@@ -1,0 +1,276 @@
+use openlife_core::config::AppConfig;
+use openlife_core::life_model::LifeModel;
+use openlife_core::llm::{
+    chat_completions_url, default_base_for_provider, effective_api_key, provider_label,
+};
+use openlife_core::mcp_audit::{AuditExport, AuditKeyConfig, KeyMode};
+use openlife_core::privacy::PrivacyPolicy;
+use openlife_core::scheduler::InferenceScheduler;
+use std::sync::Arc;
+use tauri::State;
+
+use crate::persist_life_model;
+use crate::storage::{
+    app_data_dir, load_onboarding_status_from_path, mcp_audit_keyring_path, onboarding_status_path,
+    privacy_policy_path, save_mcp_audit_keyring_to_path, save_onboarding_status_to_path,
+    save_privacy_policy_to_path, OnboardingStatus,
+};
+use crate::AppState;
+
+#[tauri::command]
+pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, String> {
+    let cfg = state.config.lock().await;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+pub async fn save_config(config: AppConfig, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let data_dir = app_data_dir();
+    let config_path = data_dir.join("config.yaml");
+    config.save(&config_path).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock().await;
+    *cfg = config.clone();
+    let mut scheduler = state.scheduler.lock().await;
+    *scheduler = InferenceScheduler::new(
+        config.local_model,
+        config.prefer_local_model,
+        config.llm.provider,
+        config.llm.openai_base,
+        config.llm.openai_key,
+        config.llm.chat_model,
+        config.llm.embedding_model,
+        config.llm.embedding_enabled,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn export_all_data(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, String> {
+    let life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+    let messages = {
+        let store = state.memory_store.lock().await;
+        store.export_all_messages().map_err(|e| e.to_string())?
+    };
+    let vectors = {
+        let store = state.vector_store.lock().await;
+        store.export_all_chunks().map_err(|e| e.to_string())?
+    };
+    Ok(serde_json::json!({
+        "version": "1.0",
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "life_model": life_model,
+        "messages": messages,
+        "vectors": vectors,
+    }))
+}
+
+#[tauri::command]
+pub async fn import_all_data(
+    payload: serde_json::Value,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let life_model: LifeModel = serde_json::from_value(
+        payload
+            .get("life_model")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    )
+    .map_err(|e| format!("解析 life_model 失败: {}", e))?;
+    {
+        let _ = persist_life_model(&state.inner().clone(), life_model, false).await?;
+    }
+
+    let messages: Vec<openlife_core::memory::ExportedMessage> = serde_json::from_value(
+        payload
+            .get("messages")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|e| format!("解析 messages 失败: {}", e))?;
+    {
+        let store = state.memory_store.lock().await;
+        store.clear_all_messages().map_err(|e| e.to_string())?;
+        store
+            .import_messages(&messages)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let vectors: Vec<openlife_core::vectors::ExportedVectorChunk> = serde_json::from_value(
+        payload
+            .get("vectors")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(vec![])),
+    )
+    .map_err(|e| format!("解析 vectors 失败: {}", e))?;
+    {
+        let store = state.vector_store.lock().await;
+        store.clear_all_chunks().map_err(|e| e.to_string())?;
+        store.import_chunks(&vectors).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn test_api_key(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    let (base, key) = {
+        let cfg = state.config.lock().await;
+        (cfg.llm.openai_base.clone(), cfg.llm.openai_key.clone())
+    };
+    let api_key = if key.is_empty() {
+        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
+    } else {
+        key
+    };
+    if api_key.is_empty() {
+        return Ok(false);
+    }
+    let url = if base.is_empty() {
+        "https://openrouter.ai/api/v1/models".to_string()
+    } else {
+        format!("{}/models", base.trim_end_matches('/'))
+    };
+    let client = reqwest::Client::new();
+    let res = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(res.status().is_success())
+}
+
+#[derive(serde::Serialize)]
+pub struct LlmConnectionTestResult {
+    pub ok: bool,
+    pub provider: String,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn test_llm_connection(config: AppConfig) -> Result<LlmConnectionTestResult, String> {
+    let provider = config.llm.provider.clone();
+    let label = provider_label(&provider);
+    let api_key = effective_api_key(&provider, &config.llm.openai_key);
+    if api_key.trim().is_empty() {
+        return Ok(LlmConnectionTestResult {
+            ok: false,
+            provider: label,
+            message: "未检测到 API Key，请填写后再测试。".to_string(),
+        });
+    }
+
+    let base = if config.llm.openai_base.trim().is_empty() {
+        default_base_for_provider(&provider).to_string()
+    } else {
+        config.llm.openai_base.trim_end_matches('/').to_string()
+    };
+    let url = chat_completions_url(&provider, &base);
+    let model = if config.llm.chat_model.trim().is_empty() {
+        "deepseek-chat"
+    } else {
+        config.llm.chat_model.as_str()
+    };
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 8,
+        "temperature": 0.0
+    });
+
+    let client = reqwest::Client::new();
+    let res = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if status.is_success() {
+        Ok(LlmConnectionTestResult {
+            ok: true,
+            provider: label,
+            message: "连接成功，云端模型可用。".to_string(),
+        })
+    } else {
+        Ok(LlmConnectionTestResult {
+            ok: false,
+            provider: label,
+            message: format!(
+                "连接失败 ({}): {}",
+                status,
+                text.chars().take(240).collect::<String>()
+            ),
+        })
+    }
+}
+
+#[tauri::command]
+pub async fn export_mcp_audit_logs(
+    days: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AuditExport, String> {
+    let store = state.mcp_audit_store.lock().await;
+    store.export_logs(days).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cleanup_mcp_audit_logs(
+    retention_days: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, String> {
+    let store = state.mcp_audit_store.lock().await;
+    store.cleanup(retention_days).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn rotate_mcp_audit_key(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let mut store = state.mcp_audit_store.lock().await;
+    let new_config = AuditKeyConfig {
+        mode: KeyMode::Derived,
+        salt_b64: None,
+        env_var: None,
+        epoch: chrono::Utc::now().timestamp() as u64,
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    store.rotate_key(new_config);
+    save_mcp_audit_keyring_to_path(&mcp_audit_keyring_path(), store.key_configs())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_privacy_policy(state: State<'_, Arc<AppState>>) -> Result<PrivacyPolicy, String> {
+    let engine = state.privacy_engine.lock().await;
+    Ok(engine.policy().clone())
+}
+
+#[tauri::command]
+pub async fn set_privacy_policy(
+    policy: PrivacyPolicy,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    save_privacy_policy_to_path(&privacy_policy_path(), &policy)?;
+    let mut engine = state.privacy_engine.lock().await;
+    engine.set_policy(policy);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn has_completed_onboarding() -> Result<bool, String> {
+    Ok(load_onboarding_status_from_path(&onboarding_status_path()).completed)
+}
+
+#[tauri::command]
+pub async fn mark_onboarding_completed() -> Result<(), String> {
+    let status = OnboardingStatus {
+        completed: true,
+        completed_at: Some(chrono::Utc::now().to_rfc3339()),
+    };
+    save_onboarding_status_to_path(&onboarding_status_path(), &status)
+}

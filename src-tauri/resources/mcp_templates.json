@@ -1,0 +1,66 @@
+[
+  {
+    "id": "filesystem",
+    "name": "本地文件系统",
+    "description": "读取和写入本地文件，支持文件搜索与目录遍历。",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "{{rootPath}}"],
+    "required_args": ["rootPath"],
+    "arg_labels": {
+      "rootPath": "允许访问的根目录路径"
+    },
+    "tags": ["file", "filesystem", "io", "document", "local"]
+  },
+  {
+    "id": "fetch",
+    "name": "网页抓取",
+    "description": "获取网页 HTML 内容并提取纯文本，用于联网搜索与阅读。",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-fetch"],
+    "required_args": [],
+    "arg_labels": {},
+    "tags": ["web", "fetch", "internet", "search", "read"]
+  },
+  {
+    "id": "sqlite",
+    "name": "SQLite 数据库",
+    "description": "对本地 SQLite 数据库执行查询与读写操作。",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-sqlite", "{{dbPath}}"],
+    "required_args": ["dbPath"],
+    "arg_labels": {
+      "dbPath": "SQLite 数据库文件路径"
+    },
+    "tags": ["database", "sql", "data", "query", "storage"]
+  },
+  {
+    "id": "brave-search",
+    "name": "Brave 搜索",
+    "description": "通过 Brave Search API 进行网页搜索，需要 API Key。",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "required_args": ["braveApiKey"],
+    "env": {
+      "BRAVE_API_KEY": "{{braveApiKey}}"
+    },
+    "arg_labels": {
+      "braveApiKey": "Brave API Key"
+    },
+    "tags": ["search", "web", "internet", "research", "browser"]
+  },
+  {
+    "id": "github",
+    "name": "GitHub",
+    "description": "搜索仓库、读取 Issues、管理 Pull Requests。",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "required_args": ["githubPersonalAccessToken"],
+    "env": {
+      "GITHUB_PERSONAL_ACCESS_TOKEN": "{{githubPersonalAccessToken}}"
+    },
+    "arg_labels": {
+      "githubPersonalAccessToken": "GitHub Personal Access Token"
+    },
+    "tags": ["code", "git", "github", "development", "repository"]
+  }
+]

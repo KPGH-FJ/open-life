@@ -1,0 +1,43 @@
+[package]
+name = "openlife-tauri"
+version = "0.1.0"
+description = "OpenLife - 终身成长合伙人"
+authors = ["OpenLife Team"]
+license = "MIT"
+repository = ""
+edition = "2021"
+rust-version = "1.75"
+default-run = "openlife-tauri"
+
+[lib]
+name = "openlife_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dependencies]
+tauri = { version = "2.5", features = [] }
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tauri-plugin-shell = "2.2"
+tauri-plugin-fs = "2.2"
+tauri-plugin-dialog = "2.2"
+tauri-plugin-store = "2.2"
+tauri-plugin-http = { version = "2.4", features = ["unsafe-headers"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+anyhow = "1.0"
+dirs = "5.0"
+chrono = "0.4"
+serde_yaml = "0.9"
+axum = "0.7"
+openlife-core = { path = "../openlife-core" }
+
+[dev-dependencies]
+tempfile = "3.14"
+
+[[bin]]
+name = "openlife-a2a-server"
+path = "src/bin/a2a_server.rs"

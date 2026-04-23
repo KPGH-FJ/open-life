@@ -1,0 +1,102 @@
+#!/bin/bash
+# =============================================================================
+# OpenLife 开发模式启动脚本 (macOS / Linux)
+# =============================================================================
+# 用途：
+#   以开发模式启动 OpenLife 桌面应用，包含热重载、调试输出。
+#   自动选择可用的 Tauri CLI 启动方式。
+#
+# 使用方法：
+#   chmod +x dev.sh && ./dev.sh
+#   或: ./startup.sh dev
+#
+# 前提条件：
+#   - 已完成环境初始化 (./setup.sh)
+#   - 已配置 API Key（可选但推荐）
+#
+# 常见问题：
+#   Q: 首次启动很慢
+#   A: 首次需要编译 Rust 代码，耗时 1-3 分钟，请耐心等待
+#
+#   Q: 端口 5173 被占用
+#   A: 设置环境变量 PORT=5174 ./dev.sh
+#
+#   Q: 白屏或前端报错
+#   A: 检查 frontend/node_modules 是否存在，运行 ./setup.sh 重新安装
+# =============================================================================
+
+set -euo pipefail
+
+# 颜色
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRONTEND_DIR="$SCRIPT_DIR/frontend"
+VITE_PORT="${PORT:-5173}"
+
+# 加载 .env
+ENV_FILE="$SCRIPT_DIR/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    while IFS='=' read -r key value; do
+        [[ -z "$key" || "$key" =~ ^# ]] && continue
+        key=$(echo "$key" | xargs)
+        value=$(echo "$value" | sed -e 's/^["\x27]//' -e 's/["\x27]$//' | xargs)
+        export "$key=$value"
+    done < "$ENV_FILE"
+    set +a
+fi
+
+# 检查端口
+if lsof -Pi ":$VITE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || \
+   ss -tuln 2>/dev/null | grep -q ":$VITE_PORT "; then
+    echo -e "${YELLOW}[WARN]${NC} 端口 $VITE_PORT 已被占用"
+    echo "       可设置环境变量: PORT=5174 ./dev.sh"
+    exit 1
+fi
+
+# 检查 node_modules
+if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+    echo -e "${YELLOW}[WARN]${NC} 前端依赖未安装，请先运行 ./setup.sh"
+    exit 1
+fi
+
+echo -e "${CYAN}"
+echo "   ____                 __   _       __"
+echo "  / __ \____  ___  ____/ /  | |     / /___  _________ _____"
+echo " / / / / __ \/ _ \/ __  /   | | /| / / __ \/ ___/ __ \ / __ \\"
+echo "/ /_/ / /_/ /  __/ /_/ /    | |/ |/ / /_/ / /  / / / // /_/ /"
+echo "\____/ .___/\___/\__,_/     |__/|__/\____/_/  /_/ /_/ \____/"
+echo "    /_/"
+echo -e "${NC}"
+echo -e "${BLUE}OpenLife - 开发模式启动${NC}"
+echo ""
+echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}║  🚀 正在启动 OpenLife 开发服务器...                           ║${NC}"
+echo -e "${GREEN}║                                                              ║${NC}"
+echo -e "${GREEN}║  首次启动可能需要 1-3 分钟编译 Rust 代码                     ║${NC}"
+echo -e "${GREEN}║  请耐心等待...                                               ║${NC}"
+echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+echo ""
+
+cd "$SCRIPT_DIR"
+
+# 自动检测 Tauri CLI 启动方式
+if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
+    echo -e "${BLUE}[INFO]${NC} 使用本地 Tauri CLI 启动..."
+    if command -v pnpm &>/dev/null; then
+        pnpm --dir "$FRONTEND_DIR" tauri dev
+    else
+        npm --prefix "$FRONTEND_DIR" exec tauri dev
+    fi
+elif command -v tauri &>/dev/null; then
+    echo -e "${BLUE}[INFO]${NC} 使用全局 Tauri CLI 启动..."
+    tauri dev
+else
+    echo -e "${BLUE}[INFO]${NC} 使用 npx 启动 Tauri..."
+    cd "$FRONTEND_DIR" && npx tauri dev
+fi

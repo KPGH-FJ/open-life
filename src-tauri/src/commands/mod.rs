@@ -1,0 +1,13 @@
+pub mod a2a;
+pub mod builder;
+pub mod calibration;
+pub mod chat;
+pub mod diagnostics;
+pub mod feedback;
+pub mod hermes;
+pub mod life_model;
+pub mod mcp;
+pub mod memory;
+pub mod settings;
+pub mod state;
+pub mod version;

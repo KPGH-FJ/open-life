@@ -1,0 +1,592 @@
+use crate::privacy::PrivacyEngine;
+use crate::tool_manifest::{ToolManifest, ToolSource};
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
+
+/// MCP Tool definition
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tool {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value, // JSON Schema object
+}
+
+/// JSON-RPC request for MCP
+#[derive(Debug, Clone, Serialize)]
+struct JsonRpcRequest {
+    jsonrpc: String,
+    id: u64,
+    method: String,
+    params: Option<Value>,
+}
+
+/// JSON-RPC response from MCP
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct JsonRpcResponse {
+    jsonrpc: String,
+    id: u64,
+    #[serde(default)]
+    result: Option<Value>,
+    #[serde(default)]
+    error: Option<JsonRpcError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct JsonRpcError {
+    code: i32,
+    message: String,
+    #[serde(default)]
+    data: Option<Value>,
+}
+
+/// MCP Client using Stdio transport
+pub struct McpClient {
+    child: Arc<Mutex<Child>>,
+    request_id: Arc<Mutex<u64>>,
+    pub command: String,
+    pub args: Vec<String>,
+}
+
+impl McpClient {
+    /// Start an MCP server subprocess and create a client
+    pub fn new(command: &str, args: &[&str], env: &HashMap<String, String>) -> Result<Self> {
+        let mut cmd = Command::new(command);
+        cmd.args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn MCP server: {}", command))?;
+
+        // Initialize the server
+        {
+            let stdin = child.stdin.as_mut().context("failed to get stdin")?;
+            let init_req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: 0,
+                method: "initialize".into(),
+                params: Some(serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": { "name": "openlife", "version": "0.1.0" }
+                })),
+            };
+            Self::send_request_raw(stdin, &init_req)?;
+        }
+
+        // Read initialization response (consume it)
+        {
+            let stdout = child.stdout.as_mut().context("failed to get stdout")?;
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .context("failed to read init response")?;
+            // We could parse and validate, but for now we just consume
+        }
+
+        Ok(Self {
+            child: Arc::new(Mutex::new(child)),
+            request_id: Arc::new(Mutex::new(1)),
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    fn send_request_raw(stdin: &mut std::process::ChildStdin, req: &JsonRpcRequest) -> Result<()> {
+        let json = serde_json::to_string(req)?;
+        writeln!(stdin, "{}", json)?;
+        stdin.flush()?;
+        Ok(())
+    }
+
+    fn next_id(&self) -> u64 {
+        let mut id = self.request_id.lock().unwrap();
+        let current = *id;
+        *id += 1;
+        current
+    }
+
+    /// List available tools from the MCP server
+    pub fn list_tools(&self) -> Result<Vec<Tool>> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
+        let id = self.next_id();
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id,
+            method: "tools/list".into(),
+            params: None,
+        };
+
+        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
+        Self::send_request_raw(stdin, &req)?;
+
+        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .context("failed to read response")?;
+
+        let resp: JsonRpcResponse = serde_json::from_str(&line)
+            .with_context(|| format!("invalid JSON response: {}", line))?;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow::anyhow!("MCP error {}: {}", err.code, err.message));
+        }
+
+        let tools: Vec<Tool> = resp
+            .result
+            .and_then(|r| r.get("tools").cloned())
+            .and_then(|t| serde_json::from_value(t).ok())
+            .unwrap_or_default();
+
+        Ok(tools)
+    }
+
+    /// Call a tool with the given arguments
+    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
+        let id = self.next_id();
+
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            id,
+            method: "tools/call".into(),
+            params: Some(serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            })),
+        };
+
+        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
+        Self::send_request_raw(stdin, &req)?;
+
+        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .context("failed to read response")?;
+
+        let resp: JsonRpcResponse = serde_json::from_str(&line)
+            .with_context(|| format!("invalid JSON response: {}", line))?;
+
+        if let Some(err) = resp.error {
+            return Err(anyhow::anyhow!("MCP error {}: {}", err.code, err.message));
+        }
+
+        // Extract content from result
+        let content = resp
+            .result
+            .and_then(|r| r.get("content").cloned())
+            .and_then(|c| c.as_array().cloned())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .unwrap_or_default();
+
+        Ok(content)
+    }
+}
+
+impl Drop for McpClient {
+    fn drop(&mut self) {
+        let _ = self.child.lock().unwrap().kill();
+    }
+}
+
+pub type BuiltinFn = Box<dyn Fn(Value) -> Result<String> + Send + Sync>;
+
+/// Registry for multiple MCP clients and built-in tools
+pub struct McpRegistry {
+    clients: HashMap<String, McpClient>,
+    tools_cache: Vec<Tool>,
+    privacy_engine: PrivacyEngine,
+    builtins: HashMap<String, BuiltinFn>,
+    builtin_manifests: Vec<ToolManifest>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McpServerInfo {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub tool_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpPrivacyFinding {
+    pub path: String,
+    pub privacy_type: String,
+    pub matched: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpArgumentInspection {
+    pub permission_level: String,
+    pub pii_found: bool,
+    pub findings: Vec<McpPrivacyFinding>,
+    pub sanitized_arguments: Value,
+    pub requires_confirmation: bool,
+}
+
+impl McpRegistry {
+    pub fn new() -> Self {
+        let mut reg = Self {
+            clients: HashMap::new(),
+            tools_cache: Vec::new(),
+            privacy_engine: PrivacyEngine::new(),
+            builtins: HashMap::new(),
+            builtin_manifests: Vec::new(),
+        };
+        reg.register_default_builtins();
+        reg
+    }
+
+    fn register_default_builtins(&mut self) {
+        // Built-in: echo
+        let echo_manifest = ToolManifest {
+            name: "builtin_echo".into(),
+            description: "返回传入的文本内容，用于测试工具链路。".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string", "description": "要回显的文本" }
+                },
+                "required": ["text"]
+            }),
+            permission_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            tags: vec!["test".into(), "utility".into()],
+        };
+        self.register_builtin(
+            echo_manifest,
+            Box::new(|args| {
+                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                Ok(text.to_string())
+            }),
+        );
+    }
+
+    /// Register a built-in tool with its manifest.
+    pub fn register_builtin(&mut self, manifest: ToolManifest, func: BuiltinFn) {
+        self.builtins.insert(manifest.name.clone(), func);
+        self.builtin_manifests.push(manifest);
+    }
+
+    /// Register and start an MCP server
+    pub fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
+        self.register_with_env(name, command, args, &HashMap::new())
+    }
+
+    /// Register and start an MCP server with environment variables.
+    pub fn register_with_env(
+        &mut self,
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &HashMap<String, String>,
+    ) -> Result<()> {
+        let client = McpClient::new(command, args, env)?;
+        let tools = client.list_tools().unwrap_or_default();
+        self.tools_cache.extend(tools);
+        self.clients.insert(name.to_string(), client);
+        Ok(())
+    }
+
+    /// Unregister an MCP server
+    pub fn unregister(&mut self, name: &str) -> Result<()> {
+        let removed = self.clients.remove(name);
+        if removed.is_none() {
+            return Err(anyhow::anyhow!("server '{}' not found", name));
+        }
+        // rebuild tools cache
+        self.tools_cache.clear();
+        for client in self.clients.values() {
+            let tools = client.list_tools().unwrap_or_default();
+            self.tools_cache.extend(tools);
+        }
+        Ok(())
+    }
+
+    /// List registered servers with metadata
+    pub fn list_servers(&self) -> Vec<McpServerInfo> {
+        self.clients
+            .iter()
+            .map(|(name, client)| McpServerInfo {
+                name: name.clone(),
+                command: client.command.clone(),
+                args: client.args.clone(),
+                tool_count: client.list_tools().unwrap_or_default().len(),
+            })
+            .collect()
+    }
+
+    /// Get all available tools from all registered servers
+    pub fn list_all_tools(&self) -> &[Tool] {
+        &self.tools_cache
+    }
+
+    /// Return unified manifests for both MCP tools and built-in tools.
+    pub fn list_manifests(&self) -> Vec<ToolManifest> {
+        let mut out: Vec<ToolManifest> = self.builtin_manifests.clone();
+        for (server_name, client) in &self.clients {
+            if let Ok(tools) = client.list_tools() {
+                for tool in tools {
+                    out.push(ToolManifest {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.parameters.clone(),
+                        permission_level: ToolManifest::infer_permission_level(&tool.name),
+                        version: "1.0.0".into(),
+                        source: ToolSource::Mcp {
+                            server_name: server_name.clone(),
+                        },
+                        tags: Vec::new(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// Execute a manifest by its source.
+    pub fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
+        match &manifest.source {
+            ToolSource::BuiltIn => {
+                if let Some(func) = self.builtins.get(&manifest.name) {
+                    func(arguments)
+                } else {
+                    Err(anyhow::anyhow!(
+                        "built-in tool '{}' not found",
+                        manifest.name
+                    ))
+                }
+            }
+            ToolSource::Mcp { .. } => self.call_tool(&manifest.name, arguments),
+        }
+    }
+
+    /// Call a tool by name (searches all registered servers).
+    /// Arguments are desensitized before sending and reconstructed after receiving the result.
+    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
+        // 1. Detect and desensitize arguments
+        let args_str = arguments.to_string();
+        let pii = self.privacy_engine.detect(&args_str);
+        let (desensitized_str, map) = if pii.is_empty() {
+            (args_str, HashMap::new())
+        } else {
+            self.privacy_engine.desensitize(&args_str)
+        };
+        let desensitized_args: Value =
+            serde_json::from_str(&desensitized_str).unwrap_or_else(|_| arguments.clone());
+
+        let mut last_error: Option<anyhow::Error> = None;
+        for client in self.clients.values() {
+            match client.call_tool(name, desensitized_args.clone()) {
+                Ok(result) => {
+                    // 2. Reconstruct any placeholders in the result
+                    let final_result = if map.is_empty() {
+                        result
+                    } else {
+                        self.privacy_engine.reconstruct(&result, &map)
+                    };
+                    return Ok(final_result);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("not found") || msg.contains("Unknown tool") {
+                        last_error = Some(e);
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("tool {} not found", name)))
+    }
+
+    /// Generate a system prompt snippet describing available tools
+    pub fn tools_prompt(&self) -> String {
+        let manifests = self.list_manifests();
+        if manifests.is_empty() {
+            return "".into();
+        }
+        let mut lines = vec!["\n你可以使用以下工具:\n".to_string()];
+        for m in &manifests {
+            lines.push(format!("- {}: {}", m.name, m.description));
+        }
+        lines.push("\n如果需要使用工具，请回复 JSON: {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}".into());
+        lines.join("\n")
+    }
+
+    /// Scan arguments for PII and return findings without calling the tool.
+    pub fn scan_pii(&self, arguments: &Value) -> Vec<(crate::privacy::PrivacyType, String)> {
+        self.privacy_engine.detect(&arguments.to_string())
+    }
+
+    pub fn inspect_call_arguments(&self, name: &str, arguments: &Value) -> McpArgumentInspection {
+        let permission_level = self.tool_permission_level(name);
+        let findings = collect_privacy_findings(&self.privacy_engine, arguments, "$");
+        let pii_found = !findings.is_empty();
+        let args_str = arguments.to_string();
+        let sanitized_arguments = if pii_found {
+            let (masked, _) = self.privacy_engine.desensitize(&args_str);
+            serde_json::from_str(&masked).unwrap_or_else(|_| arguments.clone())
+        } else {
+            arguments.clone()
+        };
+        let requires_confirmation =
+            permission_level == "high" || (pii_found && permission_level != "low");
+        McpArgumentInspection {
+            permission_level,
+            pii_found,
+            findings,
+            sanitized_arguments,
+            requires_confirmation,
+        }
+    }
+
+    /// Determine the permission level of a tool by its name.
+    /// Returns "high" for filesystem-modifying or shell-like tools, "medium" for search/fetch,
+    /// and "low" for read-only or safe tools.
+    pub fn tool_permission_level(&self, name: &str) -> String {
+        ToolManifest::infer_permission_level(name)
+    }
+
+    /// Recommend tools based on goal-capability gap analysis strings.
+    /// Simple v1 engine: score by keyword overlap between gap text and manifest tags.
+    pub fn recommend_manifests(&self, gaps: &[String], top_k: usize) -> Vec<ToolManifest> {
+        let manifests = self.list_manifests();
+        let mut scored: Vec<(i32, &ToolManifest)> = manifests
+            .iter()
+            .map(|m| {
+                let mut score = 0i32;
+                for gap in gaps {
+                    let gap_lower = gap.to_lowercase();
+                    for tag in &m.tags {
+                        if gap_lower.contains(&tag.to_lowercase()) {
+                            score += 1;
+                        }
+                    }
+                    // heuristic boost for keywords in name/description if tags are empty
+                    if m.tags.is_empty() {
+                        let text = format!("{} {}", m.name, m.description).to_lowercase();
+                        let keywords = [
+                            "write", "read", "search", "fetch", "file", "code", "git", "db", "sql",
+                            "web",
+                        ];
+                        for kw in &keywords {
+                            if text.contains(kw) && gap_lower.contains(kw) {
+                                score += 1;
+                            }
+                        }
+                    }
+                }
+                (score, m)
+            })
+            .filter(|(s, _)| *s > 0)
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.truncate(top_k);
+        scored.into_iter().map(|(_, m)| m.clone()).collect()
+    }
+}
+
+impl Default for McpRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn collect_privacy_findings(
+    engine: &PrivacyEngine,
+    value: &Value,
+    path: &str,
+) -> Vec<McpPrivacyFinding> {
+    let mut findings = Vec::new();
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let next_path = format!("{}.{}", path, key);
+                findings.extend(collect_privacy_findings(engine, nested, &next_path));
+            }
+        }
+        Value::Array(items) => {
+            for (idx, nested) in items.iter().enumerate() {
+                let next_path = format!("{}[{}]", path, idx);
+                findings.extend(collect_privacy_findings(engine, nested, &next_path));
+            }
+        }
+        Value::String(text) => {
+            for (ptype, matched) in engine.detect(text) {
+                findings.push(McpPrivacyFinding {
+                    path: path.to_string(),
+                    privacy_type: format!("{:?}", ptype),
+                    matched,
+                });
+            }
+        }
+        _ => {}
+    }
+    findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inspect_call_arguments_marks_medium_with_pii_for_confirmation() {
+        let registry = McpRegistry::new();
+        let inspection = registry.inspect_call_arguments(
+            "web_search",
+            &serde_json::json!({
+                "query": "帮我搜索 test@example.com 的公开信息"
+            }),
+        );
+        assert_eq!(inspection.permission_level, "medium");
+        assert!(inspection.pii_found);
+        assert!(inspection.requires_confirmation);
+        assert_eq!(inspection.findings[0].path, "$.query");
+        assert_ne!(
+            inspection.sanitized_arguments["query"],
+            "帮我搜索 test@example.com 的公开信息"
+        );
+    }
+
+    #[test]
+    fn inspect_call_arguments_keeps_low_risk_without_pii() {
+        let registry = McpRegistry::new();
+        let inspection = registry.inspect_call_arguments(
+            "builtin_echo",
+            &serde_json::json!({ "text": "hello world" }),
+        );
+        assert_eq!(inspection.permission_level, "low");
+        assert!(!inspection.pii_found);
+        assert!(!inspection.requires_confirmation);
+    }
+}

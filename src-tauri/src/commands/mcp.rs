@@ -1,0 +1,84 @@
+use crate::AppState;
+use std::sync::Arc;
+use tauri::State;
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<openlife_core::mcp::McpServerInfo>, String> {
+    let reg = state.mcp_registry.lock().await;
+    Ok(reg.list_servers())
+}
+
+#[tauri::command]
+pub async fn register_mcp_server(
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: Option<std::collections::HashMap<String, String>>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut registry = state.mcp_registry.lock().await;
+    let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let env_map = env.unwrap_or_default();
+    registry
+        .register_with_env(&name, &command, &args_ref, &env_map)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn unregister_mcp_server(
+    name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let mut registry = state.mcp_registry.lock().await;
+    registry.unregister(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_mcp_tools(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<openlife_core::mcp::Tool>, String> {
+    let registry = state.mcp_registry.lock().await;
+    Ok(registry.list_all_tools().to_vec())
+}
+
+#[tauri::command]
+pub async fn list_mcp_templates() -> Result<serde_json::Value, String> {
+    let content = include_str!("../../resources/mcp_templates.json");
+    serde_json::from_str(content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn recommend_mcp_manifests(
+    top_k: usize,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<openlife_core::tool_manifest::ToolManifest>, String> {
+    let model = state
+        .life_model_manager
+        .lock()
+        .await
+        .load()
+        .map_err(|e| e.to_string())?;
+    let gaps = model.goal_capability_gap_analysis();
+    let registry = state.mcp_registry.lock().await;
+    Ok(registry.recommend_manifests(&gaps, top_k))
+}
+
+#[tauri::command]
+pub async fn list_mcp_audit_logs(
+    limit: usize,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<openlife_core::mcp_audit::McpLogEntry>, String> {
+    let store = state.mcp_audit_store.lock().await;
+    store.list_logs(limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_mcp_audit_logs(
+    days: i64,
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, String> {
+    let store = state.mcp_audit_store.lock().await;
+    store.clear_old_logs(days).map_err(|e| e.to_string())
+}
