@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
 import { Search, Database, Loader2, Archive, RotateCcw, MessageSquare, User, Bot, Tag } from "lucide-react";
 import {
@@ -113,7 +113,7 @@ export default function MemorySearch() {
     }
   };
 
-  const handleRestore = async (chunk: ArchivedChunkSummary) => {
+  const handleRestore = useCallback(async (chunk: ArchivedChunkSummary) => {
     if (safeMode) {
       setArchiveMsg(buildSafeModeBlockedMessage("归档记忆恢复", diagnostics));
       return;
@@ -130,7 +130,7 @@ export default function MemorySearch() {
     } finally {
       setArchiveLoading(false);
     }
-  };
+  }, [safeMode, diagnostics]);
 
   return (
     <div className="h-full overflow-auto bg-white">
@@ -242,7 +242,7 @@ export default function MemorySearch() {
           <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-xs leading-5 text-indigo-800">
             读取策略可以简单理解为：热记忆更容易被优先检索，冷记忆保留但不总是优先出现，归档记忆则需要你显式恢复后再重新进入主检索层。
           </div>
-          {archiveMsg && <p className="text-sm text-slate-600">{archiveMsg}</p>}
+          {archiveMsg && <p className="text-sm text-slate-600" data-testid="archive-msg">{archiveMsg}</p>}
           <div className="space-y-2">
             {archived.length === 0 ? (
               <EmptyState title="暂无归档记忆" description="低访问记忆归档后会显示在这里，可随时恢复。" className="py-4" />

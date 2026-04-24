@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { BrowserRouter } from 'react-router-dom'
 import MemorySearch from './MemorySearch'
 import { invoke } from '@tauri-apps/api/core'
@@ -119,8 +119,14 @@ describe('MemorySearch', () => {
     expect(await screen.findByText(/归档摘要/)).toBeInTheDocument()
     // 等待 Safe Mode banner 渲染完成（diagnostics 异步加载）
     expect(await screen.findByText(/Safe Mode：记忆写入操作已建议暂停/)).toBeInTheDocument()
+    // 确保 handleRestore 已更新（safeMode 为 true）
+    await new Promise(resolve => setTimeout(resolve, 50))
     fireEvent.click(screen.getByRole('button', { name: /恢复/i }))
-    expect(await screen.findByText(/当前处于 Safe Mode/)).toBeInTheDocument()
+    // 使用 waitFor 轮询等待 archiveMsg 更新
+    await waitFor(() => {
+      const msg = screen.getByTestId('archive-msg')
+      expect(msg.textContent).toMatch(/当前处于 Safe Mode/)
+    }, { timeout: 3000 })
     expect(invoke).not.toHaveBeenCalledWith('restore_archived_chunks', expect.anything())
   })
 })

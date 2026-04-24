@@ -161,9 +161,12 @@ fn recovery_db_path(file_name: &str) -> std::path::PathBuf {
     dir.join(file_name)
 }
 
-fn init_memory_store(db_path: &std::path::Path, startup_warnings: &mut Vec<String>) -> MemoryStore {
+fn init_memory_store(
+    db_path: &std::path::Path,
+    startup_warnings: &mut Vec<String>,
+) -> Result<MemoryStore, String> {
     match MemoryStore::new(db_path) {
-        Ok(store) => store,
+        Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("memory.db");
             startup_warnings.push(format!(
@@ -171,18 +174,17 @@ fn init_memory_store(db_path: &std::path::Path, startup_warnings: &mut Vec<Strin
                 primary_err
             ));
             match MemoryStore::new(&fallback) {
-                Ok(store) => store,
+                Ok(store) => Ok(store),
                 Err(fallback_err) => {
                     startup_warnings.push(format!(
                         "临时 memory.db 初始化也失败，已降级为内存数据库；本次会话聊天记录不会持久化：{}",
                         fallback_err
                     ));
-                    MemoryStore::new_in_memory().unwrap_or_else(|memory_err| {
-                        eprintln!(
-                            "OpenLife could not initialize any memory store: primary={}, fallback={}, in_memory={}",
+                    MemoryStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 memory store 初始化失败: primary={}, fallback={}, in_memory={}",
                             primary_err, fallback_err, memory_err
-                        );
-                        std::process::exit(1);
+                        )
                     })
                 }
             }
@@ -193,9 +195,9 @@ fn init_memory_store(db_path: &std::path::Path, startup_warnings: &mut Vec<Strin
 fn init_feedback_store(
     db_path: &std::path::Path,
     startup_warnings: &mut Vec<String>,
-) -> FeedbackStore {
+) -> Result<FeedbackStore, String> {
     match FeedbackStore::new(db_path) {
-        Ok(store) => store,
+        Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("feedback.db");
             startup_warnings.push(format!(
@@ -203,18 +205,17 @@ fn init_feedback_store(
                 primary_err
             ));
             match FeedbackStore::new(&fallback) {
-                Ok(store) => store,
+                Ok(store) => Ok(store),
                 Err(fallback_err) => {
                     startup_warnings.push(format!(
                         "临时 feedback.db 初始化也失败，已降级为内存数据库；本次会话反馈不会持久化：{}",
                         fallback_err
                     ));
-                    FeedbackStore::new_in_memory().unwrap_or_else(|memory_err| {
-                        eprintln!(
-                            "OpenLife could not initialize any feedback store: primary={}, fallback={}, in_memory={}",
+                    FeedbackStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 feedback store 初始化失败: primary={}, fallback={}, in_memory={}",
                             primary_err, fallback_err, memory_err
-                        );
-                        std::process::exit(1);
+                        )
                     })
                 }
             }
@@ -222,9 +223,12 @@ fn init_feedback_store(
     }
 }
 
-fn init_vector_store(db_path: &std::path::Path, startup_warnings: &mut Vec<String>) -> VectorStore {
+fn init_vector_store(
+    db_path: &std::path::Path,
+    startup_warnings: &mut Vec<String>,
+) -> Result<VectorStore, String> {
     match VectorStore::new(db_path) {
-        Ok(store) => store,
+        Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("vectors.db");
             startup_warnings.push(format!(
@@ -232,18 +236,17 @@ fn init_vector_store(db_path: &std::path::Path, startup_warnings: &mut Vec<Strin
                 primary_err
             ));
             match VectorStore::new(&fallback) {
-                Ok(store) => store,
+                Ok(store) => Ok(store),
                 Err(fallback_err) => {
                     startup_warnings.push(format!(
                         "临时 vectors.db 初始化也失败，已降级为内存数据库；本次会话向量记忆不会持久化：{}",
                         fallback_err
                     ));
-                    VectorStore::new_in_memory().unwrap_or_else(|memory_err| {
-                        eprintln!(
-                            "OpenLife could not initialize any vector store: primary={}, fallback={}, in_memory={}",
+                    VectorStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 vector store 初始化失败: primary={}, fallback={}, in_memory={}",
                             primary_err, fallback_err, memory_err
-                        );
-                        std::process::exit(1);
+                        )
                     })
                 }
             }
@@ -271,6 +274,21 @@ pub struct AppState {
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
+}
+
+impl AppState {
+    /// 按固定顺序获取 MCP 相关锁，避免死锁
+    /// 顺序：mcp_registry → mcp_audit_store
+    pub async fn get_mcp_state(
+        &self,
+    ) -> (
+        tokio::sync::MutexGuard<'_, McpRegistry>,
+        tokio::sync::MutexGuard<'_, McpAuditStore>,
+    ) {
+        let reg = self.mcp_registry.lock().await;
+        let audit = self.mcp_audit_store.lock().await;
+        (reg, audit)
+    }
 }
 pub(crate) async fn persist_life_model(
     state: &Arc<AppState>,
@@ -1047,8 +1065,7 @@ async fn send_message(
     };
 
     let tool_results = {
-        let reg = state.mcp_registry.lock().await;
-        let audit = state.mcp_audit_store.lock().await;
+        let (reg, audit) = state.get_mcp_state().await;
         try_prepare_tool_calls(&first_reply, &reg, &audit)
     };
 
@@ -1555,8 +1572,7 @@ async fn start_stream_message(
     }
 
     let tool_results = {
-        let reg = state.mcp_registry.lock().await;
-        let audit = state.mcp_audit_store.lock().await;
+        let (reg, audit) = state.get_mcp_state().await;
         try_prepare_tool_calls(&first_reply, &reg, &audit)
     };
     let (reply, tool_calls) = if let Some(results) = tool_results {
@@ -1660,8 +1676,7 @@ async fn execute_tool_call(
     arguments: serde_json::Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ToolCallResult, String> {
-    let reg = state.mcp_registry.lock().await;
-    let audit = state.mcp_audit_store.lock().await;
+    let (reg, audit) = state.get_mcp_state().await;
     let permission_level = reg.tool_permission_level(&name);
     Ok(execute_tool_call_internal(
         &name,
@@ -1696,11 +1711,23 @@ pub fn run() {
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");
-    let memory_store = init_memory_store(&db_path, &mut startup_warnings);
+    let memory_store = init_memory_store(&db_path, &mut startup_warnings)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(e);
+            MemoryStore::new_in_memory().expect("致命错误：无法初始化 memory store，系统资源耗尽")
+        });
     let feedback_db_path = data_dir.join("feedback.db");
-    let feedback_store = init_feedback_store(&feedback_db_path, &mut startup_warnings);
+    let feedback_store = init_feedback_store(&feedback_db_path, &mut startup_warnings)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(e);
+            FeedbackStore::new_in_memory().expect("致命错误：无法初始化 feedback store，系统资源耗尽")
+        });
     let vector_db_path = data_dir.join("vectors.db");
-    let vector_store = init_vector_store(&vector_db_path, &mut startup_warnings);
+    let vector_store = init_vector_store(&vector_db_path, &mut startup_warnings)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(e);
+            VectorStore::new_in_memory().expect("致命错误：无法初始化 vector store，系统资源耗尽")
+        });
 
     let model_dir = data_dir.join("models");
     let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
@@ -1789,18 +1816,16 @@ pub fn run() {
                     e
                 })?;
             }
-            println!("[setup] launching a2a sidecar - lib.rs:2228");
+            println!("[setup] launching a2a sidecar");
             let a2a_sidecar = app_state_for_setup.a2a_sidecar.clone();
-            if let Err(e) =
-                tauri::async_runtime::block_on(async { a2a_sidecar.lock().await.start().await })
-            {
-                eprintln!("[setup] a2a sidecar start failed: {} - lib.rs:2231", e);
-                eprintln!("[setup] falling back to embedded a2a server - lib.rs:2232");
-                let state = app_state_for_setup.clone();
-                tauri::async_runtime::spawn(async move {
+            let state = app_state_for_setup.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = a2a_sidecar.lock().await.start().await {
+                    eprintln!("[setup] a2a sidecar start failed: {}", e);
+                    eprintln!("[setup] falling back to embedded a2a server");
                     a2a_server::start(state).await;
-                });
-            }
+                }
+            });
             if std::env::var("OPENLIFE_AUTOSTART_FILESYSTEM_MCP").as_deref() == Ok("1") {
                 let mcp_registry = app_state_for_setup.mcp_registry.clone();
                 tauri::async_runtime::spawn(async move {

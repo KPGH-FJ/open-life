@@ -54,13 +54,28 @@ async fn main() {
                 addr
             );
             if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("[A2A] Server error: {} - a2a_server.rs:51", e);
-                std::process::exit(1);
+                eprintln!("[A2A] Server error: {}", e);
+                return;
             }
         }
         Err(e) => {
-            eprintln!("[A2A] Failed to bind server: {} - a2a_server.rs:56", e);
-            std::process::exit(1);
+            eprintln!("[A2A] Failed to bind server: {}", e);
+            // 尝试其他端口或优雅退出
+            for port in 8766..=8775 {
+                let bind_addr = format!("127.0.0.1:{}", port);
+                match tokio::net::TcpListener::bind(&bind_addr).await {
+                    Ok(listener) => {
+                        let addr = listener.local_addr().unwrap();
+                        println!("[A2A] HTTP server listening on http://{}", addr);
+                        if let Err(e) = axum::serve(listener, app).await {
+                            eprintln!("[A2A] Server error: {}", e);
+                        }
+                        return;
+                    }
+                    Err(_) => continue,
+                }
+            }
+            eprintln!("[A2A] Could not bind to any port in range 8765-8775");
         }
     }
 }
