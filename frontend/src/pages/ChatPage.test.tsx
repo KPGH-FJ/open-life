@@ -182,9 +182,16 @@ describe('ChatPage', () => {
   })
 
   it('shows first-use guidance when life model is still empty', async () => {
-    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string, args?: Record<string, any>) => {
       if (cmd === 'get_life_model') {
-        return Promise.resolve(createEmptyModel())
+        return createEmptyModel()
+      }
+      if (cmd === 'get_system_diagnostics') {
+        const base = await mockInvoke(cmd, args)
+        return {
+          ...base,
+          model_empty: true,
+        }
       }
       return mockInvoke(cmd, args)
     })

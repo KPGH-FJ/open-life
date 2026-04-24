@@ -1,4 +1,5 @@
 import type { LifeModel } from "../types";
+import type { SystemDiagnostics } from "../tauri";
 
 export function isModelEmpty(model: LifeModel | null): boolean {
   if (!model) return true;
@@ -52,4 +53,18 @@ export function isModelEmpty(model: LifeModel | null): boolean {
     !model.preferences.learning_style.trim() &&
     !model.preferences.decision_making_style.trim()
   );
+}
+
+/**
+ * Unified helper to check if the model is effectively empty.
+ * Prioritizes backend diagnostics if available, falls back to local heuristic.
+ */
+export function getModelEmptyState(
+  model: LifeModel | null,
+  diagnostics: SystemDiagnostics | null | undefined
+): boolean {
+  if (diagnostics && typeof diagnostics.model_empty === "boolean") {
+    return diagnostics.model_empty;
+  }
+  return isModelEmpty(model);
 }

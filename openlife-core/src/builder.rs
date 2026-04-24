@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Normalize a list line by trimming and removing common bullet/number prefixes.
+/// Returns the cleaned line, or empty string if the line is just a bullet.
+pub fn normalize_list_line(line: &str) -> String {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    // Remove common prefixes: -, •, 1., 1), etc.
+    let without_prefix = trimmed.trim_start_matches(|c: char| {
+        c.is_numeric() || c == '.' || c == ')' || c == '•' || c == '-' || c == '*'
+    });
+    without_prefix.trim().to_string()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BuilderMode {
     Quick,
@@ -1177,19 +1191,10 @@ impl<'a> BuilderEngine<'a> {
         if let Some(ans) = answers.get(&3) {
             let goals_text = ans.trim();
             if !goals_text.is_empty() {
-                // Parse goals (split by newlines or numbers)
+                // Parse goals (split by newlines, support bullet formats)
                 let goals: Vec<String> = goals_text
                     .lines()
-                    .map(|l| l.trim())
-                    .filter(|l| !l.is_empty() && !l.starts_with('•') && !l.starts_with('-'))
-                    .map(|l| {
-                        // Remove bullet points and numbers
-                        l.trim_start_matches(|c: char| {
-                            c.is_numeric() || c == '.' || c == ')' || c == '•' || c == '-'
-                        })
-                        .trim()
-                        .to_string()
-                    })
+                    .map(|l| normalize_list_line(l))
                     .filter(|l| !l.is_empty())
                     .collect();
 
@@ -1250,16 +1255,7 @@ impl<'a> BuilderEngine<'a> {
             if !caps_text.is_empty() {
                 let skills: Vec<String> = caps_text
                     .lines()
-                    .map(|l| l.trim())
-                    .filter(|l| {
-                        !l.is_empty()
-                            && (l.starts_with('•') || l.starts_with('-') || l.starts_with("我"))
-                    })
-                    .map(|l| {
-                        l.trim_start_matches(|c: char| c == '•' || c == '-' || c == ' ')
-                            .trim()
-                            .to_string()
-                    })
+                    .map(|l| normalize_list_line(l))
                     .filter(|l| !l.is_empty())
                     .take(5) // Limit to top 5
                     .collect();

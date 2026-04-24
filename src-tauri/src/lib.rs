@@ -1243,14 +1243,21 @@ async fn start_stream_message(
     if layer == Layer::L1 {
         if let Some(ref i) = intent {
             if let Some(reply) = i.direct_response() {
-                let store = state.memory_store.lock().await;
-                let _ = store.save_message(
-                    &session_id,
-                    &ChatMessage {
-                        role: "assistant".into(),
-                        content: reply.clone(),
-                    },
-                );
+                // 先保存用户消息
+                if let Some(ref user) = user_msg {
+                    if user.role == "user" {
+                        let user_inserted = persist_chat_message_if_needed(&session_id, user, &state).await?;
+                        if user_inserted {
+                            persist_vector_memory_for_message(&session_id, user, &state).await;
+                        }
+                    }
+                }
+                // 保存助手回复
+                let assistant_msg = ChatMessage {
+                    role: "assistant".into(),
+                    content: reply.clone(),
+                };
+                let _ = persist_chat_message_if_needed(&session_id, &assistant_msg, &state).await?;
                 let _ = app_handle.emit(
                     "stream-message-start",
                     serde_json::json!({
@@ -1711,7 +1718,10 @@ pub fn run() {
         ));
     }
     let config_path = data_dir.join("config.yaml");
-    let config = AppConfig::load_or_default(&config_path);
+    let (config, config_warning) = AppConfig::load_or_default_with_warning(&config_path);
+    if let Some(warning) = config_warning {
+        startup_warnings.push(warning);
+    }
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");

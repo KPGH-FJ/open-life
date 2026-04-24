@@ -14,7 +14,7 @@ import {
   shouldShowCalibration, markCalibrationShown, listSnapshots, getSystemDiagnostics,
   type CapabilityGap, type AlignmentIssue, type SystemDiagnostics
 } from "../tauri";
-import { isModelEmpty } from "../utils/modelEmpty";
+import { getModelEmptyState } from "../utils/modelEmpty";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
@@ -450,7 +450,7 @@ export default function DashboardPage() {
   const lowestDimensionValue = lowestDimension ? (builderCompletion[lowestDimension as keyof typeof builderCompletion] as number) : 100;
   
   const builderRecommendations = (() => {
-    if (!builderCompletion || isModelEmpty(model)) return [];
+    if (!builderCompletion || getModelEmptyState(model, diagnostics)) return [];
     
     const recs: Array<{ title: string; detail: string; to: string }> = [];
     
@@ -490,7 +490,7 @@ export default function DashboardPage() {
           to: "/builder",
         }
       : null,
-    isModelEmpty(model)
+    getModelEmptyState(model, diagnostics)
       ? { title: "先构建人生模型", detail: "模型为空时，Chat 和 Dashboard 都只能提供通用建议。", to: "/builder" }
       : null,
     ...builderRecommendations.map(r => r as { title: string; detail: string; to: string }),
@@ -522,7 +522,7 @@ export default function DashboardPage() {
           to: "/builder",
         }
       : null,
-    isModelEmpty(model)
+    getModelEmptyState(model, diagnostics)
       ? { title: "完成第一次人生模型构建", detail: "先用快速构建建立最小可用模型，再开始个性化对话。", to: "/builder" }
       : builderCompletion && builderCompletion.overall < 60
       ? {
@@ -549,7 +549,7 @@ export default function DashboardPage() {
           detail: diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深度试用会更顺畅。",
         }
       : null,
-    isModelEmpty(model)
+    getModelEmptyState(model, diagnostics)
       ? {
           label: "人生模型",
           tone: "indigo",
@@ -596,7 +596,7 @@ export default function DashboardPage() {
   };
   const compassTone = diagnostics && !diagnostics.chat_ready
     ? "需要先修复运行环境"
-    : isModelEmpty(model)
+    : getModelEmptyState(model, diagnostics)
     ? "先让 OpenLife 认识你"
     : stateAlerts.length > 0
     ? "今天适合稳住节奏"
@@ -605,7 +605,7 @@ export default function DashboardPage() {
     : "今天可以做一次深度对话";
   const compassDetail = diagnostics && !diagnostics.chat_ready
     ? "模型后端还没有就绪，先去设置页完成试用检查，会比继续点功能更省时间。"
-    : isModelEmpty(model)
+    : getModelEmptyState(model, diagnostics)
     ? "人生模型还是空的。先完成一次快速构建，OpenLife 的建议才会真正围绕你展开。"
     : stateAlerts.length > 0
     ? `检测到 ${stateAlerts.length} 条状态预警，建议先降低任务强度，做一次状态复盘。`
@@ -843,7 +843,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {isModelEmpty(model) && (
+        {getModelEmptyState(model, diagnostics) && (
           <div className="bg-white border rounded-xl p-5 flex flex-col sm:flex-row sm:items-center gap-4">
             <div className="flex-1">
               <div className="font-semibold text-indigo-900 flex items-center gap-2">

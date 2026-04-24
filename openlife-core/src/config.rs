@@ -94,6 +94,19 @@ impl AppConfig {
         Self::load(&path).unwrap_or_default()
     }
 
+    /// Load config with warning on parse failure.
+    /// Returns (config, optional_warning).
+    pub fn load_or_default_with_warning(path: impl AsRef<Path>) -> (Self, Option<String>) {
+        let path = path.as_ref();
+        if !path.exists() {
+            return (Self::default(), None);
+        }
+        match Self::load(path) {
+            Ok(config) => (config, None),
+            Err(e) => (Self::default(), Some(format!("配置文件读取失败: {}", e))),
+        }
+    }
+
     pub fn normalize_provider_from_base(&mut self) {
         if self.llm.provider != default_provider() {
             self.normalize_provider_embedding_defaults();

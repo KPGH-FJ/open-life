@@ -456,10 +456,15 @@ async fn builder_apply_signals_with_state(
     }
 
     // Clean up session
-    let store = state.builder_session_store.lock().await;
-    let _ = store.remove_session(&session_id);
+    let mut warnings = Vec::new();
+    {
+        let store = state.builder_session_store.lock().await;
+        if let Err(e) = store.remove_session(&session_id) {
+            warnings.push(format!("模型已写入，但构建会话清理失败: {}", e));
+        }
+    }
 
-    Ok(serde_json::json!({
+    let mut result = serde_json::json!({
         "success": true,
         "applied_fields": applied,
         "merged_fields": merged,
@@ -467,7 +472,13 @@ async fn builder_apply_signals_with_state(
         "edited_count": edited_count,
         "rejected_count": rejected_count,
         "model": model,
-    }))
+    });
+    if !warnings.is_empty() {
+        result["warnings"] = serde_json::Value::Array(
+            warnings.into_iter().map(serde_json::Value::String).collect()
+        );
+    }
+    Ok(result)
 }
 
 #[tauri::command]

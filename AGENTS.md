@@ -322,7 +322,7 @@ VectorStore.search(query_embedding, top_k=5)
 5. **Ollama 缓存 10 秒**：`ollama.rs` 每 10 秒缓存一次模型可用性检查，状态变化不会立即反映。
 6. **向量记忆 tier 维护**：`vectors.rs` 定期运行 `run_tier_maintenance()`，高频访问 chunk 晋升 tier，低频降级。
 7. **HashRouter 强制使用**：前端必须使用 `HashRouter` 而非 `BrowserRouter`，因为 Tauri 桌面应用基于 `file://` 协议。
-8. **数据目录硬编码**：应用数据目录在代码中硬编码为 `com.openlife.app`（而非从 `tauri.conf.json` 的 `identifier: ai.openlife.app` 读取），macOS 路径为 `~/Library/Application Support/com.openlife.app/`。
+8. **数据目录统一**：应用数据目录已统一为 `ai.openlife.app`（与 `tauri.conf.json` 的 `identifier` 一致），macOS 路径为 `~/Library/Application Support/ai.openlife.app/`。旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
 
 ---
 
@@ -352,7 +352,7 @@ VectorStore.search(query_embedding, top_k=5)
 
 配置优先级：**环境变量 > `config.yaml` > 代码默认值**
 
-运行时配置文件路径（macOS）：`~/Library/Application Support/com.openlife.app/config.yaml`
+运行时配置文件路径（macOS）：`~/Library/Application Support/ai.openlife.app/config.yaml`
 
 ### 启动和测试命令
 
@@ -423,7 +423,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 1. **reqwest 版本不一致**：`openlife-core` 使用 `reqwest 0.11`，`src-tauri` 使用 `reqwest 0.12`。目前编译通过，但建议统一版本以避免潜在兼容性问题。
 2. **Ollama 缓存固定 10 秒**：`ollama.rs` 中 `OLLAMA_CACHE_TTL = 10s` 硬编码。如果用户刚启动 Ollama，需要等缓存过期才能被检测到。
-3. **数据目录与 Tauri identifier 不一致**：`tauri.conf.json` 中 `identifier` 是 `ai.openlife.app`，但代码中 `app_data_dir()` 硬编码返回 `com.openlife.app`。这可能导致 Tauri 的某些 API 与手动构造的路径不一致。
+3. ~~数据目录与 Tauri identifier 不一致~~ **已修复**：数据目录已统一为 `ai.openlife.app`。旧版本数据如需迁移请手动复制。
 4. **MCP 审计日志单独数据库**：`mcp_audit.db` 与 `messages.db`/`vectors.db` 分开存储，这是设计上的隔离，但备份/迁移时容易遗漏。
 
 ### 常见陷阱

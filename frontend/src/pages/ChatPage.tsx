@@ -31,7 +31,7 @@ import {
   type SystemDiagnostics,
 } from "../tauri";
 import type { HermesTrace, ToolCallResult, StreamMessageStartPayload, StreamMessageDonePayload } from "../tauri";
-import { isModelEmpty } from "../utils/modelEmpty";
+import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import HermesTracePanel from "../components/HermesTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
@@ -178,6 +178,11 @@ export default function ChatPage() {
   const diagnosticsRef = useRef<SystemDiagnostics | null>(null);
   const streamErrorHandledRef = useRef(false);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
+  const currentSessionIdRef = useRef<string>(currentSessionId);
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
 
   const flushStreaming = () => {
     if (streamingRafRef.current !== null) {
@@ -225,7 +230,7 @@ export default function ChatPage() {
     const refreshChatContext = () => {
       getLifeModel().then(setModel).catch(() => {});
       getSystemDiagnostics().then(setDiagnostics).catch(() => {});
-      loadSessions();
+      loadSessions(currentSessionIdRef.current);
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -247,11 +252,11 @@ export default function ChatPage() {
     loadSessions();
   }, [location.state]);
 
-  const loadSessions = async () => {
+  const loadSessions = async (activeSessionId = currentSessionIdRef.current) => {
     try {
       const list = await listChatSessions();
       setSessions(list);
-      if (list.length > 0 && !list.find((s) => s.session_id === currentSessionId)) {
+      if (list.length > 0 && !list.find((s) => s.session_id === activeSessionId)) {
         setCurrentSessionId(list[0].session_id);
       }
     } catch (e) {
@@ -396,10 +401,10 @@ export default function ChatPage() {
   const handleDeleteSession = async (id: string) => {
     try {
       await deleteChatSession(id);
-      await loadSessions();
-      if (currentSessionId === id) {
-        const remaining = sessions.filter((s) => s.session_id !== id);
-        setCurrentSessionId(remaining.length > 0 ? remaining[0].session_id : "default");
+      const list = await listChatSessions();
+      setSessions(list);
+      if (currentSessionIdRef.current === id) {
+        setCurrentSessionId(list.length > 0 ? list[0].session_id : "default");
       }
     } catch (e) {
       console.error("删除会话失败", e);
@@ -1039,7 +1044,7 @@ export default function ChatPage() {
               <div className="max-w-3xl w-full rounded-2xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
                 <div className="text-sm font-semibold text-stone-900">不知道从哪一句开始？</div>
                 <div className="mt-1 text-xs text-stone-500">
-                  {isModelEmpty(model)
+                  {getModelEmptyState(model, diagnostics)
                     ? "你还没有完成人生模型构建。下面这些问题可以先体验通用对话，但完成构建后会明显更贴近你。"
                     : "选择一个陪跑场景，OpenLife 会按你的人生模型展开对话。"}
                 </div>
@@ -1058,7 +1063,7 @@ export default function ChatPage() {
               </div>
             </div>
           )}
-          {showGuide && isModelEmpty(model) && (
+          {showGuide && getModelEmptyState(model, diagnostics) && (
             <div className="flex justify-start">
               <div className="max-w-2xl w-full bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-xl p-4 text-sm relative">
                 <button
