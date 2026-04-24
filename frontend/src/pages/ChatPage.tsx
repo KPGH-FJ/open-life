@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   Send, Loader2, ThumbsUp, ThumbsDown, Hammer, ArrowRight, X, Plus, Trash2,
   Edit2, MessageSquare, Target, Activity, Compass, Sparkles, Heart, CheckCircle2
@@ -35,6 +35,7 @@ import { isModelEmpty } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import HermesTracePanel from "../components/HermesTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -77,6 +78,20 @@ function getFixSuggestion(diagnostics: SystemDiagnostics | null): { text: string
     };
   }
   if (diagnostics.model_empty) {
+    if ((diagnostics.pending_builder_review_sessions ?? 0) > 0) {
+      return {
+        text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个待确认的 Builder Review。`,
+        action: "回 Builder 审阅",
+        link: "/builder"
+      };
+    }
+    if (diagnostics.unfinished_builder_sessions > 0) {
+      return {
+        text: `人生模型还没有真正写入，但你有 ${diagnostics.unfinished_builder_sessions} 个待继续的构建会话。`,
+        action: "回 Builder 继续",
+        link: "/builder"
+      };
+    }
     return {
       text: "人生模型尚未构建。",
       action: "去 Builder 创建",
@@ -135,6 +150,7 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
 }
 
 export default function ChatPage() {
+  const location = useLocation();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>("default");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -205,6 +221,32 @@ export default function ChatPage() {
     getLifeModel().then(setModel).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    const refreshChatContext = () => {
+      getLifeModel().then(setModel).catch(() => {});
+      getSystemDiagnostics().then(setDiagnostics).catch(() => {});
+      loadSessions();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshChatContext();
+      }
+    };
+    window.addEventListener("focus", refreshChatContext);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refreshChatContext);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!(location.state as { refreshFromBuilder?: boolean } | null)?.refreshFromBuilder) return;
+    getLifeModel().then(setModel).catch(() => {});
+    getSystemDiagnostics().then(setDiagnostics).catch(() => {});
+    loadSessions();
+  }, [location.state]);
+
   const loadSessions = async () => {
     try {
       const list = await listChatSessions();
@@ -248,7 +290,7 @@ export default function ChatPage() {
         ]);
       })
       .finally(() => setLoadingHistory(false));
-  }, [currentSessionId, diagnostics]);
+  }, [currentSessionId]);
 
   // Scroll on significant changes only; avoid smooth scroll during streaming
   useEffect(() => {
@@ -537,9 +579,10 @@ export default function ChatPage() {
     setShowToolCalls(false);
 
     try {
-      await saveChatMessage(currentSessionId, userMsg);
-      await loadSessions();
+      // The streaming backend persists the user message before model execution.
+      // Saving it here as well creates duplicate user rows in history and memory retrieval.
       await startStreamMessage(currentSessionId, nextMessages);
+      await loadSessions();
     } catch (e) {
       flushStreaming();
       if (!streamErrorHandledRef.current) {
@@ -560,6 +603,14 @@ export default function ChatPage() {
   };
 
   const handleContinueStream = async () => {
+    const lastUser =
+      lastUserMessageRef.current ?? [...messages].reverse().find((m) => m.role === "user") ?? null;
+    if (!lastUser || sending) return;
+    const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
+    const retryMessages =
+      lastUserIndex >= 0
+        ? messages.slice(0, lastUserIndex + 1)
+        : [lastUser];
     setStreamInterrupted(false);
     setSending(true);
     streamErrorHandledRef.current = false;
@@ -569,7 +620,7 @@ export default function ChatPage() {
     setToolCalls([]);
     setShowToolCalls(false);
     try {
-      await startStreamMessage(currentSessionId, messages);
+      await startStreamMessage(currentSessionId, retryMessages);
     } catch (e) {
       flushStreaming();
       if (!streamErrorHandledRef.current) {
@@ -643,6 +694,24 @@ export default function ChatPage() {
       value: primaryGoal?.name || "尚未设定",
     },
   ];
+  const conversationContext = [
+    {
+      label: "价值观过滤",
+      detail: topValues.length > 0 ? `优先参考：${topValues.map((value) => value.name).join("、")}` : "当前还没有足够价值观信号，建议先完成一次构建。",
+    },
+    {
+      label: "当前状态",
+      detail: model?.state.current_focus
+        ? `会优先围绕“${model.state.current_focus}”来组织建议。`
+        : "当前焦点还比较空，这轮对话会更多依赖你的即时输入。",
+    },
+    {
+      label: "目标牵引",
+      detail: primaryGoal?.name
+        ? `会优先结合当前目标：${primaryGoal.name}`
+        : "目标还不够清晰，更适合先做探索型对话。",
+    },
+  ];
 
   const fillPrompt = (prompt: string) => {
     setInput(prompt);
@@ -679,6 +748,16 @@ export default function ChatPage() {
   };
 
   const handleIndexMemory = async (content: string) => {
+    if (isSafeMode(diagnostics)) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `当前处于 Safe Mode，${getSafeModeReason(diagnostics)} 建议先去设置页恢复控制台处理数据风险，再执行“加入记忆”。`,
+        },
+      ]);
+      return;
+    }
     try {
       await indexMemoryChunk(currentSessionId, content, "chat");
     } catch (e) {
@@ -818,6 +897,20 @@ export default function ChatPage() {
             {preferLocal ? "优先本地模型" : "优先云端模型"}
           </button>
         </div>
+        {diagnostics && isSafeMode(diagnostics) && (
+            <div className="border-b border-amber-200 bg-amber-50 px-6 py-2">
+              <div className="max-w-3xl text-xs text-amber-800 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <span className="font-medium">Safe Mode：</span>
+                  {getSafeModeReason(diagnostics)}
+                  <span className="ml-2">普通对话仍可继续，但“加入记忆”等写入操作建议先暂停。</span>
+                </div>
+                <Link to="/settings" className="underline font-medium">
+                  打开恢复控制台
+                </Link>
+              </div>
+            </div>
+          )}
         {/* Chat mode selector */}
         <div className="border-b px-6 py-2 bg-white">
           <div className="flex items-center gap-2 overflow-x-auto">
@@ -896,6 +989,17 @@ export default function ChatPage() {
                       </button>
                     ))}
                   </div>
+                  <div className="mt-4 rounded-2xl border border-stone-200 bg-white/75 p-3">
+                    <div className="text-xs font-semibold text-stone-900">这轮对话会优先参考</div>
+                    <div className="mt-2 space-y-2">
+                      {conversationContext.map((item) => (
+                        <div key={item.label} className="rounded-xl border border-stone-100 bg-stone-50/80 px-3 py-2">
+                          <div className="text-[11px] font-medium text-stone-500">{item.label}</div>
+                          <div className="mt-1 text-xs leading-5 text-stone-700">{item.detail}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -934,7 +1038,11 @@ export default function ChatPage() {
             <div className="flex justify-start">
               <div className="max-w-3xl w-full rounded-2xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
                 <div className="text-sm font-semibold text-stone-900">不知道从哪一句开始？</div>
-                <div className="mt-1 text-xs text-stone-500">选择一个陪跑场景，OpenLife 会按你的人生模型展开对话。</div>
+                <div className="mt-1 text-xs text-stone-500">
+                  {isModelEmpty(model)
+                    ? "你还没有完成人生模型构建。下面这些问题可以先体验通用对话，但完成构建后会明显更贴近你。"
+                    : "选择一个陪跑场景，OpenLife 会按你的人生模型展开对话。"}
+                </div>
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   {conversationStarters.map((starter) => (
                     <button
@@ -967,12 +1075,23 @@ export default function ChatPage() {
                 <p className="text-indigo-800 mb-3">
                   OpenLife 的回答会基于你的人生模型进行价值观过滤。模型越完整，对话越贴心。
                 </p>
-                <Link
-                  to="/builder"
-                  className="inline-flex items-center gap-1 bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs hover:bg-indigo-700"
-                >
-                  去构建 <ArrowRight size={14} />
-                </Link>
+                <div className="flex flex-wrap gap-2">
+                  <Link
+                    to="/builder"
+                    className="inline-flex items-center gap-1 bg-indigo-600 text-white px-3 py-1.5 rounded-md text-xs hover:bg-indigo-700"
+                  >
+                    去构建 <ArrowRight size={14} />
+                  </Link>
+                  <Link
+                    to="/dashboard"
+                    className="inline-flex items-center gap-1 border border-indigo-200 bg-white text-indigo-700 px-3 py-1.5 rounded-md text-xs hover:bg-indigo-50"
+                  >
+                    先看仪表盘 <ArrowRight size={14} />
+                  </Link>
+                </div>
+                <div className="mt-2 text-xs text-indigo-600">
+                  如果你只是想先感受一下，也可以直接使用下面的场景卡开始一次通用对话。
+                </div>
               </div>
             </div>
           )}

@@ -3,7 +3,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { BrowserRouter } from 'react-router-dom'
 import BuilderPage from './BuilderPage'
 import { invoke } from '@tauri-apps/api/core'
-import { mockInvoke } from '@/test/mocks/tauri'
+import { mockInvoke, mockLifeModel } from '@/test/mocks/tauri'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -258,6 +258,115 @@ describe('BuilderPage', () => {
     })
   })
 
+  it('restores pending review when resuming a finished quick build session', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'builder_list_unfinished') {
+        return Promise.resolve([
+          {
+            session_id: 'review-session',
+            mode: 'Quick',
+            step_index: 6,
+            finished: true,
+            draft_yaml: '',
+            current_prompt: '请审阅以下建议',
+            pending_signals: [
+              {
+                id: 'sig-1',
+                source_step: 1,
+                source_question_id: 'q1',
+                dimension: 'Identity',
+                affected_path: 'identity.name',
+                proposed_value: 'OpenLife 用户',
+                confidence: 0.8,
+                reason: '来自快速构建',
+                risk_level: 'low',
+                user_status: 'Pending',
+              },
+            ],
+          },
+        ])
+      }
+      if (cmd === 'builder_start') {
+        return Promise.resolve({
+          prompt: '请审阅以下建议',
+          finished: true,
+          progress: { progress: 1, current_step_label: '审阅模型建议', step_index: 6, total_steps: 6 },
+          pending_signals: [
+            {
+              id: 'sig-1',
+              source_step: 1,
+              source_question_id: 'q1',
+              dimension: 'Identity',
+              affected_path: 'identity.name',
+              proposed_value: 'OpenLife 用户',
+              confidence: 0.8,
+              reason: '来自快速构建',
+              risk_level: 'low',
+              user_status: 'Pending',
+            },
+          ],
+          mode: 'Quick',
+        })
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText('继续未完成的会话')).toBeInTheDocument()
+    expect(screen.getByText('待确认 Review')).toBeInTheDocument()
+    expect(screen.getByText('已完成问题收集，等待你确认并应用模型建议')).toBeInTheDocument()
+    expect(screen.getByText('待确认内容：请审阅以下建议')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('去审阅'))
+
+    expect(await screen.findByText('OpenLife 准备这样理解你')).toBeInTheDocument()
+    expect(screen.getByText('名称')).toBeInTheDocument()
+    expect(screen.getByText('OpenLife 用户')).toBeInTheDocument()
+  })
+
+  it('shows safe mode banner and blocks starting new builder sessions when diagnostics are degraded', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_system_diagnostics') {
+        return Promise.resolve({
+          beta_ready: false,
+          beta_ready_issues: ['memory degraded'],
+          chat_ready: true,
+          readiness_issues: [],
+          local_model: 'qwen2.5:7b',
+          resolved_local_model: 'qwen2.5:7b',
+          ollama_running: true,
+          cloud_api_configured: true,
+          life_model_ready: true,
+          memory_chunk_count: 10,
+          vector_corrupt_embedding_count: 2,
+          active_data_dir: '/tmp/openlife',
+          legacy_data_dir: '/tmp/openlife-legacy',
+          database_status: 'degraded',
+          startup_warnings: ['memory.db 初始化失败，正在使用临时数据库'],
+        })
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText(/Safe Mode：构建写入已暂停/)).toBeInTheDocument()
+    const quickButton = screen.getByText('快速构建').closest('button')
+    expect(quickButton).toBeDisabled()
+    expect(screen.getByText(/去恢复控制台/)).toBeInTheDocument()
+
+    const startCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'builder_start')
+    expect(startCalls).toHaveLength(0)
+  })
+
   it('passes defined target_dimension when starting incremental build for State', async () => {
     render(
       <BrowserRouter>
@@ -509,5 +618,165 @@ describe('BuilderPage', () => {
         expect(decision.status).toBe('accepted')
       }
     })
+  })
+
+  it('shows build outcome summary and productized next steps after apply succeeds', async () => {
+    const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
+      if (cmd === 'builder_start') {
+        return Promise.resolve({
+          prompt: '请描述你的价值观',
+          progress: { progress: 0.2, current_step_label: '价值观', step_index: 1, total_steps: 5 },
+        })
+      }
+      if (cmd === 'builder_step') {
+        return Promise.resolve({
+          prompt: '完成',
+          finished: true,
+          progress: { progress: 1.0, current_step_label: '完成', step_index: 5, total_steps: 5 },
+          mode: 'Quick',
+          pending_signals: [
+            {
+              id: 'sig_1',
+              source_step: 1,
+              source_question_id: 'q1',
+              dimension: 'Identity',
+              affected_path: 'identity.name',
+              proposed_value: 'Test',
+              confidence: 0.9,
+              reason: 'test',
+              risk_level: 'low',
+              user_status: 'Pending',
+            },
+          ],
+          model: mockLifeModel,
+        })
+      }
+      if (cmd === 'builder_apply_signals') {
+        return Promise.resolve({
+          success: true,
+          applied_fields: ['identity.name', 'goals.short_term'],
+          merged_fields: ['identity.values'],
+          skipped_fields: [],
+          edited_count: 1,
+          rejected_count: 2,
+          model: mockLifeModel,
+        })
+      }
+      return mockInvoke(cmd, args)
+    })
+    vi.mocked(invoke).mockImplementation(customMock)
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    )
+
+    fireEvent.click((await screen.findByText('快速构建')).closest('button')!)
+    await waitFor(() => {
+      expect(screen.getByText('请描述你的价值观')).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText('输入你的回答...'), { target: { value: 'reply' } })
+    fireEvent.click(screen.getByText('下一步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+    })
+
+    const checkboxes = screen.getAllByRole('checkbox')
+    checkboxes.forEach((cb) => {
+      if (!(cb as HTMLInputElement).checked) fireEvent.click(cb)
+    })
+    fireEvent.click(screen.getByText('保存选中内容'))
+
+    await waitFor(() => {
+      expect(screen.getByText('本轮沉淀')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('本轮写入结果')).toBeInTheDocument()
+    expect(screen.getByText('已写入')).toBeInTheDocument()
+    expect(screen.getByText('已合并')).toBeInTheDocument()
+    expect(screen.getByText('已编辑')).toBeInTheDocument()
+    expect(screen.getByText('已拒绝')).toBeInTheDocument()
+    expect(screen.getByText('能力资产')).toBeInTheDocument()
+    expect(screen.getByText('开始第一次个性化对话')).toBeInTheDocument()
+    expect(screen.getByText('去仪表盘查看下一步')).toBeInTheDocument()
+    expect(screen.getByText(/本轮已写入 2 项，合并 1 项，编辑 1 项，拒绝 2 项/)).toBeInTheDocument()
+  })
+
+  it('returns review-only builds back to unfinished sessions when choosing not to save', async () => {
+    const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
+      if (cmd === 'builder_list_unfinished') {
+        return Promise.resolve([
+          {
+            session_id: 'draft-review',
+            mode: 'Quick',
+            step_index: 6,
+            finished: true,
+            draft_yaml: '',
+            current_prompt: '请审阅以下建议',
+          },
+        ])
+      }
+      if (cmd === 'builder_start') {
+        return Promise.resolve({
+          prompt: '请描述你的价值观',
+          progress: { progress: 0.2, current_step_label: '价值观', step_index: 1, total_steps: 5 },
+        })
+      }
+      if (cmd === 'builder_step') {
+        return Promise.resolve({
+          prompt: '完成',
+          finished: true,
+          progress: { progress: 1.0, current_step_label: '完成', step_index: 5, total_steps: 5 },
+          mode: 'Quick',
+          pending_signals: [
+            {
+              id: 'sig_1',
+              source_step: 1,
+              source_question_id: 'q1',
+              dimension: 'Identity',
+              affected_path: 'identity.name',
+              proposed_value: 'Test',
+              confidence: 0.9,
+              reason: 'test',
+              risk_level: 'low',
+              user_status: 'Pending',
+            },
+          ],
+          model: null,
+        })
+      }
+      return mockInvoke(cmd, args)
+    })
+    vi.mocked(invoke).mockImplementation(customMock)
+
+    render(
+      <BrowserRouter>
+        <BuilderPage />
+      </BrowserRouter>
+    )
+
+    fireEvent.click((await screen.findByText('快速构建')).closest('button')!)
+    await waitFor(() => {
+      expect(screen.getByText('请描述你的价值观')).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText('输入你的回答...'), { target: { value: 'reply' } })
+    fireEvent.click(screen.getByText('下一步'))
+
+    await waitFor(() => {
+      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('暂不保存'))
+
+    await waitFor(() => {
+      expect(screen.getByText('这轮理解已暂存到未完成会话，还没有写入人生模型。你可以稍后回来继续审阅。')).toBeInTheDocument()
+    })
+
+    expect(screen.queryByText('构建完成！')).not.toBeInTheDocument()
+    expect(screen.getByText('继续未完成的会话')).toBeInTheDocument()
   })
 })

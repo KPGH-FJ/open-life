@@ -50,7 +50,7 @@ describe("OnboardingWizard", () => {
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
-    fireEvent.click(screen.getByText("开始使用 OpenLife"));
+    fireEvent.click(screen.getByText("关闭引导，稍后再探索"));
     await waitFor(() => {
       expect(onComplete).toHaveBeenCalled();
     });
@@ -76,7 +76,22 @@ describe("OnboardingWizard", () => {
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
     fireEvent.click(screen.getByText("下一步"));
-    expect(screen.getByText("隐私与数据安全")).toBeInTheDocument();
+    expect(screen.getByText("准备开始试用")).toBeInTheDocument();
     expect(screen.getByText(/PII 检测引擎/)).toBeInTheDocument();
+    expect(screen.getByText("推荐试用路线")).toBeInTheDocument();
+    expect(screen.getByText("2. 开始第一次对话")).toBeInTheDocument();
+  });
+
+  it("navigates to chat from the final recommended route", () => {
+    render(
+      <MemoryRouter>
+        <OnboardingWizard onComplete={() => {}} />
+      </MemoryRouter>
+    );
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("下一步"));
+    fireEvent.click(screen.getByText("2. 开始第一次对话"));
+    expect(mockNavigate).toHaveBeenCalledWith("/chat");
   });
 });

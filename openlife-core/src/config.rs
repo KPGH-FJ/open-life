@@ -79,7 +79,8 @@ fn default_local_model() -> String {
 impl AppConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        let config: Self = serde_yaml::from_str(&content)?;
+        let mut config: Self = serde_yaml::from_str(&content)?;
+        config.normalize_provider_from_base();
         Ok(config)
     }
 
@@ -91,6 +92,36 @@ impl AppConfig {
 
     pub fn load_or_default(path: impl AsRef<Path>) -> Self {
         Self::load(&path).unwrap_or_default()
+    }
+
+    pub fn normalize_provider_from_base(&mut self) {
+        if self.llm.provider != default_provider() {
+            self.normalize_provider_embedding_defaults();
+            return;
+        }
+        let base = self.llm.openai_base.to_lowercase();
+        self.llm.provider = if base.contains("api.deepseek.com") {
+            "deepseek".to_string()
+        } else if base.contains("openrouter.ai") {
+            "openrouter".to_string()
+        } else if base.contains("api.siliconflow.cn") {
+            "siliconflow".to_string()
+        } else if base.contains("api.moonshot.cn") {
+            "moonshot".to_string()
+        } else if base.contains("dashscope.aliyuncs.com") {
+            "dashscope".to_string()
+        } else if base.contains("open.bigmodel.cn") {
+            "zhipu".to_string()
+        } else {
+            self.llm.provider.clone()
+        };
+        self.normalize_provider_embedding_defaults();
+    }
+
+    fn normalize_provider_embedding_defaults(&mut self) {
+        if self.llm.provider == "deepseek" {
+            self.llm.embedding_enabled = false;
+        }
     }
 
     /// Get effective OpenAI base URL (env var overrides config file)
@@ -115,10 +146,7 @@ impl AppConfig {
             "moonshot" => std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
             "dashscope" => std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
             "zhipu" => std::env::var("ZHIPU_API_KEY").unwrap_or_default(),
-            _ => std::env::var("DEEPSEEK_API_KEY")
-                .or_else(|_| std::env::var("OPENAI_API_KEY"))
-                .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
-                .unwrap_or_default(),
+            _ => String::new(),
         }
     }
 
@@ -189,6 +217,7 @@ mod tests {
 
     #[test]
     fn config_effective_openai_base_env_override() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let config = AppConfig::default();
         std::env::set_var("OPENAI_API_BASE", "https://env.override.com/v1");
         assert_eq!(
@@ -201,6 +230,7 @@ mod tests {
 
     #[test]
     fn config_effective_openai_key_env_override() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
         config.llm.openai_key = "from-config".into();
         std::env::set_var("OPENAI_API_KEY", "sk-env");
@@ -211,10 +241,47 @@ mod tests {
 
     #[test]
     fn config_deepseek_env_fallback() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
         config.llm.provider = "deepseek".into();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
         assert_eq!(config.effective_cloud_api_key(), "sk-deepseek");
         std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn config_custom_provider_requires_explicit_key() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        let mut config = AppConfig::default();
+        config.llm.provider = "custom".into();
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek");
+        std::env::set_var("OPENAI_API_KEY", "sk-openai");
+        assert_eq!(config.effective_cloud_api_key(), "");
+        config.llm.openai_key = "sk-custom".into();
+        assert_eq!(config.effective_cloud_api_key(), "sk-custom");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn config_load_infers_provider_for_legacy_deepseek_base() {
+        let file = NamedTempFile::new().unwrap();
+        fs::write(
+            file.path(),
+            r#"
+llm:
+  openai_base: "https://api.deepseek.com/v1"
+  openai_key: "sk-test"
+  chat_model: "deepseek-chat"
+prefer_local_model: false
+local_model: ""
+"#,
+        )
+        .unwrap();
+
+        let config = AppConfig::load(file.path()).unwrap();
+        assert_eq!(config.llm.provider, "deepseek");
+        assert!(!config.llm.embedding_enabled);
+        assert_eq!(config.effective_provider_label(), "DeepSeek");
     }
 }

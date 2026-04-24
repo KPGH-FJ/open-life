@@ -24,7 +24,11 @@ pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, St
 }
 
 #[tauri::command]
-pub async fn save_config(config: AppConfig, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn save_config(
+    mut config: AppConfig,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    config.normalize_provider_from_base();
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
     config.save(&config_path).map_err(|e| e.to_string())?;
@@ -80,10 +84,6 @@ pub async fn import_all_data(
             .unwrap_or(serde_json::Value::Null),
     )
     .map_err(|e| format!("解析 life_model 失败: {}", e))?;
-    {
-        let _ = persist_life_model(&state.inner().clone(), life_model, false).await?;
-    }
-
     let messages: Vec<openlife_core::memory::ExportedMessage> = serde_json::from_value(
         payload
             .get("messages")
@@ -91,14 +91,6 @@ pub async fn import_all_data(
             .unwrap_or(serde_json::Value::Array(vec![])),
     )
     .map_err(|e| format!("解析 messages 失败: {}", e))?;
-    {
-        let store = state.memory_store.lock().await;
-        store.clear_all_messages().map_err(|e| e.to_string())?;
-        store
-            .import_messages(&messages)
-            .map_err(|e| e.to_string())?;
-    }
-
     let vectors: Vec<openlife_core::vectors::ExportedVectorChunk> = serde_json::from_value(
         payload
             .get("vectors")
@@ -106,10 +98,63 @@ pub async fn import_all_data(
             .unwrap_or(serde_json::Value::Array(vec![])),
     )
     .map_err(|e| format!("解析 vectors 失败: {}", e))?;
+
+    let previous_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+    let previous_messages = {
+        let store = state.memory_store.lock().await;
+        store.export_all_messages().map_err(|e| e.to_string())?
+    };
+    let previous_vectors = {
+        let store = state.vector_store.lock().await;
+        store.export_all_chunks().map_err(|e| e.to_string())?
+    };
+
+    if let Err(import_error) =
+        apply_import_payload(state.inner().clone(), life_model, messages, vectors).await
+    {
+        let rollback_error = apply_import_payload(
+            state.inner().clone(),
+            previous_model,
+            previous_messages,
+            previous_vectors,
+        )
+        .await
+        .err();
+        if let Some(rollback_error) = rollback_error {
+            return Err(format!(
+                "导入失败，且自动回滚失败。请不要继续操作，先备份数据目录。导入错误: {}; 回滚错误: {}",
+                import_error, rollback_error
+            ));
+        }
+        return Err(format!(
+            "导入失败，已自动回滚到导入前状态: {}",
+            import_error
+        ));
+    }
+    Ok(())
+}
+
+async fn apply_import_payload(
+    state: Arc<AppState>,
+    life_model: LifeModel,
+    messages: Vec<openlife_core::memory::ExportedMessage>,
+    vectors: Vec<openlife_core::vectors::ExportedVectorChunk>,
+) -> Result<(), String> {
+    persist_life_model(&state, life_model, false).await?;
+    {
+        let store = state.memory_store.lock().await;
+        store
+            .replace_all_messages(&messages)
+            .map_err(|e| e.to_string())?;
+    }
     {
         let store = state.vector_store.lock().await;
-        store.clear_all_chunks().map_err(|e| e.to_string())?;
-        store.import_chunks(&vectors).map_err(|e| e.to_string())?;
+        store
+            .replace_all_chunks(&vectors)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -193,10 +238,15 @@ pub async fn test_llm_connection(config: AppConfig) -> Result<LlmConnectionTestR
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if status.is_success() {
+        let model_note = if model.to_lowercase().contains("reasoner") {
+            " 当前选择的是推理模型，首次可见输出可能更慢；试用聊天建议优先使用 deepseek-chat 这类通用聊天模型。"
+        } else {
+            ""
+        };
         Ok(LlmConnectionTestResult {
             ok: true,
             provider: label,
-            message: "连接成功，云端模型可用。".to_string(),
+            message: format!("连接成功，云端模型可用。{}", model_note),
         })
     } else {
         Ok(LlmConnectionTestResult {

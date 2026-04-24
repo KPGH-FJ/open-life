@@ -2968,7 +2968,7 @@ impl BuilderSessionStore {
         Ok(data
             .sessions
             .values()
-            .filter(|s| !s.finished)
+            .filter(|s| !s.finished || !s.pending_signals.is_empty())
             .cloned()
             .collect())
     }
@@ -3031,6 +3031,32 @@ mod tests {
 
         store.remove_session("s4").unwrap();
         assert!(store.get_session("s4").unwrap().is_none());
+    }
+
+    #[test]
+    fn builder_session_store_includes_finished_review_sessions_in_resume_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BuilderSessionStore::new(dir.path().join("store.json"));
+        let mut session = BuilderSession::new("review-1", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals.push(BuilderSignal {
+            id: "sig_name".into(),
+            source_step: 1,
+            source_question_id: "name".into(),
+            dimension: BuilderDimension::Identity,
+            affected_path: "identity.name".into(),
+            proposed_value: serde_json::Value::String("fujing".into()),
+            confidence: 0.9,
+            reason: "测试".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        });
+        store.save_session(&session).unwrap();
+
+        let list = store.list_unfinished_sessions().unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].finished);
+        assert_eq!(list[0].pending_signals.len(), 1);
     }
 
     #[test]
@@ -3749,6 +3775,151 @@ mod tests {
         assert_eq!(goal.priority, 5);
         assert_eq!(goal.status, "pending");
         assert_eq!(goal.progress, 0.0);
+    }
+
+    #[test]
+    fn apply_signals_realistic_quick_build_review_payload_updates_multiple_dimensions() {
+        let mut model = LifeModel::default_model();
+        let signals = vec![
+            BuilderSignal {
+                id: "sig_name".into(),
+                source_step: 1,
+                source_question_id: "name".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.name".into(),
+                proposed_value: serde_json::Value::String("fujing".into()),
+                confidence: 0.95,
+                reason: "用户直接提供的称呼".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_focus".into(),
+                source_step: 2,
+                source_question_id: "current_focus".into(),
+                dimension: BuilderDimension::State,
+                affected_path: "state.current_focus".into(),
+                proposed_value: serde_json::Value::String("自我探索".into()),
+                confidence: 0.9,
+                reason: "用户选择的当前关注主题".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_focus_areas".into(),
+                source_step: 2,
+                source_question_id: "current_focus".into(),
+                dimension: BuilderDimension::State,
+                affected_path: "state.focus_areas".into(),
+                proposed_value: serde_json::json!(["自我探索"]),
+                confidence: 0.85,
+                reason: "当前关注作为焦点领域".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_short_term".into(),
+                source_step: 3,
+                source_question_id: "short_term_goals".into(),
+                dimension: BuilderDimension::Goals,
+                affected_path: "goals.short_term".into(),
+                proposed_value: serde_json::json!([
+                    {
+                        "name": "把 OpenLife 跑通",
+                        "priority": 5,
+                        "status": "pending",
+                        "milestones": [],
+                        "description": "",
+                        "progress": 0.0
+                    }
+                ]),
+                confidence: 0.8,
+                reason: "用户描述的近期目标".into(),
+                risk_level: RiskLevel::Medium,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_long_term".into(),
+                source_step: 4,
+                source_question_id: "long_term_direction".into(),
+                dimension: BuilderDimension::Goals,
+                affected_path: "goals.long_term".into(),
+                proposed_value: serde_json::json!([
+                    {
+                        "name": "长期方向: 希望事业收获阶段性的成功",
+                        "priority": 5,
+                        "status": "pending",
+                        "milestones": [],
+                        "description": "希望事业收获阶段性的成功",
+                        "progress": 0.0
+                    }
+                ]),
+                confidence: 0.6,
+                reason: "用户描述的长期方向(需要确认)".into(),
+                risk_level: RiskLevel::High,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_alert".into(),
+                source_step: 6,
+                source_question_id: "current_blockers".into(),
+                dimension: BuilderDimension::State,
+                affected_path: "state.alerts".into(),
+                proposed_value: serde_json::json!([
+                    {
+                        "dimension_name": "general",
+                        "message": "当前卡点: 方向不明确、拖延",
+                        "severity": "medium"
+                    }
+                ]),
+                confidence: 0.65,
+                reason: "用户主动报告的阻碍".into(),
+                risk_level: RiskLevel::Medium,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_comm_style".into(),
+                source_step: 7,
+                source_question_id: "companion_style".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "preferences.communication_style".into(),
+                proposed_value: serde_json::Value::String("苏格拉底式追问型".into()),
+                confidence: 0.9,
+                reason: "用户选择的陪伴风格".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Accepted,
+            },
+            BuilderSignal {
+                id: "sig_voice".into(),
+                source_step: 7,
+                source_question_id: "companion_style".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.voice_style.tone_descriptors".into(),
+                proposed_value: serde_json::json!(["好奇", "探究"]),
+                confidence: 0.85,
+                reason: "根据陪伴风格映射的语调特征".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Accepted,
+            },
+        ];
+
+        let (applied, skipped) = BuilderEngine::apply_signals_to_model(&mut model, &signals);
+
+        assert!(skipped.is_empty());
+        assert_eq!(model.identity.name, "fujing");
+        assert_eq!(model.state.current_focus, "自我探索");
+        assert!(model.state.focus_areas.iter().any(|item| item == "自我探索"));
+        assert!(model.goals.short_term.iter().any(|goal| goal.name == "把 OpenLife 跑通"));
+        assert!(model.goals.long_term.iter().any(|goal| goal.description == "希望事业收获阶段性的成功"));
+        assert_eq!(model.preferences.communication_style, "苏格拉底式追问型");
+        assert!(model.identity.voice_style.tone_descriptors.iter().any(|item| item == "好奇"));
+        assert!(model.identity.voice_style.tone_descriptors.iter().any(|item| item == "探究"));
+        assert_eq!(model.state.alerts.len(), 1);
+        assert!(applied.iter().any(|item| item.contains("identity.name")));
+        assert!(applied.iter().any(|item| item.contains("state.current_focus")));
+        assert!(applied.iter().any(|item| item.contains("goals.short_term")));
+        assert!(applied.iter().any(|item| item.contains("goals.long_term")));
+        assert!(applied.iter().any(|item| item.contains("preferences.communication_style")));
     }
 
     #[test]

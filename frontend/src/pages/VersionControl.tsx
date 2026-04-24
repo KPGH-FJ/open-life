@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { listSnapshots, restoreSnapshot, diffSnapshots, createSnapshot } from "../tauri";
+import { Link } from "react-router-dom";
+import { listSnapshots, restoreSnapshot, diffSnapshots, createSnapshot, getSystemDiagnostics, type SystemDiagnostics } from "../tauri";
 import type { LifeModelVersion } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 
 type DiffLine = {
   sign: "+" | "-" | " ";
@@ -139,6 +142,7 @@ function dimLabel(dim: NonNullable<DiffLine["dim"]>) {
 
 export default function VersionControl() {
   const [snapshots, setSnapshots] = useState<LifeModelVersion[]>([]);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [loading, setLoading] = useState(true);
   const [tag, setTag] = useState("");
   const [note, setNote] = useState("");
@@ -149,6 +153,8 @@ export default function VersionControl() {
   const [diffing, setDiffing] = useState(false);
   const [structuredDiff, setStructuredDiff] = useState<DiffLine[]>([]);
   const diffSummary = summarizeStructuredDiff(structuredDiff);
+  const safeMode = isSafeMode(diagnostics);
+  const safeModeReason = getSafeModeReason(diagnostics);
 
   const load = async () => {
     setLoading(true);
@@ -164,9 +170,14 @@ export default function VersionControl() {
 
   useEffect(() => {
     load();
+    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
   }, []);
 
   const handleCreate = async () => {
+    if (safeMode) {
+      setNotice(buildSafeModeBlockedMessage("创建快照", diagnostics));
+      return;
+    }
     setCreating(true);
     try {
       await createSnapshot(tag || "手动快照", note || "");
@@ -175,19 +186,23 @@ export default function VersionControl() {
       setNotice("快照创建成功");
       await load();
     } catch (e) {
-      setNotice("快照创建失败: " + String(e));
+      setNotice(buildRuntimeActionError("创建快照", e, "data"));
     } finally {
       setCreating(false);
     }
   };
 
   const handleRestore = async (version: string) => {
+    if (safeMode) {
+      setNotice(buildSafeModeBlockedMessage("版本回滚", diagnostics));
+      return;
+    }
     if (!confirm(`确定要回滚到版本 ${version} 吗？\n\n系统会先自动创建 pre-restore 备份快照，再恢复目标版本。`)) return;
     try {
       await restoreSnapshot(version);
       setNotice(`回滚成功，系统已先自动备份当前版本，再恢复到 ${version}`);
     } catch (e) {
-      setNotice("回滚失败: " + String(e));
+      setNotice(buildRuntimeActionError("版本回滚", e, "data"));
     }
   };
 
@@ -231,11 +246,56 @@ export default function VersionControl() {
     <div className="h-full overflow-auto p-6">
       <div className="max-w-4xl mx-auto bg-white rounded-xl shadow p-6 space-y-6">
         <h2 className="text-2xl font-bold text-gray-800">版本控制</h2>
+        {safeMode && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-amber-900">Safe Mode：版本写入已暂停</div>
+                <div className="mt-1 text-xs leading-5 text-amber-800">
+                  {safeModeReason} 你仍然可以查看历史快照与版本差异，但创建快照和执行回滚都会被拦截。
+                </div>
+              </div>
+              <Link
+                to="/settings"
+                className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+              >
+                去恢复控制台
+              </Link>
+            </div>
+          </div>
+        )}
         {notice && (
           <div className="text-sm text-green-600 bg-green-50 px-3 py-2 rounded">
             {notice}
           </div>
         )}
+
+        <section className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-4">
+          <div className="text-sm font-semibold text-slate-900">版本治理说明</div>
+          <div className="mt-1 text-xs leading-5 text-slate-600">
+            版本控制不是用来频繁试错每一句文案，而是用来管理人生模型的重要变化：构建、校准、进化和回滚都应该在这里留下明确痕迹。
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">什么时候创建快照</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                完成一次 Builder、应用一轮校准、或准备做较大调整前，先留一个可回看的锚点。
+              </div>
+            </div>
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">什么时候看差异</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                当你感觉“模型变了，但说不清哪里变了”时，先对比版本，再决定是否继续吸收这些变化。
+              </div>
+            </div>
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">什么时候回滚</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                只有在确认变化方向明显不对时才回滚；系统会先自动创建 pre-restore 备份，避免把现在的状态彻底丢掉。
+              </div>
+            </div>
+          </div>
+        </section>
 
         <section className="space-y-3">
           <h3 className="text-lg font-semibold text-gray-700">创建快照</h3>
@@ -254,7 +314,7 @@ export default function VersionControl() {
             />
             <button
               onClick={handleCreate}
-              disabled={creating}
+              disabled={creating || safeMode}
               className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:opacity-50"
             >
               {creating ? "创建中..." : "快照"}
@@ -315,7 +375,8 @@ export default function VersionControl() {
                   </div>
                   <button
                     onClick={() => handleRestore(s.version)}
-                    className="text-sm text-indigo-600 hover:text-indigo-800"
+                    disabled={safeMode}
+                    className="text-sm text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
                   >
                     回滚
                   </button>

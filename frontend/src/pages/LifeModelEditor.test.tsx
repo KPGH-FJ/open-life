@@ -114,6 +114,45 @@ describe("LifeModelEditor", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
+  it("shows safe mode read-only banner and blocks save when diagnostics are degraded", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_system_diagnostics") {
+        return Promise.resolve({
+          beta_ready: false,
+          beta_ready_issues: ["memory degraded"],
+          chat_ready: true,
+          readiness_issues: [],
+          local_model: "qwen2.5:7b",
+          resolved_local_model: "qwen2.5:7b",
+          ollama_running: true,
+          cloud_api_configured: true,
+          life_model_ready: true,
+          memory_chunk_count: 10,
+          vector_corrupt_embedding_count: 2,
+          active_data_dir: "/tmp/openlife",
+          legacy_data_dir: "/tmp/openlife-legacy",
+          database_status: "degraded",
+          startup_warnings: ["memory.db 初始化失败，正在使用临时数据库"],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(<LifeModelEditor />);
+
+    expect(await screen.findByText(/Safe Mode：人生模型当前只读/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /只读查看/ }));
+    expect(await screen.findByText(/编辑已切换为只读/)).toBeInTheDocument();
+
+    const saveButton = screen.getByRole("button", { name: /保存/ });
+    expect(saveButton).toBeDisabled();
+
+    vi.advanceTimersByTime(3000);
+    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_life_model");
+    expect(saveCalls).toHaveLength(0);
+    expect(screen.getAllByText(/去 Settings 的恢复控制台/).length).toBeGreaterThan(0);
+  });
+
   it("collapses and expands sections via SectionHeader", async () => {
     render(<LifeModelEditor />);
 

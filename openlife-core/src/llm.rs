@@ -12,6 +12,7 @@ pub type StreamResult = Pin<Box<dyn Stream<Item = Result<String>> + Send>>;
 
 const CHAT_REQUEST_TIMEOUT_SECS: u64 = 120;
 const STREAM_CONNECT_TIMEOUT_SECS: u64 = 20;
+const REASONING_NOTICE: &str = "（模型正在推理中，可能需要稍等片刻...）\n\n";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -44,10 +45,7 @@ pub fn effective_api_key(provider: &str, configured_key: &str) -> String {
         "moonshot" => std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
         "dashscope" => std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
         "zhipu" => std::env::var("ZHIPU_API_KEY").unwrap_or_default(),
-        _ => std::env::var("DEEPSEEK_API_KEY")
-            .or_else(|_| std::env::var("OPENAI_API_KEY"))
-            .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
-            .unwrap_or_default(),
+        _ => String::new(),
     }
 }
 
@@ -76,6 +74,14 @@ pub fn chat_completions_url(provider: &str, openai_base: &str) -> String {
     }
 }
 
+pub fn resolve_stream_chat_model<'a>(provider: &str, chat_model: &'a str) -> &'a str {
+    if provider == "deepseek" && chat_model.to_lowercase().contains("reasoner") {
+        "deepseek-chat"
+    } else {
+        chat_model
+    }
+}
+
 fn extract_chat_content(json: &serde_json::Value) -> Option<String> {
     json["choices"][0]["message"]["content"]
         .as_str()
@@ -95,6 +101,17 @@ fn extract_stream_content(json: &serde_json::Value) -> Option<String> {
         .or_else(|| json["content"].as_str())
         .map(ToString::to_string)
         .filter(|s| !s.is_empty())
+}
+
+fn has_reasoning_content(json: &serde_json::Value) -> bool {
+    json["choices"][0]["delta"]["reasoning_content"]
+        .as_str()
+        .or_else(|| json["choices"][0]["message"]["reasoning_content"].as_str())
+        .or_else(|| json["delta"]["reasoning_content"].as_str())
+        .or_else(|| json["reasoning_content"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
 }
 
 pub async fn chat_with_openrouter(
@@ -186,8 +203,14 @@ pub async fn chat_with_openrouter_raw(
     let json: serde_json::Value =
         serde_json::from_str(&text).with_context(|| format!("解析响应 JSON 失败: {}", text))?;
 
-    let content = extract_chat_content(&json)
-        .ok_or_else(|| anyhow::anyhow!("{} 响应为空或格式不兼容: {}", label, text))?;
+    let content = match extract_chat_content(&json) {
+        Some(content) => content,
+        None if has_reasoning_content(&json) => format!(
+            "{} 返回了推理过程，但没有返回最终回答。建议切换到 deepseek-chat 等通用聊天模型，或重试并增加输出 token 上限。",
+            label
+        ),
+        None => return Err(anyhow::anyhow!("{} 响应为空或格式不兼容: {}", label, text)),
+    };
 
     Ok(content)
 }
@@ -223,6 +246,7 @@ pub async fn chat_with_openrouter_raw_stream(
 ) -> Result<StreamResult> {
     let api_key = effective_api_key(provider, openai_key);
     let label = provider_label(provider);
+    let stream_model = resolve_stream_chat_model(provider, chat_model);
 
     if api_key.is_empty() {
         return Err(anyhow::anyhow!(
@@ -247,7 +271,7 @@ pub async fn chat_with_openrouter_raw_stream(
     }
 
     let body = json!({
-        "model": chat_model,
+        "model": stream_model,
         "messages": req_messages,
         "temperature": 0.7,
         "max_tokens": 2048,
@@ -280,6 +304,7 @@ pub async fn chat_with_openrouter_raw_stream(
     let mut byte_stream = res.bytes_stream();
     let stream = try_stream! {
         let mut buffer = String::new();
+        let mut emitted_reasoning_notice = false;
         while let Some(chunk) = byte_stream.next().await {
             let bytes = chunk.with_context(|| "stream read error")?;
             buffer.push_str(&String::from_utf8_lossy(&bytes));
@@ -292,6 +317,9 @@ pub async fn chat_with_openrouter_raw_stream(
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                         if let Some(content) = extract_stream_content(&json) {
                             yield content;
+                        } else if !emitted_reasoning_notice && has_reasoning_content(&json) {
+                            emitted_reasoning_notice = true;
+                            yield REASONING_NOTICE.to_string();
                         }
                     }
                 }
@@ -304,6 +332,8 @@ pub async fn chat_with_openrouter_raw_stream(
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(content) = extract_stream_content(&json) {
                         yield content;
+                    } else if !emitted_reasoning_notice && has_reasoning_content(&json) {
+                        yield REASONING_NOTICE.to_string();
                     }
                 }
             }
@@ -415,7 +445,7 @@ fn format_state_hint(state: &crate::life_model::State) -> String {
 mod tests {
     use super::{
         chat_completions_url, default_base_for_provider, effective_api_key, extract_chat_content,
-        extract_stream_content, provider_label,
+        extract_stream_content, has_reasoning_content, provider_label, resolve_stream_chat_model,
     };
 
     #[test]
@@ -429,6 +459,7 @@ mod tests {
 
     #[test]
     fn provider_specific_env_fallbacks_are_used_when_config_key_is_empty() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         std::env::set_var("DEEPSEEK_API_KEY", "sk-deepseek-test");
         std::env::set_var("OPENROUTER_API_KEY", "sk-openrouter-test");
         std::env::set_var("OPENAI_API_KEY", "sk-openai-test");
@@ -437,6 +468,7 @@ mod tests {
         assert_eq!(effective_api_key("openrouter", ""), "sk-openrouter-test");
         assert_eq!(effective_api_key("openai", ""), "sk-openai-test");
         assert_eq!(effective_api_key("deepseek", "sk-config"), "sk-config");
+        assert_eq!(effective_api_key("custom", ""), "");
 
         std::env::remove_var("DEEPSEEK_API_KEY");
         std::env::remove_var("OPENROUTER_API_KEY");
@@ -473,9 +505,34 @@ mod tests {
         let stream_alt = serde_json::json!({
             "delta": {"content": "alt"}
         });
+        let reasoning = serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": "thinking"}}]
+        });
+        let reasoning_message = serde_json::json!({
+            "choices": [{"message": {"reasoning_content": "thinking", "content": ""}}]
+        });
         assert_eq!(extract_chat_content(&normal).as_deref(), Some("hello"));
         assert_eq!(extract_chat_content(&text).as_deref(), Some("hello text"));
         assert_eq!(extract_stream_content(&stream).as_deref(), Some("hi"));
         assert_eq!(extract_stream_content(&stream_alt).as_deref(), Some("alt"));
+        assert!(has_reasoning_content(&reasoning));
+        assert!(has_reasoning_content(&reasoning_message));
+        assert_eq!(extract_stream_content(&reasoning), None);
+    }
+
+    #[test]
+    fn deepseek_reasoner_stream_is_downgraded_to_chat_model() {
+        assert_eq!(
+            resolve_stream_chat_model("deepseek", "deepseek-reasoner"),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            resolve_stream_chat_model("deepseek", "deepseek-chat"),
+            "deepseek-chat"
+        );
+        assert_eq!(
+            resolve_stream_chat_model("openai", "gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
     }
 }

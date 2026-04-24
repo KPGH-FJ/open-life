@@ -47,6 +47,16 @@ impl FeedbackStore {
         Ok(store)
     }
 
+    pub fn new_in_memory() -> Result<Self> {
+        let conn =
+            Connection::open_in_memory().context("failed to open in-memory feedback sqlite db")?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
     fn init_tables(&self) -> Result<()> {
         let conn = self
             .conn

@@ -14,13 +14,13 @@
 # 前提条件:
 #   - Rust >= 1.75    (https://rustup.rs/)
 #   - Node.js >= 18   (https://nodejs.org/)
-#   - pnpm >= 8       (https://pnpm.io/installation)
+#   - pnpm >= 8（推荐）或 npm（已内置 fallback）
 #   - Tauri CLI       (pnpm add -g @tauri-apps/cli)
 #   - Ollama (可选)   (https://ollama.com/)
 #
 # 常见问题:
 #   Q: 提示 "command not found: pnpm"
-#   A: 运行 "npm install -g pnpm" 安装 pnpm
+#   A: 可以直接使用 npm fallback 继续启动；如需 pnpm 可运行 "npm install -g pnpm"
 #
 #   Q: 提示 "Rust compiler not found"
 #   A: 访问 https://rustup.rs/ 安装 Rust
@@ -158,7 +158,13 @@ check_environment() {
 
     # 检查核心依赖
     check_command "node" || has_errors=1
-    check_command "pnpm" || has_errors=1
+    if check_command "pnpm"; then
+        :
+    elif check_command "npm"; then
+        log_warn "pnpm 未安装，将使用 npm fallback 启动前端 Tauri CLI"
+    else
+        has_errors=1
+    fi
     check_command "rustc" || has_errors=1
     check_command "cargo" || has_errors=1
 
@@ -170,7 +176,7 @@ check_environment() {
     # 检查 Tauri CLI
     if ! check_command "tauri"; then
         if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
-            log_success "Tauri CLI 存在于 node_modules (使用 pnpm tauri)"
+            log_success "Tauri CLI 存在于 node_modules (可使用 pnpm 或 npm exec tauri)"
         else
             log_warn "Tauri CLI 未全局安装，将在首次运行时通过 pnpm 安装"
         fi
@@ -200,8 +206,8 @@ check_environment() {
         echo "快速安装指南:"
         echo "  Rust:    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
         echo "  Node.js: https://nodejs.org/"
-        echo "  pnpm:    npm install -g pnpm"
-        echo "  Tauri:   pnpm add -g @tauri-apps/cli"
+        echo "  pnpm:    npm install -g pnpm   (推荐，可选)"
+        echo "  Tauri:   pnpm add -g @tauri-apps/cli  或使用项目内 CLI"
         exit 1
     fi
 

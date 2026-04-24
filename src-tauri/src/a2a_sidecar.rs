@@ -14,16 +14,26 @@ impl A2ASidecar {
         }
     }
 
-    pub fn start(&self) -> Result<(), String> {
-        let mut child_lock = self.child.lock().map_err(|e| e.to_string())?;
-        if child_lock.is_some() {
-            println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
+    pub async fn start(&self) -> Result<(), String> {
+        {
+            let child_lock = self.child.lock().map_err(|e| e.to_string())?;
+            if child_lock.is_some() {
+                println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
+                return Ok(());
+            }
+        }
+
+        if crate::a2a_server::has_reachable_local_server(self.port).await {
+            println!(
+                "[A2A Sidecar] detected existing OpenLife A2A server on port {} - a2a_sidecar.rs:26",
+                self.port
+            );
             return Ok(());
         }
 
         let bin_path = resolve_a2a_server_binary()?;
         println!(
-            "[A2A Sidecar] starting binary: {:?} - a2a_sidecar.rs:25",
+            "[A2A Sidecar] starting binary: {:?} - a2a_sidecar.rs:33",
             bin_path
         );
 
@@ -34,9 +44,10 @@ impl A2ASidecar {
             .spawn()
             .map_err(|e| format!("Failed to spawn A2A sidecar: {}", e))?;
 
+        let mut child_lock = self.child.lock().map_err(|e| e.to_string())?;
         *child_lock = Some(child);
         println!(
-            "[A2A Sidecar] spawned on port {} - a2a_sidecar.rs:35",
+            "[A2A Sidecar] spawned on port {} - a2a_sidecar.rs:43",
             self.port
         );
         Ok(())

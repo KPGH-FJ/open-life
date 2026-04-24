@@ -452,6 +452,61 @@ impl LifeModel {
         }
     }
 
+    pub fn is_effectively_empty(&self) -> bool {
+        let default = Self::default_model();
+
+        self.identity.name.trim().is_empty()
+            && self.identity.birth_date.is_none()
+            && self.identity.values.is_empty()
+            && self.identity.personality_traits.is_empty()
+            && self.identity.life_philosophy.trim().is_empty()
+            && self.identity.mission_statement.trim().is_empty()
+            && self.identity.role_definition.primary_role.trim().is_empty()
+            && self.identity.role_definition.secondary_roles.is_empty()
+            && self.identity.role_definition.responsibilities.is_empty()
+            && self.identity.role_definition.boundaries.is_empty()
+            && self.identity.voice_style.tone_descriptors.is_empty()
+            && self.identity.voice_style.vocabulary_preference.trim().is_empty()
+            && self.goals.short_term.is_empty()
+            && self.goals.medium_term.is_empty()
+            && self.goals.long_term.is_empty()
+            && self.goals.life_goals.is_empty()
+            && self.goals.daily.is_empty()
+            && self.capabilities.skills.is_empty()
+            && self.capabilities.resources.is_empty()
+            && self.capabilities.networks.is_empty()
+            && self.capabilities.tools.is_empty()
+            && self.capabilities.knowledge_domains.is_empty()
+            && self.state.current_focus == default.state.current_focus
+            && self.state.health_status.physical == default.state.health_status.physical
+            && self.state.health_status.mental == default.state.health_status.mental
+            && self.state.health_status.energy_level == default.state.health_status.energy_level
+            && self.state.emotional_state.current_mood
+                == default.state.emotional_state.current_mood
+            && self.state.emotional_state.stress_level
+                == default.state.emotional_state.stress_level
+            && self.state.emotional_state.fulfillment_score
+                == default.state.emotional_state.fulfillment_score
+            && self.state.recent_reflections.is_empty()
+            && self.state.open_questions.is_empty()
+            && self.state.focus_areas.is_empty()
+            && self.state.recent_events.is_empty()
+            && self.state.habit_streaks.is_empty()
+            && self.state.custom_dimensions.is_empty()
+            && self.state.alerts.is_empty()
+            && self.relationships.inner_circle.is_empty()
+            && self.relationships.mentors.is_empty()
+            && self.relationships.collaborators.is_empty()
+            && self.preferences.work_hours.preferred_start.trim().is_empty()
+            && self.preferences.work_hours.preferred_end.trim().is_empty()
+            && self.preferences.work_hours.timezone.trim().is_empty()
+            && self.preferences.peak_energy_time.trim().is_empty()
+            && self.preferences.communication_style.trim().is_empty()
+            && self.preferences.learning_style.trim().is_empty()
+            && self.preferences.decision_making_style.trim().is_empty()
+            && self.evolution_rules.is_empty()
+    }
+
     pub fn calculate_4d_completion(&self) -> Model4DCompletion {
         let identity = {
             let mut score = 0u8;
@@ -750,6 +805,29 @@ mod tests {
             c.overall,
             (c.identity / 4) + (c.goals / 4) + (c.capabilities / 4) + (c.state / 4)
         );
+    }
+
+    #[test]
+    fn default_model_is_effectively_empty() {
+        let model = LifeModel::default_model();
+        assert!(model.is_effectively_empty());
+    }
+
+    #[test]
+    fn builder_populated_model_is_not_effectively_empty() {
+        let mut model = LifeModel::default_model();
+        model.identity.name = "fujing".into();
+        model.goals.short_term.push(GoalItem {
+            name: "把 OpenLife 跑通".into(),
+            description: "".into(),
+            priority: 5,
+            status: "pending".into(),
+            progress: 0.0,
+            deadline: None,
+            milestones: vec![],
+            related_memories: vec![],
+        });
+        assert!(!model.is_effectively_empty());
     }
 
     #[test]

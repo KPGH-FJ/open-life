@@ -72,7 +72,8 @@ describe('CalibrationPage', () => {
       expect(screen.getByText('周期校准')).toBeInTheDocument()
     })
 
-    expect(screen.getByText('置信度 82%')).toBeInTheDocument()
+    expect(screen.getAllByText('置信度 82%').length).toBeGreaterThanOrEqual(1)
+    expect(screen.getByText('为什么推荐你校准这里')).toBeInTheDocument()
     // Source labels are now in expanded detail view
     // Click expand to see detailed sources
     const expandBtn = screen.getAllByTitle('查看详细信号来源')[0]
@@ -97,6 +98,22 @@ describe('CalibrationPage', () => {
     expect(screen.getByText('融合信号概览')).toBeInTheDocument()
     expect(screen.getByText('最强反馈信号')).toBeInTheDocument()
     expect(screen.getByText('最强对话/行为信号')).toBeInTheDocument()
+  })
+
+  it('shows calibration governance guidance and linked follow-up actions', async () => {
+    render(
+      <BrowserRouter>
+        <CalibrationPage />
+      </BrowserRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('校准治理说明')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText(/校准不是“让系统随便改你的人生模型”/)).toBeInTheDocument()
+    expect(screen.getByText('先去检查记忆')).toBeInTheDocument()
+    expect(screen.getByText('去版本控制看回滚路径')).toBeInTheDocument()
   })
 
   it('expands change item to show detailed source information', async () => {

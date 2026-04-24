@@ -9,14 +9,32 @@ function safeInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   if (!isTauriEnv()) {
     return Promise.reject(new Error("当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。"));
   }
-  if (import.meta.env.DEV) {
-    console.log("[safeInvoke]", cmd, JSON.stringify(args));
+  const normalizedArgs = withTauriArgAliases(args);
+  if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
+    console.log("[safeInvoke]", cmd, JSON.stringify(normalizedArgs));
   }
-  return invoke<T>(cmd, args);
+  return invoke<T>(cmd, normalizedArgs);
 }
 
 function sessionArgs(sessionId: string): { sessionId: string; session_id: string } {
   return { sessionId, session_id: sessionId };
+}
+
+function snakeToCamel(key: string): string {
+  return key.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+}
+
+function withTauriArgAliases(args?: Record<string, any>): Record<string, any> | undefined {
+  if (!args) return args;
+  const normalized = { ...args };
+  for (const [key, value] of Object.entries(args)) {
+    if (!key.includes("_")) continue;
+    const camelKey = snakeToCamel(key);
+    if (!(camelKey in normalized)) {
+      normalized[camelKey] = value;
+    }
+  }
+  return normalized;
 }
 
 function optionalDualArg<T>(
@@ -184,7 +202,9 @@ export interface SystemDiagnostics {
   mcp_recent_audit_count: number;
   mcp_recent_pii_count: number;
   memory_chunk_count: number;
+  vector_corrupt_embedding_count?: number;
   unfinished_builder_sessions: number;
+  pending_builder_review_sessions?: number;
   ollama_online: boolean;
   local_model: string;
   resolved_local_model?: string | null;
@@ -483,6 +503,14 @@ export async function countMemoryChunks(): Promise<number> {
   return safeInvoke("count_memory_chunks");
 }
 
+export async function rebuildMemoryIndex(): Promise<{
+  processed: number;
+  indexed: number;
+  skipped: number;
+}> {
+  return safeInvoke("rebuild_memory_index");
+}
+
 export async function logAnalyticsEvent(
   eventName: string,
   sessionId?: string,
@@ -600,7 +628,19 @@ export interface BuilderPatchReview {
   confidence_by_dimension: Record<string, number>;
 }
 
-export async function builderStart(mode: "quick" | "incremental" | "socratic", sessionId: string, targetDimension?: "identity" | "goals" | "capabilities" | "state"): Promise<{ prompt: string; progress: BuilderProgress; analysis?: BuilderAnalysis }> {
+export async function builderStart(
+  mode: "quick" | "incremental" | "socratic",
+  sessionId: string,
+  targetDimension?: "identity" | "goals" | "capabilities" | "state"
+): Promise<{
+  prompt: string;
+  progress: BuilderProgress;
+  analysis?: BuilderAnalysis;
+  finished?: boolean;
+  pending_signals?: BuilderSignal[];
+  mode?: string;
+  target_dimension?: string;
+}> {
   return safeInvoke("builder_start", {
     mode,
     ...sessionArgs(sessionId),
@@ -623,6 +663,7 @@ export interface UnfinishedBuilderSession {
   finished: boolean;
   draft_yaml: string;
   current_prompt?: string;
+  pending_signals?: BuilderSignal[];
   target_dimension?: "Identity" | "Goals" | "Capabilities" | "State";
 }
 

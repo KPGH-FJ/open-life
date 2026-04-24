@@ -9,7 +9,6 @@ import {
   MousePointer,
   Brain,
   GitCommit,
-  Info,
 } from "lucide-react";
 import {
   generateCalibrationReport,
@@ -24,6 +23,7 @@ import type { LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
+import SuggestionContextPanel from "../components/SuggestionContextPanel";
 
 interface CalibrationData {
   report: {
@@ -321,6 +321,49 @@ export default function CalibrationPage() {
           )}
         </div>
 
+        <div className="rounded-xl border border-slate-200 bg-white p-6 space-y-4">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">校准治理说明</div>
+            <div className="mt-1 text-xs leading-5 text-slate-600">
+              校准不是“让系统随便改你的人生模型”，而是把近期反馈、行为和对话推断整理成可审阅建议。你可以先理解这些建议来自哪里，再决定是否吸收；如果吸收后感觉方向不对，还可以去版本控制回看和回退。
+            </div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="text-[11px] font-medium text-slate-500">先看来源</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                每条建议都应该先看信号来源与置信度，确认它到底是来自你的真实反馈、行为记录，还是对话中的推断。
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="text-[11px] font-medium text-slate-500">再看记忆</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                如果你怀疑系统“记错了”或“记偏了”，先去记忆页确认长期记忆里到底保存了什么，再决定要不要应用这次校准。
+              </div>
+            </div>
+            <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
+              <div className="text-[11px] font-medium text-slate-500">最后看回滚</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                应用校准前系统会自动创建快照。如果后面发现方向不对，可以去版本控制里对比差异并执行回滚。
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              to="/memory"
+              className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            >
+              先去检查记忆
+            </Link>
+            <Link
+              to="/versions"
+              className="inline-flex items-center gap-2 rounded-full border border-indigo-200 bg-indigo-50 px-4 py-2 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+            >
+              去版本控制看回滚路径
+            </Link>
+          </div>
+        </div>
+
         {/* Changes Section */}
         <div className="bg-white rounded-xl shadow p-6 space-y-4">
           <div className="flex items-center justify-between">
@@ -471,7 +514,26 @@ export default function CalibrationPage() {
                             {increased ? "↑" : "↓"} {(Math.abs(c.new_value - c.old_value)).toFixed(2)}
                           </span>
                         </div>
-                        <div className="mt-1 text-xs text-gray-500">{c.reason}</div>
+                        <div className="mt-3">
+                          <SuggestionContextPanel
+                            title="为什么推荐你校准这里"
+                            reason={c.reason}
+                            affectedPath={`${c.dimension} / ${c.target_name}`}
+                            confidence={c.confidence}
+                            badges={[
+                              {
+                                label: highImpact ? "高影响·需手动确认" : "可选建议",
+                                tone: highImpact ? "rose" : "blue",
+                              },
+                            ]}
+                            note={
+                              c.sources && c.sources.length > 0
+                                ? buildSourceExplanation(c.sources)
+                                : "当前还没有更细的信号拆解，系统仅基于近期行为、反馈和对话推断给出本次建议。"
+                            }
+                            footer="应用前会自动创建快照，你可以在版本管理里回看或回滚。"
+                          />
+                        </div>
                       </div>
                       <button
                         onClick={(e) => {
@@ -507,10 +569,6 @@ export default function CalibrationPage() {
                                   </div>
                                 </div>
                               ))}
-                              <div className="text-[11px] text-gray-400 bg-gray-50 rounded-lg px-3 py-2">
-                                <Info size={12} className="inline mr-1" />
-                                {buildSourceExplanation(c.sources)}
-                              </div>
                             </div>
                           ) : (
                             <div className="text-xs text-gray-400">无详细信号来源记录</div>

@@ -450,6 +450,7 @@ impl McpRegistry {
 
     pub fn inspect_call_arguments(&self, name: &str, arguments: &Value) -> McpArgumentInspection {
         let permission_level = self.tool_permission_level(name);
+        let is_builtin = self.builtins.contains_key(name);
         let findings = collect_privacy_findings(&self.privacy_engine, arguments, "$");
         let pii_found = !findings.is_empty();
         let args_str = arguments.to_string();
@@ -460,7 +461,7 @@ impl McpRegistry {
             arguments.clone()
         };
         let requires_confirmation =
-            permission_level == "high" || (pii_found && permission_level != "low");
+            !is_builtin || permission_level == "high" || (pii_found && permission_level != "low");
         McpArgumentInspection {
             permission_level,
             pii_found,
@@ -588,5 +589,15 @@ mod tests {
         assert_eq!(inspection.permission_level, "low");
         assert!(!inspection.pii_found);
         assert!(!inspection.requires_confirmation);
+    }
+
+    #[test]
+    fn inspect_call_arguments_requires_confirmation_for_external_low_risk_tools() {
+        let registry = McpRegistry::new();
+        let inspection = registry
+            .inspect_call_arguments("calculator", &serde_json::json!({ "expression": "1 + 1" }));
+        assert_eq!(inspection.permission_level, "low");
+        assert!(!inspection.pii_found);
+        assert!(inspection.requires_confirmation);
     }
 }

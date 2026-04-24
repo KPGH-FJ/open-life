@@ -33,16 +33,22 @@ pub async fn get_system_diagnostics(
         let pii_count = logs.iter().filter(|log| log.pii_found).count();
         (logs.len(), pii_count)
     };
-    let memory_chunk_count = {
+    let (memory_chunk_count, vector_corrupt_embedding_count) = {
         let store = state.vector_store.lock().await;
-        store.count_all_chunks().map_err(|e| e.to_string())? as usize
+        let report = store.integrity_report().map_err(|e| e.to_string())?;
+        (
+            report.total_chunks as usize,
+            report.corrupt_embedding_count as usize,
+        )
     };
-    let unfinished_builder_sessions = {
+    let (unfinished_builder_sessions, pending_builder_review_sessions) = {
         let store = state.builder_session_store.lock().await;
-        store
-            .list_unfinished_sessions()
-            .map_err(|e| e.to_string())?
-            .len()
+        let sessions = store.list_unfinished_sessions().map_err(|e| e.to_string())?;
+        let pending_review = sessions
+            .iter()
+            .filter(|session| session.finished && !session.pending_signals.is_empty())
+            .count();
+        (sessions.len(), pending_review)
     };
     let (
         local_model,
@@ -51,6 +57,7 @@ pub async fn get_system_diagnostics(
         cloud_provider,
         cloud_api_validated,
         cloud_api_last_error,
+        embedding_enabled,
     ) = {
         let cfg = state.config.lock().await;
         let effective_key = cfg.effective_cloud_api_key();
@@ -75,6 +82,7 @@ pub async fn get_system_diagnostics(
             provider,
             configured,
             None,
+            cfg.llm.embedding_enabled,
         )
     };
     let resolved_local_model = resolve_ollama_model(&local_model).await;
@@ -89,14 +97,7 @@ pub async fn get_system_diagnostics(
         let manager = state.life_model_manager.lock().await;
         match manager.load() {
             Ok(model) => {
-                let empty = model.identity.values.is_empty()
-                    && model.goals.short_term.is_empty()
-                    && model.goals.medium_term.is_empty()
-                    && model.goals.long_term.is_empty()
-                    && model.goals.life_goals.is_empty()
-                    && model.capabilities.skills.is_empty()
-                    && model.state.current_focus.is_empty()
-                    && model.state.emotional_state.current_mood.is_empty();
+                let empty = model.is_effectively_empty();
 
                 let completion = model.calculate_4d_completion();
                 let lowest_dim = [
@@ -155,6 +156,17 @@ pub async fn get_system_diagnostics(
         readiness_issues
             .push("人生模型读取失败：请检查应用数据目录权限或重新保存人生模型。".to_string());
     }
+    if model_empty && pending_builder_review_sessions > 0 {
+        readiness_issues.push(format!(
+            "检测到 {} 个待确认的人生模型 Review 会话。你其实已经完成了问题收集，下一步更适合先回到 Builder 审阅并应用这些建议，而不是重新开始构建。",
+            pending_builder_review_sessions
+        ));
+    } else if model_empty && unfinished_builder_sessions > 0 {
+        readiness_issues.push(format!(
+            "检测到 {} 个未完成的人生模型构建会话，其中可能包含待确认的 Review 内容。建议先回到 Builder 继续或应用这些结果，再开始深度试用。",
+            unfinished_builder_sessions
+        ));
+    }
     if prefer_local_model && !ollama_online && !cloud_api_configured {
         readiness_issues.push(format!(
             "当前设置为优先本地模型，但未找到可用模型：{}。",
@@ -167,12 +179,55 @@ pub async fn get_system_diagnostics(
             cloud_provider
         ));
     }
+    if cloud_provider == "DeepSeek" && local_model.is_empty() {
+        let current_model = {
+            let cfg = state.config.lock().await;
+            cfg.llm.chat_model.clone()
+        };
+        if current_model.to_lowercase().contains("reasoner") {
+            readiness_issues.push(
+                "当前云端聊天模型是 DeepSeek 推理模型 deepseek-reasoner。为保证桌面端实时对话体验，主聊天流会自动切到 deepseek-chat；如果你想要更稳定的试用体验，也建议直接在设置页把模型改成 deepseek-chat。".to_string(),
+            );
+        }
+        if embedding_enabled {
+            readiness_issues.push(
+                "当前是 DeepSeek 云端配置，远端 embedding 会自动关闭并回退到本地/Ollama 或哈希向量；如果历史聊天很多但记忆索引仍为空，请去设置页恢复控制台重建向量索引。".to_string(),
+            );
+        }
+    }
+    if vector_corrupt_embedding_count > 0 {
+        readiness_issues.push(format!(
+            "检测到 {} 条向量记忆索引损坏，记忆检索可能不完整；请在设置页导出备份后重建记忆索引。",
+            vector_corrupt_embedding_count
+        ));
+    }
+    if chat_session_count > 0 && memory_chunk_count == 0 {
+        readiness_issues.push(
+            "检测到已有聊天会话，但语义记忆索引仍为空。聊天可以继续使用，但长期记忆、校准和相关建议会偏弱；建议去设置页恢复控制台重建向量索引。".to_string(),
+        );
+    }
+    if !state.startup_warnings.is_empty() {
+        readiness_issues.push(format!(
+            "应用正在以降级数据模式运行：{}",
+            state.startup_warnings.join("；")
+        ));
+    }
     let chat_ready = life_model_ready && (ollama_online || cloud_api_configured);
 
     let mut beta_readiness_issues = Vec::new();
     if !chat_ready {
         beta_readiness_issues
             .push("核心聊天链路未就绪，请先修复试用就绪检查中的问题。".to_string());
+    }
+    if model_empty && pending_builder_review_sessions > 0 {
+        beta_readiness_issues.push(format!(
+            "Builder 中仍有 {} 个待确认 Review：请先回到 Builder 审阅并应用结果，再验证个性化体验。",
+            pending_builder_review_sessions
+        ));
+    } else if model_empty && unfinished_builder_sessions > 0 {
+        beta_readiness_issues.push(
+            "Builder 中仍有未完成或待确认的构建会话：请先回到 Builder 完成 Review 并应用结果，再验证个性化体验。".to_string(),
+        );
     }
     if model_empty {
         beta_readiness_issues.push(
@@ -191,11 +246,28 @@ pub async fn get_system_diagnostics(
             "首次启动引导尚未完成：请完成或跳过 Onboarding，以确保新用户路径可验证。".to_string(),
         );
     }
+    if !state.startup_warnings.is_empty() {
+        beta_readiness_issues.push(
+            "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度试用。".to_string(),
+        );
+    }
+    if vector_corrupt_embedding_count > 0 {
+        beta_readiness_issues
+            .push("向量记忆索引存在损坏记录：建议重建索引后再验证长期记忆体验。".to_string());
+    }
+    if chat_session_count > 0 && memory_chunk_count == 0 {
+        beta_readiness_issues.push(
+            "已有聊天记录，但语义记忆索引仍为空：建议先重建记忆索引，再验证长期记忆与校准体验。".to_string(),
+        );
+    }
     let beta_ready = chat_ready
         && !model_empty
         && chat_session_count > 0
         && cloud_api_configured
-        && onboarding_completed;
+        && onboarding_completed
+        && state.startup_warnings.is_empty()
+        && vector_corrupt_embedding_count == 0
+        && !(chat_session_count > 0 && memory_chunk_count == 0);
 
     Ok(SystemDiagnostics {
         router,
@@ -204,7 +276,9 @@ pub async fn get_system_diagnostics(
         mcp_recent_audit_count,
         mcp_recent_pii_count,
         memory_chunk_count,
+        vector_corrupt_embedding_count,
         unfinished_builder_sessions,
+        pending_builder_review_sessions,
         ollama_online,
         local_model,
         resolved_local_model,

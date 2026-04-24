@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent } from '@testing-library/react'
-import { BrowserRouter } from 'react-router-dom'
+import { BrowserRouter, MemoryRouter } from 'react-router-dom'
 import ChatPage from './ChatPage'
 import { invoke } from '@tauri-apps/api/core'
-import { mockInvoke } from '@/test/mocks/tauri'
+import { mockInvoke, mockLifeModel } from '@/test/mocks/tauri'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -36,6 +36,23 @@ describe('ChatPage', () => {
     })
 
     expect(screen.getByText('会话 2')).toBeInTheDocument()
+  })
+
+  it('refreshes chat context immediately when arriving from Builder apply', async () => {
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/chat', state: { refreshFromBuilder: true } }]}>
+        <ChatPage />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('会话 1')).toBeInTheDocument()
+    })
+
+    const getLifeModelCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_life_model')
+    const getDiagnosticsCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'get_system_diagnostics')
+    expect(getLifeModelCalls.length).toBeGreaterThan(1)
+    expect(getDiagnosticsCalls.length).toBeGreaterThan(1)
   })
 
   it('shows quick command guide by default', async () => {
@@ -92,6 +109,155 @@ describe('ChatPage', () => {
     expect(screen.getByText('成为更好的自己')).toBeInTheDocument()
     expect(screen.getByText('当前重心')).toBeInTheDocument()
     expect(screen.getByText('工作')).toBeInTheDocument()
+    expect(screen.getByText('这轮对话会优先参考')).toBeInTheDocument()
+    expect(screen.getByText('价值观过滤')).toBeInTheDocument()
+  })
+
+  it('refreshes life model pulse when the window regains focus', async () => {
+    let currentFocus = '工作'
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_life_model') {
+        return Promise.resolve({
+          ...mockLifeModel,
+          state: {
+            ...mockLifeModel.state,
+            current_focus: currentFocus,
+          },
+        } as any)
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText('陪跑现场')).toBeInTheDocument()
+    expect(screen.getByText('工作')).toBeInTheDocument()
+
+    currentFocus = '深度工作'
+    fireEvent(window, new Event('focus'))
+
+    await waitFor(() => {
+      expect(screen.getByText('深度工作')).toBeInTheDocument()
+    })
+  })
+
+  const createEmptyModel = (): any => ({
+    metadata: { version: '0.1.0', created_at: '', updated_at: '', author: '' },
+    identity: {
+      name: '',
+      values: [],
+      personality_traits: [],
+      life_philosophy: '',
+      mission_statement: '',
+      role_definition: { primary_role: '', secondary_roles: [], responsibilities: [], boundaries: [] },
+      voice_style: { formality: 'neutral', tone_descriptors: [], vocabulary_preference: '', emoji_usage: 'sparingly' },
+    },
+    goals: { short_term: [], medium_term: [], long_term: [], life_goals: [], daily: [], progress: 0, related_memories: [] },
+    capabilities: { skills: [], resources: [], networks: [], tools: [], knowledge_domains: [] },
+    state: {
+      current_focus: '',
+      health_status: { physical: '', mental: '', energy_level: 5 },
+      emotional_state: { current_mood: '', stress_level: 3, fulfillment_score: 5 },
+      recent_reflections: [],
+      open_questions: [],
+      focus_areas: [],
+      recent_events: [],
+      habit_streaks: [],
+      custom_dimensions: [],
+      alerts: [],
+    },
+    relationships: { inner_circle: [], mentors: [], collaborators: [] },
+    preferences: {
+      work_hours: { preferred_start: '', preferred_end: '', timezone: '' },
+      peak_energy_time: '',
+      communication_style: '',
+      learning_style: '',
+      decision_making_style: '',
+    },
+    evolution_rules: [],
+  })
+
+  it('shows first-use guidance when life model is still empty', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_life_model') {
+        return Promise.resolve(createEmptyModel())
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText('先建立你的人生模型')).toBeInTheDocument()
+    expect(screen.getByText('先看仪表盘')).toBeInTheDocument()
+    expect(screen.getByText(/也可以直接使用下面的场景卡开始一次通用对话/)).toBeInTheDocument()
+  })
+
+  it('guides the user back to Builder when there is an unfinished builder session', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_life_model') {
+        return Promise.resolve(createEmptyModel())
+      }
+      if (cmd === 'get_system_diagnostics') {
+        return Promise.resolve({
+          router: { onnx_available: false, onnx_disabled: false, active_backend: 'regex', latency_threshold_us: 50000 },
+          mcp_server_count: 0,
+          mcp_tool_count: 0,
+          mcp_recent_audit_count: 0,
+          mcp_recent_pii_count: 0,
+          memory_chunk_count: 0,
+          unfinished_builder_sessions: 1,
+          ollama_online: true,
+          local_model: 'llama3',
+          resolved_local_model: 'llama3:latest',
+          prefer_local_model: false,
+          cloud_api_configured: true,
+          cloud_provider: 'DeepSeek',
+          cloud_api_validated: true,
+          cloud_api_last_error: null,
+          chat_ready: true,
+          readiness_issues: [],
+          data_dir: '/tmp/openlife-test',
+          active_data_dir: '/tmp/openlife-test',
+          legacy_data_dir: '/tmp/openlife-legacy',
+          database_status: 'ok',
+          startup_warnings: [],
+          snapshot_count: 0,
+          life_model_ready: true,
+          app_version: '0.1.0',
+          model_empty: true,
+          chat_session_count: 0,
+          onboarding_completed: true,
+          beta_ready: false,
+          beta_readiness_issues: [],
+          builder_completion: {
+            identity: 0,
+            goals: 0,
+            capabilities: 0,
+            state: 0,
+            overall: 0,
+            lowest_dimension: 'identity',
+          },
+        } as any)
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText('先建立你的人生模型')).toBeInTheDocument()
+    expect(screen.getByText('回 Builder 继续')).toBeInTheDocument()
   })
 
   it('fills prompt from companion mode card', async () => {
@@ -259,7 +425,7 @@ describe('ChatPage', () => {
     expect(screen.queryByText(/暂时无法发送普通对话/)).not.toBeInTheDocument()
   })
 
-  it('persists normal user messages before starting the stream', async () => {
+  it('lets the streaming command persist normal user messages once', async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -272,17 +438,14 @@ describe('ChatPage', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('save_chat_message', {
+      expect(invoke).toHaveBeenCalledWith('start_stream_message', expect.objectContaining({
         sessionId: 'session-1',
         session_id: 'session-1',
-        message: { role: 'user', content: '今天怎么安排？' },
-      })
+        args: expect.objectContaining({ sessionId: 'session-1', session_id: 'session-1' }),
+      }))
     })
-    expect(invoke).toHaveBeenCalledWith('start_stream_message', expect.objectContaining({
-      sessionId: 'session-1',
-      session_id: 'session-1',
-      args: expect.objectContaining({ sessionId: 'session-1', session_id: 'session-1' }),
-    }))
+    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'save_chat_message')
+    expect(saveCalls).toHaveLength(0)
   })
 
   it('persists slash command messages to chat history', async () => {
@@ -326,7 +489,7 @@ describe('ChatPage', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' })
 
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith('add_daily_goal', { name: '阅读30分钟', time_block: undefined })
+      expect(invoke).toHaveBeenCalledWith('add_daily_goal', { name: '阅读30分钟' })
     })
     expect(await screen.findByText(/已添加今日目标：阅读30分钟/)).toBeInTheDocument()
   })
@@ -346,6 +509,78 @@ describe('ChatPage', () => {
       expect(invoke).toHaveBeenCalledWith('toggle_daily_goal', { index: 0 })
     })
     expect(await screen.findByText(/已完成今日目标：早起/)).toBeInTheDocument()
+  })
+
+  it('shows safe mode warning and blocks add-to-memory action when diagnostics are degraded', async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_system_diagnostics') {
+        return Promise.resolve({
+          router: { onnx_available: false, onnx_disabled: false, active_backend: 'regex', latency_threshold_us: 50000 },
+          mcp_server_count: 1,
+          mcp_tool_count: 2,
+          mcp_recent_audit_count: 1,
+          mcp_recent_pii_count: 0,
+          memory_chunk_count: 42,
+          vector_corrupt_embedding_count: 2,
+          unfinished_builder_sessions: 0,
+          ollama_online: true,
+          local_model: 'llama3',
+          resolved_local_model: 'llama3:latest',
+          prefer_local_model: false,
+          cloud_api_configured: true,
+          cloud_provider: 'DeepSeek',
+          cloud_api_validated: true,
+          cloud_api_last_error: null,
+          chat_ready: true,
+          readiness_issues: [],
+          data_dir: '/tmp/openlife-test',
+          active_data_dir: '/tmp/openlife-test',
+          legacy_data_dir: '/tmp/openlife-legacy',
+          database_status: 'degraded',
+          startup_warnings: ['memory.db 初始化失败，正在使用临时数据库'],
+          snapshot_count: 1,
+          life_model_ready: true,
+          app_version: '0.1.0',
+          model_empty: false,
+          chat_session_count: 1,
+          onboarding_completed: true,
+          beta_ready: false,
+          beta_readiness_issues: [],
+          builder_completion: {
+            identity: 80,
+            goals: 75,
+            capabilities: 70,
+            state: 65,
+            overall: 72.5,
+            lowest_dimension: 'state',
+          },
+          data_files: {
+            messages_db_exists: true,
+            messages_db_size_mb: 0.1,
+            vectors_db_exists: true,
+            vectors_db_size_mb: 0.1,
+            mcp_audit_db_exists: false,
+            mcp_audit_db_size_mb: 0,
+            config_yaml_exists: true,
+            life_model_yaml_exists: true,
+          },
+          ollama_models: [],
+          config_source: 'default',
+        })
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    )
+
+    expect(await screen.findByText(/Safe Mode：/)).toBeInTheDocument()
+    fireEvent.click((await screen.findAllByText('加入记忆'))[0])
+    expect(await screen.findByText(/建议先去设置页恢复控制台处理数据风险/)).toBeInTheDocument()
+    expect(invoke).not.toHaveBeenCalledWith('index_memory_chunk', expect.anything())
   })
 
 })

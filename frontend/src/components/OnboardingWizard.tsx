@@ -41,6 +41,16 @@ export default function OnboardingWizard({ onComplete }: Props) {
     navigate("/builder");
   };
 
+  const goChat = () => {
+    handleFinish();
+    navigate("/chat");
+  };
+
+  const goDashboard = () => {
+    handleFinish();
+    navigate("/dashboard");
+  };
+
   const steps = [
     {
       title: "欢迎使用 OpenLife",
@@ -111,12 +121,12 @@ export default function OnboardingWizard({ onComplete }: Props) {
       ),
     },
     {
-      title: "隐私与数据安全",
+      title: "准备开始试用",
       icon: <ShieldCheck size={32} className="text-indigo-600" />,
       content: (
         <div className="space-y-4">
           <p className="text-gray-700 leading-relaxed">
-            你的隐私对我们至关重要：
+            你的隐私对我们至关重要，同时现在也可以顺着一条最省力的路径开始试用：
           </p>
           <ul className="list-disc list-inside text-sm text-gray-700 space-y-2">
             <li>
@@ -132,12 +142,41 @@ export default function OnboardingWizard({ onComplete }: Props) {
               你可以在「设置 → 隐私策略」中自定义检测规则。
             </li>
           </ul>
+          <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4">
+            <div className="text-sm font-semibold text-indigo-900">推荐试用路线</div>
+            <div className="mt-1 text-xs text-indigo-700">
+              先完成设置和构建，再进入对话与仪表盘，会更容易体会 OpenLife 的价值。
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <button
+                onClick={goBuilder}
+                className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
+              >
+                <div className="font-medium">1. 去构建人生模型</div>
+                <div className="mt-1 text-xs text-indigo-500">推荐首次试用先完成快速构建。</div>
+              </button>
+              <button
+                onClick={goChat}
+                className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
+              >
+                <div className="font-medium">2. 开始第一次对话</div>
+                <div className="mt-1 text-xs text-indigo-500">让 OpenLife 基于模型做一次规划或陪跑。</div>
+              </button>
+              <button
+                onClick={goDashboard}
+                className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
+              >
+                <div className="font-medium">3. 去仪表盘看下一步</div>
+                <div className="mt-1 text-xs text-indigo-500">查看完成度、状态和推荐试用路线。</div>
+              </button>
+            </div>
+          </div>
           <button
             onClick={handleFinish}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition"
           >
             <Rocket size={16} />
-            开始使用 OpenLife
+            关闭引导，稍后再探索
           </button>
         </div>
       ),

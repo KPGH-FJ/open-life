@@ -12,7 +12,8 @@ import DashboardPage from "./pages/DashboardPage";
 import SettingsPage from "./pages/SettingsPage";
 import CalibrationPage from "./pages/CalibrationPage";
 import OnboardingWizard from "./components/OnboardingWizard";
-import { hasCompletedOnboarding } from "./tauri";
+import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
+import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
   constructor(props: { children: ReactNode }) {
@@ -42,6 +43,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boole
 function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [wizardReady, setWizardReady] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
 
   useEffect(() => {
     hasCompletedOnboarding()
@@ -54,6 +56,15 @@ function App() {
         setWizardReady(true);
       });
   }, []);
+
+  useEffect(() => {
+    getSystemDiagnostics()
+      .then(setDiagnostics)
+      .catch(() => setDiagnostics(null));
+  }, []);
+
+  const safeMode = isSafeMode(diagnostics);
+  const safeModeReason = getSafeModeReason(diagnostics);
 
   const navClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition ${
@@ -71,6 +82,20 @@ function App() {
             <h1 className="text-lg font-bold tracking-tight text-stone-950">OpenLife</h1>
             <div className="text-[11px] text-stone-500">你的成长驾驶舱</div>
           </div>
+          {diagnostics && (
+            <NavLink
+              to="/settings"
+              className={`ml-2 hidden rounded-full px-3 py-1 text-[11px] font-medium md:inline-flex ${
+                diagnostics.beta_ready
+                  ? "bg-emerald-100 text-emerald-800"
+                  : diagnostics.chat_ready
+                  ? "bg-blue-100 text-blue-800"
+                  : "bg-amber-100 text-amber-800"
+              }`}
+            >
+              {diagnostics.beta_ready ? "Beta 可试用" : diagnostics.chat_ready ? "核心链路已通" : "试用待修复"}
+            </NavLink>
+          )}
         </div>
         <nav className="flex flex-wrap justify-end gap-2">
           <NavLink
@@ -134,6 +159,51 @@ function App() {
           </NavLink>
         </nav>
       </header>
+      {safeMode && diagnostics && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-3">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-amber-900">Safe Mode：当前数据环境存在风险</div>
+              <div className="mt-1 text-xs text-amber-800">
+                {safeModeReason}
+              </div>
+              <div className="mt-1 text-xs text-amber-700">
+                建议先去设置页的“恢复控制台”导出备份，再继续试用。
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <NavLink
+                to="/settings"
+                className="rounded-full bg-amber-900 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-950"
+              >
+                打开恢复控制台
+              </NavLink>
+              <NavLink
+                to="/memory"
+                className="rounded-full border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+              >
+                查看记忆状态
+              </NavLink>
+            </div>
+          </div>
+        </div>
+      )}
+      {!safeMode && diagnostics && !diagnostics.beta_ready && (
+        <div className="border-b border-blue-100 bg-blue-50/80 px-4 py-2.5">
+          <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
+            <div className="text-xs text-blue-900">
+              <span className="font-semibold">Beta 试用准备中：</span>
+              {diagnostics.beta_readiness_issues?.[0] ?? "继续完成设置、构建和首轮对话，就能形成完整试用闭环。"}
+            </div>
+            <NavLink
+              to="/settings"
+              className="rounded-full bg-blue-700 px-3 py-1 text-[11px] font-medium text-white hover:bg-blue-800"
+            >
+              查看试用完成度
+            </NavLink>
+          </div>
+        </div>
+      )}
       <main className="flex-1 overflow-hidden">
         <ErrorBoundary>
           <Routes>

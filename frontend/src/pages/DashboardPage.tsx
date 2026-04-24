@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Target, Brain, Zap, Hammer, ArrowRight,
   RefreshCw, ClipboardList, TrendingUp,
@@ -17,6 +17,7 @@ import {
 import { isModelEmpty } from "../utils/modelEmpty";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type TrendDirection = "up" | "down" | "stable";
 
@@ -177,6 +178,7 @@ function trendBadge(direction: TrendDirection) {
 }
 
 export default function DashboardPage() {
+  const location = useLocation();
   const [model, setModel] = useState<LifeModel | null>(null);
   const [memories, setMemories] = useState<Array<{ chunk: any; score: number }>>([]);
   const [memoryQuery, setMemoryQuery] = useState("");
@@ -235,6 +237,50 @@ export default function DashboardPage() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    const refreshDashboardContext = () => {
+      refreshAll();
+      shouldShowCalibration()
+        .then((res) => {
+          if (res.weekly || res.monthly) {
+            setCalibrationPrompt({ weekly: res.weekly, monthly: res.monthly });
+          } else {
+            setCalibrationPrompt(null);
+          }
+        })
+        .catch((e) => {
+          setLoadWarnings((prev) => [...prev, warningText("校准提醒", e)]);
+        });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        refreshDashboardContext();
+      }
+    };
+    window.addEventListener("focus", refreshDashboardContext);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("focus", refreshDashboardContext);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!(location.state as { refreshFromBuilder?: boolean } | null)?.refreshFromBuilder) return;
+    refreshAll();
+    shouldShowCalibration()
+      .then((res) => {
+        if (res.weekly || res.monthly) {
+          setCalibrationPrompt({ weekly: res.weekly, monthly: res.monthly });
+        } else {
+          setCalibrationPrompt(null);
+        }
+      })
+      .catch((e) => {
+        setLoadWarnings((prev) => [...prev, warningText("校准提醒", e)]);
+      });
+  }, [location.state]);
 
   useEffect(() => {
     if (dimensions.length === 0 || selectedDimension) return;
@@ -431,6 +477,19 @@ export default function DashboardPage() {
   })();
 
   const nextActions = [
+    diagnostics && diagnostics.model_empty && (diagnostics.pending_builder_review_sessions ?? 0) > 0
+      ? {
+          title: "先审阅待确认的构建建议",
+          detail: `Builder 里还有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，后续对话才会真正个性化。`,
+          to: "/builder",
+        }
+      : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+      ? {
+          title: "继续未完成的构建会话",
+          detail: `Builder 里还有 ${diagnostics.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，后续对话才会真正个性化。`,
+          to: "/builder",
+        }
+      : null,
     isModelEmpty(model)
       ? { title: "先构建人生模型", detail: "模型为空时，Chat 和 Dashboard 都只能提供通用建议。", to: "/builder" }
       : null,
@@ -446,7 +505,95 @@ export default function DashboardPage() {
       : null,
   ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>;
 
+  const trialRoute = [
+    !diagnostics?.chat_ready
+      ? { title: "先完成模型与 API 配置", detail: diagnostics?.readiness_issues?.[0] ?? "先让对话后端进入可用状态。", to: "/settings" }
+      : null,
+    diagnostics && diagnostics.model_empty && (diagnostics.pending_builder_review_sessions ?? 0) > 0
+      ? {
+          title: "继续 Builder 中待确认的 Review",
+          detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先回 Builder 审阅并应用它们，比重新开始更合适。`,
+          to: "/builder",
+        }
+      : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+      ? {
+          title: "继续 Builder 中待确认的 Review",
+          detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.unfinished_builder_sessions} 个未完成构建会话。先回 Builder 应用它们，比重新开始更合适。`,
+          to: "/builder",
+        }
+      : null,
+    isModelEmpty(model)
+      ? { title: "完成第一次人生模型构建", detail: "先用快速构建建立最小可用模型，再开始个性化对话。", to: "/builder" }
+      : builderCompletion && builderCompletion.overall < 60
+      ? {
+          title: `补强最弱维度：${dimensionLabels[lowestDimension || "state"] || "State"}`,
+          detail: `当前整体完成度 ${Math.round(builderCompletion.overall)}%，继续构建会明显提升后续对话质量。`,
+          to: "/builder",
+        }
+      : { title: "开始一次个性化对话", detail: "让 OpenLife 基于当前模型做今日规划、复盘或决策陪跑。", to: "/chat" },
+    calibrationPrompt
+      ? { title: "查看周期校准建议", detail: "有新的模型校准提醒，建议确认哪些变化值得吸收。", to: "/calibration" }
+      : null,
+    latestVersion
+      ? { title: "检查最近模型变化", detail: `最近快照 ${latestVersion.version} 已可查看差异和回滚。`, to: "/versions" }
+      : null,
+  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>;
+
   const overallCompletion = diagnostics?.builder_completion?.overall ?? 0;
+  const actionSignals = [
+    diagnostics && !diagnostics.chat_ready
+      ? {
+          label: "运行环境",
+          tone: "amber",
+          title: "模型后端还没完全就绪",
+          detail: diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深度试用会更顺畅。",
+        }
+      : null,
+    isModelEmpty(model)
+      ? {
+          label: "人生模型",
+          tone: "indigo",
+          title: "你的人生模型还没有建立起来",
+          detail: "OpenLife 现在只能给通用建议。先完成一次快速构建，后续对话才会真正围绕你展开。",
+        }
+      : null,
+    builderCompletion && builderCompletion.overall > 0
+      ? {
+          label: "模型完整度",
+          tone: "emerald",
+          title: `当前整体完成度 ${Math.round(builderCompletion.overall)}%`,
+          detail:
+            lowestDimension && lowestDimensionValue < completionThreshold
+              ? `${dimensionLabels[lowestDimension] ?? lowestDimension} 仍是最薄弱维度，继续补这块会比盲目聊天更有效。`
+              : "模型基础已经够用，可以把重心转到对话、复盘和持续校准。",
+        }
+      : null,
+    dailyGoals.length > 0
+      ? {
+          label: "今日推进",
+          tone: "rose",
+          title: `今天还有 ${dailyGoals.length - completedDaily} 个目标待完成`,
+          detail:
+            completedDaily < dailyGoals.length
+              ? "先完成一个低阻力的小闭环，通常比重新规划更能带来推进感。"
+              : "今日目标已经清空，可以把时间留给反思、校准或下一阶段规划。",
+        }
+      : null,
+    stateAlerts.length > 0
+      ? {
+          label: "状态信号",
+          tone: "amber",
+          title: `检测到 ${stateAlerts.length} 条状态预警`,
+          detail: "系统判断你现在更适合先稳住节奏、做状态复盘，而不是继续叠加强刺激任务。",
+        }
+      : null,
+  ].filter(Boolean) as Array<{ label: string; tone: "amber" | "indigo" | "emerald" | "rose"; title: string; detail: string }>;
+  const actionSignalToneClass: Record<string, string> = {
+    amber: "border-amber-100 bg-amber-50 text-amber-900",
+    indigo: "border-indigo-100 bg-indigo-50 text-indigo-900",
+    emerald: "border-emerald-100 bg-emerald-50 text-emerald-900",
+    rose: "border-rose-100 bg-rose-50 text-rose-900",
+  };
   const compassTone = diagnostics && !diagnostics.chat_ready
     ? "需要先修复运行环境"
     : isModelEmpty(model)
@@ -572,6 +719,82 @@ export default function DashboardPage() {
             </div>
           </div>
         )}
+
+        {trialRoute.length > 0 && (
+          <div className="rounded-2xl border border-stone-200 bg-white/90 p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-sm font-semibold text-gray-900">推荐试用路线</div>
+                <div className="mt-1 text-xs text-gray-500">如果你今天只想顺着一条最省力的路径往前走，按这个顺序即可。</div>
+              </div>
+              <Link to={trialRoute[0].to} className="rounded-full bg-stone-900 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-stone-800">
+                从第一步开始
+              </Link>
+            </div>
+            <div className="mt-4 space-y-3">
+              {trialRoute.map((item, index) => (
+                <Link
+                  key={`${index}-${item.title}`}
+                  to={item.to}
+                  className="flex items-start gap-3 rounded-xl border border-stone-100 bg-stone-50/70 px-4 py-3 transition hover:bg-white"
+                >
+                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-stone-900 text-xs font-semibold text-amber-50">
+                    {index + 1}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium text-stone-900">{item.title}</div>
+                    <div className="mt-1 text-xs leading-5 text-stone-600">{item.detail}</div>
+                  </div>
+                  <ArrowRight size={14} className="mt-1 shrink-0 text-stone-400" />
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {actionSignals.length > 0 && (
+          <div className="rounded-2xl border border-stone-200 bg-white/90 p-5">
+            <div className="text-sm font-semibold text-stone-900">为什么今天先做这个</div>
+            <div className="mt-1 text-xs text-stone-500">
+              这些不是随机建议，而是系统根据你当前的人生模型、目标进度、状态信号和运行环境整理出的判断依据。
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {actionSignals.slice(0, 4).map((signal) => (
+                <div
+                  key={`${signal.label}-${signal.title}`}
+                  className={`rounded-xl border px-4 py-3 ${actionSignalToneClass[signal.tone]}`}
+                >
+                  <div className="text-[11px] font-medium opacity-80">{signal.label}</div>
+                  <div className="mt-1 text-sm font-medium">{signal.title}</div>
+                  <div className="mt-1 text-xs leading-5 opacity-90">{signal.detail}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {diagnostics && isSafeMode(diagnostics) && (
+            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-amber-900">Safe Mode：建议先修复数据环境再深度试用</div>
+                  <div className="mt-1 text-xs leading-5 text-amber-800">
+                    {getSafeModeReason(diagnostics)}
+                  </div>
+                  <div className="mt-1 text-xs text-amber-700">
+                    可以继续查看仪表盘，但若要进行 Builder、长期记忆或高频聊天试用，建议先去恢复控制台。
+                  </div>
+                </div>
+                <Link
+                  to="/settings"
+                  className="inline-flex shrink-0 items-center gap-2 rounded-full bg-amber-900 px-4 py-2 text-sm font-medium text-amber-50 hover:bg-amber-950"
+                >
+                  去恢复控制台
+                  <ArrowRight size={14} />
+                </Link>
+              </div>
+            </div>
+          )}
 
         {loadWarnings.length > 0 && (
           <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">

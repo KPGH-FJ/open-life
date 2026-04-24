@@ -53,6 +53,15 @@ impl MemoryStore {
         Ok(store)
     }
 
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("failed to open in-memory sqlite db")?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
     fn init_tables(&self) -> Result<()> {
         let conn = self
             .conn
@@ -391,6 +400,43 @@ impl MemoryStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let tx = conn.transaction()?;
+        for msg in messages {
+            let tags = Self::message_tags(&ChatMessage {
+                role: msg.role.clone(),
+                content: msg.content.clone(),
+            });
+            tx.execute(
+                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
+                params![msg.session_id, msg.role, msg.content, msg.created_at],
+            )?;
+            let _ = Self::insert_memory_row(
+                &tx,
+                &msg.session_id,
+                &msg.content,
+                "chat_message",
+                &format!("chat:{}", msg.role),
+                Some(&msg.role),
+                &msg.created_at,
+                &tags,
+                "private",
+                None,
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_all_messages(&self, messages: &[ExportedMessage]) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM messages", [])?;
+        tx.execute(
+            "DELETE FROM memories WHERE content_type = 'chat_message'",
+            [],
+        )?;
         for msg in messages {
             let tags = Self::message_tags(&ChatMessage {
                 role: msg.role.clone(),

@@ -3,6 +3,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use openlife_core::a2a::AgentCard;
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
 use std::sync::Arc;
 
@@ -10,7 +11,27 @@ use crate::AppState;
 
 pub const A2A_PORT: u16 = 8765;
 
+pub async fn has_reachable_local_server(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{}/agent.json", port);
+    let client = reqwest::Client::new();
+    match client.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => match resp.json::<AgentCard>().await {
+            Ok(card) => card.name == "OpenLife",
+            Err(_) => false,
+        },
+        _ => false,
+    }
+}
+
 pub async fn start(state: Arc<AppState>) {
+    if has_reachable_local_server(A2A_PORT).await {
+        println!(
+            "[A2A] existing local server already available on port {} - a2a_server.rs:24",
+            A2A_PORT
+        );
+        return;
+    }
+
     let app = Router::new()
         .route("/agent.json", get(agent_card_handler))
         .route("/tasks/send", post(send_task))
@@ -31,7 +52,7 @@ pub async fn start(state: Arc<AppState>) {
             });
         }
         Err(e) => {
-            eprintln!("[A2A] Failed to bind server: {} - a2a_server.rs:31", e);
+            eprintln!("[A2A] Failed to bind server: {} - a2a_server.rs:45", e);
         }
     }
 }

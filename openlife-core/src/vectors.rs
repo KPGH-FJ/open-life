@@ -34,6 +34,12 @@ pub struct VectorStore {
     conn: Mutex<Connection>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIntegrityReport {
+    pub total_chunks: i64,
+    pub corrupt_embedding_count: i64,
+}
+
 impl VectorStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path: PathBuf = db_path.into();
@@ -42,6 +48,16 @@ impl VectorStore {
         }
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open vector sqlite db at {:?}", db_path))?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
+    pub fn new_in_memory() -> Result<Self> {
+        let conn =
+            Connection::open_in_memory().context("failed to open in-memory vector sqlite db")?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -300,6 +316,29 @@ impl VectorStore {
         Ok(count)
     }
 
+    pub fn integrity_report(&self) -> Result<VectorIntegrityReport> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut stmt = conn.prepare("SELECT embedding_json FROM vectors")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut total = 0_i64;
+        let mut corrupt = 0_i64;
+        for row in rows {
+            total += 1;
+            let embedding_json = row?;
+            match serde_json::from_str::<Vec<f32>>(&embedding_json) {
+                Ok(embedding) if !embedding.is_empty() => {}
+                _ => corrupt += 1,
+            }
+        }
+        Ok(VectorIntegrityReport {
+            total_chunks: total,
+            corrupt_embedding_count: corrupt,
+        })
+    }
+
     pub fn export_all_chunks(&self) -> Result<Vec<ExportedVectorChunk>> {
         let conn = self
             .conn
@@ -345,6 +384,24 @@ impl VectorStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let tx = conn.transaction()?;
+        for chunk in chunks {
+            let embedding_json = serde_json::to_string(&chunk.embedding)?;
+            tx.execute(
+                "INSERT INTO vectors (session_id, content, embedding_json, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![chunk.session_id, chunk.content, embedding_json, chunk.source, chunk.created_at, chunk.tier, chunk.access_count, &chunk.last_accessed_at, chunk.importance_score, chunk.archived as i64, &chunk.archived_at, &chunk.summary],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn replace_all_chunks(&self, chunks: &[ExportedVectorChunk]) -> Result<()> {
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM vectors", [])?;
         for chunk in chunks {
             let embedding_json = serde_json::to_string(&chunk.embedding)?;
             tx.execute(
@@ -837,6 +894,33 @@ mod tests {
         assert_eq!(store.count_all_chunks().unwrap(), 1);
         store.clear_all_chunks().unwrap();
         assert_eq!(store.count_all_chunks().unwrap(), 0);
+    }
+
+    #[test]
+    fn vector_integrity_report_counts_corrupt_embeddings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = VectorStore::new(dir.path().join("vectors.db")).unwrap();
+        store
+            .insert("s1", "healthy", &dummy_embedding(4), "note")
+            .unwrap();
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO vectors (session_id, content, embedding_json, source, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "s1",
+                    "broken",
+                    "not-json",
+                    "note",
+                    chrono::Utc::now().to_rfc3339()
+                ],
+            )
+            .unwrap();
+        }
+
+        let report = store.integrity_report().unwrap();
+        assert_eq!(report.total_chunks, 2);
+        assert_eq!(report.corrupt_embedding_count, 1);
     }
 
     #[test]

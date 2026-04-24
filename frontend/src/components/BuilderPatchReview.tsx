@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, X, Edit2, AlertTriangle, Info, ShieldCheck, Sparkles, Target, User, Zap, Heart } from "lucide-react";
 import type { BuilderSignal, BuilderSummary, BuilderSignalDecision } from "../tauri";
+import SuggestionContextPanel from "./SuggestionContextPanel";
 
 interface Props {
   signals: BuilderSignal[];
@@ -12,6 +13,12 @@ interface Props {
 interface SignalEditState {
   [signalId: string]: unknown;
 }
+
+const riskPriority: Record<"low" | "medium" | "high", number> = {
+  high: 0,
+  medium: 1,
+  low: 2,
+};
 
 function fieldPathLabel(path: string): string {
   const parts = path.split(".");
@@ -247,7 +254,11 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
       {/* Signal List by Dimension */}
       <div className="space-y-4">
         {dimensions.map((dim) => {
-          const dimSignals = grouped[dim] || [];
+          const dimSignals = [...(grouped[dim] || [])].sort((a, b) => {
+            const riskDiff = riskPriority[a.risk_level] - riskPriority[b.risk_level];
+            if (riskDiff !== 0) return riskDiff;
+            return b.confidence - a.confidence;
+          });
           return (
             <div key={dim} className="border rounded-xl overflow-hidden bg-white">
               <div className="bg-gradient-to-r from-gray-50 to-gray-100 px-4 py-3 border-b flex items-center gap-2">
@@ -281,42 +292,40 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
                           <span className="font-medium text-gray-900 text-sm">
                             {fieldPathLabel(signal.affected_path)}
                           </span>
-                          {signal.source_question_id && (
-                            <span className="text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">
-                              来源: {signal.source_question_id}
-                            </span>
-                          )}
-                          <span
-                            className={`text-xs px-2 py-0.5 rounded-full border ${risk.color}`}
-                          >
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${risk.color}`}>
                             {risk.label}
                           </span>
-                          {/* 置信度标签 */}
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                            signal.confidence >= 0.8 ? "bg-green-100 text-green-700" :
-                            signal.confidence >= 0.6 ? "bg-amber-100 text-amber-700" :
-                            "bg-rose-100 text-rose-700"
-                          }`}>
+                          <span className="rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
                             置信度 {Math.round(signal.confidence * 100)}%
                           </span>
+                          <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-600">
+                            来源 {signal.source_question_id}
+                          </span>
+                          <span
+                            className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                              isHighRisk
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-emerald-100 text-emerald-800"
+                            }`}
+                          >
+                            {isHighRisk ? "需要你显式确认" : "默认已勾选"}
+                          </span>
                         </div>
-
-                        {/* Impact preview - 影响字段预览 */}
-                        {signal.affected_path && (
-                          <div className="text-[10px] text-gray-400 mb-2 font-mono">
-                            影响字段: {signal.affected_path}
-                          </div>
-                        )}
 
                         {isEditing ? (
                           <div className="mt-2 space-y-2">
                             {Array.isArray(signal.proposed_value) || (signal.proposed_value && typeof signal.proposed_value === "object") ? (
-                              <textarea
-                                value={editValue}
-                                onChange={(e) => setEditValue(e.target.value)}
-                                className="w-full min-h-28 px-3 py-2 text-xs font-mono border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                autoFocus
-                              />
+                              <>
+                                <div className="text-[11px] text-indigo-700 bg-indigo-50 rounded-lg px-3 py-2">
+                                  这是结构化字段，请保持合法 JSON。保存后会按原结构写回，而不是降级成普通字符串。
+                                </div>
+                                <textarea
+                                  value={editValue}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  className="w-full min-h-28 px-3 py-2 text-xs font-mono border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                  autoFocus
+                                />
+                              </>
                             ) : (
                               <input
                                 type="text"
@@ -357,9 +366,15 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
                           </div>
                         )}
 
-                        <div className="mt-2 text-xs text-gray-500 bg-gray-50 rounded-lg px-3 py-2">
-                          <span className="font-medium text-gray-600">为什么这样理解：</span>
-                          {signal.reason}
+                        <div className="mt-3">
+                          <SuggestionContextPanel
+                            reason={signal.reason}
+                            affectedPath={signal.affected_path}
+                            sourceLabel={signal.source_question_id}
+                            confidence={signal.confidence}
+                            riskLabel={risk.label}
+                            note={isHighRisk ? "这是高风险字段，默认不会自动勾选，只有在你明确认可后才会写入人生模型。" : "这条建议会在保存时和你当前的人生模型一起判断，尽量避免误覆盖已有内容。"}
+                          />
                         </div>
                       </div>
 

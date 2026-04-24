@@ -1,5 +1,8 @@
 use openlife_core::memory_cache::HotMemoryCache;
-use openlife_core::vectors::{embed_text, ArchivedChunkSummary, MemoryChunk, TierStats};
+use openlife_core::vectors::{
+    embed_text, embed_text_with_config, ArchivedChunkSummary, ExportedVectorChunk, MemoryChunk,
+    TierStats,
+};
 use std::sync::Arc;
 use tauri::State;
 
@@ -128,4 +131,86 @@ pub async fn list_archived_chunks(
 pub async fn get_memory_tier_stats(state: State<'_, Arc<AppState>>) -> Result<TierStats, String> {
     let store = state.vector_store.lock().await;
     store.tier_stats().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn rebuild_memory_index(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    let messages = {
+        let store = state.memory_store.lock().await;
+        store.export_all_messages().map_err(|e| e.to_string())?
+    };
+    let previous_vectors = {
+        let store = state.vector_store.lock().await;
+        store.export_all_chunks().map_err(|e| e.to_string())?
+    };
+    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.llm.provider.clone(),
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.embedding_model.clone(),
+            cfg.llm.embedding_enabled,
+        )
+    };
+
+    let mut rebuilt = Vec::<ExportedVectorChunk>::new();
+    let mut skipped = 0_usize;
+    for msg in messages {
+        let content = msg.content.trim().to_string();
+        if content.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let embedding = embed_text_with_config(
+            &content,
+            &provider,
+            &openai_base,
+            &openai_key,
+            &embedding_model,
+            embedding_enabled,
+        )
+        .await
+        .map_err(|e| format!("重建向量索引时生成 embedding 失败: {}", e))?;
+        if embedding.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        rebuilt.push(ExportedVectorChunk {
+            session_id: msg.session_id,
+            content,
+            embedding,
+            source: format!("rebuild:{}", msg.role),
+            created_at: msg.created_at,
+            tier: 2,
+            access_count: 0,
+            last_accessed_at: String::new(),
+            importance_score: 0.5,
+            archived: false,
+            archived_at: None,
+            summary: None,
+        });
+    }
+
+    {
+        let store = state.vector_store.lock().await;
+        if let Err(rebuild_error) = store.replace_all_chunks(&rebuilt) {
+            let rollback_error = store.replace_all_chunks(&previous_vectors).err();
+            if let Some(rollback_error) = rollback_error {
+                return Err(format!(
+                    "重建向量索引失败，且回滚失败。重建错误: {}; 回滚错误: {}",
+                    rebuild_error, rollback_error
+                ));
+            }
+            return Err(format!("重建向量索引失败，已回滚: {}", rebuild_error));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "processed": rebuilt.len() + skipped,
+        "indexed": rebuilt.len(),
+        "skipped": skipped,
+    }))
 }

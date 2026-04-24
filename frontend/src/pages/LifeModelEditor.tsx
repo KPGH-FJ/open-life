@@ -5,8 +5,10 @@ import {
   User, Target, Zap, Heart, ArrowRight, ShieldCheck, Sparkles
 } from "lucide-react";
 import type { LifeModel, GoalItem, Milestone, Skill, Resource, ToolCapability, KnowledgeDomain, Relationship } from "../types";
-import { getLifeModel, saveLifeModel, createSnapshot } from "../tauri";
+import { getLifeModel, saveLifeModel, createSnapshot, getSystemDiagnostics, type SystemDiagnostics } from "../tauri";
 import LoadingSpinner from "../components/LoadingSpinner";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 
 function emptyModel(): LifeModel {
   const now = new Date().toISOString();
@@ -90,6 +92,7 @@ function emptyRelationship(): Relationship {
 
 export default function LifeModelEditor() {
   const [model, setModel] = useState<LifeModel | null>(null);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
@@ -116,11 +119,15 @@ export default function LifeModelEditor() {
 
   useEffect(() => {
     loadModel();
+    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
   }, []);
+
+  const safeMode = isSafeMode(diagnostics);
+  const safeModeReason = getSafeModeReason(diagnostics);
 
   // 自动保存：模型变更后 2 秒 debounce
   useEffect(() => {
-    if (!model || loading || !dirty) return;
+    if (!model || loading || !dirty || safeMode) return;
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     autoSaveTimerRef.current = setTimeout(() => {
       saveLifeModel(model)
@@ -136,10 +143,14 @@ export default function LifeModelEditor() {
     return () => {
       if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     };
-  }, [model, loading, dirty]);
+  }, [model, loading, dirty, safeMode]);
 
   const update = (fn: (d: LifeModel) => void) => {
     if (!model) return;
+    if (safeMode) {
+      setNotice(buildSafeModeBlockedMessage("人生模型编辑", diagnostics));
+      return;
+    }
     const next = { ...model };
     fn(next);
     next.metadata.updated_at = new Date().toISOString();
@@ -158,6 +169,10 @@ export default function LifeModelEditor() {
 
   const handleSave = async () => {
     if (!model) return;
+    if (safeMode) {
+      setNotice(buildSafeModeBlockedMessage("人生模型保存", diagnostics));
+      return;
+    }
     setSaving(true);
     try {
       await saveLifeModel(model);
@@ -166,7 +181,7 @@ export default function LifeModelEditor() {
       setNotice("保存成功并已自动快照");
       setTimeout(() => setNotice(""), 2000);
     } catch (e) {
-      setNotice("保存失败: " + String(e));
+      setNotice(buildRuntimeActionError("保存人生模型", e, "data"));
     } finally {
       setSaving(false);
     }
@@ -302,6 +317,24 @@ export default function LifeModelEditor() {
     return (
       <div className="h-full overflow-auto bg-[#f4efe7] p-6">
         <div className="mx-auto max-w-6xl space-y-6">
+          {safeMode && (
+            <div className="rounded-3xl border border-amber-200 bg-amber-50 p-5">
+              <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                <div>
+                  <div className="text-sm font-semibold text-amber-900">Safe Mode：人生模型当前只读</div>
+                  <div className="mt-1 text-sm leading-6 text-amber-800">
+                    {safeModeReason} 为了避免覆盖现有数据，编辑和保存已暂时关闭。你仍然可以查看当前人生地图。
+                  </div>
+                </div>
+                <a
+                  href="#/settings"
+                  className="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-white px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+                >
+                  去恢复控制台 <ArrowRight size={15} />
+                </a>
+              </div>
+            </div>
+          )}
           <div className="relative overflow-hidden rounded-3xl border border-stone-200 bg-[#fbf7ef] p-6 shadow-sm">
             <div className="absolute -right-12 -top-16 h-56 w-56 rounded-full bg-amber-200/40 blur-2xl" />
             <div className="relative flex flex-col gap-5 md:flex-row md:items-start md:justify-between">
@@ -323,7 +356,7 @@ export default function LifeModelEditor() {
                   className="inline-flex items-center gap-2 rounded-full bg-stone-900 px-4 py-2 text-sm font-medium text-amber-50 hover:bg-stone-800"
                 >
                   <Edit3 size={15} />
-                  编辑模型
+                  {safeMode ? "只读查看" : "编辑模型"}
                 </button>
                 <a href="#/builder" className="inline-flex items-center gap-2 rounded-full border border-stone-200 bg-white/80 px-4 py-2 text-sm font-medium text-stone-700 hover:bg-white">
                   继续构建 <ArrowRight size={15} />
@@ -475,15 +508,26 @@ export default function LifeModelEditor() {
             </button>
             <button
               onClick={handleSave}
-              disabled={saving}
+              disabled={saving || safeMode}
               className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 disabled:opacity-50"
             >
               <Save size={18} /> {saving ? "保存中..." : "保存"}
             </button>
           </div>
         </div>
+        {safeMode && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <div className="font-medium">Safe Mode：编辑已切换为只读</div>
+            <div className="mt-1 text-amber-800">
+              {safeModeReason} 你可以继续检查当前模型，但所有字段写入、自动保存和手动保存都已暂停。
+            </div>
+            <a href="#/settings" className="mt-2 inline-flex items-center gap-1 font-medium text-amber-900 underline">
+              去 Settings 的恢复控制台 <ArrowRight size={14} />
+            </a>
+          </div>
+        )}
         {notice && <div className="text-sm text-green-600">{notice}</div>}
-
+        <fieldset disabled={safeMode} className={safeMode ? "opacity-70" : ""}>
         {/* 基本信息 */}
         <section className="space-y-3">
           <SectionHeader title="基本信息" sectionKey="basic" />
@@ -1311,6 +1355,7 @@ export default function LifeModelEditor() {
             <button onClick={() => update((m) => m.evolution_rules.push(""))} className="flex items-center gap-1 text-indigo-600 text-sm font-medium"><Plus size={16} /> 添加规则</button>
           </div>
         </section>
+        </fieldset>
       </div>
     </div>
   );

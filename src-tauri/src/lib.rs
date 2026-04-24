@@ -17,7 +17,7 @@ use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertIt
 use openlife_core::versioning::VersionManager;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
@@ -60,8 +60,8 @@ use commands::mcp::{
 };
 use commands::memory::{
     archive_low_access_memories, count_memory_chunks, get_hot_cache, get_memory_tier_stats,
-    index_memory_chunk, list_archived_chunks, restore_archived_chunks, run_memory_tier_maintenance,
-    search_memory,
+    index_memory_chunk, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
+    run_memory_tier_maintenance, search_memory,
 };
 use commands::settings::{
     cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config, get_privacy_policy,
@@ -118,7 +118,9 @@ pub struct SystemDiagnostics {
     pub mcp_recent_audit_count: usize,
     pub mcp_recent_pii_count: usize,
     pub memory_chunk_count: usize,
+    pub vector_corrupt_embedding_count: usize,
     pub unfinished_builder_sessions: usize,
+    pub pending_builder_review_sessions: usize,
     pub ollama_online: bool,
     pub local_model: String,
     pub resolved_local_model: Option<String>,
@@ -157,6 +159,96 @@ fn recovery_db_path(file_name: &str) -> std::path::PathBuf {
         );
     }
     dir.join(file_name)
+}
+
+fn init_memory_store(db_path: &std::path::Path, startup_warnings: &mut Vec<String>) -> MemoryStore {
+    match MemoryStore::new(db_path) {
+        Ok(store) => store,
+        Err(primary_err) => {
+            let fallback = recovery_db_path("memory.db");
+            startup_warnings.push(format!(
+                "memory.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match MemoryStore::new(&fallback) {
+                Ok(store) => store,
+                Err(fallback_err) => {
+                    startup_warnings.push(format!(
+                        "临时 memory.db 初始化也失败，已降级为内存数据库；本次会话聊天记录不会持久化：{}",
+                        fallback_err
+                    ));
+                    MemoryStore::new_in_memory().unwrap_or_else(|memory_err| {
+                        eprintln!(
+                            "OpenLife could not initialize any memory store: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        );
+                        std::process::exit(1);
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_feedback_store(
+    db_path: &std::path::Path,
+    startup_warnings: &mut Vec<String>,
+) -> FeedbackStore {
+    match FeedbackStore::new(db_path) {
+        Ok(store) => store,
+        Err(primary_err) => {
+            let fallback = recovery_db_path("feedback.db");
+            startup_warnings.push(format!(
+                "feedback.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match FeedbackStore::new(&fallback) {
+                Ok(store) => store,
+                Err(fallback_err) => {
+                    startup_warnings.push(format!(
+                        "临时 feedback.db 初始化也失败，已降级为内存数据库；本次会话反馈不会持久化：{}",
+                        fallback_err
+                    ));
+                    FeedbackStore::new_in_memory().unwrap_or_else(|memory_err| {
+                        eprintln!(
+                            "OpenLife could not initialize any feedback store: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        );
+                        std::process::exit(1);
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_vector_store(db_path: &std::path::Path, startup_warnings: &mut Vec<String>) -> VectorStore {
+    match VectorStore::new(db_path) {
+        Ok(store) => store,
+        Err(primary_err) => {
+            let fallback = recovery_db_path("vectors.db");
+            startup_warnings.push(format!(
+                "vectors.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match VectorStore::new(&fallback) {
+                Ok(store) => store,
+                Err(fallback_err) => {
+                    startup_warnings.push(format!(
+                        "临时 vectors.db 初始化也失败，已降级为内存数据库；本次会话向量记忆不会持久化：{}",
+                        fallback_err
+                    ));
+                    VectorStore::new_in_memory().unwrap_or_else(|memory_err| {
+                        eprintln!(
+                            "OpenLife could not initialize any vector store: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        );
+                        std::process::exit(1);
+                    })
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -398,6 +490,88 @@ fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Op
         None
     }
 }
+
+async fn persist_chat_message_if_needed(
+    session_id: &str,
+    msg: &ChatMessage,
+    state: &State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let store = state.memory_store.lock().await;
+    let should_skip = store
+        .load_recent_messages(session_id, 1)
+        .map_err(|e| e.to_string())?
+        .last()
+        .map(|last| last.role == msg.role && last.content == msg.content)
+        .unwrap_or(false);
+    if should_skip {
+        let _ = store.touch_chat_session(session_id);
+        return Ok(false);
+    }
+    store
+        .save_message(session_id, msg)
+        .map_err(|e| e.to_string())?;
+    let _ = store.touch_chat_session(session_id);
+    Ok(true)
+}
+
+async fn persist_vector_memory_for_message(
+    session_id: &str,
+    msg: &ChatMessage,
+    state: &State<'_, Arc<AppState>>,
+) {
+    let content = msg.content.trim();
+    if content.is_empty() {
+        return;
+    }
+    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.llm.provider.clone(),
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.embedding_model.clone(),
+            cfg.llm.embedding_enabled,
+        )
+    };
+    let embedding = match embed_text_with_config(
+        content,
+        &provider,
+        &openai_base,
+        &openai_key,
+        &embedding_model,
+        embedding_enabled,
+    )
+    .await
+    {
+        Ok(embedding) if !embedding.is_empty() => embedding,
+        Ok(_) => return,
+        Err(e) => {
+            eprintln!(
+                "[memory] embedding generation failed for {} message in session {}: {} - lib.rs:520",
+                msg.role, session_id, e
+            );
+            return;
+        }
+    };
+    let store = state.vector_store.lock().await;
+    let item = VectorInsertItem {
+        session_id,
+        content,
+        embedding: &embedding,
+        source: if msg.role == "assistant" {
+            "assistant_reply"
+        } else {
+            "user_message"
+        },
+    };
+    if let Err(e) = store.insert_batch(&[item]) {
+        eprintln!(
+            "[memory] vector insert failed for {} message in session {}: {} - lib.rs:537",
+            msg.role, session_id, e
+        );
+    }
+}
+
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
@@ -418,11 +592,10 @@ async fn preprocess_chat_input(
 > {
     if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
-            let store = state.memory_store.lock().await;
-            store
-                .save_message(session_id, user_msg)
-                .map_err(|e| e.to_string())?;
-            let _ = store.touch_chat_session(session_id);
+            let inserted = persist_chat_message_if_needed(session_id, user_msg, state).await?;
+            if inserted {
+                persist_vector_memory_for_message(session_id, user_msg, state).await;
+            }
         }
     }
 
@@ -948,53 +1121,19 @@ async fn send_message(
         }
     }
 
-    {
-        let store = state.memory_store.lock().await;
-        store
-            .save_message(
-                &session_id,
-                &ChatMessage {
-                    role: "assistant".into(),
-                    content: reply.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-    }
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
 
     hermes_trace.execution_result = Some(serde_json::json!({ "text": &reply }));
 
     if let Some(err) = embed_err {
         hermes_trace.errors.push(err);
     }
-
-    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-        let cfg = state.config.lock().await;
-        (
-            cfg.llm.provider.clone(),
-            cfg.llm.openai_base.clone(),
-            cfg.llm.openai_key.clone(),
-            cfg.llm.embedding_model.clone(),
-            cfg.llm.embedding_enabled,
-        )
-    };
-    if let Ok(embedding) = embed_text_with_config(
-        &reply,
-        &provider,
-        &openai_base,
-        &openai_key,
-        &embedding_model,
-        embedding_enabled,
-    )
-    .await
-    {
-        let store = state.vector_store.lock().await;
-        let item = VectorInsertItem {
-            session_id: &session_id,
-            content: &reply,
-            embedding: &embedding,
-            source: "assistant_reply",
-        };
-        let _ = store.insert_batch(&[item]);
+    if inserted {
+        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
     }
 
     Ok(SendMessageResult {
@@ -1491,18 +1630,11 @@ async fn start_stream_message(
         (first_reply, vec![])
     };
 
-    {
-        let store = state.memory_store.lock().await;
-        store
-            .save_message(
-                &session_id,
-                &ChatMessage {
-                    role: "assistant".into(),
-                    content: reply.clone(),
-                },
-            )
-            .map_err(|e| e.to_string())?;
-    }
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
 
     hermes_trace.execution_result = Some(serde_json::json!({ "text": &reply }));
 
@@ -1516,35 +1648,8 @@ async fn start_stream_message(
         }),
     );
 
-    // Batch embed insert after stream ends
-    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-        let cfg = state.config.lock().await;
-        (
-            cfg.llm.provider.clone(),
-            cfg.llm.openai_base.clone(),
-            cfg.llm.openai_key.clone(),
-            cfg.llm.embedding_model.clone(),
-            cfg.llm.embedding_enabled,
-        )
-    };
-    if let Ok(embedding) = embed_text_with_config(
-        &reply,
-        &provider,
-        &openai_base,
-        &openai_key,
-        &embedding_model,
-        embedding_enabled,
-    )
-    .await
-    {
-        let store = state.vector_store.lock().await;
-        let item = VectorInsertItem {
-            session_id: &session_id,
-            content: &reply,
-            embedding: &embedding,
-            source: "assistant_reply",
-        };
-        let _ = store.insert_batch(&[item]);
+    if inserted {
+        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
     }
 
     Ok(())
@@ -1591,32 +1696,11 @@ pub fn run() {
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");
-    let memory_store = match MemoryStore::new(&db_path) {
-        Ok(store) => store,
-        Err(e) => {
-            startup_warnings.push(format!("memory.db 初始化失败，已切换到临时数据库：{}", e));
-            let fallback = recovery_db_path("memory.db");
-            MemoryStore::new(&fallback).expect("failed to init fallback memory store")
-        }
-    };
+    let memory_store = init_memory_store(&db_path, &mut startup_warnings);
     let feedback_db_path = data_dir.join("feedback.db");
-    let feedback_store = match FeedbackStore::new(&feedback_db_path) {
-        Ok(store) => store,
-        Err(e) => {
-            startup_warnings.push(format!("feedback.db 初始化失败，已切换到临时数据库：{}", e));
-            let fallback = recovery_db_path("feedback.db");
-            FeedbackStore::new(&fallback).expect("failed to init fallback feedback store")
-        }
-    };
+    let feedback_store = init_feedback_store(&feedback_db_path, &mut startup_warnings);
     let vector_db_path = data_dir.join("vectors.db");
-    let vector_store = match VectorStore::new(&vector_db_path) {
-        Ok(store) => store,
-        Err(e) => {
-            startup_warnings.push(format!("vectors.db 初始化失败，已切换到临时数据库：{}", e));
-            let fallback = recovery_db_path("vectors.db");
-            VectorStore::new(&fallback).expect("failed to init fallback vector store")
-        }
-    };
+    let vector_store = init_vector_store(&vector_db_path, &mut startup_warnings);
 
     let model_dir = data_dir.join("models");
     let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
@@ -1683,10 +1767,33 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_http::init())
         .manage(app_state.clone())
-        .setup(move |_app| {
+        .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            } else {
+                let _ = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "main",
+                    tauri::WebviewUrl::App("index.html".into()),
+                )
+                .title("OpenLife")
+                .inner_size(1280.0, 800.0)
+                .resizable(true)
+                .center()
+                .visible(true)
+                .focused(true)
+                .build()
+                .map_err(|e| {
+                    eprintln!("[setup] failed to create main window: {} - lib.rs:1768", e);
+                    e
+                })?;
+            }
             println!("[setup] launching a2a sidecar - lib.rs:2228");
             let a2a_sidecar = app_state_for_setup.a2a_sidecar.clone();
-            if let Err(e) = tauri::async_runtime::block_on(async { a2a_sidecar.lock().await.start() }) {
+            if let Err(e) =
+                tauri::async_runtime::block_on(async { a2a_sidecar.lock().await.start().await })
+            {
                 eprintln!("[setup] a2a sidecar start failed: {} - lib.rs:2231", e);
                 eprintln!("[setup] falling back to embedded a2a server - lib.rs:2232");
                 let state = app_state_for_setup.clone();
@@ -1694,17 +1801,22 @@ pub fn run() {
                     a2a_server::start(state).await;
                 });
             }
-            let mcp_registry = app_state_for_setup.mcp_registry.clone();
-            tauri::async_runtime::spawn(async move {
-                let mut registry = mcp_registry.lock().await;
-                if let Err(e) = registry.register(
-                    "filesystem",
-                    "npx",
-                    &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-                ) {
-                    eprintln!("[setup] autoregister filesystem mcp failed: {} - lib.rs:2246", e);
-                }
-            });
+            if std::env::var("OPENLIFE_AUTOSTART_FILESYSTEM_MCP").as_deref() == Ok("1") {
+                let mcp_registry = app_state_for_setup.mcp_registry.clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut registry = mcp_registry.lock().await;
+                    if let Err(e) = registry.register(
+                        "filesystem",
+                        "npx",
+                        &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+                    ) {
+                        eprintln!(
+                            "[setup] autoregister filesystem mcp failed: {} - lib.rs:2246",
+                            e
+                        );
+                    }
+                });
+            }
             let vs = app_state_for_setup.vector_store.clone();
             tauri::async_runtime::spawn(async move {
                 {
@@ -1817,6 +1929,7 @@ pub fn run() {
             restore_archived_chunks,
             list_archived_chunks,
             get_memory_tier_stats,
+            rebuild_memory_index,
             export_mcp_audit_logs,
             cleanup_mcp_audit_logs,
             rotate_mcp_audit_key,

@@ -5,8 +5,10 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import type { LifeModel, BuilderProgress } from "../types";
-import { builderStart, builderStep, builderListUnfinished, builderDeleteSession, builderApplySignals, getModel4DCompletion, type UnfinishedBuilderSession, type Model4DCompletion, type BuilderAnalysis, type BuilderSignal } from "../tauri";
+import { builderStart, builderStep, builderListUnfinished, builderDeleteSession, builderApplySignals, getModel4DCompletion, getSystemDiagnostics, type UnfinishedBuilderSession, type Model4DCompletion, type BuilderAnalysis, type BuilderSignal, type SystemDiagnostics } from "../tauri";
 import BuilderPatchReview from "../components/BuilderPatchReview";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 
 function CompletionBar({ label, value, colorClass }: { label: string; value: number; colorClass: string }) {
   const pct = Math.max(0, Math.min(100, value));
@@ -171,6 +173,20 @@ function buildStageSuggestions(completion: Model4DCompletion | null, analysis: B
   return suggestions.slice(0, 3);
 }
 
+function sortResumeSessions(sessions: UnfinishedBuilderSession[]): UnfinishedBuilderSession[] {
+  return [...sessions].sort((a, b) => {
+    const aPendingReview = a.finished && (a.pending_signals?.length ?? 0) > 0;
+    const bPendingReview = b.finished && (b.pending_signals?.length ?? 0) > 0;
+    if (aPendingReview !== bPendingReview) {
+      return aPendingReview ? -1 : 1;
+    }
+    if (a.finished !== b.finished) {
+      return a.finished ? -1 : 1;
+    }
+    return b.step_index - a.step_index;
+  });
+}
+
 const dimensionStyleMap: Record<"identity" | "goals" | "capabilities" | "state", {
   hover: string;
   text: string;
@@ -211,6 +227,7 @@ export default function BuilderPage() {
   const [completion, setCompletion] = useState<Model4DCompletion | null>(null);
   const [analysis, setAnalysis] = useState<BuilderAnalysis | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
+  const [builderNotice, setBuilderNotice] = useState<string | null>(null);
   const [lastStart, setLastStart] = useState<{
     mode: "quick" | "incremental" | "socratic";
     sessionId: string;
@@ -221,13 +238,20 @@ export default function BuilderPage() {
   const [appliedFields, setAppliedFields] = useState<string[]>([]);
   const [mergedFields, setMergedFields] = useState<string[]>([]);
   const [skippedFields, setSkippedFields] = useState<Array<{ path: string; reason: string; expected?: string }>>([]);
+  const [editedCount, setEditedCount] = useState(0);
+  const [rejectedCount, setRejectedCount] = useState(0);
   const [incrementalDimension, setIncrementalDimension] = useState<"identity" | "goals" | "capabilities" | "state" | null>(null);
   const [beforeBuildCompletion, setBeforeBuildCompletion] = useState<Model4DCompletion | null>(null);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const navigate = useNavigate();
+
+  const safeMode = isSafeMode(diagnostics);
+  const safeModeReason = getSafeModeReason(diagnostics);
 
   useEffect(() => {
     loadUnfinished();
     loadCompletion();
+    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
   }, []);
 
   const loadCompletion = async () => {
@@ -243,18 +267,23 @@ export default function BuilderPage() {
   const loadUnfinished = async () => {
     try {
       const list = await builderListUnfinished();
-      setUnfinished(list);
+      setUnfinished(sortResumeSessions(list));
     } catch (e) {
       console.error("加载未完成会话失败", e);
-      setBuilderError("加载未完成会话失败：" + String(e));
+      setBuilderError(buildRuntimeActionError("加载未完成会话", e, "data"));
     }
   };
 
   const start = async (selected: "quick" | "incremental" | "socratic", sid: string, targetDimension?: "identity" | "goals" | "capabilities" | "state") => {
+    if (safeMode) {
+      setBuilderError(buildSafeModeBlockedMessage("新的构建写入", diagnostics));
+      return;
+    }
     setMode(selected);
     setSessionId(sid);
     setLoading(true);
     setBuilderError(null);
+    setBuilderNotice(null);
     setLastStart({ mode: selected, sessionId: sid, targetDimension });
     // Snapshot completion before building starts
     try {
@@ -268,14 +297,27 @@ export default function BuilderPage() {
       setPrompt(res.prompt);
       setProgress(res.progress);
       if (res.analysis) setAnalysis(res.analysis);
+      if (res.finished && res.pending_signals && res.pending_signals.length > 0) {
+        setPendingSignals(res.pending_signals);
+        setReviewMode(true);
+        setFinished(true);
+      } else {
+        setPendingSignals([]);
+        setReviewMode(false);
+        setFinished(false);
+      }
     } catch (e) {
-      setBuilderError("启动构建会话失败：" + String(e));
+      setBuilderError(buildRuntimeActionError("启动构建会话", e, "review"));
     } finally {
       setLoading(false);
     }
   };
 
   const resume = async (session: UnfinishedBuilderSession) => {
+    if (safeMode) {
+      setBuilderError(buildSafeModeBlockedMessage("恢复构建会话", diagnostics));
+      return;
+    }
     const modeMap: Record<string, "quick" | "incremental" | "socratic"> = {
       Quick: "quick",
       Incremental: "incremental",
@@ -289,17 +331,22 @@ export default function BuilderPage() {
   const removeSession = async (sid: string) => {
     try {
       await builderDeleteSession(sid);
-      setUnfinished((prev) => prev.filter((s) => s.session_id !== sid));
+      setUnfinished((prev) => sortResumeSessions(prev.filter((s) => s.session_id !== sid)));
     } catch (e) {
-      setBuilderError("删除未完成会话失败：" + String(e));
+      setBuilderError(buildRuntimeActionError("删除未完成会话", e, "data"));
     }
   };
 
   const sendReply = async (replyOverride?: string) => {
     const reply = (replyOverride ?? input).trim();
     if (!reply || loading) return;
+    if (safeMode) {
+      setBuilderError(buildSafeModeBlockedMessage("构建回答提交", diagnostics));
+      return;
+    }
     setLoading(true);
     setBuilderError(null);
+    setBuilderNotice(null);
     try {
       const res = await builderStep(sessionId, reply);
       setPrompt(res.prompt);
@@ -320,7 +367,7 @@ export default function BuilderPage() {
       setInput("");
       await loadCompletion();
     } catch (e) {
-      setBuilderError("提交回答失败：" + String(e));
+      setBuilderError(buildRuntimeActionError("提交回答", e, "review"));
     } finally {
       setLoading(false);
     }
@@ -335,18 +382,26 @@ export default function BuilderPage() {
     setProgress(null);
     setAnalysis(null);
     setBuilderError(null);
+    setBuilderNotice(null);
     setPendingSignals([]);
     setReviewMode(false);
     setBeforeBuildCompletion(null);
     setAppliedFields([]);
     setMergedFields([]);
     setSkippedFields([]);
+    setEditedCount(0);
+    setRejectedCount(0);
     setSessionId(crypto.randomUUID());
     loadUnfinished();
   };
 
   const handleApplySignals = async (decisions: import("../tauri").BuilderSignalDecision[]) => {
+    if (safeMode) {
+      setBuilderError(buildSafeModeBlockedMessage("人生模型写入", diagnostics));
+      return;
+    }
     setLoading(true);
+    setBuilderNotice(null);
     try {
       const res = await builderApplySignals(sessionId, decisions);
       if (res.success) {
@@ -356,6 +411,11 @@ export default function BuilderPage() {
         setAppliedFields(res.applied_fields ?? []);
         setMergedFields(res.merged_fields ?? []);
         setSkippedFields(res.skipped_fields ?? []);
+        setEditedCount(res.edited_count ?? 0);
+        setRejectedCount(res.rejected_count ?? 0);
+        setBuilderNotice(
+          `本轮已写入 ${res.applied_fields?.length ?? 0} 项，合并 ${res.merged_fields?.length ?? 0} 项，编辑 ${res.edited_count ?? 0} 项，拒绝 ${res.rejected_count ?? 0} 项。`
+        );
         if (res.skipped_fields && res.skipped_fields.length > 0) {
           setBuilderError(
             `已保存模型，但有 ${res.skipped_fields.length} 项字段未能应用。请查看下方跳过明细。`
@@ -363,7 +423,11 @@ export default function BuilderPage() {
         } else {
           setBuilderError(null);
         }
-        await loadCompletion();
+        await Promise.all([
+          loadCompletion(),
+          loadUnfinished(),
+          getSystemDiagnostics().then(setDiagnostics).catch(() => null),
+        ]);
         // For incremental mode, return to dimension selection after applying
         if (mode === "incremental") {
           setMode(null);
@@ -375,16 +439,26 @@ export default function BuilderPage() {
         }
       }
     } catch (e) {
-      setBuilderError("保存模型失败：" + String(e));
+      setBuilderError(buildRuntimeActionError("保存人生模型", e, "review"));
     } finally {
       setLoading(false);
     }
   };
 
   const handleRejectSignals = () => {
+    setBuilderError(null);
+    setBuilderNotice("这轮理解已暂存到未完成会话，还没有写入人生模型。你可以稍后回来继续审阅。");
     setReviewMode(false);
     setPendingSignals([]);
-    // Still show result but don't save
+    setFinished(false);
+    setResultModel(null);
+    setPrompt(null);
+    setProgress(null);
+    setAnalysis(null);
+    setMode(null);
+    setSessionId(crypto.randomUUID());
+    loadUnfinished();
+    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
   };
 
   const allGoals = [
@@ -407,6 +481,69 @@ export default function BuilderPage() {
     : [0, 0, 0, 0];
   const activeCompletion = analysis?.completion ?? completion ?? null;
   const stageSuggestions = buildStageSuggestions(activeCompletion, analysis);
+  const buildOutcome = resultModel
+    ? [
+        {
+          label: "身份线索",
+          value: [
+            resultModel.identity.name,
+            resultModel.identity.role_definition.primary_role,
+            resultModel.identity.mission_statement || resultModel.identity.life_philosophy,
+          ].filter(Boolean).length,
+        },
+        { label: "价值观", value: resultModel.identity.values.length },
+        { label: "目标", value: allGoals.length },
+        {
+          label: "能力资产",
+          value:
+            resultModel.capabilities.skills.length +
+            resultModel.capabilities.resources.length +
+            resultModel.capabilities.tools.length +
+            resultModel.capabilities.knowledge_domains.length,
+        },
+        {
+          label: "状态信号",
+          value:
+            Number(Boolean(resultModel.state.current_focus)) +
+            resultModel.state.focus_areas.length +
+            resultModel.state.alerts.length,
+        },
+      ]
+    : [];
+  const postBuildActions = [
+    {
+      title: "去人生模型核对结果",
+      detail: "先确认这次提取的身份、目标和能力是否贴近你的真实状态。",
+      to: "/",
+    },
+    {
+      title: "去仪表盘查看下一步",
+      detail: "看 4D 完成度、今日行动和推荐路线，决定接下来补哪一块。",
+      to: "/dashboard",
+    },
+    {
+      title: "开始第一次个性化对话",
+      detail: "让 OpenLife 基于刚建立的模型做今日规划、复盘或决策陪跑。",
+      to: "/chat",
+    },
+    {
+      title: mode === "incremental" ? "继续补下一个维度" : "去校准查看建议",
+      detail:
+        mode === "incremental"
+          ? "回到构建页继续补强下一个薄弱维度，让模型更完整。"
+          : "如果你想继续精修模型，可以在周期校准里查看建议变更。",
+      to: mode === "incremental" ? "/builder" : "/calibration",
+    },
+  ];
+
+  const navigateAfterBuilder = (to: string) => {
+    navigate(to, {
+      state: {
+        builderAppliedAt: Date.now(),
+        refreshFromBuilder: true,
+      },
+    });
+  };
 
   return (
     <div className="h-full overflow-auto bg-white p-6">
@@ -415,6 +552,25 @@ export default function BuilderPage() {
           <Hammer className="text-indigo-600" size={22} />
           人生模型构建
         </h2>
+
+        {safeMode && (
+          <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-amber-900">Safe Mode：构建写入已暂停</div>
+                <div className="mt-1 text-sm text-amber-800">
+                  {safeModeReason} 你仍然可以查看当前构建页面，但新的构建会话、继续回答和 Review 应用都会被拦截。
+                </div>
+              </div>
+              <a
+                href="#/settings"
+                className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+              >
+                去恢复控制台 <ArrowRight size={15} />
+              </a>
+            </div>
+          </div>
+        )}
 
         {builderError && (
           <div className="rounded-xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-800">
@@ -432,6 +588,12 @@ export default function BuilderPage() {
                 重试启动
               </button>
             )}
+          </div>
+        )}
+
+        {builderNotice && (
+          <div className="rounded-xl border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-800">
+            {builderNotice}
           </div>
         )}
 
@@ -456,14 +618,24 @@ export default function BuilderPage() {
                   {unfinished.map((s) => {
                     const totalSteps = s.mode === "Quick" ? 6 : s.mode === "Socratic" ? 8 : 1;
                     const pct = Math.min(100, Math.round((s.step_index / totalSteps) * 100));
+                    const isPendingReview = s.finished && (s.pending_signals?.length ?? 0) > 0;
                     return (
                       <div key={s.session_id} className="border rounded-xl p-4 flex items-center justify-between bg-gray-50">
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm font-semibold text-gray-800 truncate">{modeLabel(s.mode)}</div>
-                          <div className="text-xs text-gray-500">已进行 {s.step_index} 步</div>
+                          <div className="flex items-center gap-2">
+                            <div className="text-sm font-semibold text-gray-800 truncate">{modeLabel(s.mode)}</div>
+                            {isPendingReview && (
+                              <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
+                                待确认 Review
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-500">
+                            {isPendingReview ? "已完成问题收集，等待你确认并应用模型建议" : `已进行 ${s.step_index} 步`}
+                          </div>
                           {s.current_prompt && (
                             <div className="text-xs text-gray-500 mt-1 line-clamp-2 max-w-md">
-                              当前问题：{s.current_prompt}
+                              {isPendingReview ? `待确认内容：${s.current_prompt}` : `当前问题：${s.current_prompt}`}
                             </div>
                           )}
                           <div className="w-32 bg-gray-200 rounded-full h-1.5 mt-2">
@@ -473,9 +645,10 @@ export default function BuilderPage() {
                         <div className="flex items-center gap-2 shrink-0 ml-3">
                           <button
                             onClick={() => resume(s)}
+                            disabled={safeMode}
                             className="bg-indigo-600 text-white px-3 py-1.5 rounded-md text-sm hover:bg-indigo-700"
                           >
-                            恢复
+                            {isPendingReview ? "去审阅" : "恢复"}
                           </button>
                           <button
                             onClick={() => removeSession(s.session_id)}
@@ -560,7 +733,8 @@ export default function BuilderPage() {
                   <button
                     key={option.title}
                     onClick={option.action}
-                    className="group overflow-hidden rounded-2xl border border-gray-200 bg-white text-left shadow-sm transition hover:-translate-y-1 hover:shadow-lg"
+                    disabled={safeMode}
+                    className="group overflow-hidden rounded-2xl border border-gray-200 bg-white text-left shadow-sm transition hover:-translate-y-1 hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:shadow-sm"
                   >
                     <div className={`bg-gradient-to-br ${option.tone} p-4`}>
                       <div className="flex items-center justify-between gap-3">
@@ -674,7 +848,8 @@ export default function BuilderPage() {
                       setIncrementalDimension(dim.key);
                       start("incremental", crypto.randomUUID(), dim.key);
                     }}
-                    className={`border rounded-xl p-5 text-left transition relative ${styles.hover} ${isRecommended ? "ring-2 ring-indigo-200" : ""}`}
+                    disabled={safeMode}
+                    className={`border rounded-xl p-5 text-left transition relative ${styles.hover} ${isRecommended ? "ring-2 ring-indigo-200" : ""} disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white disabled:hover:border-gray-200`}
                   >
                     {isRecommended && (
                       <span className="absolute top-2 right-2 text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">推荐</span>
@@ -840,11 +1015,12 @@ export default function BuilderPage() {
                 }}
                 rows={3}
                 placeholder={progress?.waiting_pairwise ? "输入 A、B 或你的描述..." : "输入你的回答..."}
+                disabled={safeMode}
                 className="flex-1 resize-none border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
               <button
                 onClick={() => sendReply()}
-                disabled={loading || !input.trim()}
+                disabled={loading || !input.trim() || safeMode}
                 className="bg-indigo-600 text-white px-5 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
               >
                 {loading ? <RefreshCw size={16} className="animate-spin" /> : <ArrowRight size={16} />}
@@ -931,9 +1107,44 @@ export default function BuilderPage() {
 
             {appliedFields.length > 0 && (
               <div className="border rounded-xl p-5 bg-white space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <div className="rounded-lg border border-green-100 bg-green-50 px-4 py-3">
+                    <div className="text-xs text-green-700">已写入</div>
+                    <div className="mt-1 text-2xl font-semibold text-green-800">{appliedFields.length}</div>
+                    <div className="mt-1 text-[11px] text-green-700">这部分已经进入你的人生模型，可直接用于后续对话。</div>
+                  </div>
+                  <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3">
+                    <div className="text-xs text-indigo-700">已合并</div>
+                    <div className="mt-1 text-2xl font-semibold text-indigo-800">{mergedFields.length}</div>
+                    <div className="mt-1 text-[11px] text-indigo-700">系统尝试保留你已有内容，而不是整段覆盖。</div>
+                  </div>
+                  <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
+                    <div className="text-xs text-amber-700">待处理</div>
+                    <div className="mt-1 text-2xl font-semibold text-amber-800">{skippedFields.length}</div>
+                    <div className="mt-1 text-[11px] text-amber-700">这些内容暂时没写入，通常是因为结构不完整或字段类型不匹配。</div>
+                  </div>
+                  <div className="rounded-lg border border-sky-100 bg-sky-50 px-4 py-3">
+                    <div className="text-xs text-sky-700">已编辑</div>
+                    <div className="mt-1 text-2xl font-semibold text-sky-800">{editedCount}</div>
+                    <div className="mt-1 text-[11px] text-sky-700">这些字段经过你的手动确认或修订后再写入。</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                    <div className="text-xs text-slate-700">已拒绝</div>
+                    <div className="mt-1 text-2xl font-semibold text-slate-800">{rejectedCount}</div>
+                    <div className="mt-1 text-[11px] text-slate-700">这些内容本轮明确不写入，后续仍可继续构建补充。</div>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                  <div className="font-medium text-slate-900">本轮写入结果</div>
+                  <div className="mt-1 text-xs leading-relaxed">
+                    先看“已写入”，确认核心内容已经进入模型；再看“已合并”和“已编辑”，理解系统如何保护旧数据并尊重你的确认；如果有“待处理”，建议去人生模型页或继续渐进构建补齐。
+                  </div>
+                </div>
+
                 <div className="flex items-center gap-2 text-gray-900 font-semibold">
                   <CheckCircle2 className="text-green-600" size={18} />
-                  本次更新的字段
+                  已写入的人生模型字段
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {appliedFields.map((field, i) => (
@@ -944,13 +1155,14 @@ export default function BuilderPage() {
                   ))}
                 </div>
                 {mergedFields.length > 0 && (
-                  <div className="text-xs text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2">
-                    已合并 {mergedFields.length} 项：{mergedFields.join("、")}
+                  <div className="text-xs text-emerald-700 bg-emerald-50 rounded-lg px-3 py-2 space-y-1">
+                    <div className="font-medium">已合并的字段</div>
+                    <div>系统在保留旧内容的前提下，吸收了这轮新信息：{mergedFields.join("、")}</div>
                   </div>
                 )}
                 {skippedFields.length > 0 && (
                   <div className="text-xs text-amber-800 bg-amber-50 rounded-lg px-3 py-2 space-y-1">
-                    <div className="font-medium">跳过字段</div>
+                    <div className="font-medium">这次先没写入的内容</div>
                     {skippedFields.map((field, i) => (
                       <div key={`${field.path}-${i}`}>
                         {field.path}: {field.reason}{field.expected ? `（期望：${field.expected}）` : ""}
@@ -958,6 +1170,26 @@ export default function BuilderPage() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+
+            {buildOutcome.length > 0 && (
+              <div className="border rounded-xl p-5 bg-white space-y-4">
+                <div className="flex items-center gap-2 text-gray-900 font-semibold">
+                  <Sparkles className="text-indigo-600" size={18} />
+                  本轮沉淀
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                  {buildOutcome.map((item) => (
+                    <div key={item.label} className="rounded-lg border bg-gray-50 px-3 py-3 text-center">
+                      <div className="text-xs text-gray-500">{item.label}</div>
+                      <div className="mt-1 text-xl font-semibold text-gray-900">{item.value}</div>
+                    </div>
+                  ))}
+                </div>
+                <div className="text-xs text-gray-500">
+                  这些数字表示这轮构建至少沉淀出了多少条可用于后续对话与校准的模型线索。
+                </div>
               </div>
             )}
 
@@ -1075,34 +1307,19 @@ export default function BuilderPage() {
                 <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4 space-y-3">
                   <div className="text-sm font-medium text-indigo-800">下一步建议</div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <button
-                      onClick={() => navigate("/")}
-                      className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-50 transition-colors text-left"
-                    >
-                      <ArrowRight size={16} />
-                      <span>去「人生模型」检查提取结果</span>
-                    </button>
-                    <button
-                      onClick={() => navigate("/dashboard")}
-                      className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-50 transition-colors text-left"
-                    >
-                      <ArrowRight size={16} />
-                      <span>去「仪表盘」查看 4D 完成度</span>
-                    </button>
-                    <button
-                      onClick={() => navigate("/chat")}
-                      className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-50 transition-colors text-left"
-                    >
-                      <ArrowRight size={16} />
-                      <span>去「对话」开始第一次个性化陪跑</span>
-                    </button>
-                    <button
-                      onClick={() => navigate("/calibration")}
-                      className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-50 transition-colors text-left"
-                    >
-                      <ArrowRight size={16} />
-                      <span>去「周期校准」查看首次校准建议</span>
-                    </button>
+                    {postBuildActions.map((action) => (
+                      <button
+                        key={action.title}
+                        onClick={() => navigateAfterBuilder(action.to)}
+                        className="flex items-center gap-2 rounded-lg border border-indigo-200 bg-white px-4 py-3 text-sm text-indigo-700 hover:bg-indigo-50 transition-colors text-left"
+                      >
+                        <ArrowRight size={16} />
+                        <span>
+                          <span className="block font-medium">{action.title}</span>
+                          <span className="mt-0.5 block text-xs text-indigo-500">{action.detail}</span>
+                        </span>
+                      </button>
+                    ))}
                   </div>
                 </div>
               </div>

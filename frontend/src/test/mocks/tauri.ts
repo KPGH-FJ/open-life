@@ -96,6 +96,90 @@ export const mockLifeModel: LifeModel = {
   evolution_rules: [],
 }
 
+export function createEmptyLifeModel(): LifeModel {
+  return {
+    metadata: {
+      version: '0.1.0',
+      created_at: '',
+      updated_at: '',
+      author: '',
+    },
+    identity: {
+      name: '',
+      birth_date: undefined,
+      values: [],
+      personality_traits: [],
+      life_philosophy: '',
+      mission_statement: '',
+      role_definition: {
+        primary_role: '',
+        secondary_roles: [],
+        responsibilities: [],
+        boundaries: [],
+      },
+      voice_style: {
+        formality: 'neutral',
+        tone_descriptors: [],
+        vocabulary_preference: '',
+        emoji_usage: 'never',
+      },
+    },
+    goals: {
+      short_term: [],
+      medium_term: [],
+      long_term: [],
+      life_goals: [],
+      daily: [],
+      progress: 0,
+      related_memories: [],
+    },
+    capabilities: {
+      skills: [],
+      resources: [],
+      networks: [],
+      tools: [],
+      knowledge_domains: [],
+    },
+    state: {
+      current_focus: '构建人生模型',
+      health_status: {
+        physical: '良好',
+        mental: '积极',
+        energy_level: 7,
+      },
+      emotional_state: {
+        current_mood: '期待',
+        stress_level: 3,
+        fulfillment_score: 6,
+      },
+      recent_reflections: [],
+      open_questions: [],
+      focus_areas: [],
+      recent_events: [],
+      habit_streaks: [],
+      custom_dimensions: [],
+      alerts: [],
+    },
+    relationships: {
+      inner_circle: [],
+      mentors: [],
+      collaborators: [],
+    },
+    preferences: {
+      work_hours: {
+        preferred_start: '',
+        preferred_end: '',
+        timezone: '',
+      },
+      peak_energy_time: '',
+      communication_style: '',
+      learning_style: '',
+      decision_making_style: '',
+    },
+    evolution_rules: [],
+  }
+}
+
 export const mockDailyGoals: DailyGoal[] = [
   { name: '早起', done: false, time_block: { start: '07:00', end: '08:00' } },
   { name: '运动', done: true },
@@ -270,6 +354,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve([] as T)
     case 'count_memory_chunks':
       return Promise.resolve(42 as T)
+    case 'rebuild_memory_index':
+      return Promise.resolve({
+        processed: 12,
+        indexed: 10,
+        skipped: 2,
+      } as T)
     case 'get_feedback_summary':
       return Promise.resolve({
         total_messages: 100,
@@ -301,7 +391,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         mcp_recent_audit_count: 1,
         mcp_recent_pii_count: 1,
         memory_chunk_count: 42,
+        vector_corrupt_embedding_count: 0,
         unfinished_builder_sessions: 0,
+        pending_builder_review_sessions: 0,
         ollama_online: true,
         local_model: 'llama3',
         resolved_local_model: 'llama3:latest',

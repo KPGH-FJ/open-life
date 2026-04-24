@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { Search, Database, Loader2, Archive, RotateCcw, MessageSquare, User, Bot, Tag } from "lucide-react";
 import {
   searchMemory,
@@ -7,10 +8,14 @@ import {
   restoreArchivedChunks,
   listArchivedChunks,
   getMemoryTierStats,
+  getSystemDiagnostics,
   type ArchivedChunkSummary,
+  type SystemDiagnostics,
   type TierStats,
 } from "../tauri";
 import EmptyState from "../components/EmptyState";
+import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 
 interface MemoryResult {
   chunk: {
@@ -36,15 +41,21 @@ export default function MemorySearch() {
   const [archived, setArchived] = useState<ArchivedChunkSummary[]>([]);
   const [archiveMsg, setArchiveMsg] = useState("");
   const [archiveLoading, setArchiveLoading] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
 
   const loadArchiveState = async () => {
-    const [stats, archivedList] = await Promise.all([
+    const [stats, archivedList, diag] = await Promise.all([
       getMemoryTierStats(),
       listArchivedChunks(20),
+      getSystemDiagnostics().catch(() => null),
     ]);
     setTierStats(stats);
     setArchived(archivedList);
+    setDiagnostics(diag);
   };
+
+  const safeMode = isSafeMode(diagnostics);
+  const safeModeReason = getSafeModeReason(diagnostics);
 
   useEffect(() => {
     loadArchiveState().catch((e) => setArchiveMsg("加载记忆层级失败: " + String(e)));
@@ -65,6 +76,10 @@ export default function MemorySearch() {
 
   const handleIndex = async () => {
     if (!content.trim()) return;
+    if (safeMode) {
+      setIndexMsg(buildSafeModeBlockedMessage("手动索引", diagnostics));
+      return;
+    }
     setIndexing(true);
     setIndexMsg("");
     try {
@@ -73,13 +88,17 @@ export default function MemorySearch() {
       setContent("");
       await loadArchiveState();
     } catch (e) {
-      setIndexMsg("索引失败: " + String(e));
+      setIndexMsg(buildRuntimeActionError("写入记忆索引", e, "data"));
     } finally {
       setIndexing(false);
     }
   };
 
   const handleArchiveLowAccess = async () => {
+    if (safeMode) {
+      setArchiveMsg(buildSafeModeBlockedMessage("记忆归档", diagnostics));
+      return;
+    }
     if (!confirm("确定归档低访问、低重要性的旧记忆吗？归档后仍可在下方恢复。")) return;
     setArchiveLoading(true);
     setArchiveMsg("");
@@ -88,13 +107,17 @@ export default function MemorySearch() {
       setArchiveMsg(`已归档 ${count} 条低访问记忆`);
       await loadArchiveState();
     } catch (e) {
-      setArchiveMsg("归档失败: " + String(e));
+      setArchiveMsg(buildRuntimeActionError("归档低访问记忆", e, "data"));
     } finally {
       setArchiveLoading(false);
     }
   };
 
   const handleRestore = async (chunk: ArchivedChunkSummary) => {
+    if (safeMode) {
+      setArchiveMsg(buildSafeModeBlockedMessage("归档记忆恢复", diagnostics));
+      return;
+    }
     if (!confirm(`确定恢复这条归档记忆吗？\n\n${chunk.summary || chunk.content.slice(0, 80)}`)) return;
     setArchiveLoading(true);
     setArchiveMsg("");
@@ -103,7 +126,7 @@ export default function MemorySearch() {
       setArchiveMsg(`已恢复 ${count} 条记忆`);
       await loadArchiveState();
     } catch (e) {
-      setArchiveMsg("恢复失败: " + String(e));
+      setArchiveMsg(buildRuntimeActionError("恢复归档记忆", e, "data"));
     } finally {
       setArchiveLoading(false);
     }
@@ -112,6 +135,55 @@ export default function MemorySearch() {
   return (
     <div className="h-full overflow-auto bg-white">
       <div className="max-w-4xl mx-auto p-6 space-y-8">
+        {safeMode && (
+          <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-amber-900">Safe Mode：记忆写入操作已建议暂停</div>
+                <div className="mt-1 text-xs leading-5 text-amber-800">
+                  {safeModeReason}
+                </div>
+                <div className="mt-1 text-xs text-amber-700">
+                  搜索和查看仍可继续，但手动索引、低访问归档等写操作建议先暂停。
+                </div>
+              </div>
+              <Link
+                to="/settings"
+                className="inline-flex shrink-0 items-center justify-center rounded-full bg-amber-900 px-3 py-1.5 text-xs font-medium text-amber-50 hover:bg-amber-950"
+              >
+                打开恢复控制台
+              </Link>
+            </div>
+          </section>
+        )}
+
+        <section className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-4">
+          <div className="text-sm font-semibold text-slate-900">记忆治理说明</div>
+          <div className="mt-1 text-xs leading-5 text-slate-600">
+            这个页面负责回答三个问题：系统现在记住了什么、哪些记忆已经沉到归档层、以及哪些内容值得重新恢复到活跃层。
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-3">
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">搜索记忆</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                用语义检索确认系统到底记住了什么，避免“以为被记住，其实没有进入长期记忆”。
+              </div>
+            </div>
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">归档与恢复</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                低访问记忆会逐渐沉到归档层；如果某段历史又重新重要，可以在这里恢复，而不是重新手工输入。
+              </div>
+            </div>
+            <div className="rounded-xl border border-white bg-white px-3 py-3">
+              <div className="text-[11px] font-medium text-slate-500">风险边界</div>
+              <div className="mt-1 text-xs leading-5 text-slate-700">
+                如果当前处于 Safe Mode，写入和层级维护会先暂停；先修复数据环境，再做记忆治理更安全。
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="space-y-3">
           <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
             <Database size={18} /> 手动索引记忆
@@ -131,7 +203,7 @@ export default function MemorySearch() {
             />
             <button
               onClick={handleIndex}
-              disabled={indexing || !content.trim()}
+              disabled={indexing || !content.trim() || safeMode}
               className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50"
             >
               {indexing ? <Loader2 size={16} className="animate-spin" /> : "索引"}
@@ -147,7 +219,7 @@ export default function MemorySearch() {
             </h2>
             <button
               onClick={handleArchiveLowAccess}
-              disabled={archiveLoading}
+              disabled={archiveLoading || safeMode}
               className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-white hover:bg-slate-900 disabled:opacity-50"
             >
               {archiveLoading ? "处理中..." : "归档低访问记忆"}
@@ -166,6 +238,9 @@ export default function MemorySearch() {
                 <div className="mt-1 text-lg font-semibold text-slate-900">{value}</div>
               </div>
             ))}
+          </div>
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-xs leading-5 text-indigo-800">
+            读取策略可以简单理解为：热记忆更容易被优先检索，冷记忆保留但不总是优先出现，归档记忆则需要你显式恢复后再重新进入主检索层。
           </div>
           {archiveMsg && <p className="text-sm text-slate-600">{archiveMsg}</p>}
           <div className="space-y-2">

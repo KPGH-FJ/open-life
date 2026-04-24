@@ -101,8 +101,8 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    expect(screen.getAllByText("低风险").length).toBe(2);
-    expect(screen.getByText("高风险")).toBeInTheDocument();
+    expect(screen.getAllByText("低风险").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText("高风险").length).toBeGreaterThanOrEqual(1);
   });
 
   it("low risk signals are checked by default, high risk are not", () => {
@@ -230,6 +230,21 @@ describe("BuilderPatchReview", () => {
     // 用getAllByText因为可能有多个"2"（如step number）
     const countElements = screen.getAllByText("2");
     expect(countElements.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders a unified suggestion context panel for each signal", () => {
+    render(
+      <BuilderPatchReview
+        signals={mockSignals}
+        summary={mockSummary}
+        onApply={mockApply}
+        onReject={mockReject}
+      />
+    );
+
+    expect(screen.getAllByText("为什么会有这个建议").length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText("影响字段：identity.name")).toBeInTheDocument();
+    expect(screen.getByText("来源：name")).toBeInTheDocument();
   });
 
   it("allows editing a signal inline and marks it as edited in decisions", async () => {
@@ -452,8 +467,8 @@ describe("BuilderPatchReview", () => {
     );
 
     // Confidence percentages should be visible
-    expect(screen.getByText(/置信度 95%/)).toBeInTheDocument();
-    expect(screen.getByText(/置信度 60%/)).toBeInTheDocument();
+    expect(screen.getAllByText(/置信度 95%/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText(/置信度 60%/).length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows reasoning text for each signal", () => {
@@ -466,8 +481,8 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    // Multiple signals each have reasoning text
-    const reasoningLabels = screen.getAllByText(/为什么这样理解：/);
+    // Multiple signals each have reasoning context panels
+    const reasoningLabels = screen.getAllByText(/为什么会有这个建议/);
     expect(reasoningLabels.length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText("用户直接提供的称呼")).toBeInTheDocument();
     expect(screen.getByText("用户选择的当前关注主题")).toBeInTheDocument();

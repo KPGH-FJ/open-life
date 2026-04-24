@@ -5,11 +5,10 @@ use openlife_core::builder::{
 use std::sync::Arc;
 use tauri::State;
 
-#[tauri::command]
-pub async fn builder_start(
+async fn builder_start_with_state(
     mode: String,
     session_id: String,
-    state: State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
     target_dimension: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let mode = match mode.as_str() {
@@ -36,6 +35,48 @@ pub async fn builder_start(
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(|e| e.to_string())?
     };
+    if session.finished && !session.pending_signals.is_empty() {
+        let analysis = session
+            .analysis
+            .clone()
+            .unwrap_or_else(|| BuilderEngine::build_analysis(&model));
+        let pending_signals: Vec<serde_json::Value> = session
+            .pending_signals
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "source_step": s.source_step,
+                    "source_question_id": s.source_question_id,
+                    "dimension": format!("{:?}", s.dimension),
+                    "affected_path": s.affected_path,
+                    "proposed_value": s.proposed_value.clone(),
+                    "confidence": s.confidence,
+                    "reason": s.reason,
+                    "risk_level": format!("{}", s.risk_level),
+                    "user_status": format!("{:?}", s.user_status),
+                })
+            })
+            .collect();
+        {
+            let mut sessions = state.builder_sessions.lock().await;
+            sessions.insert(session_id.clone(), session.clone());
+        }
+        {
+            let store = state.builder_session_store.lock().await;
+            store.save_session(&session).map_err(|e| e.to_string())?;
+        }
+        return Ok(serde_json::json!({
+            "prompt": session.current_prompt,
+            "progress": session.progress(),
+            "analysis": analysis,
+            "finished": true,
+            "pending_signals": pending_signals,
+            "mode": format!("{:?}", session.mode),
+            "target_dimension": session.target_dimension.as_ref().map(|d| format!("{:?}", d)),
+        }));
+    }
+
     if !session.current_prompt.is_empty() && !session.finished && session.step_index > 0 {
         let progress = session.progress();
         let analysis = session
@@ -94,6 +135,16 @@ pub async fn builder_start(
         "progress": progress,
         "analysis": analysis,
     }))
+}
+
+#[tauri::command]
+pub async fn builder_start(
+    mode: String,
+    session_id: String,
+    state: State<'_, Arc<AppState>>,
+    target_dimension: Option<String>,
+) -> Result<serde_json::Value, String> {
+    builder_start_with_state(mode, session_id, state.inner(), target_dimension).await
 }
 
 #[tauri::command]
@@ -228,10 +279,19 @@ pub async fn builder_get_pending_signals(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    let sessions = state.builder_sessions.lock().await;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| "Session not found".to_string())?;
+    let in_memory = {
+        let sessions = state.builder_sessions.lock().await;
+        sessions.get(&session_id).cloned()
+    };
+    let session = if let Some(session) = in_memory {
+        session
+    } else {
+        let store = state.builder_session_store.lock().await;
+        store
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Session not found".to_string())?
+    };
 
     let pending_signals: Vec<serde_json::Value> = session
         .pending_signals
@@ -302,16 +362,22 @@ pub async fn builder_get_pending_signals(
 }
 
 /// Apply accepted signals from Quick Build
-#[tauri::command]
-pub async fn builder_apply_signals(
+async fn builder_apply_signals_with_state(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
-    state: State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mut session = {
+    let in_memory_session = {
         let mut sessions = state.builder_sessions.lock().await;
-        sessions
-            .remove(&session_id)
+        sessions.remove(&session_id)
+    };
+    let mut session = if let Some(session) = in_memory_session {
+        session
+    } else {
+        let store = state.builder_session_store.lock().await;
+        store
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
             .ok_or_else(|| "Session not found".to_string())?
     };
 
@@ -368,7 +434,7 @@ pub async fn builder_apply_signals(
         .collect();
 
     // Save the updated model
-    persist_life_model(&state.inner().clone(), model.clone(), true).await?;
+    persist_life_model(state, model.clone(), true).await?;
 
     // Create snapshot
     {
@@ -402,6 +468,15 @@ pub async fn builder_apply_signals(
         "rejected_count": rejected_count,
         "model": model,
     }))
+}
+
+#[tauri::command]
+pub async fn builder_apply_signals(
+    session_id: String,
+    decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    builder_apply_signals_with_state(session_id, decisions, state.inner()).await
 }
 
 #[tauri::command]
@@ -458,4 +533,219 @@ pub async fn identity_goal_alignment_report(
         manager.load().map_err(|e| e.to_string())?
     };
     Ok(model.identity_goal_alignment_report())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::builder::{BuilderSignal, BuilderSignalDecision, RiskLevel};
+    use openlife_core::config::AppConfig;
+    use openlife_core::feedback::FeedbackStore;
+    use openlife_core::layer_router::LayerRouter;
+    use openlife_core::life_model::LifeModelManager;
+    use openlife_core::mcp::McpRegistry;
+    use openlife_core::mcp_audit::McpAuditStore;
+    use openlife_core::memory::MemoryStore;
+    use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
+    use openlife_core::privacy::PrivacyEngine;
+    use openlife_core::router::IntentRouter;
+    use openlife_core::scheduler::InferenceScheduler;
+    use openlife_core::vectors::VectorStore;
+    use openlife_core::versioning::VersionManager;
+    use std::collections::HashMap;
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
+        let config = AppConfig::default();
+        let life_model_manager = LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
+        let hot_cache: SharedHotCache = Arc::new(std::sync::Mutex::new(HotMemoryCache::default()));
+
+        Arc::new(AppState {
+            config: Arc::new(tokio::sync::Mutex::new(config.clone())),
+            life_model_manager: Arc::new(tokio::sync::Mutex::new(life_model_manager)),
+            memory_store: Arc::new(tokio::sync::Mutex::new(MemoryStore::new_in_memory().unwrap())),
+            mcp_registry: Arc::new(tokio::sync::Mutex::new(McpRegistry::new())),
+            intent_router: Arc::new(tokio::sync::Mutex::new(IntentRouter::new())),
+            layer_router: Arc::new(tokio::sync::Mutex::new(LayerRouter::new())),
+            scheduler: Arc::new(tokio::sync::Mutex::new(InferenceScheduler::new(
+                config.local_model.clone(),
+                config.prefer_local_model,
+                config.llm.provider.clone(),
+                config.llm.openai_base.clone(),
+                config.llm.openai_key.clone(),
+                config.llm.chat_model.clone(),
+                config.llm.embedding_model.clone(),
+                config.llm.embedding_enabled,
+            ))),
+            privacy_engine: Arc::new(tokio::sync::Mutex::new(PrivacyEngine::new())),
+            version_manager: Arc::new(tokio::sync::Mutex::new(VersionManager::new(
+                temp_dir.path().join("life-model").join("versions"),
+            ))),
+            feedback_store: Arc::new(tokio::sync::Mutex::new(FeedbackStore::new_in_memory().unwrap())),
+            vector_store: Arc::new(tokio::sync::Mutex::new(VectorStore::new_in_memory().unwrap())),
+            builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            builder_session_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::builder::BuilderSessionStore::new(
+                    temp_dir.path().join("builder_sessions.json"),
+                ),
+            )),
+            a2a_sidecar: Arc::new(tokio::sync::Mutex::new(crate::a2a_sidecar::A2ASidecar::new(8765))),
+            last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
+            mcp_audit_store: Arc::new(tokio::sync::Mutex::new(McpAuditStore::new(
+                temp_dir.path().join("mcp_audit.db"),
+            ))),
+            hot_cache,
+            startup_warnings: vec![],
+        })
+    }
+
+    #[tokio::test]
+    async fn builder_start_restores_finished_review_session_from_store() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("review-session", BuilderMode::Quick);
+        session.finished = true;
+        session.current_prompt = "快速构建问题已完成！接下来请审阅 AI 生成的模型建议。".into();
+        session.pending_signals.push(BuilderSignal {
+            id: "sig_name".into(),
+            source_step: 1,
+            source_question_id: "name".into(),
+            dimension: BuilderDimension::Identity,
+            affected_path: "identity.name".into(),
+            proposed_value: serde_json::Value::String("fujing".into()),
+            confidence: 0.95,
+            reason: "用户直接提供的称呼".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        });
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let res = builder_start_with_state(
+            "quick".into(),
+            "review-session".into(),
+            &state,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("finished").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            res.get("pending_signals")
+                .and_then(|v| v.as_array())
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            res.get("prompt").and_then(|v| v.as_str()),
+            Some("快速构建问题已完成！接下来请审阅 AI 生成的模型建议。")
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_apply_signals_updates_model_and_removes_persisted_session() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("apply-session", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals = vec![
+            BuilderSignal {
+                id: "sig_name".into(),
+                source_step: 1,
+                source_question_id: "name".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.name".into(),
+                proposed_value: serde_json::Value::String("fujing".into()),
+                confidence: 0.95,
+                reason: "用户直接提供的称呼".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Pending,
+            },
+            BuilderSignal {
+                id: "sig_goal".into(),
+                source_step: 3,
+                source_question_id: "short_term_goals".into(),
+                dimension: BuilderDimension::Goals,
+                affected_path: "goals.short_term".into(),
+                proposed_value: serde_json::json!([
+                    {
+                        "name": "把 OpenLife 跑通",
+                        "priority": 5,
+                        "status": "pending",
+                        "milestones": [],
+                        "description": "",
+                        "progress": 0.0
+                    }
+                ]),
+                confidence: 0.8,
+                reason: "用户描述的近期目标".into(),
+                risk_level: RiskLevel::Medium,
+                user_status: SignalUserStatus::Pending,
+            },
+            BuilderSignal {
+                id: "sig_comm_style".into(),
+                source_step: 7,
+                source_question_id: "companion_style".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "preferences.communication_style".into(),
+                proposed_value: serde_json::Value::String("苏格拉底式追问型".into()),
+                confidence: 0.9,
+                reason: "用户选择的陪伴风格".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Pending,
+            },
+        ];
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let decisions = vec![
+            BuilderSignalDecision {
+                id: "sig_name".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            },
+            BuilderSignalDecision {
+                id: "sig_goal".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            },
+            BuilderSignalDecision {
+                id: "sig_comm_style".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            },
+        ];
+
+        let res = builder_apply_signals_with_state("apply-session".into(), decisions, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(res.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert!(
+            res.get("applied_fields")
+                .and_then(|v| v.as_array())
+                .is_some_and(|items| !items.is_empty())
+        );
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.name, "fujing");
+        assert!(model.goals.short_term.iter().any(|goal| goal.name == "把 OpenLife 跑通"));
+        assert_eq!(model.preferences.communication_style, "苏格拉底式追问型");
+
+        let persisted = state
+            .builder_session_store
+            .lock()
+            .await
+            .get_session("apply-session")
+            .unwrap();
+        assert!(persisted.is_none());
+    }
 }

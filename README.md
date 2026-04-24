@@ -30,7 +30,7 @@ OpenLife 是你的**终身成长合伙人**，一款基于 Tauri + React + Rust 
 
 - [Rust](https://rustup.rs/)（>= 1.75）
 - [Node.js](https://nodejs.org/) 18+
-- [pnpm](https://pnpm.io/)
+- [pnpm](https://pnpm.io/)（推荐）或 npm
 - （可选）[Ollama](https://ollama.com/) 本地运行 `qwen2.5:7b`
 
 ### 安装依赖
@@ -39,6 +39,8 @@ OpenLife 是你的**终身成长合伙人**，一款基于 Tauri + React + Rust 
 cd frontend && pnpm install
 cd ..
 ```
+
+如果本机没有 `pnpm`，也可以直接使用项目根目录的 `./dev.sh`，它会自动 fallback 到 `npm exec tauri dev`。
 
 ### 配置云端 API Key（DeepSeek 优先）
 
@@ -60,7 +62,7 @@ DeepSeek 默认配置为 `https://api.deepseek.com` + `deepseek-chat`，并默�
 ### 开发运行
 
 ```bash
-pnpm tauri dev
+./dev.sh
 ```
 
 ### 构建安装包
@@ -120,15 +122,58 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 2. 再看 `plans/openlife_development_plan.md`
 3. 需要理解长期目标时再看 `OpenLife_Final_PRD.md`
 
+## 当前试用状态
+
+当前版本更准确的定位是：
+
+- **可持续试用 Alpha**
+- 不是“功能演示壳子”
+- 也还不是完全稳定的公开 Beta
+
+现在已经可以稳定体验的主链路是：
+
+1. `Settings` 完成模型配置与试用检查
+2. `Builder` 做一次快速或渐进构建
+3. `Chat` 发起第一次个性化对话
+4. `Dashboard` 查看下一步行动与依据
+5. `Calibration / VersionControl` 查看建议变化与回滚路径
+
+如果你只是第一次打开项目，建议直接按这个顺序试，不要先在高级页来回跳。
+
 ## 试用前检查
 
-进入桌面端后，建议先走这条最短路径：
+进入桌面端后，建议按下面这条最短闭环走：
 
-1. 打开 **Settings**，确认“试用就绪检查”。
-2. 如果使用 DeepSeek，选择 `DeepSeek` Provider，填入 API Key，点击“测试”，成功后保存。
-3. 如果使用本地模型，先启动 Ollama，并确认本地模型名称能被解析，例如 `qwen2.5:7b` 或 `llama3:latest`。
-4. 打开 **构建**，完成一次“快速构建”，在 Review 中确认要写入的人生模型字段。
-5. 打开 **对话**，发送一条普通消息；刷新后确认 user 和 assistant 历史都还在。
+1. 打开 **Settings**
+   - 先看 `试用路径 Checklist`
+   - 再看 `试用闭环定义`
+   - 如果顶部出现 `Safe Mode`，先不要深度试用，优先处理恢复控制台
+2. 配置模型后端
+   - 如果使用 DeepSeek，选择 `DeepSeek` Provider，填入 API Key，点击“测试连接”，成功后保存
+   - 如果使用本地模型，先启动 Ollama，并确认模型名可解析，例如 `qwen2.5:7b` 或 `llama3:latest`
+3. 打开 **构建**
+   - 如果首页已经出现 `待确认 Review`，优先点“去审阅”
+   - 否则先完成一次“快速构建”，再在 Review 中确认要写入的人生模型字段
+4. 打开 **对话**
+   - 发送一条普通消息
+   - 刷新后确认 user 和 assistant 历史都还在
+5. 打开 **仪表盘 / 校准 / 版本控制**
+   - 仪表盘确认今天的建议和依据
+   - 校准确认建议来源
+   - 版本控制确认快照与回滚路径存在
+
+做到上面 5 步，才算真正完成了一次 OpenLife 试用闭环。
+
+## 当前推荐试用路径
+
+如果你时间不多，只想快速判断项目当前能不能用，建议只做下面这套：
+
+1. `Settings` 里完成 DeepSeek 或 Ollama 配置
+2. `Builder` 里优先恢复 `待确认 Review`，或完成一次快速构建并应用 Review
+3. 确认 `~/Library/Application Support/com.openlife.app/life-model/current/life_model.yaml` 已真实变化
+4. `Chat` 里发一条“帮我规划今天”
+5. `Dashboard` 看是否出现明确的下一步行动与模型依据
+6. `Calibration` 看是否能理解“为什么建议变更”
 
 常见错误修复：
 
@@ -136,6 +181,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 - `401 / 403 / invalid API Key`：去 Settings 重新测试当前表单内容，确认 Provider、Base URL、模型名和 API Key 匹配。
 - `Ollama connection refused / 11434`：启动 Ollama，或切换到 DeepSeek/OpenAI-compatible 云端模式。
 - 数据库 schema 错误：Settings 诊断区会显示 active data dir、legacy data dir、database status 和 startup warnings；优先备份数据目录后再做清理。
+- `Safe Mode`：说明当前数据环境存在风险。先去 Settings 的恢复控制台，优先做“导出完整备份”与“重建向量索引”，再继续试用。
+- 记忆或校准“看不懂为什么这样建议”：先去 `Memory` 看系统到底记住了什么，再回到 `Calibration` 查看建议来源，最后去 `VersionControl` 确认回滚路径。
 
 ## 主要页面说明
 
