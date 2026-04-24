@@ -291,7 +291,7 @@ pub async fn get_system_diagnostics(
         readiness_issues,
         data_dir: app_data_dir().display().to_string(),
         active_data_dir: app_data_dir().display().to_string(),
-        legacy_data_dir: dirs::data_dir().map(|d| d.join("com.openlife.app").display().to_string()),
+        legacy_data_dir: None, // 已统一为 ai.openlife.app
         database_status: if state.startup_warnings.is_empty() {
             "ok".to_string()
         } else {

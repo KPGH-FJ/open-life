@@ -113,9 +113,9 @@ A: 请先完成「构建」向导创建初始人生模型。AI 只有在了解�
 ### Q: 数据保存在哪里？安全吗？
 
 A: 所有数据保存在你的电脑本地：
-- macOS: `~/Library/Application Support/com.openlife.app/`
-- Windows: `%APPDATA%/com.openlife.app/`
-- Linux: `~/.config/com.openlife.app/`
+- macOS: `~/Library/Application Support/ai.openlife.app/`
+- Windows: `%APPDATA%/ai.openlife.app/`
+- Linux: `~/.config/ai.openlife.app/`
 
 如果你使用云端模型，仅对话内容会发送到对应的 API 服务商（如 OpenRouter）。所有敏感信息（身份证号、银行卡号等）在发送前会被自动脱敏或拦截。
 

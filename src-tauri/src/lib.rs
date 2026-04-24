@@ -392,7 +392,9 @@ fn execute_tool_call_internal(
         .collect::<Vec<_>>();
     match registry.call_tool(name, args.clone()) {
         Ok(r) => {
-            let _ = audit.insert_log(name, &args, &r, true, pii_found);
+            if let Err(e) = audit.insert_log(name, &args, &r, true, pii_found) {
+                eprintln!("[warn] 审计日志写入失败: {}", e);
+            }
             ToolCallResult {
                 name: name.to_string(),
                 arguments: args,
@@ -408,7 +410,9 @@ fn execute_tool_call_internal(
             }
         }
         Err(e) => {
-            let _ = audit.insert_log(name, &args, &e.to_string(), false, pii_found);
+            if let Err(log_err) = audit.insert_log(name, &args, &e.to_string(), false, pii_found) {
+                eprintln!("[warn] 审计日志写入失败: {}", log_err);
+            }
             ToolCallResult {
                 name: name.to_string(),
                 arguments: args,

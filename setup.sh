@@ -222,13 +222,13 @@ step_init_data_dir() {
     local data_dir
     case "$(uname -s)" in
         Darwin*)
-            data_dir="${HOME}/Library/Application Support/com.openlife.app"
+            data_dir="${HOME}/Library/Application Support/ai.openlife.app"
             ;;
         Linux*)
             if [ -n "${XDG_DATA_HOME:-}" ]; then
-                data_dir="${XDG_DATA_HOME}/com.openlife.app"
+                data_dir="${XDG_DATA_HOME}/ai.openlife.app"
             else
-                data_dir="${HOME}/.local/share/com.openlife.app"
+                data_dir="${HOME}/.local/share/ai.openlife.app"
             fi
             ;;
         *)

@@ -170,7 +170,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 1. `Settings` 里完成 DeepSeek 或 Ollama 配置
 2. `Builder` 里优先恢复 `待确认 Review`，或完成一次快速构建并应用 Review
-3. 确认 `~/Library/Application Support/com.openlife.app/life-model/current/life_model.yaml` 已真实变化
+3. 确认 `~/Library/Application Support/ai.openlife.app/life-model/current/life_model.yaml` 已真实变化
 4. `Chat` 里发一条“帮我规划今天”
 5. `Dashboard` 看是否出现明确的下一步行动与模型依据
 6. `Calibration` 看是否能理解“为什么建议变更”

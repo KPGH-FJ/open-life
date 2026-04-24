@@ -21,7 +21,7 @@ async fn main() {
         .unwrap_or(8765);
 
     let data_dir = dirs::data_dir()
-        .map(|d| d.join("com.openlife.app"))
+        .map(|d| d.join("ai.openlife.app"))
         .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"));
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));

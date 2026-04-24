@@ -391,7 +391,7 @@ impl McpAuditStore {
 impl Default for McpAuditStore {
     fn default() -> Self {
         let data_dir = dirs::data_dir()
-            .map(|d| d.join("com.openlife.app"))
+            .map(|d| d.join("ai.openlife.app"))
             .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"));
         Self::new(data_dir.join("mcp_audit.db"))
     }
