@@ -1,6 +1,6 @@
 use crate::{persist_life_model, AppState};
 use chrono::Datelike;
-use openlife_core::agent::{AgentProposal, ProposalType, RiskLevel};
+use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::evolution::{EvolutionChange, MicroEvolutionEngine};
 use std::sync::Arc;
 use tauri::State;
@@ -32,12 +32,18 @@ fn assess_change_risk(change: &EvolutionChange) -> RiskLevel {
 /// 将 EvolutionChange 转换为 AgentProposal
 fn change_to_proposal(
     change: &EvolutionChange,
-    source: &str,
+    source: ProposalSource,
     before_model: &openlife_core::life_model::LifeModel,
 ) -> Result<AgentProposal, String> {
     let risk_level = assess_change_risk(change);
     let proposal_type = if change.dimension.starts_with("goals.") {
         ProposalType::GoalUpdate
+    } else if change.dimension.starts_with("state.") {
+        ProposalType::StateUpdate
+    } else if change.dimension.starts_with("capabilities.") {
+        ProposalType::CapabilityUpdate
+    } else if change.dimension.starts_with("preferences.") {
+        ProposalType::PreferenceUpdate
     } else {
         ProposalType::LifeModelUpdate
     };
@@ -249,10 +255,10 @@ pub async fn calibration_create_proposals(
     let mut errors = Vec::new();
 
     for change in &changes {
-        match change_to_proposal(change, "calibration:evolution", &model) {
+        match change_to_proposal(change, ProposalSource::CalibrationRun, &model) {
             Ok(mut proposal) => {
-                proposal.source_run_id = Some(run_id.clone());
-                proposal.source_kind = Some("calibration".to_string());
+                proposal.run_id = Some(run_id.clone());
+                proposal.source_detail = Some("evolution".to_string());
                 let id = proposal.id.clone();
                 if let Err(e) = store.create_proposal(&proposal) {
                     errors.push(format!("{}: {}", proposal.affected_path, e));

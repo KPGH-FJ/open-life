@@ -1,5 +1,5 @@
 use crate::{persist_life_model, AppState};
-use openlife_core::agent::{AgentProposal, ProposalType, RiskLevel as ProposalRiskLevel};
+use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel};
 use openlife_core::builder::{
     BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary, SignalUserStatus,
 };
@@ -571,17 +571,17 @@ async fn builder_create_proposals_with_state(
             signal.proposed_value.clone()
         };
         let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+            ProposalType::GoalUpdate,
             &signal.affected_path,
             after,
             &signal.reason,
             signal.confidence,
             proposal_risk_level(&signal.risk_level),
-            &format!("builder:{}:{}", session_id, signal.id),
+            ProposalSource::BuilderReview,
         );
         proposal.before = value_at_path(&model_value, &signal.affected_path);
-        proposal.source_run_id = Some(run_id.clone());
-        proposal.source_kind = Some("builder".to_string());
+        proposal.run_id = Some(run_id.clone());
+        proposal.source_detail = Some(format!("{}:{}", session_id, signal.id));
         proposals.push(proposal);
     }
 
@@ -765,6 +765,9 @@ mod tests {
             agent_run_store: None,
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
+            ))),
+            patch_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
             hot_cache,
             startup_warnings: vec![],

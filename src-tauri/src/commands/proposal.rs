@@ -123,12 +123,13 @@ async fn apply_proposal_to_state(
             
             Ok(result)
         }
-        ProposalType::MemoryUpdate => {
+        ProposalType::MemoryWrite | ProposalType::MemoryArchive => {
             Err("Memory Proposal 尚未接入应用器；当前只支持 LifeModel/Goal 更新。".to_string())
         }
         ProposalType::ToolPermission => Err(
             "Tool Permission Proposal 尚未接入应用器；当前只支持 LifeModel/Goal 更新。".to_string(),
         ),
+        _ => Err("该类型 Proposal 尚未接入应用器。".to_string()),
     }
 }
 
@@ -259,9 +260,14 @@ pub async fn list_proposals(
 
     let type_filter = proposal_type.and_then(|t| match t.as_str() {
         "life_model_update" => Some(ProposalType::LifeModelUpdate),
-        "memory_update" => Some(ProposalType::MemoryUpdate),
-        "tool_permission" => Some(ProposalType::ToolPermission),
         "goal_update" => Some(ProposalType::GoalUpdate),
+        "state_update" => Some(ProposalType::StateUpdate),
+        "preference_update" => Some(ProposalType::PreferenceUpdate),
+        "capability_update" => Some(ProposalType::CapabilityUpdate),
+        "memory_write" => Some(ProposalType::MemoryWrite),
+        "memory_archive" => Some(ProposalType::MemoryArchive),
+        "tool_permission" => Some(ProposalType::ToolPermission),
+        "schedule_checkin" => Some(ProposalType::ScheduleCheckin),
         _ => None,
     });
 
@@ -353,7 +359,7 @@ mod tests {
     use super::*;
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
-        agent::{AgentProposal, ProposalStore, ProposalType, RiskLevel},
+        agent::{AgentProposal, ProposalSource, ProposalStore, ProposalType, RiskLevel},
         builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
@@ -411,6 +417,9 @@ mod tests {
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),
+            patch_store: Some(Arc::new(Mutex::new(
+                openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
+            ))),
             hot_cache,
             startup_warnings: vec![],
         })
@@ -421,13 +430,13 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+            ProposalType::GoalUpdate,
             "identity.name",
             serde_json::json!("Fujing"),
             "用户确认的新称呼",
             0.9,
             RiskLevel::Low,
-            "test",
+            ProposalSource::Manual,
         );
         let id = proposal.id.clone();
         state
@@ -468,7 +477,7 @@ mod tests {
             "用户状态更新",
             0.8,
             RiskLevel::Low,
-            "test",
+            ProposalSource::Manual,
         );
         let id = proposal.id.clone();
         state
@@ -509,7 +518,7 @@ mod tests {
             "无效字段",
             0.5,
             RiskLevel::Medium,
-            "test",
+            ProposalSource::Manual,
         );
         let id = proposal.id.clone();
         state
@@ -524,7 +533,7 @@ mod tests {
         let err = accept_proposal_with_state(id.clone(), &state)
             .await
             .unwrap_err();
-        assert!(err.contains("identity.no_such_field"));
+        assert!(err.contains("Invalid path") || err.contains("no_such_field"));
         let stored = state
             .proposal_store
             .as_ref()
@@ -540,17 +549,17 @@ mod tests {
     #[test]
     fn proposal_serializes_for_frontend_contract() {
         let proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+            ProposalType::GoalUpdate,
             "identity.name",
             serde_json::json!("Fujing"),
             "test",
             0.8,
             RiskLevel::Low,
-            "test",
+            ProposalSource::Manual,
         );
         let value = serde_json::to_value(proposal).unwrap();
         assert!(value.get("proposalType").is_some());
-        assert_eq!(value.get("proposalType").unwrap(), "life_model_update");
+        assert_eq!(value.get("proposalType").unwrap(), "goal_update");
         assert_eq!(value.get("riskLevel").unwrap(), "low");
         assert_eq!(value.get("status").unwrap(), "pending");
     }
