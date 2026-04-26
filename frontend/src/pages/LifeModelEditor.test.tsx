@@ -78,14 +78,18 @@ describe("LifeModelEditor", () => {
 
     // 提前推进时间不足以触发保存
     vi.advanceTimersByTime(500);
-    const callsBefore = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_life_model").length;
+    const callsBefore = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "save_life_model").length;
     expect(callsBefore).toBe(0);
 
     // 推进超过 2s debounce
     vi.advanceTimersByTime(2000);
 
     await waitFor(() => {
-      const callsAfter = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_life_model").length;
+      const callsAfter = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "save_life_model").length;
       expect(callsAfter).toBeGreaterThanOrEqual(1);
     });
 

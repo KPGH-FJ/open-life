@@ -1,5 +1,17 @@
 import { useState } from "react";
-import { Check, X, Edit2, AlertTriangle, Info, ShieldCheck, Sparkles, Target, User, Zap, Heart } from "lucide-react";
+import {
+  Check,
+  X,
+  Edit2,
+  AlertTriangle,
+  Info,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  User,
+  Zap,
+  Heart,
+} from "lucide-react";
 import type { BuilderSignal, BuilderSummary, BuilderSignalDecision } from "../tauri";
 import SuggestionContextPanel from "./SuggestionContextPanel";
 
@@ -68,9 +80,21 @@ const dimensionLabels: Record<string, string> = {
 };
 
 const riskConfig: Record<string, { color: string; label: string; defaultChecked: boolean }> = {
-  low: { color: "text-green-600 bg-green-50 border-green-200", label: "低风险", defaultChecked: true },
-  medium: { color: "text-amber-600 bg-amber-50 border-amber-200", label: "中风险", defaultChecked: true },
-  high: { color: "text-rose-600 bg-rose-50 border-rose-200", label: "高风险", defaultChecked: false },
+  low: {
+    color: "text-green-600 bg-green-50 border-green-200",
+    label: "低风险",
+    defaultChecked: true,
+  },
+  medium: {
+    color: "text-amber-600 bg-amber-50 border-amber-200",
+    label: "中风险",
+    defaultChecked: true,
+  },
+  high: {
+    color: "text-rose-600 bg-rose-50 border-rose-200",
+    label: "高风险",
+    defaultChecked: false,
+  },
 };
 
 function formatValue(value: unknown): string {
@@ -91,19 +115,28 @@ function formatValue(value: unknown): string {
 }
 
 function groupSignalsByDimension(signals: BuilderSignal[]): Record<string, BuilderSignal[]> {
-  return signals.reduce((acc, signal) => {
-    const dim = signal.dimension;
-    if (!acc[dim]) acc[dim] = [];
-    acc[dim].push(signal);
-    return acc;
-  }, {} as Record<string, BuilderSignal[]>);
+  return signals.reduce(
+    (acc, signal) => {
+      const dim = signal.dimension;
+      if (!acc[dim]) acc[dim] = [];
+      acc[dim].push(signal);
+      return acc;
+    },
+    {} as Record<string, BuilderSignal[]>
+  );
 }
 
-export default function BuilderPatchReview({ signals, summary, onApply, onCreateProposals, onReject }: Props) {
+export default function BuilderPatchReview({
+  signals,
+  summary,
+  onApply,
+  onCreateProposals,
+  onReject,
+}: Props) {
   // Track which signals are selected (checked)
   const [selected, setSelected] = useState<Set<string>>(() => {
     const initial = new Set<string>();
-    signals.forEach((s) => {
+    signals.forEach(s => {
       if (riskConfig[s.risk_level]?.defaultChecked) {
         initial.add(s.id);
       }
@@ -122,7 +155,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
   const dimensions = Object.keys(grouped);
 
   const toggleSignal = (id: string) => {
-    setSelected((prev) => {
+    setSelected(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -134,7 +167,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
     setEditing(signal.id);
     const value = editedValues[signal.id] ?? signal.proposed_value;
     setEditValue(typeof value === "string" ? value : JSON.stringify(value, null, 2));
-    setEditErrors((prev) => ({ ...prev, [signal.id]: "" }));
+    setEditErrors(prev => ({ ...prev, [signal.id]: "" }));
   };
 
   const saveEdit = (signal: BuilderSignal) => {
@@ -144,16 +177,16 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
       try {
         nextValue = JSON.parse(editValue);
       } catch {
-        setEditErrors((prev) => ({ ...prev, [signal.id]: "JSON 格式无效，请修正后再保存。" }));
+        setEditErrors(prev => ({ ...prev, [signal.id]: "JSON 格式无效，请修正后再保存。" }));
         return;
       }
     }
-    setEditedValues((prev) => ({ ...prev, [signal.id]: nextValue }));
+    setEditedValues(prev => ({ ...prev, [signal.id]: nextValue }));
     setEditing(null);
     setEditValue("");
-    setEditErrors((prev) => ({ ...prev, [signal.id]: "" }));
+    setEditErrors(prev => ({ ...prev, [signal.id]: "" }));
     // Ensure edited item is selected
-    setSelected((prev) => {
+    setSelected(prev => {
       const next = new Set(prev);
       next.add(signal.id);
       return next;
@@ -161,7 +194,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
   };
 
   const buildDecisions = (): BuilderSignalDecision[] => {
-    return signals.map((signal) => {
+    return signals.map(signal => {
       const isSelected = selected.has(signal.id);
       const hasEdit = signal.id in editedValues;
 
@@ -187,9 +220,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
 
   const handleApply = () => {
     // Check if any high risk signals are selected
-    const hasHighRiskSelected = signals.some(
-      (s) => selected.has(s.id) && s.risk_level === "high"
-    );
+    const hasHighRiskSelected = signals.some(s => selected.has(s.id) && s.risk_level === "high");
     if (hasHighRiskSelected && !showDirectApplyConfirm) {
       setShowDirectApplyConfirm(true);
       return;
@@ -203,8 +234,8 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
     onCreateProposals?.(buildDecisions());
   };
 
-  const acceptedCount = signals.filter((s) => selected.has(s.id) && !(s.id in editedValues)).length;
-  const editedCount = signals.filter((s) => selected.has(s.id) && s.id in editedValues).length;
+  const acceptedCount = signals.filter(s => selected.has(s.id) && !(s.id in editedValues)).length;
+  const editedCount = signals.filter(s => selected.has(s.id) && s.id in editedValues).length;
   const rejectedCount = signals.length - acceptedCount - editedCount;
   // Merged count will be computed after backend returns actual merge results
   const mergedCount = 0;
@@ -218,11 +249,12 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
           <h3 className="font-semibold text-indigo-900 text-lg">OpenLife 准备这样理解你</h3>
         </div>
         <p className="text-sm text-indigo-700">
-          基于我们的对话，我整理了对你的理解。<strong>建议你发送到 Review Center 逐条审阅后再写入</strong>，这样你可以清楚地看到每一项变更的前后对比。
+          基于我们的对话，我整理了对你的理解。
+          <strong>建议你发送到 Review Center 逐条审阅后再写入</strong>
+          ，这样你可以清楚地看到每一项变更的前后对比。
         </p>
         <div className="mt-3 text-xs text-indigo-600 bg-indigo-100/50 px-3 py-1.5 rounded-full inline-flex items-center gap-1">
-          <Info size={12} />
-          共 {signals.length} 条理解建议 · 高风险内容默认未勾选 · 请审阅后确认
+          <Info size={12} />共 {signals.length} 条理解建议 · 高风险内容默认未勾选 · 请审阅后确认
         </div>
       </div>
 
@@ -272,7 +304,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
 
       {/* Signal List by Dimension */}
       <div className="space-y-4">
-        {dimensions.map((dim) => {
+        {dimensions.map(dim => {
           const dimSignals = [...(grouped[dim] || [])].sort((a, b) => {
             const riskDiff = riskPriority[a.risk_level] - riskPriority[b.risk_level];
             if (riskDiff !== 0) return riskDiff;
@@ -286,7 +318,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
                 <span className="text-xs text-gray-500 ml-auto">{dimSignals.length} 项建议</span>
               </div>
               <div className="divide-y divide-gray-100">
-                {dimSignals.map((signal) => {
+                {dimSignals.map(signal => {
                   const isSelected = selected.has(signal.id);
                   const risk = riskConfig[signal.risk_level];
                   const isEditing = editing === signal.id;
@@ -311,7 +343,9 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
                           <span className="font-medium text-gray-900 text-sm">
                             {fieldPathLabel(signal.affected_path)}
                           </span>
-                          <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${risk.color}`}>
+                          <span
+                            className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${risk.color}`}
+                          >
                             {risk.label}
                           </span>
                           <span className="rounded-full border border-indigo-100 bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-700">
@@ -333,14 +367,16 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
 
                         {isEditing ? (
                           <div className="mt-2 space-y-2">
-                            {Array.isArray(signal.proposed_value) || (signal.proposed_value && typeof signal.proposed_value === "object") ? (
+                            {Array.isArray(signal.proposed_value) ||
+                            (signal.proposed_value && typeof signal.proposed_value === "object") ? (
                               <>
                                 <div className="text-[11px] text-indigo-700 bg-indigo-50 rounded-lg px-3 py-2">
-                                  这是结构化字段，请保持合法 JSON。保存后会按原结构写回，而不是降级成普通字符串。
+                                  这是结构化字段，请保持合法
+                                  JSON。保存后会按原结构写回，而不是降级成普通字符串。
                                 </div>
                                 <textarea
                                   value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
+                                  onChange={e => setEditValue(e.target.value)}
                                   className="w-full min-h-28 px-3 py-2 text-xs font-mono border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                   autoFocus
                                 />
@@ -349,7 +385,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
                               <input
                                 type="text"
                                 value={editValue}
-                                onChange={(e) => setEditValue(e.target.value)}
+                                onChange={e => setEditValue(e.target.value)}
                                 className="w-full px-3 py-1.5 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                 autoFocus
                               />
@@ -378,7 +414,10 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
                               <span className="text-[10px] text-indigo-600 font-medium bg-indigo-50 px-1.5 py-0.5 rounded shrink-0 mt-0.5">
                                 建议值
                               </span>
-                              <div className="text-sm text-gray-800 font-medium" data-testid={`proposed-value-${signal.id}`}>
+                              <div
+                                className="text-sm text-gray-800 font-medium"
+                                data-testid={`proposed-value-${signal.id}`}
+                              >
                                 {formatValue(editedValues[signal.id] ?? signal.proposed_value)}
                               </div>
                             </div>
@@ -392,7 +431,11 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
                             sourceLabel={signal.source_question_id}
                             confidence={signal.confidence}
                             riskLabel={risk.label}
-                            note={isHighRisk ? "这是高风险字段，默认不会自动勾选，只有在你明确认可后才会写入人生模型。" : "这条建议会在保存时和你当前的人生模型一起判断，尽量避免误覆盖已有内容。"}
+                            note={
+                              isHighRisk
+                                ? "这是高风险字段，默认不会自动勾选，只有在你明确认可后才会写入人生模型。"
+                                : "这条建议会在保存时和你当前的人生模型一起判断，尽量避免误覆盖已有内容。"
+                            }
                           />
                         </div>
                       </div>
@@ -483,10 +526,14 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
           <div className="text-sm text-gray-600">
             已接受 <span className="font-semibold text-indigo-600">{acceptedCount}</span> 项
             {editedCount > 0 && (
-              <span className="ml-2">已编辑 <span className="font-semibold text-amber-600">{editedCount}</span> 项</span>
+              <span className="ml-2">
+                已编辑 <span className="font-semibold text-amber-600">{editedCount}</span> 项
+              </span>
             )}
             {rejectedCount > 0 && (
-              <span className="ml-2">已拒绝 <span className="font-semibold text-rose-600">{rejectedCount}</span> 项</span>
+              <span className="ml-2">
+                已拒绝 <span className="font-semibold text-rose-600">{rejectedCount}</span> 项
+              </span>
             )}
           </div>
           <button
@@ -524,11 +571,12 @@ export default function BuilderPatchReview({ signals, summary, onApply, onCreate
       </div>
 
       {/* High Risk Warning */}
-      {signals.some((s) => s.risk_level === "high" && !selected.has(s.id)) && (
+      {signals.some(s => s.risk_level === "high" && !selected.has(s.id)) && (
         <div className="flex items-start gap-2 text-xs text-amber-600 bg-amber-50 p-3 rounded-lg">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <span>
-            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Review Center 审阅。
+            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Review Center
+            审阅。
           </span>
         </div>
       )}

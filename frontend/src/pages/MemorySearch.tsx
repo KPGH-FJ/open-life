@@ -1,6 +1,16 @@
 import { useEffect, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { Search, Database, Loader2, Archive, RotateCcw, MessageSquare, User, Bot, Tag } from "lucide-react";
+import {
+  Search,
+  Database,
+  Loader2,
+  Archive,
+  RotateCcw,
+  MessageSquare,
+  User,
+  Bot,
+  Tag,
+} from "lucide-react";
 import {
   searchMemory,
   indexMemoryChunk,
@@ -58,7 +68,7 @@ export default function MemorySearch() {
   const safeModeReason = getSafeModeReason(diagnostics);
 
   useEffect(() => {
-    loadArchiveState().catch((e) => setArchiveMsg("加载记忆层级失败: " + String(e)));
+    loadArchiveState().catch(e => setArchiveMsg("加载记忆层级失败: " + String(e)));
   }, []);
 
   const handleSearch = async () => {
@@ -113,24 +123,28 @@ export default function MemorySearch() {
     }
   };
 
-  const handleRestore = useCallback(async (chunk: ArchivedChunkSummary) => {
-    if (safeMode) {
-      setArchiveMsg(buildSafeModeBlockedMessage("归档记忆恢复", diagnostics));
-      return;
-    }
-    if (!confirm(`确定恢复这条归档记忆吗？\n\n${chunk.summary || chunk.content.slice(0, 80)}`)) return;
-    setArchiveLoading(true);
-    setArchiveMsg("");
-    try {
-      const count = await restoreArchivedChunks([chunk.id]);
-      setArchiveMsg(`已恢复 ${count} 条记忆`);
-      await loadArchiveState();
-    } catch (e) {
-      setArchiveMsg(buildRuntimeActionError("恢复归档记忆", e, "data"));
-    } finally {
-      setArchiveLoading(false);
-    }
-  }, [safeMode, diagnostics]);
+  const handleRestore = useCallback(
+    async (chunk: ArchivedChunkSummary) => {
+      if (safeMode) {
+        setArchiveMsg(buildSafeModeBlockedMessage("归档记忆恢复", diagnostics));
+        return;
+      }
+      if (!confirm(`确定恢复这条归档记忆吗？\n\n${chunk.summary || chunk.content.slice(0, 80)}`))
+        return;
+      setArchiveLoading(true);
+      setArchiveMsg("");
+      try {
+        const count = await restoreArchivedChunks([chunk.id]);
+        setArchiveMsg(`已恢复 ${count} 条记忆`);
+        await loadArchiveState();
+      } catch (e) {
+        setArchiveMsg(buildRuntimeActionError("恢复归档记忆", e, "data"));
+      } finally {
+        setArchiveLoading(false);
+      }
+    },
+    [safeMode, diagnostics]
+  );
 
   return (
     <div className="h-full overflow-auto bg-white">
@@ -139,10 +153,10 @@ export default function MemorySearch() {
           <section className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <div className="text-sm font-semibold text-amber-900">Safe Mode：记忆写入操作已建议暂停</div>
-                <div className="mt-1 text-xs leading-5 text-amber-800">
-                  {safeModeReason}
+                <div className="text-sm font-semibold text-amber-900">
+                  Safe Mode：记忆写入操作已建议暂停
                 </div>
+                <div className="mt-1 text-xs leading-5 text-amber-800">{safeModeReason}</div>
                 <div className="mt-1 text-xs text-amber-700">
                   搜索和查看仍可继续，但手动索引、低访问归档等写操作建议先暂停。
                 </div>
@@ -191,13 +205,13 @@ export default function MemorySearch() {
           <div className="flex gap-3">
             <input
               value={source}
-              onChange={(e) => setSource(e.target.value)}
+              onChange={e => setSource(e.target.value)}
               placeholder="来源标签"
               className="border rounded-lg px-3 py-2 text-sm w-40"
             />
             <input
               value={content}
-              onChange={(e) => setContent(e.target.value)}
+              onChange={e => setContent(e.target.value)}
               placeholder="输入要索引的记忆内容..."
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
@@ -242,17 +256,26 @@ export default function MemorySearch() {
           <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-xs leading-5 text-indigo-800">
             读取策略可以简单理解为：热记忆更容易被优先检索，冷记忆保留但不总是优先出现，归档记忆则需要你显式恢复后再重新进入主检索层。
           </div>
-          {archiveMsg && <p className="text-sm text-slate-600" data-testid="archive-msg">{archiveMsg}</p>}
+          {archiveMsg && (
+            <p className="text-sm text-slate-600" data-testid="archive-msg">
+              {archiveMsg}
+            </p>
+          )}
           <div className="space-y-2">
             {archived.length === 0 ? (
-              <EmptyState title="暂无归档记忆" description="低访问记忆归档后会显示在这里，可随时恢复。" className="py-4" />
+              <EmptyState
+                title="暂无归档记忆"
+                description="低访问记忆归档后会显示在这里，可随时恢复。"
+                className="py-4"
+              />
             ) : (
-              archived.map((chunk) => (
+              archived.map(chunk => (
                 <div key={chunk.id} className="rounded-lg border border-slate-200 bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="text-xs font-medium text-slate-500">
-                        {chunk.source} · 访问 {chunk.access_count} 次 · 重要度 {chunk.importance_score.toFixed(2)}
+                        {chunk.source} · 访问 {chunk.access_count} 次 · 重要度{" "}
+                        {chunk.importance_score.toFixed(2)}
                       </div>
                       <div className="mt-1 text-sm text-slate-800 whitespace-pre-wrap">
                         {chunk.summary || chunk.content.slice(0, 200)}
@@ -282,8 +305,8 @@ export default function MemorySearch() {
           <div className="flex gap-3">
             <input
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => {
                 if (e.key === "Enter") handleSearch();
               }}
               placeholder="输入查询语义..."
@@ -300,18 +323,33 @@ export default function MemorySearch() {
 
           <div className="space-y-3">
             {results.length === 0 && !loading && query && (
-              <EmptyState title="未找到相关记忆" description="尝试换一组关键词再次搜索。" className="py-4" />
+              <EmptyState
+                title="未找到相关记忆"
+                description="尝试换一组关键词再次搜索。"
+                className="py-4"
+              />
             )}
             {results.map((r, idx) => {
-              const sourceIcon = r.chunk.source === "chat" || r.chunk.source === "assistant" ? <Bot size={12} /> :
-                r.chunk.source === "user" ? <User size={12} /> :
-                r.chunk.source === "builder" ? <Tag size={12} /> :
-                <Database size={12} />;
-              const sourceLabel = r.chunk.source === "chat" || r.chunk.source === "assistant" ? "AI 回复" :
-                r.chunk.source === "user" ? "用户输入" :
-                r.chunk.source === "builder" ? "构建过程" :
-                r.chunk.source === "manual" ? "手动添加" :
-                r.chunk.source;
+              const sourceIcon =
+                r.chunk.source === "chat" || r.chunk.source === "assistant" ? (
+                  <Bot size={12} />
+                ) : r.chunk.source === "user" ? (
+                  <User size={12} />
+                ) : r.chunk.source === "builder" ? (
+                  <Tag size={12} />
+                ) : (
+                  <Database size={12} />
+                );
+              const sourceLabel =
+                r.chunk.source === "chat" || r.chunk.source === "assistant"
+                  ? "AI 回复"
+                  : r.chunk.source === "user"
+                    ? "用户输入"
+                    : r.chunk.source === "builder"
+                      ? "构建过程"
+                      : r.chunk.source === "manual"
+                        ? "手动添加"
+                        : r.chunk.source;
               return (
                 <div
                   key={idx}

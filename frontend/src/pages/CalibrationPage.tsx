@@ -40,7 +40,13 @@ interface CalibrationData {
   changes: EvolutionChange[];
   applied: boolean;
   message: string;
-  before?: { identity: number; goals: number; capabilities: number; state: number; overall: number };
+  before?: {
+    identity: number;
+    goals: number;
+    capabilities: number;
+    state: number;
+    overall: number;
+  };
   after?: { identity: number; goals: number; capabilities: number; state: number; overall: number };
   requires_confirmation?: boolean;
   signal_summary?: EvolutionSignalSummary;
@@ -67,10 +73,15 @@ function ProgressBar({
     <div className="space-y-2">
       <div className="flex items-center justify-between text-xs">
         <span className="text-gray-600 font-medium">{label}</span>
-        <span className={`font-semibold ${increased ? "text-green-600" : delta < 0 ? "text-orange-600" : "text-gray-500"}`}>
+        <span
+          className={`font-semibold ${increased ? "text-green-600" : delta < 0 ? "text-orange-600" : "text-gray-500"}`}
+        >
           {before}% → {after}%
           {delta !== 0 && (
-            <span className="ml-1">({increased ? "+" : ""}{delta}%)</span>
+            <span className="ml-1">
+              ({increased ? "+" : ""}
+              {delta}%)
+            </span>
           )}
         </span>
       </div>
@@ -142,7 +153,7 @@ function buildSourceExplanation(sources: { source: string; score: number; weight
   if (!sources || sources.length === 0) return "";
   const totalWeight = sources.reduce((s, item) => s + item.weight, 0);
   const items = sources
-    .map((s) => ({
+    .map(s => ({
       label: s.source === "feedback" ? "反馈" : s.source === "behavior" ? "行为记录" : "对话推断",
       pct: totalWeight > 0 ? Math.round((s.weight / totalWeight) * 100) : 0,
     }))
@@ -150,11 +161,15 @@ function buildSourceExplanation(sources: { source: string; score: number; weight
   if (items.length === 1) return `这个建议完全基于「${items[0].label}」信号。`;
   const main = items[0];
   const rest = items.slice(1);
-  return `这个建议主要依据「${main.label}」（占 ${main.pct}%），同时参考了${rest.map((r) => `「${r.label}」（${r.pct}%）`).join("、")}。`;
+  return `这个建议主要依据「${main.label}」（占 ${main.pct}%），同时参考了${rest.map(r => `「${r.label}」（${r.pct}%）`).join("、")}。`;
 }
 
 function isHighImpactChange(change: EvolutionChange) {
-  return change.dimension.includes("identity") || change.dimension.includes("mission") || change.dimension.includes("long_term");
+  return (
+    change.dimension.includes("identity") ||
+    change.dimension.includes("mission") ||
+    change.dimension.includes("long_term")
+  );
 }
 
 function getChangeRisk(change: EvolutionChange): "low" | "medium" | "high" | "critical" {
@@ -179,21 +194,31 @@ function getChangeRisk(change: EvolutionChange): "low" | "medium" | "high" | "cr
 
 function riskLabel(risk: string): string {
   switch (risk) {
-    case "low": return "低风险";
-    case "medium": return "中风险";
-    case "high": return "高风险";
-    case "critical": return "极高风险";
-    default: return "";
+    case "low":
+      return "低风险";
+    case "medium":
+      return "中风险";
+    case "high":
+      return "高风险";
+    case "critical":
+      return "极高风险";
+    default:
+      return "";
   }
 }
 
 function riskClass(risk: string): string {
   switch (risk) {
-    case "low": return "bg-emerald-50 text-emerald-700 border-emerald-200";
-    case "medium": return "bg-amber-50 text-amber-700 border-amber-200";
-    case "high": return "bg-rose-50 text-rose-700 border-rose-200";
-    case "critical": return "bg-red-50 text-red-700 border-red-200";
-    default: return "bg-gray-50 text-gray-700 border-gray-200";
+    case "low":
+      return "bg-emerald-50 text-emerald-700 border-emerald-200";
+    case "medium":
+      return "bg-amber-50 text-amber-700 border-amber-200";
+    case "high":
+      return "bg-rose-50 text-rose-700 border-rose-200";
+    case "critical":
+      return "bg-red-50 text-red-700 border-red-200";
+    default:
+      return "bg-gray-50 text-gray-700 border-gray-200";
   }
 }
 
@@ -234,7 +259,13 @@ export default function CalibrationPage() {
           requires_confirmation: evolution.requires_confirmation,
           signal_summary: evolution.signal_summary,
         });
-        setSelected(new Set(evolution.changes.map((change, i) => isHighImpactChange(change) ? -1 : i).filter((i) => i >= 0)));
+        setSelected(
+          new Set(
+            evolution.changes
+              .map((change, i) => (isHighImpactChange(change) ? -1 : i))
+              .filter(i => i >= 0)
+          )
+        );
       } catch (e: any) {
         setError(String(e?.message ?? e));
       } finally {
@@ -247,7 +278,7 @@ export default function CalibrationPage() {
   }, []);
 
   const toggleItem = (idx: number) => {
-    setSelected((prev) => {
+    setSelected(prev => {
       const next = new Set(prev);
       if (next.has(idx)) next.delete(idx);
       else next.add(idx);
@@ -256,7 +287,7 @@ export default function CalibrationPage() {
   };
 
   const toggleExpand = (idx: number) => {
-    setExpandedItems((prev) => {
+    setExpandedItems(prev => {
       const next = new Set(prev);
       if (next.has(idx)) next.delete(idx);
       else next.add(idx);
@@ -268,7 +299,7 @@ export default function CalibrationPage() {
     if (!model) return;
     const toApply = Array.from(selected)
       .sort((a, b) => a - b)
-      .map((i) => data.changes[i]);
+      .map(i => data.changes[i]);
     if (toApply.length === 0) {
       setPageError("请先选择至少一项变更");
       return;
@@ -291,7 +322,7 @@ export default function CalibrationPage() {
     if (!model) return;
     const toSend = Array.from(selected)
       .sort((a, b) => a - b)
-      .map((i) => data.changes[i]);
+      .map(i => data.changes[i]);
     if (toSend.length === 0) {
       setPageError("请先选择至少一项变更");
       return;
@@ -303,7 +334,9 @@ export default function CalibrationPage() {
       await markCalibrationShown("weekly");
       const runInfo = result.run_id ? `（Run #${result.run_id.slice(0, 8)}）` : "";
       if (result.error_count > 0) {
-        setPageError(`${result.message}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`);
+        setPageError(
+          `${result.message}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`
+        );
       } else {
         setPageError(`${result.message}${runInfo}`);
       }
@@ -360,7 +393,11 @@ export default function CalibrationPage() {
   return (
     <div className="h-full overflow-auto bg-gray-50 p-6">
       <div className="max-w-5xl mx-auto space-y-6">
-        <ErrorBanner message={pageError} onClose={() => setPageError("")} severity={pageError.includes("成功") ? "info" : "error"} />
+        <ErrorBanner
+          message={pageError}
+          onClose={() => setPageError("")}
+          severity={pageError.includes("成功") ? "info" : "error"}
+        />
         {/* Header */}
         <div className="bg-white rounded-xl shadow p-6 space-y-4">
           <div className="flex items-center justify-between">
@@ -460,7 +497,9 @@ export default function CalibrationPage() {
                   <div>对话推断：{data.signal_summary.inference_items}</div>
                 </div>
                 <div className="mt-2 text-[10px] text-indigo-600/80 leading-relaxed">
-                  这三类信号分别来自：你对 AI 回复的点赞/点踩（反馈）、你在对话中提到的行为和状态变化（行为）、以及 AI 从对话内容中推断出的隐含偏好（推断）。
+                  这三类信号分别来自：你对 AI
+                  回复的点赞/点踩（反馈）、你在对话中提到的行为和状态变化（行为）、以及 AI
+                  从对话内容中推断出的隐含偏好（推断）。
                 </div>
               </div>
               <div className="rounded-lg border border-emerald-100 bg-emerald-50/60 p-4">
@@ -469,8 +508,13 @@ export default function CalibrationPage() {
                   最强反馈信号
                 </div>
                 <div className="mt-2 space-y-1 text-xs text-gray-700">
-                  {(data.signal_summary.top_feedback.length > 0 ? data.signal_summary.top_feedback : [{ name: "暂无", score: 0, source: "feedback" }]).map((item) => (
-                    <div key={`${item.source}-${item.name}`}>{item.name} · {item.score.toFixed(2)}</div>
+                  {(data.signal_summary.top_feedback.length > 0
+                    ? data.signal_summary.top_feedback
+                    : [{ name: "暂无", score: 0, source: "feedback" }]
+                  ).map(item => (
+                    <div key={`${item.source}-${item.name}`}>
+                      {item.name} · {item.score.toFixed(2)}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -480,10 +524,15 @@ export default function CalibrationPage() {
                   最强对话/行为信号
                 </div>
                 <div className="mt-2 space-y-1 text-xs text-gray-700">
-                  {[...data.signal_summary.top_behavior, ...data.signal_summary.top_inference].slice(0, 3).map((item) => (
-                    <div key={`${item.source}-${item.name}`}>{item.name} · {item.score.toFixed(2)}</div>
-                  ))}
-                  {data.signal_summary.top_behavior.length === 0 && data.signal_summary.top_inference.length === 0 && <div>暂无</div>}
+                  {[...data.signal_summary.top_behavior, ...data.signal_summary.top_inference]
+                    .slice(0, 3)
+                    .map(item => (
+                      <div key={`${item.source}-${item.name}`}>
+                        {item.name} · {item.score.toFixed(2)}
+                      </div>
+                    ))}
+                  {data.signal_summary.top_behavior.length === 0 &&
+                    data.signal_summary.top_inference.length === 0 && <div>暂无</div>}
                 </div>
               </div>
             </div>
@@ -520,7 +569,9 @@ export default function CalibrationPage() {
 
           {/* Change Items */}
           {data.changes.length === 0 ? (
-            <div className="text-gray-500 text-sm">{data.message || "近7天暂无足够信号生成微调建议"}</div>
+            <div className="text-gray-500 text-sm">
+              {data.message || "近7天暂无足够信号生成微调建议"}
+            </div>
           ) : (
             <div className="space-y-3">
               {data.changes.map((c, idx) => {
@@ -532,9 +583,7 @@ export default function CalibrationPage() {
                   <div
                     key={idx}
                     className={`border rounded-lg transition ${
-                      isSelected
-                        ? "border-indigo-300 bg-indigo-50"
-                        : "border-gray-200 bg-white"
+                      isSelected ? "border-indigo-300 bg-indigo-50" : "border-gray-200 bg-white"
                     }`}
                   >
                     {/* Header row */}
@@ -546,7 +595,7 @@ export default function CalibrationPage() {
                         type="checkbox"
                         checked={isSelected}
                         onChange={() => toggleItem(idx)}
-                        onClick={(e) => e.stopPropagation()}
+                        onClick={e => e.stopPropagation()}
                         className="mt-1"
                       />
                       <div className="flex-1 min-w-0">
@@ -561,29 +610,35 @@ export default function CalibrationPage() {
                                 c.confidence >= 0.8
                                   ? "bg-emerald-50 text-emerald-700"
                                   : c.confidence >= 0.5
-                                  ? "bg-blue-50 text-blue-700"
-                                  : "bg-amber-50 text-amber-700"
+                                    ? "bg-blue-50 text-blue-700"
+                                    : "bg-amber-50 text-amber-700"
                               }`}
                               title="置信度由信号方向一致性与平均强度加权计算"
                             >
                               置信度 {Math.round(c.confidence * 100)}%
                             </span>
                           )}
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${highImpact ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-600"}`}>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${highImpact ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-600"}`}
+                          >
                             {highImpact ? "高影响·需手动确认" : "可选建议"}
                           </span>
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium border ${riskClass(getChangeRisk(c))}`}>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium border ${riskClass(getChangeRisk(c))}`}
+                          >
                             {riskLabel(getChangeRisk(c))}
                           </span>
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-sm">
                           <span className="text-gray-500">{c.old_value.toFixed(2)}</span>
                           <span className="text-gray-300">→</span>
-                          <span className={`font-semibold ${increased ? "text-green-600" : "text-orange-600"}`}>
+                          <span
+                            className={`font-semibold ${increased ? "text-green-600" : "text-orange-600"}`}
+                          >
                             {c.new_value.toFixed(2)}
                           </span>
                           <span className="text-xs text-gray-400">
-                            {increased ? "↑" : "↓"} {(Math.abs(c.new_value - c.old_value)).toFixed(2)}
+                            {increased ? "↑" : "↓"} {Math.abs(c.new_value - c.old_value).toFixed(2)}
                           </span>
                         </div>
                         <div className="mt-3">
@@ -608,7 +663,7 @@ export default function CalibrationPage() {
                         </div>
                       </div>
                       <button
-                        onClick={(e) => {
+                        onClick={e => {
                           e.stopPropagation();
                           toggleExpand(idx);
                         }}
@@ -626,7 +681,7 @@ export default function CalibrationPage() {
                           <div className="text-xs font-medium text-gray-500">信号来源明细</div>
                           {c.sources && c.sources.length > 0 ? (
                             <div className="space-y-2">
-                              {c.sources.map((s) => (
+                              {c.sources.map(s => (
                                 <div
                                   key={s.source}
                                   className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${sourceColorClass(s.source)}`}
@@ -637,7 +692,10 @@ export default function CalibrationPage() {
                                   </div>
                                   <div className="flex items-center gap-3">
                                     <span>权重 {Math.round(s.weight * 100)}%</span>
-                                    <span>强度 {s.score > 0 ? "+" : ""}{s.score.toFixed(2)}</span>
+                                    <span>
+                                      强度 {s.score > 0 ? "+" : ""}
+                                      {s.score.toFixed(2)}
+                                    </span>
                                   </div>
                                 </div>
                               ))}

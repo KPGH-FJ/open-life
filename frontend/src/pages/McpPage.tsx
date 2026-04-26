@@ -43,10 +43,13 @@ import ErrorBanner from "../components/ErrorBanner";
 type WizardStep = "select" | "preview" | "done";
 
 function resolvePlaceholders(arr: string[], inputs: Record<string, string>): string[] {
-  return arr.map((s) => s.replace(/\{\{(\w+)\}\}/g, (_, key) => inputs[key] ?? `{{${key}}}`));
+  return arr.map(s => s.replace(/\{\{(\w+)\}\}/g, (_, key) => inputs[key] ?? `{{${key}}}`));
 }
 
-function resolveEnv(env: Record<string, string> | undefined, inputs: Record<string, string>): Record<string, string> {
+function resolveEnv(
+  env: Record<string, string> | undefined,
+  inputs: Record<string, string>
+): Record<string, string> {
   if (!env) return {};
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env)) {
@@ -103,16 +106,16 @@ export default function McpPage() {
   };
 
   const toggleLogExpand = (logId: number) => {
-    setExpandedLog((prev) => (prev === logId ? null : logId));
+    setExpandedLog(prev => (prev === logId ? null : logId));
   };
 
   // Calculate audit stats
   const auditStats = {
     total: auditLogs.length,
-    success: auditLogs.filter((l) => l.success).length,
-    failed: auditLogs.filter((l) => !l.success).length,
-    piiHits: auditLogs.filter((l) => l.pii_found).length,
-    uniqueTools: new Set(auditLogs.map((l) => l.tool_name)).size,
+    success: auditLogs.filter(l => l.success).length,
+    failed: auditLogs.filter(l => !l.success).length,
+    piiHits: auditLogs.filter(l => l.pii_found).length,
+    uniqueTools: new Set(auditLogs.map(l => l.tool_name)).size,
   };
 
   useEffect(() => {
@@ -173,10 +176,10 @@ export default function McpPage() {
   };
 
   const installRecommended = (manifest: ToolManifest) => {
-    const matched = templates.find((tpl) => {
+    const matched = templates.find(tpl => {
       if (tpl.id === manifest.name) return true;
       const tags = tpl.tags ?? [];
-      return manifest.tags.some((tag) => tags.includes(tag));
+      return manifest.tags.some(tag => tags.includes(tag));
     });
     if (matched) {
       openWizard();
@@ -190,10 +193,13 @@ export default function McpPage() {
     setPageError("当前推荐工具没有对应模板，可先手动注册。");
   };
 
-  const previewArgs = selectedTemplate ? resolvePlaceholders(selectedTemplate.args, templateInputs) : [];
+  const previewArgs = selectedTemplate
+    ? resolvePlaceholders(selectedTemplate.args, templateInputs)
+    : [];
   const previewEnv = selectedTemplate ? resolveEnv(selectedTemplate.env, templateInputs) : {};
   const canRegisterTemplate =
-    selectedTemplate !== null && selectedTemplate.required_args.every((k) => templateInputs[k]?.trim() !== "");
+    selectedTemplate !== null &&
+    selectedTemplate.required_args.every(k => templateInputs[k]?.trim() !== "");
 
   const handleRegisterTemplate = async () => {
     if (!selectedTemplate) return;
@@ -240,7 +246,7 @@ export default function McpPage() {
                 className="w-full border rounded-md px-3 py-2 text-sm"
                 placeholder="例如: filesystem"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={e => setName(e.target.value)}
               />
             </div>
             <div className="space-y-1">
@@ -249,7 +255,7 @@ export default function McpPage() {
                 className="w-full border rounded-md px-3 py-2 text-sm"
                 placeholder="例如: npx"
                 value={command}
-                onChange={(e) => setCommand(e.target.value)}
+                onChange={e => setCommand(e.target.value)}
               />
             </div>
           </div>
@@ -259,7 +265,7 @@ export default function McpPage() {
               className="w-full border rounded-md px-3 py-2 text-sm"
               placeholder="例如: -y @modelcontextprotocol/server-filesystem /tmp"
               value={argsText}
-              onChange={(e) => setArgsText(e.target.value)}
+              onChange={e => setArgsText(e.target.value)}
             />
           </div>
           <div className="flex gap-3">
@@ -281,15 +287,24 @@ export default function McpPage() {
             <div className="text-xs text-gray-500">根据当前目标与能力缺口自动推荐</div>
           </div>
           {recommended.length === 0 ? (
-            <EmptyState title="暂无推荐" description="先补充目标和能力数据后，这里会给出更贴近当前阶段的工具建议。" className="py-4" />
+            <EmptyState
+              title="暂无推荐"
+              description="先补充目标和能力数据后，这里会给出更贴近当前阶段的工具建议。"
+              className="py-4"
+            />
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {recommended.map((manifest) => (
-                <div key={manifest.name} className="border rounded-lg p-4 bg-white flex items-start justify-between gap-4">
+              {recommended.map(manifest => (
+                <div
+                  key={manifest.name}
+                  className="border rounded-lg p-4 bg-white flex items-start justify-between gap-4"
+                >
                   <div className="space-y-2">
                     <div className="flex items-center gap-2">
                       <div className="font-medium text-gray-900">{manifest.name}</div>
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full ${manifest.permission_level === "high" ? "bg-rose-100 text-rose-700" : manifest.permission_level === "medium" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
+                      <span
+                        className={`text-[10px] px-2 py-0.5 rounded-full ${manifest.permission_level === "high" ? "bg-rose-100 text-rose-700" : manifest.permission_level === "medium" ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}
+                      >
                         {manifest.permission_level}
                       </span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
@@ -299,8 +314,11 @@ export default function McpPage() {
                     <div className="text-sm text-gray-600">{manifest.description}</div>
                     {manifest.tags.length > 0 && (
                       <div className="flex flex-wrap gap-2">
-                        {manifest.tags.map((tag) => (
-                          <span key={tag} className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] text-gray-600">
+                        {manifest.tags.map(tag => (
+                          <span
+                            key={tag}
+                            className="rounded-full border border-gray-200 bg-gray-50 px-2 py-0.5 text-[10px] text-gray-600"
+                          >
                             {tag}
                           </span>
                         ))}
@@ -363,7 +381,9 @@ export default function McpPage() {
                 <Check size={12} />
                 成功
               </div>
-              <div className="mt-1 text-xl font-semibold text-emerald-700">{auditStats.success}</div>
+              <div className="mt-1 text-xl font-semibold text-emerald-700">
+                {auditStats.success}
+              </div>
             </div>
             <div className="rounded-lg border border-rose-100 bg-rose-50 p-3">
               <div className="flex items-center gap-1.5 text-xs text-rose-600">
@@ -391,7 +411,7 @@ export default function McpPage() {
               {privacyRules.length === 0 ? (
                 <div className="text-xs text-gray-500">暂无隐私规则配置</div>
               ) : (
-                privacyRules.map((rule) => (
+                privacyRules.map(rule => (
                   <div
                     key={rule.ptype}
                     className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
@@ -416,8 +436,8 @@ export default function McpPage() {
                         rule.action === "Block"
                           ? "bg-rose-100 text-rose-700"
                           : rule.action === "Mask"
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-slate-100 text-slate-600"
+                            ? "bg-amber-100 text-amber-700"
+                            : "bg-slate-100 text-slate-600"
                       }`}
                     >
                       {rule.action === "Block" ? "阻止" : rule.action === "Mask" ? "脱敏" : "允许"}
@@ -441,10 +461,13 @@ export default function McpPage() {
             />
           ) : (
             <div className="space-y-3">
-              {auditLogs.map((log) => {
+              {auditLogs.map(log => {
                 const isExpanded = expandedLog === log.id;
                 return (
-                  <div key={log.id} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+                  <div
+                    key={log.id}
+                    className="rounded-lg border border-gray-200 bg-white overflow-hidden"
+                  >
                     {/* Header - always visible */}
                     <div
                       onClick={() => toggleLogExpand(log.id)}
@@ -540,11 +563,18 @@ export default function McpPage() {
             </button>
           </div>
           {servers.length === 0 ? (
-            <EmptyState title="暂无注册的 MCP Server" description="点击上方按钮注册服务器或使用模板安装。" className="py-4" />
+            <EmptyState
+              title="暂无注册的 MCP Server"
+              description="点击上方按钮注册服务器或使用模板安装。"
+              className="py-4"
+            />
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {servers.map((s) => (
-                <div key={s.name} className="border rounded-lg p-4 bg-white flex items-center justify-between">
+              {servers.map(s => (
+                <div
+                  key={s.name}
+                  className="border rounded-lg p-4 bg-white flex items-center justify-between"
+                >
                   <div>
                     <div className="font-medium text-gray-900">{s.name}</div>
                     <div className="text-xs text-gray-500 font-mono mt-1">
@@ -570,7 +600,11 @@ export default function McpPage() {
             <Wrench size={16} /> 可用工具列表
           </h3>
           {tools.length === 0 ? (
-            <EmptyState title="暂无可用工具" description="注册 MCP Server 后将显示可用工具列表。" className="py-4" />
+            <EmptyState
+              title="暂无可用工具"
+              description="注册 MCP Server 后将显示可用工具列表。"
+              className="py-4"
+            />
           ) : (
             <div className="grid grid-cols-1 gap-3">
               {tools.map((t, idx) => (
@@ -601,7 +635,7 @@ export default function McpPage() {
 
             {wizardStep === "select" && (
               <div className="space-y-3 max-h-96 overflow-auto pr-1">
-                {templates.map((tpl) => (
+                {templates.map(tpl => (
                   <button
                     key={tpl.id}
                     onClick={() => selectTemplate(tpl)}
@@ -629,7 +663,7 @@ export default function McpPage() {
 
                 {selectedTemplate.required_args.length > 0 ? (
                   <div className="space-y-3">
-                    {selectedTemplate.required_args.map((key) => (
+                    {selectedTemplate.required_args.map(key => (
                       <div key={key} className="space-y-1">
                         <label className="text-xs text-gray-500">
                           {selectedTemplate.arg_labels?.[key] || key}
@@ -639,8 +673,8 @@ export default function McpPage() {
                           type="text"
                           className="w-full border rounded-md px-3 py-2 text-sm"
                           value={templateInputs[key] || ""}
-                          onChange={(e) =>
-                            setTemplateInputs((prev) => ({ ...prev, [key]: e.target.value }))
+                          onChange={e =>
+                            setTemplateInputs(prev => ({ ...prev, [key]: e.target.value }))
                           }
                           placeholder={`输入 ${selectedTemplate.arg_labels?.[key] || key}`}
                         />

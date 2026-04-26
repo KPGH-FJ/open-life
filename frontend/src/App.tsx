@@ -1,6 +1,19 @@
 import { Component, ReactNode, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import { Map, MessageSquare, GitBranch, Brain, Network, Hammer, LayoutDashboard, Settings, Wrench, Sparkles, Activity, ShieldCheck } from "lucide-react";
+import {
+  Map,
+  MessageSquare,
+  GitBranch,
+  Brain,
+  Network,
+  Hammer,
+  LayoutDashboard,
+  Settings,
+  Wrench,
+  Sparkles,
+  Activity,
+  ShieldCheck,
+} from "lucide-react";
 import LifeMapPage from "./pages/LifeMapPage";
 import ChatPage from "./pages/ChatPage";
 import VersionControl from "./pages/VersionControl";
@@ -16,7 +29,10 @@ import OnboardingWizard from "./components/OnboardingWizard";
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
 
-class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error: string }> {
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { hasError: boolean; error: string }
+> {
   constructor(props: { children: ReactNode }) {
     super(props);
     this.state = { hasError: false, error: "" };
@@ -48,7 +64,7 @@ function App() {
 
   useEffect(() => {
     hasCompletedOnboarding()
-      .then((done) => {
+      .then(done => {
         setShowWizard(!done);
         setWizardReady(true);
       })
@@ -90,62 +106,41 @@ function App() {
                 diagnostics.beta_ready
                   ? "bg-emerald-100 text-emerald-800"
                   : diagnostics.chat_ready
-                  ? "bg-blue-100 text-blue-800"
-                  : "bg-amber-100 text-amber-800"
+                    ? "bg-blue-100 text-blue-800"
+                    : "bg-amber-100 text-amber-800"
               }`}
             >
-              {diagnostics.beta_ready ? "Beta 可试用" : diagnostics.chat_ready ? "核心链路已通" : "试用待修复"}
+              {diagnostics.beta_ready
+                ? "Beta 可试用"
+                : diagnostics.chat_ready
+                  ? "核心链路已通"
+                  : "试用待修复"}
             </NavLink>
           )}
         </div>
         <nav className="flex flex-wrap justify-end gap-2">
-          <NavLink
-            to="/workspace"
-            className={navClass}
-          >
+          <NavLink to="/workspace" className={navClass}>
             <LayoutDashboard size={16} /> Workspace
           </NavLink>
-          <NavLink
-            to="/agent"
-            className={navClass}
-          >
+          <NavLink to="/agent" className={navClass}>
             <MessageSquare size={16} /> Agent
           </NavLink>
-          <NavLink
-            to="/builder"
-            className={navClass}
-          >
+          <NavLink to="/builder" className={navClass}>
             <Hammer size={16} /> LifeModel
           </NavLink>
-          <NavLink
-            to="/"
-            end
-            className={navClass}
-          >
+          <NavLink to="/" end className={navClass}>
             <Map size={16} /> 地图
           </NavLink>
-          <NavLink
-            to="/memory"
-            className={navClass}
-          >
+          <NavLink to="/memory" className={navClass}>
             <Brain size={16} /> Memory
           </NavLink>
-          <NavLink
-            to="/runs"
-            className={navClass}
-          >
+          <NavLink to="/runs" className={navClass}>
             <Activity size={16} /> Runs
           </NavLink>
-          <NavLink
-            to="/review"
-            className={navClass}
-          >
+          <NavLink to="/review" className={navClass}>
             <ShieldCheck size={16} /> Review
           </NavLink>
-          <NavLink
-            to="/settings"
-            className={navClass}
-          >
+          <NavLink to="/settings" className={navClass}>
             <Settings size={16} /> 设置
           </NavLink>
           <details className="relative group">
@@ -170,10 +165,10 @@ function App() {
         <div className="border-b border-amber-200 bg-amber-50 px-4 py-3">
           <div className="mx-auto flex max-w-7xl flex-wrap items-start justify-between gap-3">
             <div>
-              <div className="text-sm font-semibold text-amber-900">Safe Mode：当前数据环境存在风险</div>
-              <div className="mt-1 text-xs text-amber-800">
-                {safeModeReason}
+              <div className="text-sm font-semibold text-amber-900">
+                Safe Mode：当前数据环境存在风险
               </div>
+              <div className="mt-1 text-xs text-amber-800">{safeModeReason}</div>
               <div className="mt-1 text-xs text-amber-700">
                 建议先去设置页的“恢复控制台”导出备份，再继续试用。
               </div>
@@ -200,7 +195,8 @@ function App() {
           <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3">
             <div className="text-xs text-blue-900">
               <span className="font-semibold">Beta 试用准备中：</span>
-              {diagnostics.beta_readiness_issues?.[0] ?? "继续完成设置、构建和首轮对话，就能形成完整试用闭环。"}
+              {diagnostics.beta_readiness_issues?.[0] ??
+                "继续完成设置、构建和首轮对话，就能形成完整试用闭环。"}
             </div>
             <NavLink
               to="/settings"
@@ -230,9 +226,7 @@ function App() {
           </Routes>
         </ErrorBoundary>
       </main>
-      {wizardReady && showWizard && (
-        <OnboardingWizard onComplete={() => setShowWizard(false)} />
-      )}
+      {wizardReady && showWizard && <OnboardingWizard onComplete={() => setShowWizard(false)} />}
     </div>
   );
 }

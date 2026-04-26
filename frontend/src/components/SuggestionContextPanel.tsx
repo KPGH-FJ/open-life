@@ -49,7 +49,10 @@ export default function SuggestionContextPanel({
     metaBadges.unshift({ label: `来源：${sourceLabel}`, tone: "neutral" });
   }
   if (riskLabel) {
-    metaBadges.push({ label: riskLabel, tone: riskLabel.includes("高") ? "rose" : riskLabel.includes("中") ? "amber" : "green" });
+    metaBadges.push({
+      label: riskLabel,
+      tone: riskLabel.includes("高") ? "rose" : riskLabel.includes("中") ? "amber" : "green",
+    });
   }
   if (typeof confidence === "number") {
     metaBadges.push({
@@ -66,7 +69,7 @@ export default function SuggestionContextPanel({
       </div>
       {metaBadges.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {metaBadges.map((badge) => (
+          {metaBadges.map(badge => (
             <span
               key={badge.label}
               className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${toneClassMap[badge.tone ?? "neutral"]}`}
@@ -81,9 +84,7 @@ export default function SuggestionContextPanel({
         {reason}
       </div>
       {affectedPath && (
-        <div className="text-[11px] text-slate-500 font-mono">
-          影响字段：{affectedPath}
-        </div>
+        <div className="text-[11px] text-slate-500 font-mono">影响字段：{affectedPath}</div>
       )}
       {note && (
         <div className="rounded-md bg-white/80 px-2.5 py-2 text-[11px] text-slate-500 leading-relaxed">

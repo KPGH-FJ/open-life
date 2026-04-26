@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { listSnapshots, restoreSnapshot, diffSnapshots, createSnapshot, getSystemDiagnostics, type SystemDiagnostics } from "../tauri";
+import {
+  listSnapshots,
+  restoreSnapshot,
+  diffSnapshots,
+  createSnapshot,
+  getSystemDiagnostics,
+  type SystemDiagnostics,
+} from "../tauri";
 import type { LifeModelVersion } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
@@ -34,24 +41,47 @@ function parseStructuredDiff(diffText: string): DiffLine[] {
 
     // Detect top-level keys to determine dimension
     const trimmed = text.trimStart();
-    if (trimmed.startsWith("identity:") || trimmed.startsWith("'identity':") || trimmed.startsWith('"identity":')) {
+    if (
+      trimmed.startsWith("identity:") ||
+      trimmed.startsWith("'identity':") ||
+      trimmed.startsWith('"identity":')
+    ) {
       currentDim = "identity";
       indentStack = [{ indent: leadingSpaces, dim: "identity" }];
-    } else if (trimmed.startsWith("goals:") || trimmed.startsWith("'goals':") || trimmed.startsWith('"goals":')) {
+    } else if (
+      trimmed.startsWith("goals:") ||
+      trimmed.startsWith("'goals':") ||
+      trimmed.startsWith('"goals":')
+    ) {
       currentDim = "goals";
       indentStack = [{ indent: leadingSpaces, dim: "goals" }];
-    } else if (trimmed.startsWith("capabilities:") || trimmed.startsWith("'capabilities':") || trimmed.startsWith('"capabilities":')) {
+    } else if (
+      trimmed.startsWith("capabilities:") ||
+      trimmed.startsWith("'capabilities':") ||
+      trimmed.startsWith('"capabilities":')
+    ) {
       currentDim = "capabilities";
       indentStack = [{ indent: leadingSpaces, dim: "capabilities" }];
-    } else if (trimmed.startsWith("state:") || trimmed.startsWith("'state':") || trimmed.startsWith('"state":')) {
+    } else if (
+      trimmed.startsWith("state:") ||
+      trimmed.startsWith("'state':") ||
+      trimmed.startsWith('"state":')
+    ) {
       currentDim = "state";
       indentStack = [{ indent: leadingSpaces, dim: "state" }];
-    } else if (trimmed.startsWith("metadata:") || trimmed.startsWith("evolution_rules:") || trimmed.startsWith("health_status:")) {
+    } else if (
+      trimmed.startsWith("metadata:") ||
+      trimmed.startsWith("evolution_rules:") ||
+      trimmed.startsWith("health_status:")
+    ) {
       currentDim = "other";
       indentStack = [{ indent: leadingSpaces, dim: "other" }];
     } else {
       // Pop stack if we dedented
-      while (indentStack.length > 0 && leadingSpaces <= indentStack[indentStack.length - 1].indent) {
+      while (
+        indentStack.length > 0 &&
+        leadingSpaces <= indentStack[indentStack.length - 1].indent
+      ) {
         indentStack.pop();
       }
       if (indentStack.length > 0) {
@@ -86,7 +116,8 @@ function tagBadgeClass(tag: string) {
   const t = tag.toLowerCase();
   if (t.includes("evolution")) return "bg-purple-100 text-purple-700";
   if (t.includes("calibration")) return "bg-indigo-100 text-indigo-700";
-  if (t.includes("builder") || t.includes("quick") || t.includes("socratic")) return "bg-emerald-100 text-emerald-700";
+  if (t.includes("builder") || t.includes("quick") || t.includes("socratic"))
+    return "bg-emerald-100 text-emerald-700";
   if (t.includes("progressive") || t.includes("incremental")) return "bg-amber-100 text-amber-700";
   if (t.includes("auto")) return "bg-gray-100 text-gray-700";
   return "bg-slate-100 text-slate-700";
@@ -105,7 +136,7 @@ function tagLabel(tag: string) {
 }
 
 function summarizeStructuredDiff(lines: DiffLine[]): DiffSummary {
-  const changed = lines.filter((line) => line.sign !== " ");
+  const changed = lines.filter(line => line.sign !== " ");
   const dimsMap = new Map<NonNullable<DiffLine["dim"]>, number>();
   for (const line of changed) {
     const dim = line.dim ?? "other";
@@ -113,14 +144,14 @@ function summarizeStructuredDiff(lines: DiffLine[]): DiffSummary {
   }
   return {
     totalChanges: changed.length,
-    adds: changed.filter((line) => line.sign === "+").length,
-    removes: changed.filter((line) => line.sign === "-").length,
+    adds: changed.filter(line => line.sign === "+").length,
+    removes: changed.filter(line => line.sign === "-").length,
     dims: Array.from(dimsMap.entries())
       .map(([dim, count]) => ({ dim, count }))
       .sort((a, b) => b.count - a.count),
     highlights: changed
-      .map((line) => line.text.replace(/^[+-]\s*/, "").trim())
-      .filter((text) => text.length > 0 && !text.endsWith(":"))
+      .map(line => line.text.replace(/^[+-]\s*/, "").trim())
+      .filter(text => text.length > 0 && !text.endsWith(":"))
       .slice(0, 4),
   };
 }
@@ -170,7 +201,9 @@ export default function VersionControl() {
 
   useEffect(() => {
     load();
-    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
+    getSystemDiagnostics()
+      .then(setDiagnostics)
+      .catch(() => null);
   }, []);
 
   const handleCreate = async () => {
@@ -197,7 +230,12 @@ export default function VersionControl() {
       setNotice(buildSafeModeBlockedMessage("版本回滚", diagnostics));
       return;
     }
-    if (!confirm(`确定要回滚到版本 ${version} 吗？\n\n系统会先自动创建 pre-restore 备份快照，再恢复目标版本。`)) return;
+    if (
+      !confirm(
+        `确定要回滚到版本 ${version} 吗？\n\n系统会先自动创建 pre-restore 备份快照，再恢复目标版本。`
+      )
+    )
+      return;
     try {
       await restoreSnapshot(version);
       setNotice(`回滚成功，系统已先自动备份当前版本，再恢复到 ${version}`);
@@ -207,9 +245,9 @@ export default function VersionControl() {
   };
 
   const toggleSelect = (version: string) => {
-    setSelected((prev) => {
+    setSelected(prev => {
       if (prev.includes(version)) {
-        return prev.filter((v) => v !== version);
+        return prev.filter(v => v !== version);
       }
       if (prev.length >= 2) {
         return [prev[1], version];
@@ -234,11 +272,21 @@ export default function VersionControl() {
 
   const dimLegend = (
     <div className="flex flex-wrap gap-3 text-xs mb-3">
-      <span className="px-2 py-1 rounded border-l-4 border-pink-400 bg-pink-50 text-pink-700">Identity</span>
-      <span className="px-2 py-1 rounded border-l-4 border-blue-400 bg-blue-50 text-blue-700">Goals</span>
-      <span className="px-2 py-1 rounded border-l-4 border-amber-400 bg-amber-50 text-amber-700">Capabilities</span>
-      <span className="px-2 py-1 rounded border-l-4 border-emerald-400 bg-emerald-50 text-emerald-700">State</span>
-      <span className="px-2 py-1 rounded border-l-4 border-gray-300 bg-gray-50 text-gray-600">Other</span>
+      <span className="px-2 py-1 rounded border-l-4 border-pink-400 bg-pink-50 text-pink-700">
+        Identity
+      </span>
+      <span className="px-2 py-1 rounded border-l-4 border-blue-400 bg-blue-50 text-blue-700">
+        Goals
+      </span>
+      <span className="px-2 py-1 rounded border-l-4 border-amber-400 bg-amber-50 text-amber-700">
+        Capabilities
+      </span>
+      <span className="px-2 py-1 rounded border-l-4 border-emerald-400 bg-emerald-50 text-emerald-700">
+        State
+      </span>
+      <span className="px-2 py-1 rounded border-l-4 border-gray-300 bg-gray-50 text-gray-600">
+        Other
+      </span>
     </div>
   );
 
@@ -250,9 +298,12 @@ export default function VersionControl() {
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
-                <div className="text-sm font-semibold text-amber-900">Safe Mode：版本写入已暂停</div>
+                <div className="text-sm font-semibold text-amber-900">
+                  Safe Mode：版本写入已暂停
+                </div>
                 <div className="mt-1 text-xs leading-5 text-amber-800">
-                  {safeModeReason} 你仍然可以查看历史快照与版本差异，但创建快照和执行回滚都会被拦截。
+                  {safeModeReason}{" "}
+                  你仍然可以查看历史快照与版本差异，但创建快照和执行回滚都会被拦截。
                 </div>
               </div>
               <Link
@@ -265,9 +316,7 @@ export default function VersionControl() {
           </div>
         )}
         {notice && (
-          <div className="text-sm text-green-600 bg-green-50 px-3 py-2 rounded">
-            {notice}
-          </div>
+          <div className="text-sm text-green-600 bg-green-50 px-3 py-2 rounded">{notice}</div>
         )}
 
         <section className="rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-4">
@@ -291,7 +340,8 @@ export default function VersionControl() {
             <div className="rounded-xl border border-white bg-white px-3 py-3">
               <div className="text-[11px] font-medium text-slate-500">什么时候回滚</div>
               <div className="mt-1 text-xs leading-5 text-slate-700">
-                只有在确认变化方向明显不对时才回滚；系统会先自动创建 pre-restore 备份，避免把现在的状态彻底丢掉。
+                只有在确认变化方向明显不对时才回滚；系统会先自动创建 pre-restore
+                备份，避免把现在的状态彻底丢掉。
               </div>
             </div>
           </div>
@@ -303,13 +353,13 @@ export default function VersionControl() {
             <input
               placeholder="标签 (如: 里程碑 v0.2)"
               value={tag}
-              onChange={(e) => setTag(e.target.value)}
+              onChange={e => setTag(e.target.value)}
               className="flex-1 border rounded-md px-3 py-2"
             />
             <input
               placeholder="备注"
               value={note}
-              onChange={(e) => setNote(e.target.value)}
+              onChange={e => setNote(e.target.value)}
               className="flex-[2] border rounded-md px-3 py-2"
             />
             <button
@@ -345,10 +395,14 @@ export default function VersionControl() {
           {loading ? (
             <LoadingSpinner text="加载中..." className="py-6" />
           ) : snapshots.length === 0 ? (
-            <EmptyState title="暂无历史快照" description="你还没有保存过任何版本快照。" className="py-6" />
+            <EmptyState
+              title="暂无历史快照"
+              description="你还没有保存过任何版本快照。"
+              className="py-6"
+            />
           ) : (
             <div className="divide-y border rounded-md">
-              {snapshots.map((s) => (
+              {snapshots.map(s => (
                 <div
                   key={s.version}
                   className="flex items-center justify-between px-4 py-3 hover:bg-gray-50"
@@ -392,7 +446,9 @@ export default function VersionControl() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="rounded-lg border bg-indigo-50/70 px-4 py-3">
                 <div className="text-xs text-indigo-500">总变更</div>
-                <div className="text-xl font-semibold text-indigo-900">{diffSummary.totalChanges}</div>
+                <div className="text-xl font-semibold text-indigo-900">
+                  {diffSummary.totalChanges}
+                </div>
               </div>
               <div className="rounded-lg border bg-emerald-50/70 px-4 py-3">
                 <div className="text-xs text-emerald-500">新增</div>
@@ -408,8 +464,11 @@ export default function VersionControl() {
                 <div className="text-xs font-medium text-gray-700 mb-2">差异摘要</div>
                 {diffSummary.dims.length > 0 ? (
                   <div className="flex flex-wrap gap-2">
-                    {diffSummary.dims.map((item) => (
-                      <span key={item.dim} className="rounded-full border bg-white px-3 py-1 text-xs text-gray-700">
+                    {diffSummary.dims.map(item => (
+                      <span
+                        key={item.dim}
+                        className="rounded-full border bg-white px-3 py-1 text-xs text-gray-700"
+                      >
                         {dimLabel(item.dim)} · {item.count} 处
                       </span>
                     ))}
@@ -434,7 +493,12 @@ export default function VersionControl() {
             {dimLegend}
             <pre className="text-xs bg-gray-900 text-gray-100 p-4 rounded-md overflow-auto max-h-96">
               {structuredDiff.map((line, idx) => {
-                const base = line.sign === "+" ? "text-green-300" : line.sign === "-" ? "text-red-300" : "text-gray-300";
+                const base =
+                  line.sign === "+"
+                    ? "text-green-300"
+                    : line.sign === "-"
+                      ? "text-red-300"
+                      : "text-gray-300";
                 return (
                   <div key={idx} className={`${dimBadgeClass(line.dim)} ${base} px-1`}>
                     {line.text}

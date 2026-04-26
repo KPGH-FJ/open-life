@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { Network, Send, RefreshCw, Shield, Sparkles, Play, Square } from "lucide-react";
-import { a2aDiscoverAgent, a2aSendTask, a2aLocalAgentCard, a2aHandleTask, a2aBridgeLocal, a2aRestartSidecar, a2aStopSidecar } from "../tauri";
+import {
+  a2aDiscoverAgent,
+  a2aSendTask,
+  a2aLocalAgentCard,
+  a2aHandleTask,
+  a2aBridgeLocal,
+  a2aRestartSidecar,
+  a2aStopSidecar,
+} from "../tauri";
 import ErrorBanner from "../components/ErrorBanner";
 
 export default function A2APage() {
@@ -25,7 +33,9 @@ export default function A2APage() {
   const [pageError, setPageError] = useState<string>("");
 
   useEffect(() => {
-    a2aLocalAgentCard().then(setLocalCard).catch(() => {});
+    a2aLocalAgentCard()
+      .then(setLocalCard)
+      .catch(() => {});
   }, []);
 
   const refreshLocalCard = async () => {
@@ -104,7 +114,12 @@ export default function A2APage() {
     if (!localInput.trim()) return;
     setBridgeLoading(true);
     try {
-      const result = await a2aBridgeLocal(bridgeMethod, localInput, "local-bridge-demo", "openlife.hermes_bridge");
+      const result = await a2aBridgeLocal(
+        bridgeMethod,
+        localInput,
+        "local-bridge-demo",
+        "openlife.hermes_bridge"
+      );
       setBridgeResult(JSON.stringify(result, null, 2));
     } catch (e) {
       setBridgeResult("错误: " + String(e));
@@ -146,7 +161,7 @@ export default function A2APage() {
           <div className="flex gap-2">
             <input
               value={agentUrl}
-              onChange={(e) => setAgentUrl(e.target.value)}
+              onChange={e => setAgentUrl(e.target.value)}
               placeholder="Agent Base URL"
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
@@ -155,21 +170,40 @@ export default function A2APage() {
               disabled={loadingDiscover}
               className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {loadingDiscover ? <RefreshCw size={16} className="animate-spin" /> : <Network size={16} />}
+              {loadingDiscover ? (
+                <RefreshCw size={16} className="animate-spin" />
+              ) : (
+                <Network size={16} />
+              )}
               发现
             </button>
           </div>
           {agentCard && (
             <div className="bg-gray-50 border rounded-lg p-4 text-sm space-y-1">
-              <div><span className="font-medium">Name:</span> {agentCard.name}</div>
-              <div><span className="font-medium">Description:</span> {agentCard.description}</div>
-              <div><span className="font-medium">Version:</span> {agentCard.version}</div>
-              <div><span className="font-medium">URL:</span> {agentCard.url}</div>
-              <div><span className="font-medium">Capabilities:</span> {JSON.stringify(agentCard.capabilities)}</div>
-              <div><span className="font-medium">Skills:</span></div>
+              <div>
+                <span className="font-medium">Name:</span> {agentCard.name}
+              </div>
+              <div>
+                <span className="font-medium">Description:</span> {agentCard.description}
+              </div>
+              <div>
+                <span className="font-medium">Version:</span> {agentCard.version}
+              </div>
+              <div>
+                <span className="font-medium">URL:</span> {agentCard.url}
+              </div>
+              <div>
+                <span className="font-medium">Capabilities:</span>{" "}
+                {JSON.stringify(agentCard.capabilities)}
+              </div>
+              <div>
+                <span className="font-medium">Skills:</span>
+              </div>
               <ul className="list-disc list-inside text-gray-700">
                 {agentCard.skills?.map((s: any) => (
-                  <li key={s.id}>{s.name} — {s.description}</li>
+                  <li key={s.id}>
+                    {s.name} — {s.description}
+                  </li>
                 ))}
               </ul>
             </div>
@@ -181,13 +215,13 @@ export default function A2APage() {
           <div className="flex gap-2">
             <input
               value={taskSkill}
-              onChange={(e) => setTaskSkill(e.target.value)}
+              onChange={e => setTaskSkill(e.target.value)}
               placeholder="Skill metadata (可选)"
               className="w-40 border rounded-lg px-3 py-2 text-sm"
             />
             <input
               value={taskText}
-              onChange={(e) => setTaskText(e.target.value)}
+              onChange={e => setTaskText(e.target.value)}
               placeholder="输入要发送给 Agent 的内容"
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
@@ -201,7 +235,9 @@ export default function A2APage() {
             </button>
           </div>
           {taskResult && (
-            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">{taskResult}</pre>
+            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">
+              {taskResult}
+            </pre>
           )}
         </section>
 
@@ -224,12 +260,20 @@ export default function A2APage() {
           </div>
           {localCard && (
             <div className="bg-indigo-50 border border-indigo-100 rounded-lg p-4 text-sm space-y-1">
-              <div><span className="font-medium">Name:</span> {localCard.name}</div>
-              <div><span className="font-medium">Description:</span> {localCard.description}</div>
-              <div><span className="font-medium">Skills:</span></div>
+              <div>
+                <span className="font-medium">Name:</span> {localCard.name}
+              </div>
+              <div>
+                <span className="font-medium">Description:</span> {localCard.description}
+              </div>
+              <div>
+                <span className="font-medium">Skills:</span>
+              </div>
               <ul className="list-disc list-inside text-gray-700">
                 {localCard.skills?.map((s: any) => (
-                  <li key={s.id}>{s.name} — {s.description}</li>
+                  <li key={s.id}>
+                    {s.name} — {s.description}
+                  </li>
                 ))}
               </ul>
             </div>
@@ -238,12 +282,14 @@ export default function A2APage() {
             <div className="flex gap-2">
               <input
                 value={localInput}
-                onChange={(e) => setLocalInput(e.target.value)}
+                onChange={e => setLocalInput(e.target.value)}
                 placeholder="输入要发给本地 A2A Agent 的内容"
                 className="flex-1 border rounded-lg px-3 py-2 text-sm"
               />
               <button
-                onClick={() => handleLocalService("openlife.query_life_model", localInput || "查询人生模型")}
+                onClick={() =>
+                  handleLocalService("openlife.query_life_model", localInput || "查询人生模型")
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
@@ -252,14 +298,18 @@ export default function A2APage() {
             </div>
             <div className="flex gap-2">
               <button
-                onClick={() => handleLocalService("openlife.assess_values", localInput || "评估这段话")}
+                onClick={() =>
+                  handleLocalService("openlife.assess_values", localInput || "评估这段话")
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
                 <Shield size={16} /> 价值观评估
               </button>
               <button
-                onClick={() => handleLocalService("openlife.hermes_bridge", localInput || "帮我做决策")}
+                onClick={() =>
+                  handleLocalService("openlife.hermes_bridge", localInput || "帮我做决策")
+                }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
@@ -274,7 +324,9 @@ export default function A2APage() {
             )}
           </div>
           {localResult && (
-            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">{localResult}</pre>
+            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-64">
+              {localResult}
+            </pre>
           )}
         </section>
 
@@ -283,13 +335,13 @@ export default function A2APage() {
           <div className="flex gap-2">
             <input
               value={bridgeMethod}
-              onChange={(e) => setBridgeMethod(e.target.value)}
+              onChange={e => setBridgeMethod(e.target.value)}
               placeholder="Hermes method"
               className="w-40 border rounded-lg px-3 py-2 text-sm"
             />
             <input
               value={localInput}
-              onChange={(e) => setLocalInput(e.target.value)}
+              onChange={e => setLocalInput(e.target.value)}
               placeholder="输入要送入 Hermes/A2A 桥接的文本"
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
@@ -298,7 +350,11 @@ export default function A2APage() {
               disabled={bridgeLoading || !localInput.trim()}
               className="bg-indigo-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {bridgeLoading ? <RefreshCw size={16} className="animate-spin" /> : <Network size={16} />}
+              {bridgeLoading ? (
+                <RefreshCw size={16} className="animate-spin" />
+              ) : (
+                <Network size={16} />
+              )}
               桥接运行
             </button>
           </div>
@@ -306,7 +362,9 @@ export default function A2APage() {
             这个区域会展示 Hermes 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 Hermes 结果。
           </div>
           {bridgeResult && (
-            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-80">{bridgeResult}</pre>
+            <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-80">
+              {bridgeResult}
+            </pre>
           )}
         </section>
       </div>

@@ -55,7 +55,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
             <div className="text-xs text-orange-900 bg-white/80 rounded p-2">
               <div className="font-medium mb-1">隐私提醒:</div>
               <ul className="list-disc pl-4 space-y-1">
-                {call.privacy_warnings.map((warning) => (
+                {call.privacy_warnings.map(warning => (
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
@@ -64,7 +64,9 @@ export default function ToolCallCard({ call, onExecute }: Props) {
           {call.sanitized_arguments && Object.keys(call.sanitized_arguments).length > 0 && (
             <div className="text-xs text-gray-700 bg-white/80 rounded p-2">
               <div className="font-medium mb-1">脱敏后参数预览:</div>
-              <pre className="whitespace-pre-wrap break-all">{JSON.stringify(call.sanitized_arguments, null, 2)}</pre>
+              <pre className="whitespace-pre-wrap break-all">
+                {JSON.stringify(call.sanitized_arguments, null, 2)}
+              </pre>
             </div>
           )}
           <div className="flex gap-2">
@@ -85,7 +87,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
             <div className="text-xs text-amber-800 bg-amber-50 rounded p-2">
               <div className="font-medium mb-1">隐私命中:</div>
               <ul className="list-disc pl-4 space-y-1">
-                {call.privacy_warnings.map((warning) => (
+                {call.privacy_warnings.map(warning => (
                   <li key={warning}>{warning}</li>
                 ))}
               </ul>
@@ -94,30 +96,32 @@ export default function ToolCallCard({ call, onExecute }: Props) {
           {call.arguments && Object.keys(call.arguments).length > 0 && (
             <div className="text-xs text-gray-600 bg-gray-50 rounded p-2">
               <div className="font-medium mb-1">参数:</div>
-              <pre className="whitespace-pre-wrap break-all">{JSON.stringify(call.arguments, null, 2)}</pre>
+              <pre className="whitespace-pre-wrap break-all">
+                {JSON.stringify(call.arguments, null, 2)}
+              </pre>
             </div>
           )}
           {call.sanitized_arguments && Object.keys(call.sanitized_arguments).length > 0 && (
             <div className="text-xs text-gray-600 bg-slate-50 rounded p-2">
               <div className="font-medium mb-1">脱敏后参数:</div>
-              <pre className="whitespace-pre-wrap break-all">{JSON.stringify(call.sanitized_arguments, null, 2)}</pre>
+              <pre className="whitespace-pre-wrap break-all">
+                {JSON.stringify(call.sanitized_arguments, null, 2)}
+              </pre>
             </div>
           )}
-          {call.success ? (
-            call.output && (
-              <div className="text-xs text-gray-700 bg-green-50 rounded p-2">
-                <div className="font-medium mb-1">结果:</div>
-                <pre className="whitespace-pre-wrap break-all">{call.output}</pre>
-              </div>
-            )
-          ) : (
-            call.error && (
-              <div className="text-xs text-red-700 bg-red-50 rounded p-2">
-                <div className="font-medium mb-1">错误:</div>
-                {call.error}
-              </div>
-            )
-          )}
+          {call.success
+            ? call.output && (
+                <div className="text-xs text-gray-700 bg-green-50 rounded p-2">
+                  <div className="font-medium mb-1">结果:</div>
+                  <pre className="whitespace-pre-wrap break-all">{call.output}</pre>
+                </div>
+              )
+            : call.error && (
+                <div className="text-xs text-red-700 bg-red-50 rounded p-2">
+                  <div className="font-medium mb-1">错误:</div>
+                  {call.error}
+                </div>
+              )}
         </>
       )}
     </div>

@@ -7,7 +7,9 @@ function isTauriEnv(): boolean {
 
 function safeInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   if (!isTauriEnv()) {
-    return Promise.reject(new Error("当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。"));
+    return Promise.reject(
+      new Error("当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。")
+    );
   }
   const normalizedArgs = withTauriArgAliases(args);
   if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
@@ -55,7 +57,15 @@ export async function saveLifeModel(model: LifeModel): Promise<void> {
 
 export interface AppConfig {
   llm: {
-    provider?: "deepseek" | "openai" | "openrouter" | "siliconflow" | "moonshot" | "dashscope" | "zhipu" | "custom";
+    provider?:
+      | "deepseek"
+      | "openai"
+      | "openrouter"
+      | "siliconflow"
+      | "moonshot"
+      | "dashscope"
+      | "zhipu"
+      | "custom";
     openai_base: string;
     openai_key: string;
     embedding_model: string;
@@ -76,7 +86,10 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 
 // DEPRECATED: use sendMessageV2 for full trace support
 export async function sendMessage(sessionId: string, messages: ChatMessage[]): Promise<string> {
-  const result = await safeInvoke<SendMessageResult>("send_message", { ...sessionArgs(sessionId), messages });
+  const result = await safeInvoke<SendMessageResult>("send_message", {
+    ...sessionArgs(sessionId),
+    messages,
+  });
   return result.reply;
 }
 
@@ -132,11 +145,17 @@ export interface StreamMessageDonePayload {
   tool_calls: ToolCallResult[];
 }
 
-export async function sendMessageV2(sessionId: string, messages: ChatMessage[]): Promise<SendMessageResult> {
+export async function sendMessageV2(
+  sessionId: string,
+  messages: ChatMessage[]
+): Promise<SendMessageResult> {
   return safeInvoke<SendMessageResult>("send_message", { ...sessionArgs(sessionId), messages });
 }
 
-export async function startStreamMessage(sessionId: string, messages: ChatMessage[]): Promise<void> {
+export async function startStreamMessage(
+  sessionId: string,
+  messages: ChatMessage[]
+): Promise<void> {
   const payload = { ...sessionArgs(sessionId), messages };
   return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
 }
@@ -146,7 +165,11 @@ export async function hermesDispatch(
   method: string,
   messages: ChatMessage[]
 ): Promise<HermesTrace> {
-  return safeInvoke<HermesTrace>("hermes_dispatch", { ...sessionArgs(sessionId), method, messages });
+  return safeInvoke<HermesTrace>("hermes_dispatch", {
+    ...sessionArgs(sessionId),
+    method,
+    messages,
+  });
 }
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
@@ -253,7 +276,10 @@ export async function setSchedulerConfig(localModel: string, preferLocal: boolea
   });
 }
 
-export async function executeToolCall(name: string, arguments_: Record<string, any>): Promise<ToolCallResult> {
+export async function executeToolCall(
+  name: string,
+  arguments_: Record<string, any>
+): Promise<ToolCallResult> {
   return safeInvoke<ToolCallResult>("execute_tool_call", { name, arguments: arguments_ });
 }
 
@@ -271,11 +297,19 @@ export interface McpArgumentInspection {
   requires_confirmation: boolean;
 }
 
-export async function inspectMcpCall(name: string, arguments_: Record<string, any>): Promise<McpArgumentInspection> {
+export async function inspectMcpCall(
+  name: string,
+  arguments_: Record<string, any>
+): Promise<McpArgumentInspection> {
   return safeInvoke<McpArgumentInspection>("inspect_mcp_call", { name, arguments: arguments_ });
 }
 
-export async function registerMcpServer(name: string, command: string, args: string[], env?: Record<string, string>): Promise<void> {
+export async function registerMcpServer(
+  name: string,
+  command: string,
+  args: string[],
+  env?: Record<string, string>
+): Promise<void> {
   return safeInvoke("register_mcp_server", { name, command, args, env });
 }
 
@@ -350,7 +384,10 @@ export async function recommendMcpManifests(topK?: number): Promise<ToolManifest
   });
 }
 
-export async function createSnapshot(tag: string, note: string): Promise<import("./types").LifeModelVersion> {
+export async function createSnapshot(
+  tag: string,
+  note: string
+): Promise<import("./types").LifeModelVersion> {
   return safeInvoke<import("./types").LifeModelVersion>("create_snapshot", { tag, note });
 }
 
@@ -411,7 +448,7 @@ export async function runMicroEvolution(): Promise<{
   message: string;
   snapshot_version?: string | null;
 }> {
-  return safeInvoke('run_micro_evolution');
+  return safeInvoke("run_micro_evolution");
 }
 
 export async function generateCalibrationReport(periodDays: number): Promise<{
@@ -424,7 +461,7 @@ export async function generateCalibrationReport(periodDays: number): Promise<{
   suggested_actions: string[];
   summary_text: string;
 }> {
-  return safeInvoke('generate_calibration_report', {
+  return safeInvoke("generate_calibration_report", {
     periodDays,
     period_days: periodDays,
   });
@@ -470,7 +507,7 @@ export async function generateMicroEvolutionChanges(): Promise<{
   requires_confirmation: boolean;
   signal_summary: EvolutionSignalSummary;
 }> {
-  return safeInvoke('generate_micro_evolution_changes');
+  return safeInvoke("generate_micro_evolution_changes");
 }
 
 export async function applyCalibration(
@@ -482,19 +519,17 @@ export async function applyCalibration(
   applied_count: number;
   message: string;
 }> {
-  return safeInvoke('apply_calibration', { changes, mode });
+  return safeInvoke("apply_calibration", { changes, mode });
 }
 
-export async function calibrationCreateProposals(
-  changes: EvolutionChange[]
-): Promise<{
+export async function calibrationCreateProposals(changes: EvolutionChange[]): Promise<{
   created_count: number;
   created_ids: string[];
   error_count: number;
   errors: string[];
   message: string;
 }> {
-  return safeInvoke('calibration_create_proposals', { changes });
+  return safeInvoke("calibration_create_proposals", { changes });
 }
 
 export async function shouldShowCalibration(): Promise<{
@@ -502,11 +537,11 @@ export async function shouldShowCalibration(): Promise<{
   monthly: boolean;
   today: string;
 }> {
-  return safeInvoke('should_show_calibration');
+  return safeInvoke("should_show_calibration");
 }
 
-export async function markCalibrationShown(period: 'weekly' | 'monthly'): Promise<void> {
-  return safeInvoke('mark_calibration_shown', { period });
+export async function markCalibrationShown(period: "weekly" | "monthly"): Promise<void> {
+  return safeInvoke("mark_calibration_shown", { period });
 }
 
 export async function runMemoryTierMaintenance(): Promise<{
@@ -552,7 +587,12 @@ export async function indexMemoryChunk(
 export async function searchMemory(
   query: string,
   topK: number
-): Promise<Array<{ chunk: { id: number; session_id: string; content: string; source: string; created_at: string }; score: number }>> {
+): Promise<
+  Array<{
+    chunk: { id: number; session_id: string; content: string; source: string; created_at: string };
+    score: number;
+  }>
+> {
   const raw: Array<[any, number]> = await safeInvoke("search_memory", {
     query,
     topK,
@@ -665,7 +705,19 @@ export async function builderStart(
   });
 }
 
-export async function builderStep(sessionId: string, userReply: string): Promise<{ prompt: string; finished: boolean; model?: LifeModel; progress: BuilderProgress; analysis?: BuilderAnalysis; pending_signals?: BuilderSignal[]; mode?: string; target_dimension?: string }> {
+export async function builderStep(
+  sessionId: string,
+  userReply: string
+): Promise<{
+  prompt: string;
+  finished: boolean;
+  model?: LifeModel;
+  progress: BuilderProgress;
+  analysis?: BuilderAnalysis;
+  pending_signals?: BuilderSignal[];
+  mode?: string;
+  target_dimension?: string;
+}> {
   return safeInvoke("builder_step", {
     ...sessionArgs(sessionId),
     userReply,
@@ -881,7 +933,10 @@ export async function recordState(
   });
 }
 
-export async function getStateHistory(dimensionName: string, limit: number): Promise<StateHistoryEntry[]> {
+export async function getStateHistory(
+  dimensionName: string,
+  limit: number
+): Promise<StateHistoryEntry[]> {
   return safeInvoke<StateHistoryEntry[]>("get_state_history", {
     dimensionName,
     dimension_name: dimensionName,
@@ -897,14 +952,21 @@ export async function getDailyGoals(): Promise<DailyGoal[]> {
   return safeInvoke<DailyGoal[]>("get_daily_goals");
 }
 
-export async function addDailyGoal(name: string, timeBlock?: { start: string; end: string }): Promise<void> {
+export async function addDailyGoal(
+  name: string,
+  timeBlock?: { start: string; end: string }
+): Promise<void> {
   return safeInvoke("add_daily_goal", {
     name,
     ...optionalDualArg("timeBlock", "time_block", timeBlock),
   });
 }
 
-export async function updateDailyGoal(index: number, name: string, timeBlock?: { start: string; end: string }): Promise<void> {
+export async function updateDailyGoal(
+  index: number,
+  name: string,
+  timeBlock?: { start: string; end: string }
+): Promise<void> {
   return safeInvoke("update_daily_goal", {
     index,
     name,
@@ -1096,7 +1158,10 @@ export async function listAgentRuns(limit: number = 50, offset: number = 0): Pro
   return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
 }
 
-export async function listAgentRunsForSession(sessionId: string, limit: number = 50): Promise<AgentRun[]> {
+export async function listAgentRunsForSession(
+  sessionId: string,
+  limit: number = 50
+): Promise<AgentRun[]> {
   return safeInvoke<AgentRun[]>("list_agent_runs_for_session", { sessionId, limit });
 }
 
@@ -1115,7 +1180,11 @@ export async function batchAcceptLowRiskProposals(): Promise<number> {
 
 // ── Proposal ──
 export type ProposalStatus = "pending" | "accepted" | "rejected" | "edited" | "postponed";
-export type ProposalType = "life_model_update" | "memory_update" | "tool_permission" | "goal_update";
+export type ProposalType =
+  | "life_model_update"
+  | "memory_update"
+  | "tool_permission"
+  | "goal_update";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export interface AgentProposal {

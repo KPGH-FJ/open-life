@@ -1,6 +1,18 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertCircle, Check, Clock, Inbox, RefreshCw, ShieldCheck, X, Edit2, ChevronDown, Hammer, SlidersHorizontal } from "lucide-react";
+import {
+  AlertCircle,
+  Check,
+  Clock,
+  Inbox,
+  RefreshCw,
+  ShieldCheck,
+  X,
+  Edit2,
+  ChevronDown,
+  Hammer,
+  SlidersHorizontal,
+} from "lucide-react";
 import {
   acceptProposal,
   listProposals,
@@ -117,7 +129,7 @@ export default function ProposalReviewPage() {
 
   const toggleSelection = (id: string, risk: string) => {
     if (risk === "high" || risk === "critical") return;
-    setSelectedIds((prev) => {
+    setSelectedIds(prev => {
       const next = new Set(prev);
       if (next.has(id)) {
         next.delete(id);
@@ -179,7 +191,9 @@ export default function ProposalReviewPage() {
     }
   };
 
-  const selectableCount = proposals.filter((p) => p.riskLevel !== "high" && p.riskLevel !== "critical").length;
+  const selectableCount = proposals.filter(
+    p => p.riskLevel !== "high" && p.riskLevel !== "critical"
+  ).length;
   const allSelected = selectableCount > 0 && selectableCount === selectedIds.size;
 
   const toggleSelectAll = () => {
@@ -187,8 +201,8 @@ export default function ProposalReviewPage() {
       setSelectedIds(new Set());
     } else {
       const ids = proposals
-        .filter((p) => p.riskLevel !== "high" && p.riskLevel !== "critical")
-        .map((p) => p.id);
+        .filter(p => p.riskLevel !== "high" && p.riskLevel !== "critical")
+        .map(p => p.id);
       setSelectedIds(new Set(ids));
     }
   };
@@ -207,7 +221,8 @@ export default function ProposalReviewPage() {
                 </div>
                 <h2 className="mt-4 text-2xl font-bold tracking-tight">Review Center</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-300">
-                  这里集中处理 OpenLife 对人生模型的更新建议。确认前不会写入，拒绝后不会影响现有模型。
+                  这里集中处理 OpenLife
+                  对人生模型的更新建议。确认前不会写入，拒绝后不会影响现有模型。
                 </p>
               </div>
               <button
@@ -235,7 +250,9 @@ export default function ProposalReviewPage() {
         {safeMode && (
           <div className="rounded-2xl border border-amber-100 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <div className="font-medium">系统处于 Safe Mode</div>
-            <div className="mt-1">{safeModeReason} 当前仅可查看和拒绝/稍后处理 Proposal，无法应用或编辑。</div>
+            <div className="mt-1">
+              {safeModeReason} 当前仅可查看和拒绝/稍后处理 Proposal，无法应用或编辑。
+            </div>
           </div>
         )}
 
@@ -244,11 +261,13 @@ export default function ProposalReviewPage() {
             <SlidersHorizontal size={14} className="text-stone-400" />
             <select
               value={filterType}
-              onChange={(e) => setFilterType(e.target.value)}
+              onChange={e => setFilterType(e.target.value)}
               className="bg-transparent text-sm text-stone-700 outline-none"
             >
-              {TYPE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              {TYPE_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
               ))}
             </select>
           </div>
@@ -256,11 +275,13 @@ export default function ProposalReviewPage() {
             <ShieldCheck size={14} className="text-stone-400" />
             <select
               value={filterRisk}
-              onChange={(e) => setFilterRisk(e.target.value)}
+              onChange={e => setFilterRisk(e.target.value)}
               className="bg-transparent text-sm text-stone-700 outline-none"
             >
-              {RISK_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              {RISK_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
               ))}
             </select>
           </div>
@@ -292,15 +313,13 @@ export default function ProposalReviewPage() {
                 to="/builder"
                 className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-4 py-2 text-sm text-amber-50 hover:bg-stone-800"
               >
-                <Hammer size={14} />
-                去 Builder 构建
+                <Hammer size={14} />去 Builder 构建
               </Link>
               <Link
                 to="/calibration"
                 className="inline-flex items-center gap-1.5 rounded-full border border-stone-200 px-4 py-2 text-sm text-stone-600 hover:bg-stone-50"
               >
-                <SlidersHorizontal size={14} />
-                去 Calibration 校准
+                <SlidersHorizontal size={14} />去 Calibration 校准
               </Link>
             </div>
           </div>
@@ -320,8 +339,11 @@ export default function ProposalReviewPage() {
               </div>
             )}
             <div className="grid gap-4">
-              {proposals.map((proposal) => (
-                <div key={proposal.id} className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm">
+              {proposals.map(proposal => (
+                <div
+                  key={proposal.id}
+                  className="rounded-3xl border border-stone-200 bg-white p-5 shadow-sm"
+                >
                   <div className="flex flex-wrap items-start justify-between gap-4">
                     <div className="flex items-start gap-3">
                       {(proposal.riskLevel === "low" || proposal.riskLevel === "medium") && (
@@ -334,8 +356,12 @@ export default function ProposalReviewPage() {
                       )}
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-semibold text-stone-950">{proposal.affectedPath}</span>
-                          <span className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${riskClass(proposal.riskLevel)}`}>
+                          <span className="font-semibold text-stone-950">
+                            {proposal.affectedPath}
+                          </span>
+                          <span
+                            className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${riskClass(proposal.riskLevel)}`}
+                          >
                             {proposal.riskLevel}
                           </span>
                           <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
@@ -348,9 +374,16 @@ export default function ProposalReviewPage() {
                           <span>置信度：{Math.round(proposal.confidence * 100)}%</span>
                           {proposal.sourceKind && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[10px]">
-                              {proposal.sourceKind === "builder" ? "🏗️ Builder" : proposal.sourceKind === "calibration" ? "⚖️ Calibration" : proposal.sourceKind}
+                              {proposal.sourceKind === "builder"
+                                ? "🏗️ Builder"
+                                : proposal.sourceKind === "calibration"
+                                  ? "⚖️ Calibration"
+                                  : proposal.sourceKind}
                               {proposal.sourceRunId && (
-                                <span className="text-stone-300" title={`Run ID: ${proposal.sourceRunId}`}>
+                                <span
+                                  className="text-stone-300"
+                                  title={`Run ID: ${proposal.sourceRunId}`}
+                                >
                                   #{proposal.sourceRunId.slice(0, 8)}
                                 </span>
                               )}
@@ -401,7 +434,7 @@ export default function ProposalReviewPage() {
                         <div className="text-xs font-medium text-amber-700">编辑 After 值</div>
                         <textarea
                           value={editValue}
-                          onChange={(e) => setEditValue(e.target.value)}
+                          onChange={e => setEditValue(e.target.value)}
                           className="mt-2 w-full rounded-xl border border-amber-200 bg-white p-3 text-xs leading-5 text-stone-800 outline-none focus:border-amber-400"
                           rows={6}
                         />
@@ -443,7 +476,8 @@ export default function ProposalReviewPage() {
                   {(proposal.riskLevel === "high" || proposal.riskLevel === "critical") && (
                     <div className="mt-3 flex items-start gap-2 rounded-2xl border border-rose-100 bg-rose-50 px-3 py-2 text-xs text-rose-700">
                       <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                      高风险字段会改变 OpenLife 对你的核心理解，请确认它真的符合你。此 Proposal 不支持批量接受。
+                      高风险字段会改变 OpenLife 对你的核心理解，请确认它真的符合你。此 Proposal
+                      不支持批量接受。
                     </div>
                   )}
                 </div>

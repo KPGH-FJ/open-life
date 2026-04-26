@@ -57,14 +57,8 @@ impl ProposalStore {
             [],
         )?;
         // Migration: add source_run_id and source_kind if table exists without them
-        let _ = conn.execute(
-            "ALTER TABLE proposals ADD COLUMN source_run_id TEXT",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE proposals ADD COLUMN source_kind TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_run_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_kind TEXT", []);
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at DESC)",
             [],
@@ -218,8 +212,18 @@ impl ProposalStore {
 
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-        let proposals = stmt.query_map(rusqlite::params_from_iter(param_refs.iter().copied().chain(std::iter::once(&limit as &dyn rusqlite::ToSql))), Self::row_to_proposal)?;
-        proposals.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+        let proposals = stmt.query_map(
+            rusqlite::params_from_iter(
+                param_refs
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
+            ),
+            Self::row_to_proposal,
+        )?;
+        proposals
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.into())
     }
 
     pub fn batch_accept_low_risk(&self) -> Result<i64> {

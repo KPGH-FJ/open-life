@@ -1,16 +1,53 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Hammer, Footprints, Brain, ArrowRight, CheckCircle2, RefreshCw, Target, Zap, Heart, Sparkles, Trash2, AlertCircle, ShieldCheck } from "lucide-react";
+import {
+  Hammer,
+  Footprints,
+  Brain,
+  ArrowRight,
+  CheckCircle2,
+  RefreshCw,
+  Target,
+  Zap,
+  Heart,
+  Sparkles,
+  Trash2,
+  AlertCircle,
+  ShieldCheck,
+} from "lucide-react";
 import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import type { LifeModel, BuilderProgress } from "../types";
-import { builderStart, builderStep, builderListUnfinished, builderDeleteSession, builderApplySignals, builderCreateProposals, getModel4DCompletion, getSystemDiagnostics, type UnfinishedBuilderSession, type Model4DCompletion, type BuilderAnalysis, type BuilderSignal, type SystemDiagnostics, type BuilderSignalDecision } from "../tauri";
+import {
+  builderStart,
+  builderStep,
+  builderListUnfinished,
+  builderDeleteSession,
+  builderApplySignals,
+  builderCreateProposals,
+  getModel4DCompletion,
+  getSystemDiagnostics,
+  type UnfinishedBuilderSession,
+  type Model4DCompletion,
+  type BuilderAnalysis,
+  type BuilderSignal,
+  type SystemDiagnostics,
+  type BuilderSignalDecision,
+} from "../tauri";
 import BuilderPatchReview from "../components/BuilderPatchReview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 
-function CompletionBar({ label, value, colorClass }: { label: string; value: number; colorClass: string }) {
+function CompletionBar({
+  label,
+  value,
+  colorClass,
+}: {
+  label: string;
+  value: number;
+  colorClass: string;
+}) {
   const pct = Math.max(0, Math.min(100, value));
   return (
     <div className="space-y-1">
@@ -19,7 +56,10 @@ function CompletionBar({ label, value, colorClass }: { label: string; value: num
         <span className="text-gray-500">{pct}%</span>
       </div>
       <div className="w-full bg-gray-200 rounded-full h-2">
-        <div className={`${colorClass} h-2 rounded-full transition-all`} style={{ width: `${pct}%` }} />
+        <div
+          className={`${colorClass} h-2 rounded-full transition-all`}
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   );
@@ -42,13 +82,21 @@ function RadarChart({ values, size = 120 }: { values: number[]; size?: number })
   return (
     <svg width={size} height={size} className="shrink-0">
       <polygon points={points.join(" ")} fill="none" stroke="#e5e7eb" strokeWidth={1} />
-      {[0.25, 0.5, 0.75].map((scale) => {
+      {[0.25, 0.5, 0.75].map(scale => {
         const ring = values.map((_, i) => {
           const a = angleFor(i);
           const r = radius * scale;
           return `${center + r * Math.cos(a)},${center + r * Math.sin(a)}`;
         });
-        return <polygon key={scale} points={ring.join(" ")} fill="none" stroke="#f3f4f6" strokeWidth={1} />;
+        return (
+          <polygon
+            key={scale}
+            points={ring.join(" ")}
+            fill="none"
+            stroke="#f3f4f6"
+            strokeWidth={1}
+          />
+        );
       })}
       {labels.map((_, i) => {
         const a = angleFor(i);
@@ -64,7 +112,12 @@ function RadarChart({ values, size = 120 }: { values: number[]; size?: number })
           />
         );
       })}
-      <polygon points={valuePoints.join(" ")} fill="rgba(99,102,241,0.25)" stroke="#6366f1" strokeWidth={2} />
+      <polygon
+        points={valuePoints.join(" ")}
+        fill="rgba(99,102,241,0.25)"
+        stroke="#6366f1"
+        strokeWidth={2}
+      />
     </svg>
   );
 }
@@ -90,12 +143,12 @@ function ModeStepper({ mode, progress }: { mode: string; progress: BuilderProgre
             dimInfo.color === "indigo"
               ? "bg-indigo-100 text-indigo-700"
               : dimInfo.color === "green"
-              ? "bg-green-100 text-green-700"
-              : dimInfo.color === "yellow"
-              ? "bg-amber-100 text-amber-700"
-              : dimInfo.color === "purple"
-              ? "bg-purple-100 text-purple-700"
-              : "bg-gray-100 text-gray-600";
+                ? "bg-green-100 text-green-700"
+                : dimInfo.color === "yellow"
+                  ? "bg-amber-100 text-amber-700"
+                  : dimInfo.color === "purple"
+                    ? "bg-purple-100 text-purple-700"
+                    : "bg-gray-100 text-gray-600";
           return (
             <div key={label} className="flex flex-col items-center gap-1 flex-1">
               <div
@@ -103,8 +156,8 @@ function ModeStepper({ mode, progress }: { mode: string; progress: BuilderProgre
                   done
                     ? "bg-indigo-600 border-indigo-600 text-white"
                     : active
-                    ? "bg-indigo-50 border-indigo-600 text-indigo-700 font-semibold"
-                    : "bg-white border-gray-300 text-gray-400"
+                      ? "bg-indigo-50 border-indigo-600 text-indigo-700 font-semibold"
+                      : "bg-white border-gray-300 text-gray-400"
                 }`}
               >
                 {done ? <CheckCircle2 size={12} /> : i + 1}
@@ -134,8 +187,8 @@ function ModeStepper({ mode, progress }: { mode: string; progress: BuilderProgre
                   done
                     ? "bg-indigo-600 border-indigo-600 text-white"
                     : active
-                    ? "bg-indigo-50 border-indigo-600 text-indigo-700 font-semibold"
-                    : "bg-white border-gray-300 text-gray-400"
+                      ? "bg-indigo-50 border-indigo-600 text-indigo-700 font-semibold"
+                      : "bg-white border-gray-300 text-gray-400"
                 }`}
               >
                 {idx}
@@ -152,7 +205,10 @@ function ModeStepper({ mode, progress }: { mode: string; progress: BuilderProgre
   return null;
 }
 
-function buildStageSuggestions(completion: Model4DCompletion | null, analysis: BuilderAnalysis | null) {
+function buildStageSuggestions(
+  completion: Model4DCompletion | null,
+  analysis: BuilderAnalysis | null
+) {
   const suggestions: string[] = [];
   if (!completion) return suggestions;
   const dims = [
@@ -187,11 +243,14 @@ function sortResumeSessions(sessions: UnfinishedBuilderSession[]): UnfinishedBui
   });
 }
 
-const dimensionStyleMap: Record<"identity" | "goals" | "capabilities" | "state", {
-  hover: string;
-  text: string;
-  bar: string;
-}> = {
+const dimensionStyleMap: Record<
+  "identity" | "goals" | "capabilities" | "state",
+  {
+    hover: string;
+    text: string;
+    bar: string;
+  }
+> = {
   identity: {
     hover: "hover:border-indigo-500 hover:bg-indigo-50",
     text: "text-indigo-700",
@@ -237,11 +296,17 @@ export default function BuilderPage() {
   const [reviewMode, setReviewMode] = useState(false);
   const [appliedFields, setAppliedFields] = useState<string[]>([]);
   const [mergedFields, setMergedFields] = useState<string[]>([]);
-  const [skippedFields, setSkippedFields] = useState<Array<{ path: string; reason: string; expected?: string }>>([]);
+  const [skippedFields, setSkippedFields] = useState<
+    Array<{ path: string; reason: string; expected?: string }>
+  >([]);
   const [editedCount, setEditedCount] = useState(0);
   const [rejectedCount, setRejectedCount] = useState(0);
-  const [incrementalDimension, setIncrementalDimension] = useState<"identity" | "goals" | "capabilities" | "state" | null>(null);
-  const [beforeBuildCompletion, setBeforeBuildCompletion] = useState<Model4DCompletion | null>(null);
+  const [incrementalDimension, setIncrementalDimension] = useState<
+    "identity" | "goals" | "capabilities" | "state" | null
+  >(null);
+  const [beforeBuildCompletion, setBeforeBuildCompletion] = useState<Model4DCompletion | null>(
+    null
+  );
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const navigate = useNavigate();
 
@@ -251,7 +316,9 @@ export default function BuilderPage() {
   useEffect(() => {
     loadUnfinished();
     loadCompletion();
-    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
+    getSystemDiagnostics()
+      .then(setDiagnostics)
+      .catch(() => null);
   }, []);
 
   const loadCompletion = async () => {
@@ -274,7 +341,11 @@ export default function BuilderPage() {
     }
   };
 
-  const start = async (selected: "quick" | "incremental" | "socratic", sid: string, targetDimension?: "identity" | "goals" | "capabilities" | "state") => {
+  const start = async (
+    selected: "quick" | "incremental" | "socratic",
+    sid: string,
+    targetDimension?: "identity" | "goals" | "capabilities" | "state"
+  ) => {
     if (safeMode) {
       setBuilderError(buildSafeModeBlockedMessage("新的构建写入", diagnostics));
       return;
@@ -324,14 +395,19 @@ export default function BuilderPage() {
       Socratic: "socratic",
     };
     const m = modeMap[session.mode] ?? "quick";
-    const targetDim = session.target_dimension?.toLowerCase() as "identity" | "goals" | "capabilities" | "state" | undefined;
+    const targetDim = session.target_dimension?.toLowerCase() as
+      | "identity"
+      | "goals"
+      | "capabilities"
+      | "state"
+      | undefined;
     await start(m, session.session_id, targetDim);
   };
 
   const removeSession = async (sid: string) => {
     try {
       await builderDeleteSession(sid);
-      setUnfinished((prev) => sortResumeSessions(prev.filter((s) => s.session_id !== sid)));
+      setUnfinished(prev => sortResumeSessions(prev.filter(s => s.session_id !== sid)));
     } catch (e) {
       setBuilderError(buildRuntimeActionError("删除未完成会话", e, "data"));
     }
@@ -357,7 +433,12 @@ export default function BuilderPage() {
         setResultModel(res.model);
       }
       // For Quick and Incremental modes: when finished, enter review mode instead of auto-saving
-      if (res.finished && (res.mode === "Quick" || res.mode === "Incremental") && res.pending_signals && res.pending_signals.length > 0) {
+      if (
+        res.finished &&
+        (res.mode === "Quick" || res.mode === "Incremental") &&
+        res.pending_signals &&
+        res.pending_signals.length > 0
+      ) {
         setPendingSignals(res.pending_signals);
         setReviewMode(true);
         // Keep session alive for review
@@ -428,7 +509,9 @@ export default function BuilderPage() {
         await Promise.all([
           loadCompletion(),
           loadUnfinished(),
-          getSystemDiagnostics().then(setDiagnostics).catch(() => null),
+          getSystemDiagnostics()
+            .then(setDiagnostics)
+            .catch(() => null),
         ]);
         // For incremental mode, return to dimension selection after applying
         if (mode === "incremental") {
@@ -470,7 +553,8 @@ export default function BuilderPage() {
         setBuilderNotice(
           <div className="space-y-2">
             <div>
-              已创建 <strong>{res.created_count}</strong> 条待确认 Proposal{runInfo}，拒绝 <strong>{res.rejected_count}</strong> 条。
+              已创建 <strong>{res.created_count}</strong> 条待确认 Proposal{runInfo}，拒绝{" "}
+              <strong>{res.rejected_count}</strong> 条。
             </div>
             <div>
               <button
@@ -484,7 +568,9 @@ export default function BuilderPage() {
         );
         await Promise.all([
           loadUnfinished(),
-          getSystemDiagnostics().then(setDiagnostics).catch(() => null),
+          getSystemDiagnostics()
+            .then(setDiagnostics)
+            .catch(() => null),
         ]);
       }
     } catch (e) {
@@ -507,7 +593,9 @@ export default function BuilderPage() {
     setMode(null);
     setSessionId(crypto.randomUUID());
     loadUnfinished();
-    getSystemDiagnostics().then(setDiagnostics).catch(() => null);
+    getSystemDiagnostics()
+      .then(setDiagnostics)
+      .catch(() => null);
   };
 
   const allGoals = [
@@ -524,10 +612,15 @@ export default function BuilderPage() {
   };
 
   const radarValues = analysis
-    ? [analysis.completion.identity, analysis.completion.goals, analysis.completion.capabilities, analysis.completion.state]
+    ? [
+        analysis.completion.identity,
+        analysis.completion.goals,
+        analysis.completion.capabilities,
+        analysis.completion.state,
+      ]
     : completion
-    ? [completion.identity, completion.goals, completion.capabilities, completion.state]
-    : [0, 0, 0, 0];
+      ? [completion.identity, completion.goals, completion.capabilities, completion.state]
+      : [0, 0, 0, 0];
   const activeCompletion = analysis?.completion ?? completion ?? null;
   const stageSuggestions = buildStageSuggestions(activeCompletion, analysis);
   const buildOutcome = resultModel
@@ -606,9 +699,12 @@ export default function BuilderPage() {
           <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
-                <div className="text-sm font-semibold text-amber-900">Safe Mode：构建写入已暂停</div>
+                <div className="text-sm font-semibold text-amber-900">
+                  Safe Mode：构建写入已暂停
+                </div>
                 <div className="mt-1 text-sm text-amber-800">
-                  {safeModeReason} 你仍然可以查看当前构建页面，但新的构建会话、继续回答和 Review 应用都会被拦截。
+                  {safeModeReason} 你仍然可以查看当前构建页面，但新的构建会话、继续回答和 Review
+                  应用都会被拦截。
                 </div>
               </div>
               <a
@@ -631,7 +727,9 @@ export default function BuilderPage() {
             />
             {lastStart && (
               <button
-                onClick={() => start(lastStart.mode, lastStart.sessionId, lastStart.targetDimension)}
+                onClick={() =>
+                  start(lastStart.mode, lastStart.sessionId, lastStart.targetDimension)
+                }
                 className="mt-2 rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-rose-700"
               >
                 重试启动
@@ -664,15 +762,20 @@ export default function BuilderPage() {
               <div className="space-y-3">
                 <div className="text-sm text-gray-600 font-medium">继续未完成的会话</div>
                 <div className="grid grid-cols-1 gap-3">
-                  {unfinished.map((s) => {
+                  {unfinished.map(s => {
                     const totalSteps = s.mode === "Quick" ? 6 : s.mode === "Socratic" ? 8 : 1;
                     const pct = Math.min(100, Math.round((s.step_index / totalSteps) * 100));
                     const isPendingReview = s.finished && (s.pending_signals?.length ?? 0) > 0;
                     return (
-                      <div key={s.session_id} className="border rounded-xl p-4 flex items-center justify-between bg-gray-50">
+                      <div
+                        key={s.session_id}
+                        className="border rounded-xl p-4 flex items-center justify-between bg-gray-50"
+                      >
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
-                            <div className="text-sm font-semibold text-gray-800 truncate">{modeLabel(s.mode)}</div>
+                            <div className="text-sm font-semibold text-gray-800 truncate">
+                              {modeLabel(s.mode)}
+                            </div>
                             {isPendingReview && (
                               <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-800">
                                 待确认 Review
@@ -680,15 +783,22 @@ export default function BuilderPage() {
                             )}
                           </div>
                           <div className="text-xs text-gray-500">
-                            {isPendingReview ? "已完成问题收集，等待你确认并应用模型建议" : `已进行 ${s.step_index} 步`}
+                            {isPendingReview
+                              ? "已完成问题收集，等待你确认并应用模型建议"
+                              : `已进行 ${s.step_index} 步`}
                           </div>
                           {s.current_prompt && (
                             <div className="text-xs text-gray-500 mt-1 line-clamp-2 max-w-md">
-                              {isPendingReview ? `待确认内容：${s.current_prompt}` : `当前问题：${s.current_prompt}`}
+                              {isPendingReview
+                                ? `待确认内容：${s.current_prompt}`
+                                : `当前问题：${s.current_prompt}`}
                             </div>
                           )}
                           <div className="w-32 bg-gray-200 rounded-full h-1.5 mt-2">
-                            <div className="bg-indigo-500 h-1.5 rounded-full transition-all" style={{ width: `${pct}%` }} />
+                            <div
+                              className="bg-indigo-500 h-1.5 rounded-full transition-all"
+                              style={{ width: `${pct}%` }}
+                            />
                           </div>
                         </div>
                         <div className="flex items-center gap-2 shrink-0 ml-3">
@@ -721,16 +831,32 @@ export default function BuilderPage() {
                   <div className="text-sm text-gray-500">总体 {completion.overall}%</div>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <CompletionBar label="Identity（身份认同）" value={completion.identity} colorClass="bg-indigo-500" />
-                  <CompletionBar label="Goals（目标体系）" value={completion.goals} colorClass="bg-green-500" />
-                  <CompletionBar label="Capabilities（能力资源）" value={completion.capabilities} colorClass="bg-yellow-500" />
-                  <CompletionBar label="State（当前状态）" value={completion.state} colorClass="bg-purple-500" />
+                  <CompletionBar
+                    label="Identity（身份认同）"
+                    value={completion.identity}
+                    colorClass="bg-indigo-500"
+                  />
+                  <CompletionBar
+                    label="Goals（目标体系）"
+                    value={completion.goals}
+                    colorClass="bg-green-500"
+                  />
+                  <CompletionBar
+                    label="Capabilities（能力资源）"
+                    value={completion.capabilities}
+                    colorClass="bg-yellow-500"
+                  />
+                  <CompletionBar
+                    label="State（当前状态）"
+                    value={completion.state}
+                    colorClass="bg-purple-500"
+                  />
                 </div>
                 {stageSuggestions.length > 0 && (
                   <div className="rounded-xl border border-indigo-100 bg-white px-4 py-3">
                     <div className="text-sm font-medium text-indigo-800 mb-2">推荐下一步</div>
                     <div className="space-y-1">
-                      {stageSuggestions.map((item) => (
+                      {stageSuggestions.map(item => (
                         <div key={item} className="text-sm text-gray-700">
                           {item}
                         </div>
@@ -744,7 +870,9 @@ export default function BuilderPage() {
             <div className="space-y-3">
               <div>
                 <div className="text-lg font-semibold text-gray-900">选择一种构建方式</div>
-                <div className="mt-1 text-sm text-gray-500">不是所有人都适合从长问卷开始。你可以先快速建立可用模型，也可以一点点补全，或者做一次深度自我探索。</div>
+                <div className="mt-1 text-sm text-gray-500">
+                  不是所有人都适合从长问卷开始。你可以先快速建立可用模型，也可以一点点补全，或者做一次深度自我探索。
+                </div>
               </div>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                 {[
@@ -765,7 +893,11 @@ export default function BuilderPage() {
                     icon: <Footprints size={18} />,
                     tone: "from-emerald-700 to-teal-600 text-white",
                     detail: "一次只补一个维度。适合已经有基础模型，想逐步精修。",
-                    bullets: ["选择 Identity / Goals / Capabilities / State", "补弱项", "应用后回到维度选择"],
+                    bullets: [
+                      "选择 Identity / Goals / Capabilities / State",
+                      "补弱项",
+                      "应用后回到维度选择",
+                    ],
                     action: () => setMode("incremental"),
                   },
                   {
@@ -778,7 +910,7 @@ export default function BuilderPage() {
                     bullets: ["开放追问", "价值排序", "先解释再写入"],
                     action: () => start("socratic", crypto.randomUUID()),
                   },
-                ].map((option) => (
+                ].map(option => (
                   <button
                     key={option.title}
                     onClick={option.action}
@@ -790,7 +922,9 @@ export default function BuilderPage() {
                         <div className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-white/18">
                           {option.icon}
                         </div>
-                        <span className="rounded-full bg-white/18 px-2 py-1 text-[11px] font-medium">{option.duration}</span>
+                        <span className="rounded-full bg-white/18 px-2 py-1 text-[11px] font-medium">
+                          {option.duration}
+                        </span>
                       </div>
                       <div className="mt-4 text-lg font-semibold">{option.title}</div>
                       <div className="text-xs opacity-85">{option.subtitle}</div>
@@ -798,7 +932,7 @@ export default function BuilderPage() {
                     <div className="p-4">
                       <p className="text-sm leading-6 text-gray-600">{option.detail}</p>
                       <div className="mt-3 space-y-1">
-                        {option.bullets.map((item) => (
+                        {option.bullets.map(item => (
                           <div key={item} className="flex items-center gap-2 text-xs text-gray-500">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                             {item}
@@ -832,17 +966,35 @@ export default function BuilderPage() {
                 <div className="text-sm text-gray-500">总体 {completion?.overall ?? 0}%</div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <CompletionBar label="Identity（身份认同）" value={completion?.identity ?? 0} colorClass="bg-indigo-500" />
-                <CompletionBar label="Goals（目标体系）" value={completion?.goals ?? 0} colorClass="bg-green-500" />
-                <CompletionBar label="Capabilities（能力资源）" value={completion?.capabilities ?? 0} colorClass="bg-yellow-500" />
-                <CompletionBar label="State（当前状态）" value={completion?.state ?? 0} colorClass="bg-purple-500" />
+                <CompletionBar
+                  label="Identity（身份认同）"
+                  value={completion?.identity ?? 0}
+                  colorClass="bg-indigo-500"
+                />
+                <CompletionBar
+                  label="Goals（目标体系）"
+                  value={completion?.goals ?? 0}
+                  colorClass="bg-green-500"
+                />
+                <CompletionBar
+                  label="Capabilities（能力资源）"
+                  value={completion?.capabilities ?? 0}
+                  colorClass="bg-yellow-500"
+                />
+                <CompletionBar
+                  label="State（当前状态）"
+                  value={completion?.state ?? 0}
+                  colorClass="bg-purple-500"
+                />
               </div>
               {stageSuggestions.length > 0 && (
                 <div className="rounded-xl border border-indigo-100 bg-white px-4 py-3">
                   <div className="text-sm font-medium text-indigo-800 mb-2">推荐下一步</div>
                   <div className="space-y-1">
-                    {stageSuggestions.map((item) => (
-                      <div key={item} className="text-sm text-gray-700">{item}</div>
+                    {stageSuggestions.map(item => (
+                      <div key={item} className="text-sm text-gray-700">
+                        {item}
+                      </div>
                     ))}
                   </div>
                 </div>
@@ -883,11 +1035,15 @@ export default function BuilderPage() {
                   icon: <Sparkles size={18} />,
                   subItems: ["当前状态", "能量", "压力", "习惯"],
                 },
-              ].map((dim) => {
-                const pct = completion?.[dim.key as keyof Model4DCompletion] as number ?? 0;
+              ].map(dim => {
+                const pct = (completion?.[dim.key as keyof Model4DCompletion] as number) ?? 0;
                 const styles = dimensionStyleMap[dim.key];
-                const isRecommended = stageSuggestions.some((s) => s.toLowerCase().includes(dim.label.toLowerCase()));
-                const dimGaps = analysis?.gaps?.filter((g) => g.toLowerCase().includes(dim.key.toLowerCase())) ?? [];
+                const isRecommended = stageSuggestions.some(s =>
+                  s.toLowerCase().includes(dim.label.toLowerCase())
+                );
+                const dimGaps =
+                  analysis?.gaps?.filter(g => g.toLowerCase().includes(dim.key.toLowerCase())) ??
+                  [];
                 const lowCompletion = pct < 40;
                 return (
                   <button
@@ -901,15 +1057,20 @@ export default function BuilderPage() {
                     className={`border rounded-xl p-5 text-left transition relative ${styles.hover} ${isRecommended ? "ring-2 ring-indigo-200" : ""} disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-white disabled:hover:border-gray-200`}
                   >
                     {isRecommended && (
-                      <span className="absolute top-2 right-2 text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">推荐</span>
+                      <span className="absolute top-2 right-2 text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">
+                        推荐
+                      </span>
                     )}
                     <div className={`flex items-center gap-2 font-semibold ${styles.text} mb-2`}>
                       {dim.icon} {dim.label}
                     </div>
                     <div className="text-sm text-gray-600 mb-2">{dim.title}</div>
                     <div className="flex flex-wrap gap-1 mb-3">
-                      {dim.subItems.map((item) => (
-                        <span key={item} className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+                      {dim.subItems.map(item => (
+                        <span
+                          key={item}
+                          className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded"
+                        >
                           {item}
                         </span>
                       ))}
@@ -922,14 +1083,15 @@ export default function BuilderPage() {
                           </div>
                         )}
                         {lowCompletion && !dimGaps.length && (
-                          <div className="text-amber-700">
-                            完成度较低，建议优先补充
-                          </div>
+                          <div className="text-amber-700">完成度较低，建议优先补充</div>
                         )}
                       </div>
                     )}
                     <div className="w-full bg-gray-200 rounded-full h-2">
-                      <div className={`${styles.bar} h-2 rounded-full transition-all`} style={{ width: `${pct}%` }} />
+                      <div
+                        className={`${styles.bar} h-2 rounded-full transition-all`}
+                        style={{ width: `${pct}%` }}
+                      />
                     </div>
                     <div className="text-xs text-gray-500 mt-1">{pct}% 完成</div>
                   </button>
@@ -984,9 +1146,14 @@ export default function BuilderPage() {
                       当前 4D 完成度: {analysis?.completion.overall ?? completion?.overall ?? 0}%
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-xs text-gray-600">
-                      <div>Identity {analysis?.completion.identity ?? completion?.identity ?? 0}%</div>
+                      <div>
+                        Identity {analysis?.completion.identity ?? completion?.identity ?? 0}%
+                      </div>
                       <div>Goals {analysis?.completion.goals ?? completion?.goals ?? 0}%</div>
-                      <div>Capabilities {analysis?.completion.capabilities ?? completion?.capabilities ?? 0}%</div>
+                      <div>
+                        Capabilities{" "}
+                        {analysis?.completion.capabilities ?? completion?.capabilities ?? 0}%
+                      </div>
                       <div>State {analysis?.completion.state ?? completion?.state ?? 0}%</div>
                     </div>
                   </div>
@@ -996,7 +1163,10 @@ export default function BuilderPage() {
                     <div className="text-gray-700 font-medium mb-1">待补充维度</div>
                     <div className="flex flex-wrap gap-2">
                       {analysis.gaps.map((g, i) => (
-                        <span key={i} className="bg-white text-gray-700 px-2 py-1 rounded-md text-xs border">
+                        <span
+                          key={i}
+                          className="bg-white text-gray-700 px-2 py-1 rounded-md text-xs border"
+                        >
                           {g}
                         </span>
                       ))}
@@ -1007,7 +1177,7 @@ export default function BuilderPage() {
                   <div className="mt-3 pt-3 border-t text-sm">
                     <div className="text-gray-700 font-medium mb-2">当前阶段建议</div>
                     <div className="space-y-1">
-                      {stageSuggestions.map((item) => (
+                      {stageSuggestions.map(item => (
                         <div key={item} className="text-gray-600">
                           {item}
                         </div>
@@ -1024,7 +1194,9 @@ export default function BuilderPage() {
                   <Sparkles size={18} className="text-amber-600" />
                   阶段性理解确认
                 </div>
-                <div className="text-sm text-amber-900 whitespace-pre-line">{progress.phase_summary}</div>
+                <div className="text-sm text-amber-900 whitespace-pre-line">
+                  {progress.phase_summary}
+                </div>
                 <div className="flex gap-3">
                   <button
                     onClick={() => sendReply("确认")}
@@ -1035,7 +1207,9 @@ export default function BuilderPage() {
                 </div>
               </div>
             )}
-            <div className="bg-gray-50 border rounded-xl p-5 text-sm text-gray-800 whitespace-pre-line">{prompt}</div>
+            <div className="bg-gray-50 border rounded-xl p-5 text-sm text-gray-800 whitespace-pre-line">
+              {prompt}
+            </div>
             {progress?.waiting_pairwise && (
               <div className="flex flex-wrap gap-3">
                 <button
@@ -1055,15 +1229,17 @@ export default function BuilderPage() {
             <div className="flex gap-3">
               <textarea
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
                     sendReply();
                   }
                 }}
                 rows={3}
-                placeholder={progress?.waiting_pairwise ? "输入 A、B 或你的描述..." : "输入你的回答..."}
+                placeholder={
+                  progress?.waiting_pairwise ? "输入 A、B 或你的描述..." : "输入你的回答..."
+                }
                 disabled={safeMode}
                 className="flex-1 resize-none border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               />
@@ -1072,7 +1248,11 @@ export default function BuilderPage() {
                 disabled={loading || !input.trim() || safeMode}
                 className="bg-indigo-600 text-white px-5 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
               >
-                {loading ? <RefreshCw size={16} className="animate-spin" /> : <ArrowRight size={16} />}
+                {loading ? (
+                  <RefreshCw size={16} className="animate-spin" />
+                ) : (
+                  <ArrowRight size={16} />
+                )}
                 下一步
               </button>
             </div>
@@ -1104,8 +1284,13 @@ export default function BuilderPage() {
             <div className="bg-green-50 border border-green-200 rounded-xl p-6 text-center space-y-3">
               <CheckCircle2 className="mx-auto text-green-600" size={40} />
               <div className="text-green-800 font-semibold">构建完成！</div>
-              <p className="text-sm text-green-700">你的人生模型已更新，可以到"人生模型"页面查看和编辑。</p>
-              <button onClick={reset} className="bg-white border px-4 py-2 rounded-lg text-sm hover:bg-gray-50">
+              <p className="text-sm text-green-700">
+                你的人生模型已更新，可以到"人生模型"页面查看和编辑。
+              </p>
+              <button
+                onClick={reset}
+                className="bg-white border px-4 py-2 rounded-lg text-sm hover:bg-gray-50"
+              >
                 再建一次
               </button>
             </div>
@@ -1122,7 +1307,7 @@ export default function BuilderPage() {
                     { key: "goals" as const, label: "Goals", color: "green" },
                     { key: "capabilities" as const, label: "Capabilities", color: "yellow" },
                     { key: "state" as const, label: "State", color: "purple" },
-                  ].map((dim) => {
+                  ].map(dim => {
                     const before = beforeBuildCompletion[dim.key];
                     const after = completion?.[dim.key] ?? 0;
                     const delta = after - before;
@@ -1130,10 +1315,10 @@ export default function BuilderPage() {
                       dim.color === "indigo"
                         ? "text-indigo-600"
                         : dim.color === "green"
-                        ? "text-green-600"
-                        : dim.color === "yellow"
-                        ? "text-amber-600"
-                        : "text-purple-600";
+                          ? "text-green-600"
+                          : dim.color === "yellow"
+                            ? "text-amber-600"
+                            : "text-purple-600";
                     return (
                       <div key={dim.key} className="bg-white rounded-lg p-3 border text-center">
                         <div className="text-xs text-gray-500 mb-1">{dim.label}</div>
@@ -1141,9 +1326,13 @@ export default function BuilderPage() {
                         <div className="text-xs mt-1">
                           <span className="text-gray-400">{before}%</span>
                           {delta > 0 ? (
-                            <span className="text-green-600 ml-1 font-medium">+{delta.toFixed(1)}%</span>
+                            <span className="text-green-600 ml-1 font-medium">
+                              +{delta.toFixed(1)}%
+                            </span>
                           ) : delta < 0 ? (
-                            <span className="text-rose-600 ml-1 font-medium">{delta.toFixed(1)}%</span>
+                            <span className="text-rose-600 ml-1 font-medium">
+                              {delta.toFixed(1)}%
+                            </span>
                           ) : (
                             <span className="text-gray-400 ml-1">—</span>
                           )}
@@ -1160,28 +1349,46 @@ export default function BuilderPage() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                   <div className="rounded-lg border border-green-100 bg-green-50 px-4 py-3">
                     <div className="text-xs text-green-700">已写入</div>
-                    <div className="mt-1 text-2xl font-semibold text-green-800">{appliedFields.length}</div>
-                    <div className="mt-1 text-[11px] text-green-700">这部分已经进入你的人生模型，可直接用于后续对话。</div>
+                    <div className="mt-1 text-2xl font-semibold text-green-800">
+                      {appliedFields.length}
+                    </div>
+                    <div className="mt-1 text-[11px] text-green-700">
+                      这部分已经进入你的人生模型，可直接用于后续对话。
+                    </div>
                   </div>
                   <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3">
                     <div className="text-xs text-indigo-700">已合并</div>
-                    <div className="mt-1 text-2xl font-semibold text-indigo-800">{mergedFields.length}</div>
-                    <div className="mt-1 text-[11px] text-indigo-700">系统尝试保留你已有内容，而不是整段覆盖。</div>
+                    <div className="mt-1 text-2xl font-semibold text-indigo-800">
+                      {mergedFields.length}
+                    </div>
+                    <div className="mt-1 text-[11px] text-indigo-700">
+                      系统尝试保留你已有内容，而不是整段覆盖。
+                    </div>
                   </div>
                   <div className="rounded-lg border border-amber-100 bg-amber-50 px-4 py-3">
                     <div className="text-xs text-amber-700">待处理</div>
-                    <div className="mt-1 text-2xl font-semibold text-amber-800">{skippedFields.length}</div>
-                    <div className="mt-1 text-[11px] text-amber-700">这些内容暂时没写入，通常是因为结构不完整或字段类型不匹配。</div>
+                    <div className="mt-1 text-2xl font-semibold text-amber-800">
+                      {skippedFields.length}
+                    </div>
+                    <div className="mt-1 text-[11px] text-amber-700">
+                      这些内容暂时没写入，通常是因为结构不完整或字段类型不匹配。
+                    </div>
                   </div>
                   <div className="rounded-lg border border-sky-100 bg-sky-50 px-4 py-3">
                     <div className="text-xs text-sky-700">已编辑</div>
                     <div className="mt-1 text-2xl font-semibold text-sky-800">{editedCount}</div>
-                    <div className="mt-1 text-[11px] text-sky-700">这些字段经过你的手动确认或修订后再写入。</div>
+                    <div className="mt-1 text-[11px] text-sky-700">
+                      这些字段经过你的手动确认或修订后再写入。
+                    </div>
                   </div>
                   <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
                     <div className="text-xs text-slate-700">已拒绝</div>
-                    <div className="mt-1 text-2xl font-semibold text-slate-800">{rejectedCount}</div>
-                    <div className="mt-1 text-[11px] text-slate-700">这些内容本轮明确不写入，后续仍可继续构建补充。</div>
+                    <div className="mt-1 text-2xl font-semibold text-slate-800">
+                      {rejectedCount}
+                    </div>
+                    <div className="mt-1 text-[11px] text-slate-700">
+                      这些内容本轮明确不写入，后续仍可继续构建补充。
+                    </div>
                   </div>
                 </div>
 
@@ -1198,9 +1405,14 @@ export default function BuilderPage() {
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   {appliedFields.map((field, i) => (
-                    <div key={i} className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 rounded-lg px-3 py-2">
+                    <div
+                      key={i}
+                      className="flex items-center gap-2 text-sm text-gray-700 bg-gray-50 rounded-lg px-3 py-2"
+                    >
                       <span className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />
-                      <span className="truncate" title={field}>{field}</span>
+                      <span className="truncate" title={field}>
+                        {field}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -1215,7 +1427,8 @@ export default function BuilderPage() {
                     <div className="font-medium">这次先没写入的内容</div>
                     {skippedFields.map((field, i) => (
                       <div key={`${field.path}-${i}`}>
-                        {field.path}: {field.reason}{field.expected ? `（期望：${field.expected}）` : ""}
+                        {field.path}: {field.reason}
+                        {field.expected ? `（期望：${field.expected}）` : ""}
                       </div>
                     ))}
                   </div>
@@ -1230,8 +1443,11 @@ export default function BuilderPage() {
                   本轮沉淀
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                  {buildOutcome.map((item) => (
-                    <div key={item.label} className="rounded-lg border bg-gray-50 px-3 py-3 text-center">
+                  {buildOutcome.map(item => (
+                    <div
+                      key={item.label}
+                      className="rounded-lg border bg-gray-50 px-3 py-3 text-center"
+                    >
                       <div className="text-xs text-gray-500">{item.label}</div>
                       <div className="mt-1 text-xl font-semibold text-gray-900">{item.value}</div>
                     </div>
@@ -1256,7 +1472,9 @@ export default function BuilderPage() {
                       <Zap size={16} /> 身份与使命
                     </div>
                     <div className="space-y-1 text-sm text-slate-900">
-                      <div>主角色：{resultModel.identity.role_definition.primary_role || "未提取"}</div>
+                      <div>
+                        主角色：{resultModel.identity.role_definition.primary_role || "未提取"}
+                      </div>
                       <div>使命：{resultModel.identity.mission_statement || "未提取"}</div>
                     </div>
                   </div>
@@ -1276,7 +1494,11 @@ export default function BuilderPage() {
                           </span>
                         ))
                       ) : (
-                        <EmptyState title="暂无价值观" description="本次构建未提取到核心价值观" className="py-2" />
+                        <EmptyState
+                          title="暂无价值观"
+                          description="本次构建未提取到核心价值观"
+                          className="py-2"
+                        />
                       )}
                     </div>
                   </div>
@@ -1293,9 +1515,15 @@ export default function BuilderPage() {
                           </div>
                         ))
                       ) : (
-                        <EmptyState title="暂无目标" description="本次构建未提取到目标" className="py-2" />
+                        <EmptyState
+                          title="暂无目标"
+                          description="本次构建未提取到目标"
+                          className="py-2"
+                        />
                       )}
-                      {allGoals.length > 3 && <div className="text-xs text-green-700">+{allGoals.length - 3} 个目标</div>}
+                      {allGoals.length > 3 && (
+                        <div className="text-xs text-green-700">+{allGoals.length - 3} 个目标</div>
+                      )}
                     </div>
                   </div>
 
@@ -1314,7 +1542,11 @@ export default function BuilderPage() {
                           </span>
                         ))
                       ) : (
-                        <EmptyState title="暂无技能" description="本次构建未提取到技能" className="py-2" />
+                        <EmptyState
+                          title="暂无技能"
+                          description="本次构建未提取到技能"
+                          className="py-2"
+                        />
                       )}
                     </div>
                   </div>
@@ -1343,11 +1575,19 @@ export default function BuilderPage() {
                           </div>
                         ))
                       ) : (
-                        <EmptyState title="暂无能力画像" description="本次构建未提取到关键能力" className="py-2" />
+                        <EmptyState
+                          title="暂无能力画像"
+                          description="本次构建未提取到关键能力"
+                          className="py-2"
+                        />
                       )}
                       {resultModel.capabilities.knowledge_domains.length > 0 && (
                         <div className="pt-2 text-xs text-amber-700">
-                          知识域：{resultModel.capabilities.knowledge_domains.slice(0, 3).map((d) => d.domain).join("、")}
+                          知识域：
+                          {resultModel.capabilities.knowledge_domains
+                            .slice(0, 3)
+                            .map(d => d.domain)
+                            .join("、")}
                         </div>
                       )}
                     </div>
@@ -1357,7 +1597,7 @@ export default function BuilderPage() {
                 <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4 space-y-3">
                   <div className="text-sm font-medium text-indigo-800">下一步建议</div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {postBuildActions.map((action) => (
+                    {postBuildActions.map(action => (
                       <button
                         key={action.title}
                         onClick={() => navigateAfterBuilder(action.to)}
@@ -1366,7 +1606,9 @@ export default function BuilderPage() {
                         <ArrowRight size={16} />
                         <span>
                           <span className="block font-medium">{action.title}</span>
-                          <span className="mt-0.5 block text-xs text-indigo-500">{action.detail}</span>
+                          <span className="mt-0.5 block text-xs text-indigo-500">
+                            {action.detail}
+                          </span>
                         </span>
                       </button>
                     ))}

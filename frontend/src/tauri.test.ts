@@ -94,10 +94,7 @@ describe("tauri command argument aliases", () => {
         alert_days: 2,
       })
     );
-    expect(invoke).toHaveBeenCalledWith(
-      "add_daily_goal",
-      { name: "阅读30分钟" }
-    );
+    expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
   });
 
   it("normalizes proposal command arguments", async () => {

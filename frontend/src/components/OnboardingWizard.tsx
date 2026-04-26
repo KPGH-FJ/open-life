@@ -63,9 +63,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
           </p>
           <div className="rounded-lg bg-indigo-50 border border-indigo-100 p-4 text-sm text-indigo-800">
             <p className="font-medium mb-1">Beta 试用提示</p>
-            <p>
-              当前为 Beta 版本，建议先完成基础配置和人生模型初始化，以获得最佳体验。
-            </p>
+            <p>当前为 Beta 版本，建议先完成基础配置和人生模型初始化，以获得最佳体验。</p>
           </div>
         </div>
       ),
@@ -80,10 +78,12 @@ export default function OnboardingWizard({ onComplete }: Props) {
           </p>
           <ul className="list-disc list-inside text-sm text-gray-700 space-y-2">
             <li>
-              <strong>云端模型</strong>（推荐）：在设置页填写 OpenRouter 或 OpenAI 的 API Key，响应质量高且支持工具调用。
+              <strong>云端模型</strong>（推荐）：在设置页填写 OpenRouter 或 OpenAI 的 API
+              Key，响应质量高且支持工具调用。
             </li>
             <li>
-              <strong>本地模型</strong>：安装 Ollama 并在本地运行模型，数据完全本地保留，但工具调用能力有限。
+              <strong>本地模型</strong>：安装 Ollama
+              并在本地运行模型，数据完全本地保留，但工具调用能力有限。
             </li>
           </ul>
           <button
@@ -106,9 +106,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
             你可以通过「构建」向导快速生成初始模型，也可以稍后手动编辑。
           </p>
           <div className="rounded-lg bg-amber-50 border border-amber-100 p-4 text-sm text-amber-800">
-            <p>
-              建议至少完成一次快速构建（约 3-5 分钟），这样 AI 才能基于你的真实背景给出建议。
-            </p>
+            <p>建议至少完成一次快速构建（约 3-5 分钟），这样 AI 才能基于你的真实背景给出建议。</p>
           </div>
           <button
             onClick={goBuilder}
@@ -129,18 +127,13 @@ export default function OnboardingWizard({ onComplete }: Props) {
             你的隐私对我们至关重要，同时现在也可以顺着一条最省力的路径开始试用：
           </p>
           <ul className="list-disc list-inside text-sm text-gray-700 space-y-2">
+            <li>所有对话记录、人生模型快照和记忆向量均保存在本地 SQLite 数据库中。</li>
             <li>
-              所有对话记录、人生模型快照和记忆向量均保存在本地 SQLite 数据库中。
+              如果选择云端模型，仅对话内容会发送到对应的 API 服务商（OpenRouter /
+              OpenAI），不会经过第三方中转。
             </li>
-            <li>
-              如果选择云端模型，仅对话内容会发送到对应的 API 服务商（OpenRouter / OpenAI），不会经过第三方中转。
-            </li>
-            <li>
-              内置 PII 检测引擎会自动识别身份证号、银行卡号等敏感信息，在发送前脱敏或拦截。
-            </li>
-            <li>
-              你可以在「设置 → 隐私策略」中自定义检测规则。
-            </li>
+            <li>内置 PII 检测引擎会自动识别身份证号、银行卡号等敏感信息，在发送前脱敏或拦截。</li>
+            <li>你可以在「设置 → 隐私策略」中自定义检测规则。</li>
           </ul>
           <div className="rounded-xl border border-indigo-100 bg-indigo-50/60 p-4">
             <div className="text-sm font-semibold text-indigo-900">推荐试用路线</div>
@@ -160,7 +153,9 @@ export default function OnboardingWizard({ onComplete }: Props) {
                 className="rounded-lg border border-indigo-200 bg-white px-3 py-3 text-left text-sm text-indigo-700 hover:bg-indigo-50"
               >
                 <div className="font-medium">2. 开始第一次对话</div>
-                <div className="mt-1 text-xs text-indigo-500">让 OpenLife 基于模型做一次规划或陪跑。</div>
+                <div className="mt-1 text-xs text-indigo-500">
+                  让 OpenLife 基于模型做一次规划或陪跑。
+                </div>
               </button>
               <button
                 onClick={goDashboard}
@@ -210,7 +205,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
           <div className="flex gap-2">
             {step > 0 && (
               <button
-                onClick={() => setStep((s) => s - 1)}
+                onClick={() => setStep(s => s - 1)}
                 className="inline-flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-200 transition"
               >
                 <ChevronLeft size={16} />
@@ -219,7 +214,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
             )}
             {step < totalSteps - 1 ? (
               <button
-                onClick={() => setStep((s) => s + 1)}
+                onClick={() => setStep(s => s + 1)}
                 className="inline-flex items-center gap-1 px-4 py-2 rounded-md bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 transition"
               >
                 下一步

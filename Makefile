@@ -36,7 +36,7 @@ endif
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a lint
+.PHONY: help setup dev build check test test-front test-rust clean a2a format lint ci
 
 ## 显示帮助信息
 help:
@@ -49,6 +49,9 @@ help:
 	@echo "  make test        - 运行所有测试"
 	@echo "  make test-front  - 运行前端测试"
 	@echo "  make test-rust   - 运行 Rust 测试"
+	@echo "  make format      - 格式化所有代码（Rust + 前端）"
+	@echo "  make lint        - 运行所有 Lint 检查"
+	@echo "  make ci          - 完整 CI 检查（format + lint + test）"
 	@echo "  make clean       - 清理构建缓存"
 	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
@@ -153,3 +156,17 @@ fmt-rust:
 fmt-front:
 	@echo "✨ 格式化前端代码..."
 	cd frontend && npx prettier --write "src/**/*.{ts,tsx,css}"
+
+## 格式化所有代码（Rust + 前端）
+format: fmt-rust fmt-front
+	@echo "✅ 所有代码格式化完成"
+
+## 运行所有 Lint 检查（Rust clippy + 前端 typecheck）
+lint: lint-rust
+	@echo "🔍 运行前端类型检查..."
+	cd frontend && npx tsc --noEmit
+	@echo "✅ Lint 检查完成"
+
+## 完整 CI 检查（格式化 + Lint + 测试）
+ci: format lint test
+	@echo "✅ CI 检查全部通过"

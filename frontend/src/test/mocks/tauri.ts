@@ -1,4 +1,4 @@
-import { vi } from 'vitest'
+import { vi } from "vitest";
 import type {
   LifeModel,
   ChatMessage,
@@ -6,50 +6,55 @@ import type {
   StateHistoryEntry,
   StateAlert,
   LifeModelVersion,
-} from '@/types'
+} from "@/types";
 
 export const mockLifeModel: LifeModel = {
   metadata: {
-    version: '0.1.0',
+    version: "0.1.0",
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    author: 'test',
+    author: "test",
   },
   identity: {
-    name: '测试用户',
+    name: "测试用户",
     values: [
-      { name: '健康', weight: 0.8, description: '保持身体健康' },
-      { name: '学习', weight: 0.7, description: '持续学习成长' },
+      { name: "健康", weight: 0.8, description: "保持身体健康" },
+      { name: "学习", weight: 0.7, description: "持续学习成长" },
     ],
     personality_traits: [
-      { trait_name: '外向', score: 0.8 },
-      { trait_name: '乐观', score: 0.9 },
+      { trait_name: "外向", score: 0.8 },
+      { trait_name: "乐观", score: 0.9 },
     ],
-    life_philosophy: '活在当下',
-    mission_statement: '成为更好的自己',
+    life_philosophy: "活在当下",
+    mission_statement: "成为更好的自己",
     role_definition: {
-      primary_role: '开发者',
-      secondary_roles: ['家庭成员'],
-      responsibilities: ['工作', '家庭'],
-      boundaries: ['不加班'],
+      primary_role: "开发者",
+      secondary_roles: ["家庭成员"],
+      responsibilities: ["工作", "家庭"],
+      boundaries: ["不加班"],
     },
     voice_style: {
-      formality: 'casual',
-      tone_descriptors: ['友好'],
-      vocabulary_preference: '简洁',
-      emoji_usage: 'often',
+      formality: "casual",
+      tone_descriptors: ["友好"],
+      vocabulary_preference: "简洁",
+      emoji_usage: "often",
     },
   },
   goals: {
     short_term: [
       {
-        name: '完成项目',
+        name: "完成项目",
         priority: 1,
-        status: 'in_progress',
+        status: "in_progress",
         milestones: [
-          { name: '设计阶段', target_date: '2024-12-01', status: 'completed', description: '完成设计' },
+          {
+            name: "设计阶段",
+            target_date: "2024-12-01",
+            status: "completed",
+            description: "完成设计",
+          },
         ],
-        description: '完成当前项目',
+        description: "完成当前项目",
         progress: 0.5,
         related_memories: [],
       },
@@ -57,71 +62,71 @@ export const mockLifeModel: LifeModel = {
     medium_term: [],
     long_term: [],
     life_goals: [],
-    daily: [{ name: '早起', done: false, time_block: { start: '07:00', end: '08:00' } }],
+    daily: [{ name: "早起", done: false, time_block: { start: "07:00", end: "08:00" } }],
     progress: 0.5,
     related_memories: [],
   },
   capabilities: {
     skills: [
-      { name: '编程', proficiency: 0.8, description: '软件开发' },
-      { name: '写作', proficiency: 0.6, description: '技术写作' },
+      { name: "编程", proficiency: 0.8, description: "软件开发" },
+      { name: "写作", proficiency: 0.6, description: "技术写作" },
     ],
-    resources: [{ name: 'MacBook', resource_type: '设备', description: '工作电脑', availability: '' }],
+    resources: [
+      { name: "MacBook", resource_type: "设备", description: "工作电脑", availability: "" },
+    ],
     networks: [],
     tools: [],
-    knowledge_domains: [{ domain: 'AI', level: 7, description: '人工智能领域' }],
+    knowledge_domains: [{ domain: "AI", level: 7, description: "人工智能领域" }],
   },
   state: {
-    current_focus: '工作',
-    health_status: { physical: '良好', mental: '稳定', energy_level: 8 },
-    emotional_state: { current_mood: 'happy', stress_level: 2, fulfillment_score: 8 },
+    current_focus: "工作",
+    health_status: { physical: "良好", mental: "稳定", energy_level: 8 },
+    emotional_state: { current_mood: "happy", stress_level: 2, fulfillment_score: 8 },
     recent_reflections: [],
     open_questions: [],
-    focus_areas: ['工作', '学习'],
+    focus_areas: ["工作", "学习"],
     recent_events: [],
-    habit_streaks: [{ name: '阅读', streak_days: 5 }],
-    custom_dimensions: [
-      { name: '专注度', unit: '%', current_value: 75, alert_days: 3 },
-    ],
+    habit_streaks: [{ name: "阅读", streak_days: 5 }],
+    custom_dimensions: [{ name: "专注度", unit: "%", current_value: 75, alert_days: 3 }],
     alerts: [],
   },
   relationships: { inner_circle: [], mentors: [], collaborators: [] },
   preferences: {
-    work_hours: { preferred_start: '09:00', preferred_end: '18:00', timezone: 'Asia/Shanghai' },
-    peak_energy_time: '',
-    communication_style: '',
-    learning_style: '',
-    decision_making_style: '',
+    work_hours: { preferred_start: "09:00", preferred_end: "18:00", timezone: "Asia/Shanghai" },
+    peak_energy_time: "",
+    communication_style: "",
+    learning_style: "",
+    decision_making_style: "",
   },
   evolution_rules: [],
-}
+};
 
 export function createEmptyLifeModel(): LifeModel {
   return {
     metadata: {
-      version: '0.1.0',
-      created_at: '',
-      updated_at: '',
-      author: '',
+      version: "0.1.0",
+      created_at: "",
+      updated_at: "",
+      author: "",
     },
     identity: {
-      name: '',
+      name: "",
       birth_date: undefined,
       values: [],
       personality_traits: [],
-      life_philosophy: '',
-      mission_statement: '',
+      life_philosophy: "",
+      mission_statement: "",
       role_definition: {
-        primary_role: '',
+        primary_role: "",
         secondary_roles: [],
         responsibilities: [],
         boundaries: [],
       },
       voice_style: {
-        formality: 'neutral',
+        formality: "neutral",
         tone_descriptors: [],
-        vocabulary_preference: '',
-        emoji_usage: 'never',
+        vocabulary_preference: "",
+        emoji_usage: "never",
       },
     },
     goals: {
@@ -141,14 +146,14 @@ export function createEmptyLifeModel(): LifeModel {
       knowledge_domains: [],
     },
     state: {
-      current_focus: '构建人生模型',
+      current_focus: "构建人生模型",
       health_status: {
-        physical: '良好',
-        mental: '积极',
+        physical: "良好",
+        mental: "积极",
         energy_level: 7,
       },
       emotional_state: {
-        current_mood: '期待',
+        current_mood: "期待",
         stress_level: 3,
         fulfillment_score: 6,
       },
@@ -167,242 +172,253 @@ export function createEmptyLifeModel(): LifeModel {
     },
     preferences: {
       work_hours: {
-        preferred_start: '',
-        preferred_end: '',
-        timezone: '',
+        preferred_start: "",
+        preferred_end: "",
+        timezone: "",
       },
-      peak_energy_time: '',
-      communication_style: '',
-      learning_style: '',
-      decision_making_style: '',
+      peak_energy_time: "",
+      communication_style: "",
+      learning_style: "",
+      decision_making_style: "",
     },
     evolution_rules: [],
-  }
+  };
 }
 
 export const mockDailyGoals: DailyGoal[] = [
-  { name: '早起', done: false, time_block: { start: '07:00', end: '08:00' } },
-  { name: '运动', done: true },
-]
+  { name: "早起", done: false, time_block: { start: "07:00", end: "08:00" } },
+  { name: "运动", done: true },
+];
 
 export const mockStateAlerts: StateAlert[] = [
   {
-    dimension_name: '专注度',
-    level: 'warning',
-    message: '专注度低于阈值',
+    dimension_name: "专注度",
+    level: "warning",
+    message: "专注度低于阈值",
     triggered_at: new Date().toISOString(),
   },
-]
+];
 
 export const mockStateHistory: StateHistoryEntry[] = [
   {
     id: 1,
-    dimension_name: '专注度',
+    dimension_name: "专注度",
     value: 70,
-    unit: '%',
-    note: '上午工作',
+    unit: "%",
+    note: "上午工作",
     recorded_at: new Date().toISOString(),
   },
   {
     id: 2,
-    dimension_name: '专注度',
+    dimension_name: "专注度",
     value: 75,
-    unit: '%',
-    note: '下午工作',
+    unit: "%",
+    note: "下午工作",
     recorded_at: new Date(Date.now() - 86400000).toISOString(),
   },
-]
+];
 
 export const mockChatSessions: Array<{ session_id: string; title: string; updated_at: string }> = [
-  { session_id: 'session-1', title: '会话 1', updated_at: new Date().toISOString() },
-  { session_id: 'session-2', title: '会话 2', updated_at: new Date(Date.now() - 3600000).toISOString() },
-]
+  { session_id: "session-1", title: "会话 1", updated_at: new Date().toISOString() },
+  {
+    session_id: "session-2",
+    title: "会话 2",
+    updated_at: new Date(Date.now() - 3600000).toISOString(),
+  },
+];
 
 export const mockChatMessages: ChatMessage[] = [
-  { role: 'user', content: '你好' },
-  { role: 'assistant', content: '你好！我是 OpenLife。' },
-]
+  { role: "user", content: "你好" },
+  { role: "assistant", content: "你好！我是 OpenLife。" },
+];
 
 export const mockLifeModelVersions: LifeModelVersion[] = [
   {
-    version: '0.1.0',
+    version: "0.1.0",
     timestamp: new Date().toISOString(),
-    tag: 'auto',
-    note: '自动保存',
-    yaml_content: '',
+    tag: "auto",
+    note: "自动保存",
+    yaml_content: "",
   },
   {
-    version: '0.2.0',
+    version: "0.2.0",
     timestamp: new Date(Date.now() - 3600000).toISOString(),
-    tag: 'manual',
-    note: '手动调整目标与状态',
-    yaml_content: '',
+    tag: "manual",
+    note: "手动调整目标与状态",
+    yaml_content: "",
   },
-]
+];
 
 export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): Promise<T> => {
   switch (cmd) {
-    case 'get_config':
+    case "get_config":
       return Promise.resolve({
         llm: {
-          provider: 'deepseek',
-          openai_base: 'https://api.deepseek.com',
-          openai_key: '',
-          embedding_model: 'text-embedding-3-small',
-          chat_model: 'deepseek-chat',
+          provider: "deepseek",
+          openai_base: "https://api.deepseek.com",
+          openai_key: "",
+          embedding_model: "text-embedding-3-small",
+          chat_model: "deepseek-chat",
           embedding_enabled: false,
         },
         prefer_local_model: false,
-        local_model: 'llama3',
-      } as T)
-    case 'get_life_model':
-      return Promise.resolve(mockLifeModel as T)
-    case 'get_daily_goals':
-      return Promise.resolve(mockDailyGoals as T)
-    case 'get_state_alerts':
-      return Promise.resolve(mockStateAlerts as T)
-    case 'get_state_history':
-      return Promise.resolve(mockStateHistory as T)
-    case 'list_chat_sessions':
-      return Promise.resolve(mockChatSessions as T)
-    case 'list_mcp_servers':
+        local_model: "llama3",
+      } as T);
+    case "get_life_model":
+      return Promise.resolve(mockLifeModel as T);
+    case "get_daily_goals":
+      return Promise.resolve(mockDailyGoals as T);
+    case "get_state_alerts":
+      return Promise.resolve(mockStateAlerts as T);
+    case "get_state_history":
+      return Promise.resolve(mockStateHistory as T);
+    case "list_chat_sessions":
+      return Promise.resolve(mockChatSessions as T);
+    case "list_mcp_servers":
       return Promise.resolve([
-        { name: 'filesystem', command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'], tool_count: 2 },
-      ] as T)
-    case 'list_mcp_audit_logs':
+        {
+          name: "filesystem",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          tool_count: 2,
+        },
+      ] as T);
+    case "list_mcp_audit_logs":
       return Promise.resolve([
         {
           id: 1,
-          tool_name: 'write_file',
+          tool_name: "write_file",
           arguments: '{"path":"/tmp/demo.txt","content":"hello"}',
-          result: '工具执行成功',
+          result: "工具执行成功",
           success: true,
           pii_found: true,
           created_at: new Date(Date.now() - 60000).toISOString(),
         },
-      ] as T)
-    case 'clear_mcp_audit_logs':
-      return Promise.resolve(3 as T)
-    case 'list_mcp_tools':
+      ] as T);
+    case "clear_mcp_audit_logs":
+      return Promise.resolve(3 as T);
+    case "list_mcp_tools":
       return Promise.resolve([
-        { name: 'read_file', description: '读取文件内容' },
-        { name: 'write_file', description: '写入文件内容' },
-      ] as T)
-    case 'list_mcp_templates':
+        { name: "read_file", description: "读取文件内容" },
+        { name: "write_file", description: "写入文件内容" },
+      ] as T);
+    case "list_mcp_templates":
       return Promise.resolve([
         {
-          id: 'filesystem',
-          name: '本地文件系统',
-          description: '读取和写入本地文件',
-          command: 'npx',
-          args: ['-y', '@modelcontextprotocol/server-filesystem', '{{rootPath}}'],
-          required_args: ['rootPath'],
-          arg_labels: { rootPath: '允许访问的根目录路径' },
-          tags: ['file', 'filesystem', 'local'],
+          id: "filesystem",
+          name: "本地文件系统",
+          description: "读取和写入本地文件",
+          command: "npx",
+          args: ["-y", "@modelcontextprotocol/server-filesystem", "{{rootPath}}"],
+          required_args: ["rootPath"],
+          arg_labels: { rootPath: "允许访问的根目录路径" },
+          tags: ["file", "filesystem", "local"],
         },
-      ] as T)
-    case 'recommend_mcp_manifests':
+      ] as T);
+    case "recommend_mcp_manifests":
       return Promise.resolve([
         {
-          name: 'filesystem',
-          description: '适合当前阶段进行本地文件读写',
+          name: "filesystem",
+          description: "适合当前阶段进行本地文件读写",
           parameters: {},
-          permission_level: 'high',
-          version: '1.0.0',
-          source: { type: 'Mcp', server_name: 'filesystem' },
-          tags: ['file', 'filesystem', 'local'],
+          permission_level: "high",
+          version: "1.0.0",
+          source: { type: "Mcp", server_name: "filesystem" },
+          tags: ["file", "filesystem", "local"],
         },
-      ] as T)
-    case 'get_chat_history':
-      return Promise.resolve(mockChatMessages as T)
-    case 'list_snapshots':
-      return Promise.resolve(mockLifeModelVersions as T)
-    case 'get_agent_run':
-      return Promise.resolve(null as T)
-    case 'list_agent_runs':
-      return Promise.resolve([] as T)
-    case 'list_agent_runs_for_session':
-      return Promise.resolve([] as T)
-    case 'get_last_model_error':
-      return Promise.resolve(null as T)
-    case 'get_pending_proposals':
-      return Promise.resolve([] as T)
-    case 'list_proposals':
-      return Promise.resolve([] as T)
-    case 'batch_accept_low_risk_proposals':
-      return Promise.resolve(0 as T)
-    case 'accept_proposal':
-    case 'reject_proposal':
-    case 'edit_proposal':
-    case 'postpone_proposal':
-      return Promise.resolve(undefined as T)
-    case 'diff_snapshots':
-      return Promise.resolve([
-        '-identity:',
-        '-  mission_statement: 成为更好的自己',
-        '+identity:',
-        '+  mission_statement: 成为更稳定的自己',
-        '-goals:',
-        '+goals:',
-        '+  daily:',
-        '+    - name: 复盘',
-        '-state:',
-        '+state:',
-        '+  current_focus: 深度工作',
-      ].join('\n') as T)
-    case 'create_snapshot':
-      return Promise.resolve(mockLifeModelVersions[0] as T)
-    case 'restore_snapshot':
-      return Promise.resolve(mockLifeModel as T)
-    case 'goal_capability_gap_analysis':
-      return Promise.resolve(['需要提升编程技能', '需要更多学习时间'] as T)
-    case 'goal_capability_gap_report':
+      ] as T);
+    case "get_chat_history":
+      return Promise.resolve(mockChatMessages as T);
+    case "list_snapshots":
+      return Promise.resolve(mockLifeModelVersions as T);
+    case "get_agent_run":
+      return Promise.resolve(null as T);
+    case "list_agent_runs":
+      return Promise.resolve([] as T);
+    case "list_agent_runs_for_session":
+      return Promise.resolve([] as T);
+    case "get_last_model_error":
+      return Promise.resolve(null as T);
+    case "get_pending_proposals":
+      return Promise.resolve([] as T);
+    case "list_proposals":
+      return Promise.resolve([] as T);
+    case "batch_accept_low_risk_proposals":
+      return Promise.resolve(0 as T);
+    case "accept_proposal":
+    case "reject_proposal":
+    case "edit_proposal":
+    case "postpone_proposal":
+      return Promise.resolve(undefined as T);
+    case "diff_snapshots":
+      return Promise.resolve(
+        [
+          "-identity:",
+          "-  mission_statement: 成为更好的自己",
+          "+identity:",
+          "+  mission_statement: 成为更稳定的自己",
+          "-goals:",
+          "+goals:",
+          "+  daily:",
+          "+    - name: 复盘",
+          "-state:",
+          "+state:",
+          "+  current_focus: 深度工作",
+        ].join("\n") as T
+      );
+    case "create_snapshot":
+      return Promise.resolve(mockLifeModelVersions[0] as T);
+    case "restore_snapshot":
+      return Promise.resolve(mockLifeModel as T);
+    case "goal_capability_gap_analysis":
+      return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
+    case "goal_capability_gap_report":
       return Promise.resolve([
         {
-          goal_name: '完成 AI 项目',
-          skill_name: '编程',
+          goal_name: "完成 AI 项目",
+          skill_name: "编程",
           current_level: 4,
           target_level: 7,
-          severity: 'high',
-          suggestion: '安排 2 周刻意练习，并补一个可验证里程碑',
+          severity: "high",
+          suggestion: "安排 2 周刻意练习，并补一个可验证里程碑",
         },
-      ] as T)
-    case 'identity_goal_alignment_check':
-      return Promise.resolve([] as T)
-    case 'identity_goal_alignment_report':
-      return Promise.resolve([] as T)
-    case 'count_memory_chunks':
-      return Promise.resolve(42 as T)
-    case 'rebuild_memory_index':
+      ] as T);
+    case "identity_goal_alignment_check":
+      return Promise.resolve([] as T);
+    case "identity_goal_alignment_report":
+      return Promise.resolve([] as T);
+    case "count_memory_chunks":
+      return Promise.resolve(42 as T);
+    case "rebuild_memory_index":
       return Promise.resolve({
         processed: 12,
         indexed: 10,
         skipped: 2,
-      } as T)
-    case 'get_feedback_summary':
+      } as T);
+    case "get_feedback_summary":
       return Promise.resolve({
         total_messages: 100,
         total_feedback_up: 80,
         total_feedback_down: 5,
         session_count: 10,
-      } as T)
-    case 'should_show_calibration':
-      return Promise.resolve({ weekly: false, monthly: false, today: '2026-04-17' } as T)
-    case 'check_ollama_status':
-      return Promise.resolve(true as T)
-    case 'get_router_status':
+      } as T);
+    case "should_show_calibration":
+      return Promise.resolve({ weekly: false, monthly: false, today: "2026-04-17" } as T);
+    case "check_ollama_status":
+      return Promise.resolve(true as T);
+    case "get_router_status":
       return Promise.resolve({
         onnx_available: false,
         onnx_disabled: false,
-        active_backend: 'regex',
+        active_backend: "regex",
         latency_threshold_us: 50000,
-      } as T)
-    case 'get_system_diagnostics':
+      } as T);
+    case "get_system_diagnostics":
       return Promise.resolve({
         router: {
           onnx_available: false,
           onnx_disabled: false,
-          active_backend: 'regex',
+          active_backend: "regex",
           latency_threshold_us: 50000,
         },
         mcp_server_count: 1,
@@ -414,23 +430,23 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         unfinished_builder_sessions: 0,
         pending_builder_review_sessions: 0,
         ollama_online: true,
-        local_model: 'llama3',
-        resolved_local_model: 'llama3:latest',
+        local_model: "llama3",
+        resolved_local_model: "llama3:latest",
         prefer_local_model: true,
         cloud_api_configured: false,
-        cloud_provider: 'DeepSeek',
+        cloud_provider: "DeepSeek",
         cloud_api_validated: false,
         cloud_api_last_error: null,
         chat_ready: true,
         readiness_issues: [],
-        data_dir: '/tmp/openlife-test',
-        active_data_dir: '/tmp/openlife-test',
-        legacy_data_dir: '/tmp/openlife-legacy',
-        database_status: 'ok',
+        data_dir: "/tmp/openlife-test",
+        active_data_dir: "/tmp/openlife-test",
+        legacy_data_dir: "/tmp/openlife-legacy",
+        database_status: "ok",
         startup_warnings: [],
         snapshot_count: 2,
         life_model_ready: true,
-        app_version: '0.1.0',
+        app_version: "0.1.0",
         model_empty: false,
         chat_session_count: 3,
         onboarding_completed: true,
@@ -442,7 +458,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           capabilities: 70,
           state: 65,
           overall: 72.5,
-          lowest_dimension: 'state',
+          lowest_dimension: "state",
         },
         data_files: {
           messages_db_exists: true,
@@ -455,77 +471,83 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           life_model_yaml_exists: true,
         },
         ollama_models: [
-          { name: 'llama3', size_mb: 4500 },
-          { name: 'qwen2.5', size_mb: 3200 },
+          { name: "llama3", size_mb: 4500 },
+          { name: "qwen2.5", size_mb: 3200 },
         ],
-        config_source: 'env+default',
-      } as T)
-    case 'get_scheduler_config':
-      return Promise.resolve({ localModel: 'llama3', preferLocal: true } as T)
-    case 'save_chat_message':
-      return Promise.resolve(undefined as T)
-    case 'register_mcp_server':
-    case 'unregister_mcp_server':
-      return Promise.resolve(undefined as T)
-    case 'execute_tool_call':
+        config_source: "env+default",
+      } as T);
+    case "get_scheduler_config":
+      return Promise.resolve({ localModel: "llama3", preferLocal: true } as T);
+    case "save_chat_message":
+      return Promise.resolve(undefined as T);
+    case "register_mcp_server":
+    case "unregister_mcp_server":
+      return Promise.resolve(undefined as T);
+    case "execute_tool_call":
       return Promise.resolve({
         name: _args?.name,
         arguments: _args?.arguments ?? {},
         sanitized_arguments: _args?.arguments ?? {},
         success: true,
-        output: '工具执行成功',
-        permission_level: 'high',
-        status: 'success',
+        output: "工具执行成功",
+        permission_level: "high",
+        status: "success",
         requires_confirmation: false,
         pii_found: false,
         privacy_warnings: [],
-      } as T)
-    case 'inspect_mcp_call':
+      } as T);
+    case "inspect_mcp_call":
       return Promise.resolve({
-        permission_level: 'medium',
+        permission_level: "medium",
         pii_found: true,
-        findings: [{ path: '$.query', privacy_type: 'Email', matched: 'test@example.com' }],
-        sanitized_arguments: { query: '帮我搜索 <EMAIL_0> 的公开信息' },
+        findings: [{ path: "$.query", privacy_type: "Email", matched: "test@example.com" }],
+        sanitized_arguments: { query: "帮我搜索 <EMAIL_0> 的公开信息" },
         requires_confirmation: true,
-      } as T)
-    case 'get_model_4d_completion':
+      } as T);
+    case "get_model_4d_completion":
       return Promise.resolve({
         identity: 0.7,
         goals: 0.6,
         capabilities: 0.5,
         state: 0.8,
-      } as T)
-    case 'builder_list_unfinished':
-      return Promise.resolve([] as T)
-    case 'builder_start':
+      } as T);
+    case "builder_list_unfinished":
+      return Promise.resolve([] as T);
+    case "builder_start":
       return Promise.resolve({
-        prompt: '请描述你的价值观',
-        progress: { progress: 0.2, current_step_label: '价值观', step_index: 1, total_steps: 5 },
-      } as T)
-    case 'builder_step':
+        prompt: "请描述你的价值观",
+        progress: { progress: 0.2, current_step_label: "价值观", step_index: 1, total_steps: 5 },
+      } as T);
+    case "builder_step":
       return Promise.resolve({
-        prompt: '下一步问题',
+        prompt: "下一步问题",
         finished: false,
-        progress: { progress: 0.4, current_step_label: '目标', step_index: 2, total_steps: 5, waiting_phase_confirmation: false },
-        mode: 'Quick',
+        progress: {
+          progress: 0.4,
+          current_step_label: "目标",
+          step_index: 2,
+          total_steps: 5,
+          waiting_phase_confirmation: false,
+        },
+        mode: "Quick",
         pending_signals: [],
-      } as T)
-    case 'builder_get_pending_signals':
+      } as T);
+    case "builder_get_pending_signals":
       return Promise.resolve({
-        session_id: 'test-session',
+        session_id: "test-session",
         signals: [],
         summary: {
-          identity_summary: '基于 0 个信号',
-          goals_summary: '基于 0 个信号',
-          capabilities_summary: '基于 0 个信号',
-          state_summary: '基于 0 个信号',
-          assumptions: ['用户通过快速构建流程提供'],
+          identity_summary: "基于 0 个信号",
+          goals_summary: "基于 0 个信号",
+          capabilities_summary: "基于 0 个信号",
+          state_summary: "基于 0 个信号",
+          assumptions: ["用户通过快速构建流程提供"],
           unresolved_questions: [],
-          recommended_next_steps: ['审阅并确认信号', '可选择进入渐进构建继续完善'],
+          recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
         },
         finished: true,
-      } as T)
-    case 'builder_apply_signals':
+      } as T);
+    case "builder_apply_signals":
       return Promise.resolve({
         success: true,
         applied_fields: [],
@@ -534,83 +556,87 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         edited_count: 0,
         rejected_count: 0,
         model: null,
-      } as T)
-    case 'builder_create_proposals':
+      } as T);
+    case "builder_create_proposals":
       return Promise.resolve({
         success: true,
         created_count: 1,
         rejected_count: 0,
-        proposal_ids: ['proposal-1'],
+        proposal_ids: ["proposal-1"],
         warnings: [],
-      } as T)
-    case 'add_daily_goal':
-      return Promise.resolve(undefined as T)
-    case 'toggle_daily_goal':
-      return Promise.resolve(true as T)
-    case 'delete_daily_goal':
-    case 'update_daily_goal':
-      return Promise.resolve(undefined as T)
-    case 'record_state':
-      return Promise.resolve(undefined as T)
-    case 'search_memory':
-      return Promise.resolve([] as T)
-    case 'a2a_local_agent_card':
+      } as T);
+    case "add_daily_goal":
+      return Promise.resolve(undefined as T);
+    case "toggle_daily_goal":
+      return Promise.resolve(true as T);
+    case "delete_daily_goal":
+    case "update_daily_goal":
+      return Promise.resolve(undefined as T);
+    case "record_state":
+      return Promise.resolve(undefined as T);
+    case "search_memory":
+      return Promise.resolve([] as T);
+    case "a2a_local_agent_card":
       return Promise.resolve({
-        name: 'OpenLife Local Agent',
-        description: '本地 A2A 服务',
-        version: '0.1.0',
+        name: "OpenLife Local Agent",
+        description: "本地 A2A 服务",
+        version: "0.1.0",
         skills: [
-          { id: 'openlife.hermes_bridge', name: 'Hermes Bridge', description: '桥接 Hermes 和 A2A' },
+          {
+            id: "openlife.hermes_bridge",
+            name: "Hermes Bridge",
+            description: "桥接 Hermes 和 A2A",
+          },
         ],
-      } as T)
-    case 'a2a_discover_agent':
+      } as T);
+    case "a2a_discover_agent":
       return Promise.resolve({
-        name: 'Remote Agent',
-        description: '外部代理',
-        version: '0.1.0',
-        url: 'http://127.0.0.1:8080',
+        name: "Remote Agent",
+        description: "外部代理",
+        version: "0.1.0",
+        url: "http://127.0.0.1:8080",
         capabilities: { streaming: false },
-        skills: [{ id: 'demo', name: 'Demo Skill', description: '测试技能' }],
-      } as T)
-    case 'a2a_send_task':
-    case 'a2a_handle_task':
-      return Promise.resolve('{"status":"ok"}' as T)
-    case 'a2a_bridge_local':
+        skills: [{ id: "demo", name: "Demo Skill", description: "测试技能" }],
+      } as T);
+    case "a2a_send_task":
+    case "a2a_handle_task":
+      return Promise.resolve('{"status":"ok"}' as T);
+    case "a2a_bridge_local":
       return Promise.resolve({
         request: { method: _args?.method, params: { text: _args?.text } },
-        a2a_request: { message: { parts: [{ type: 'text', text: _args?.text }] } },
-        response: { status: { state: 'completed' } },
-        hermes_result: { text: '桥接成功' },
-      } as T)
-    case 'a2a_restart_sidecar':
-    case 'a2a_stop_sidecar':
-      return Promise.resolve(undefined as T)
-    case 'run_micro_evolution':
+        a2a_request: { message: { parts: [{ type: "text", text: _args?.text }] } },
+        response: { status: { state: "completed" } },
+        hermes_result: { text: "桥接成功" },
+      } as T);
+    case "a2a_restart_sidecar":
+    case "a2a_stop_sidecar":
+      return Promise.resolve(undefined as T);
+    case "run_micro_evolution":
       return Promise.resolve({
         changes: [],
         applied: false,
-        message: '近7天暂无足够信号来微调模型权重',
+        message: "近7天暂无足够信号来微调模型权重",
         snapshot_version: null,
-      } as T)
-    case 'generate_micro_evolution_changes':
+      } as T);
+    case "generate_micro_evolution_changes":
       return Promise.resolve({
         changes: [
           {
-            dimension: 'identity.values',
-            target_name: '健康',
+            dimension: "identity.values",
+            target_name: "健康",
             old_value: 8,
             new_value: 8.03,
-            reason: '近期正向行为信号增加',
+            reason: "近期正向行为信号增加",
             confidence: 0.82,
             sources: [
-              { source: 'feedback', score: 0.03, weight: 0.5 },
-              { source: 'behavior', score: 0.02, weight: 0.3 },
-              { source: 'inference', score: 0.01, weight: 0.2 },
+              { source: "feedback", score: 0.03, weight: 0.5 },
+              { source: "behavior", score: 0.02, weight: 0.3 },
+              { source: "inference", score: 0.01, weight: 0.2 },
             ],
           },
         ],
         applied: true,
-        message: '已生成 1 项建议',
+        message: "已生成 1 项建议",
         before: { identity: 70, goals: 60, capabilities: 50, state: 80, overall: 65 },
         after: { identity: 71, goals: 60, capabilities: 50, state: 80, overall: 65 },
         requires_confirmation: true,
@@ -618,81 +644,86 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           feedback_terms: 2,
           behavior_events: 1,
           inference_items: 1,
-          top_feedback: [{ name: '健康', score: 0.03, source: 'feedback' }],
-          top_behavior: [{ name: 'value_focus:健康', score: 0.02, source: 'behavior' }],
-          top_inference: [{ name: 'identity.values:健康', score: 0.01, source: 'inference' }],
+          top_feedback: [{ name: "健康", score: 0.03, source: "feedback" }],
+          top_behavior: [{ name: "value_focus:健康", score: 0.02, source: "behavior" }],
+          top_inference: [{ name: "identity.values:健康", score: 0.01, source: "inference" }],
         },
-      } as T)
-    case 'apply_calibration':
+      } as T);
+    case "apply_calibration":
       return Promise.resolve({
         success: true,
-        snapshot_version: 'v1-test',
+        snapshot_version: "v1-test",
         applied_count: 2,
-        message: '已应用校准',
-      } as T)
-    case 'calibration_create_proposals':
+        message: "已应用校准",
+      } as T);
+    case "calibration_create_proposals":
       return Promise.resolve({
         created_count: 2,
-        created_ids: ['p1', 'p2'],
+        created_ids: ["p1", "p2"],
         error_count: 0,
         errors: [],
-        message: '已创建 2 个 Proposal',
-      } as T)
+        message: "已创建 2 个 Proposal",
+      } as T);
     // Milestone D mocks
-    case 'get_hot_cache':
+    case "get_hot_cache":
       return Promise.resolve({
-        identity_summary: '你是测试用户，成为更好的自己。你的核心哲学是：活在当下。',
-        top_values: ['健康 (保持身体健康)', '学习 (持续学习成长)'],
-        current_goals: ['完成项目 (优先级: 1, 进度: 50%)', '○ 每日目标: 早起'],
-        recent_state: '心情: happy，当前专注: 工作',
+        identity_summary: "你是测试用户，成为更好的自己。你的核心哲学是：活在当下。",
+        top_values: ["健康 (保持身体健康)", "学习 (持续学习成长)"],
+        current_goals: ["完成项目 (优先级: 1, 进度: 50%)", "○ 每日目标: 早起"],
+        recent_state: "心情: happy，当前专注: 工作",
         last_refreshed: new Date().toISOString(),
-        life_model_version: '',
-      } as T)
-    case 'archive_low_access_memories':
-      return Promise.resolve(0 as T)
-    case 'restore_archived_chunks':
-      return Promise.resolve((_args?.chunk_ids ?? []).length as T)
-    case 'list_archived_chunks':
-      return Promise.resolve([] as T)
-    case 'get_memory_tier_stats':
-      return Promise.resolve({ total: 0, tier1: 0, tier2: 0, tier3: 0, archived: 0 } as T)
-    case 'export_mcp_audit_logs':
-      return Promise.resolve({ exported_at: new Date().toISOString(), entry_count: 0, days: _args?.days ?? 7, entries: [] } as T)
-    case 'cleanup_mcp_audit_logs':
-      return Promise.resolve(0 as T)
-    case 'rotate_mcp_audit_key':
-      return Promise.resolve(undefined as T)
-    case 'get_privacy_policy':
+        life_model_version: "",
+      } as T);
+    case "archive_low_access_memories":
+      return Promise.resolve(0 as T);
+    case "restore_archived_chunks":
+      return Promise.resolve((_args?.chunk_ids ?? []).length as T);
+    case "list_archived_chunks":
+      return Promise.resolve([] as T);
+    case "get_memory_tier_stats":
+      return Promise.resolve({ total: 0, tier1: 0, tier2: 0, tier3: 0, archived: 0 } as T);
+    case "export_mcp_audit_logs":
+      return Promise.resolve({
+        exported_at: new Date().toISOString(),
+        entry_count: 0,
+        days: _args?.days ?? 7,
+        entries: [],
+      } as T);
+    case "cleanup_mcp_audit_logs":
+      return Promise.resolve(0 as T);
+    case "rotate_mcp_audit_key":
+      return Promise.resolve(undefined as T);
+    case "get_privacy_policy":
       return Promise.resolve({
         enabled: true,
         rules: [
-          { ptype: 'Phone', enabled: true, action: 'Mask', custom_pattern: undefined },
-          { ptype: 'IdCard', enabled: true, action: 'Block', custom_pattern: undefined },
-          { ptype: 'Email', enabled: true, action: 'Mask', custom_pattern: undefined },
+          { ptype: "Phone", enabled: true, action: "Mask", custom_pattern: undefined },
+          { ptype: "IdCard", enabled: true, action: "Block", custom_pattern: undefined },
+          { ptype: "Email", enabled: true, action: "Mask", custom_pattern: undefined },
         ],
-      } as T)
-    case 'export_all_data':
+      } as T);
+    case "export_all_data":
       return Promise.resolve({
-        version: '2.0',
-        app_version: '0.1.0',
+        version: "2.0",
+        app_version: "0.1.0",
         exported_at: new Date().toISOString(),
         life_model: {},
         messages: [],
         vectors: [],
-      } as T)
-    case 'test_llm_connection':
+      } as T);
+    case "test_llm_connection":
       return Promise.resolve({
         ok: true,
-        provider: _args?.config?.llm?.provider === 'deepseek' ? 'DeepSeek' : 'OpenAI-compatible',
-        message: '连接成功',
-      } as T)
-    case 'set_privacy_policy':
-      return Promise.resolve(undefined as T)
-    case 'has_completed_onboarding':
-      return Promise.resolve(false as T)
-    case 'mark_onboarding_completed':
-      return Promise.resolve(undefined as T)
+        provider: _args?.config?.llm?.provider === "deepseek" ? "DeepSeek" : "OpenAI-compatible",
+        message: "连接成功",
+      } as T);
+    case "set_privacy_policy":
+      return Promise.resolve(undefined as T);
+    case "has_completed_onboarding":
+      return Promise.resolve(false as T);
+    case "mark_onboarding_completed":
+      return Promise.resolve(undefined as T);
     default:
-      return Promise.resolve({} as T)
+      return Promise.resolve({} as T);
   }
-})
+});

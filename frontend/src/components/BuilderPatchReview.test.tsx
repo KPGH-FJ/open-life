@@ -132,11 +132,11 @@ describe("BuilderPatchReview", () => {
     );
 
     const checkboxes = screen.getAllByRole("checkbox");
-    
+
     // Uncheck a low risk item
     fireEvent.click(checkboxes[0]);
     expect(checkboxes[0]).not.toBeChecked();
-    
+
     // Check a high risk item
     fireEvent.click(checkboxes[2]);
     expect(checkboxes[2]).toBeChecked();
@@ -159,13 +159,13 @@ describe("BuilderPatchReview", () => {
     const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
     expect(decisions).toHaveLength(3);
 
-    const accepted = decisions.filter((d) => d.status === "accepted");
-    const rejected = decisions.filter((d) => d.status === "rejected");
+    const accepted = decisions.filter(d => d.status === "accepted");
+    const rejected = decisions.filter(d => d.status === "rejected");
     expect(accepted).toHaveLength(2);
     expect(rejected).toHaveLength(1);
-    expect(accepted.map((d) => d.id)).toContain("sig_name");
-    expect(accepted.map((d) => d.id)).toContain("sig_focus");
-    expect(rejected.map((d) => d.id)).toContain("sig_long_term");
+    expect(accepted.map(d => d.id)).toContain("sig_name");
+    expect(accepted.map(d => d.id)).toContain("sig_focus");
+    expect(rejected.map(d => d.id)).toContain("sig_long_term");
   });
 
   it("calls onReject when clicking reject button", () => {
@@ -267,7 +267,7 @@ describe("BuilderPatchReview", () => {
 
     // Edit the value
     fireEvent.change(input, { target: { value: "Alex" } });
-    
+
     // Save the edit
     const saveEditButton = screen.getByText("保存");
     fireEvent.click(saveEditButton);
@@ -278,7 +278,7 @@ describe("BuilderPatchReview", () => {
 
     await waitFor(() => {
       const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
-      const editedDecision = decisions.find((d) => d.id === "sig_name");
+      const editedDecision = decisions.find(d => d.id === "sig_name");
       expect(editedDecision).toBeDefined();
       expect(editedDecision!.status).toBe("edited");
       expect(editedDecision!.proposed_value).toBe("Alex");
@@ -349,7 +349,7 @@ describe("BuilderPatchReview", () => {
     });
     fireEvent.click(screen.getByText("保存"));
     fireEvent.click(screen.getByText("直接应用（快速写入）"));
-    
+
     // Confirm direct apply for high-risk signal
     await waitFor(() => {
       expect(screen.getByText("确认直接写入")).toBeInTheDocument();
@@ -358,7 +358,7 @@ describe("BuilderPatchReview", () => {
 
     await waitFor(() => {
       const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
-      const editedDecision = decisions.find((d) => d.id === "sig_long_term");
+      const editedDecision = decisions.find(d => d.id === "sig_long_term");
       expect(editedDecision).toMatchObject({
         id: "sig_long_term",
         status: "edited",
@@ -410,13 +410,13 @@ describe("BuilderPatchReview", () => {
       const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
       expect(decisions).toHaveLength(3);
 
-      const rejected = decisions.filter((d) => d.status === "rejected");
+      const rejected = decisions.filter(d => d.status === "rejected");
       expect(rejected).toHaveLength(2);
-      expect(rejected.map((d) => d.id)).toContain("sig_name");
-      expect(rejected.map((d) => d.id)).toContain("sig_long_term");
+      expect(rejected.map(d => d.id)).toContain("sig_name");
+      expect(rejected.map(d => d.id)).toContain("sig_long_term");
 
       // Rejected decisions must NOT contain proposed_value
-      const nameRejected = rejected.find((d) => d.id === "sig_name");
+      const nameRejected = rejected.find(d => d.id === "sig_name");
       expect(nameRejected).not.toHaveProperty("proposed_value");
     });
   });

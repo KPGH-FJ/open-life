@@ -48,9 +48,9 @@ fn change_to_proposal(
         let parts: Vec<&str> = change.dimension.split('.').collect();
         let mut current = &model_json;
         for part in parts.iter() {
-            current = current.get(part).ok_or_else(|| {
-                format!("无法提取 before 值：路径 {} 不存在", change.dimension)
-            })?;
+            current = current
+                .get(part)
+                .ok_or_else(|| format!("无法提取 before 值：路径 {} 不存在", change.dimension))?;
         }
         // 进一步定位到 target_name
         if !change.target_name.is_empty() {

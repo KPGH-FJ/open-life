@@ -185,8 +185,8 @@ impl AgentRunStore {
             let context_summary = context_summary_json.and_then(|s| serde_json::from_str(&s).ok());
             let model_route = model_route_json.and_then(|s| serde_json::from_str(&s).ok());
             let error = error_json.and_then(|s| serde_json::from_str(&s).ok());
-            let generated_proposals: Vec<String> = serde_json::from_str(&generated_proposals_json)
-                .unwrap_or_default();
+            let generated_proposals: Vec<String> =
+                serde_json::from_str(&generated_proposals_json).unwrap_or_default();
 
             let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
                 .map_err(|e| {
@@ -291,8 +291,8 @@ impl AgentRunStore {
         let context_summary = context_summary_json.and_then(|s| serde_json::from_str(&s).ok());
         let model_route = model_route_json.and_then(|s| serde_json::from_str(&s).ok());
         let error = error_json.and_then(|s| serde_json::from_str(&s).ok());
-        let generated_proposals: Vec<String> = serde_json::from_str(&generated_proposals_json)
-            .unwrap_or_default();
+        let generated_proposals: Vec<String> =
+            serde_json::from_str(&generated_proposals_json).unwrap_or_default();
 
         let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
             .map_err(|e| {

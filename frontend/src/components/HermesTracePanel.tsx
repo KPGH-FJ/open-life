@@ -50,9 +50,15 @@ function LayerBlock({
 }
 
 export default function HermesTracePanel({ trace, show, onToggle }: Props) {
-  const meaningText = trace.meaning_result?.text ?? (typeof trace.meaning_result === "string" ? trace.meaning_result : "");
-  const strategyText = trace.strategy_result?.text ?? (typeof trace.strategy_result === "string" ? trace.strategy_result : "");
-  const executionText = trace.execution_result?.text ?? (typeof trace.execution_result === "string" ? trace.execution_result : "");
+  const meaningText =
+    trace.meaning_result?.text ??
+    (typeof trace.meaning_result === "string" ? trace.meaning_result : "");
+  const strategyText =
+    trace.strategy_result?.text ??
+    (typeof trace.strategy_result === "string" ? trace.strategy_result : "");
+  const executionText =
+    trace.execution_result?.text ??
+    (typeof trace.execution_result === "string" ? trace.execution_result : "");
   const alignedValues = trace.meaning_result?.aligned_values ?? [];
   const alignedGoals = trace.strategy_result?.aligned_goals ?? [];
   const planSteps = trace.strategy_result?.plan_steps ?? [];
@@ -61,15 +67,28 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
   const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
   const arbitrationWarnings = trace.arbitration_result?.warnings ?? [];
   const hasContent =
-    trace.input || meaningText || strategyText || executionText || trace.output || toolPlan.length > 0 || arbitrationWarnings.length > 0 || (trace.errors && trace.errors.length > 0);
+    trace.input ||
+    meaningText ||
+    strategyText ||
+    executionText ||
+    trace.output ||
+    toolPlan.length > 0 ||
+    arbitrationWarnings.length > 0 ||
+    (trace.errors && trace.errors.length > 0);
 
   const totalMs = trace.layer_timings_ms
     ? Object.values(trace.layer_timings_ms).reduce((a, b) => a + (b || 0), 0)
     : 0;
   const summaryItems = [
-    Array.isArray(alignedValues) && alignedValues.length > 0 ? `参考价值观：${alignedValues.slice(0, 2).join("、")}` : "",
-    Array.isArray(alignedGoals) && alignedGoals.length > 0 ? `对齐目标：${alignedGoals.slice(0, 2).join("、")}` : "",
-    Array.isArray(toolPlan) && toolPlan.length > 0 ? `计划工具：${toolPlan.slice(0, 2).join("、")}` : "无需外部工具",
+    Array.isArray(alignedValues) && alignedValues.length > 0
+      ? `参考价值观：${alignedValues.slice(0, 2).join("、")}`
+      : "",
+    Array.isArray(alignedGoals) && alignedGoals.length > 0
+      ? `对齐目标：${alignedGoals.slice(0, 2).join("、")}`
+      : "",
+    Array.isArray(toolPlan) && toolPlan.length > 0
+      ? `计划工具：${toolPlan.slice(0, 2).join("、")}`
+      : "无需外部工具",
   ].filter(Boolean);
 
   return (
@@ -90,8 +109,11 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
         <span className="text-xs">{show ? "▲" : "▼"}</span>
       </button>
       <div className="flex flex-wrap gap-2 pt-1">
-        {summaryItems.map((item) => (
-          <span key={item} className="rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-medium text-indigo-700 border border-indigo-100">
+        {summaryItems.map(item => (
+          <span
+            key={item}
+            className="rounded-full bg-white/80 px-2.5 py-1 text-[10px] font-medium text-indigo-700 border border-indigo-100"
+          >
             {item}
           </span>
         ))}
@@ -113,7 +135,8 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
               <div className="rounded-lg border border-indigo-100 bg-white/70 p-3 text-gray-700">
                 <div className="font-medium text-indigo-800">回答思路</div>
                 <p className="mt-1 leading-relaxed">
-                  下面是 OpenLife 思考你问题的过程。它不代表绝对判断，而是让你知道回答从哪里来、有哪些不确定性。
+                  下面是 OpenLife
+                  思考你问题的过程。它不代表绝对判断，而是让你知道回答从哪里来、有哪些不确定性。
                 </p>
               </div>
               {trace.input && (
@@ -122,7 +145,9 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                     <Terminal size={14} />
                     输入
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-gray-800">{trace.input}</div>
+                  <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-gray-800">
+                    {trace.input}
+                  </div>
                 </div>
               )}
               <LayerBlock
@@ -138,7 +163,10 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                   <div className="text-[11px] font-medium text-indigo-700">对齐价值观</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {alignedValues.map((value: string) => (
-                      <span key={value} className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-700 border border-indigo-100">
+                      <span
+                        key={value}
+                        className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-700 border border-indigo-100"
+                      >
                         {value}
                       </span>
                     ))}
@@ -158,7 +186,10 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                   <div className="text-[11px] font-medium text-purple-700">优先目标</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {alignedGoals.map((goal: string) => (
-                      <span key={goal} className="rounded-full bg-purple-50 px-2 py-0.5 text-[10px] text-purple-700 border border-purple-100">
+                      <span
+                        key={goal}
+                        className="rounded-full bg-purple-50 px-2 py-0.5 text-[10px] text-purple-700 border border-purple-100"
+                      >
                         {goal}
                       </span>
                     ))}
@@ -182,7 +213,9 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
               )}
               {Array.isArray(stableSteps) && stableSteps.length > 0 && (
                 <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 p-3">
-                  <div className="text-[11px] font-medium text-indigo-700">稳定步骤计划（已规范化）</div>
+                  <div className="text-[11px] font-medium text-indigo-700">
+                    稳定步骤计划（已规范化）
+                  </div>
                   <ol className="mt-2 list-decimal pl-4 text-xs text-gray-700 space-y-1">
                     {stableSteps.map((step: string, idx: number) => (
                       <li key={`stable-${idx}-${step}`}>{step}</li>
@@ -195,7 +228,10 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                   <div className="text-[11px] font-medium text-amber-700">建议工具链</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {toolPlan.map((tool: string) => (
-                      <span key={tool} className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700 border border-amber-100">
+                      <span
+                        key={tool}
+                        className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] text-amber-700 border border-amber-100"
+                      >
                         {tool}
                       </span>
                     ))}
@@ -216,7 +252,9 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                     <Terminal size={14} />
                     最终输出
                   </div>
-                  <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-emerald-900">{trace.output}</div>
+                  <div className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-emerald-900">
+                    {trace.output}
+                  </div>
                 </div>
               )}
               {Array.isArray(arbitrationWarnings) && arbitrationWarnings.length > 0 && (

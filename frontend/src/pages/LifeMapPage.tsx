@@ -24,16 +24,8 @@ import {
   goalCapabilityGapReport,
   identityGoalAlignmentReport,
 } from "../tauri";
-import type {
-  LifeModel,
-  DailyGoal,
-  StateAlert,
-} from "../types";
-import type {
-  Model4DCompletion,
-  CapabilityGap,
-  AlignmentIssue,
-} from "../tauri";
+import type { LifeModel, DailyGoal, StateAlert } from "../types";
+import type { Model4DCompletion, CapabilityGap, AlignmentIssue } from "../tauri";
 import EmptyState from "../components/EmptyState";
 
 interface DimensionCardProps {
@@ -204,9 +196,7 @@ export default function LifeMapPage() {
             linkLabel="完善身份"
           >
             {model?.identity?.name && (
-              <div className="text-sm font-medium text-gray-900">
-                {model.identity.name}
-              </div>
+              <div className="text-sm font-medium text-gray-900">{model.identity.name}</div>
             )}
             {topValues.length > 0 ? (
               <div className="flex flex-wrap gap-2">
@@ -338,7 +328,9 @@ export default function LifeMapPage() {
             {model?.state?.emotional_state?.current_mood && (
               <div className="flex items-center gap-2 text-sm">
                 <Heart size={14} className="text-rose-400" />
-                <span className="text-gray-800">情绪：{model.state.emotional_state.current_mood}</span>
+                <span className="text-gray-800">
+                  情绪：{model.state.emotional_state.current_mood}
+                </span>
               </div>
             )}
             {model?.state?.current_focus && (
@@ -355,16 +347,18 @@ export default function LifeMapPage() {
             )}
             {model?.state?.custom_dimensions && model.state.custom_dimensions.length > 0 ? (
               <div className="flex flex-wrap gap-2">
-                {model.state.custom_dimensions.slice(0, 3).map((dim: { name: string; current_value: number; unit: string }) => (
-                  <span
-                    key={dim.name}
-                    className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700 border border-emerald-100"
-                  >
-                    <TrendingUp size={10} />
-                    {dim.name}: {dim.current_value.toFixed(1)}
-                    {dim.unit}
-                  </span>
-                ))}
+                {model.state.custom_dimensions
+                  .slice(0, 3)
+                  .map((dim: { name: string; current_value: number; unit: string }) => (
+                    <span
+                      key={dim.name}
+                      className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs text-emerald-700 border border-emerald-100"
+                    >
+                      <TrendingUp size={10} />
+                      {dim.name}: {dim.current_value.toFixed(1)}
+                      {dim.unit}
+                    </span>
+                  ))}
               </div>
             ) : (
               <EmptyState

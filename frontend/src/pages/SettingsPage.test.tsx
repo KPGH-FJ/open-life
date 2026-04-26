@@ -219,7 +219,9 @@ describe("SettingsPage", () => {
           cloud_api_validated: true,
           cloud_api_last_error: null,
           chat_ready: true,
-          readiness_issues: ["应用正在以降级数据模式运行：memory.db 初始化失败，正在使用临时数据库"],
+          readiness_issues: [
+            "应用正在以降级数据模式运行：memory.db 初始化失败，正在使用临时数据库",
+          ],
           data_dir: "/tmp/openlife-test",
           active_data_dir: "/tmp/openlife-test",
           legacy_data_dir: "/tmp/openlife-legacy",
@@ -232,7 +234,9 @@ describe("SettingsPage", () => {
           chat_session_count: 1,
           onboarding_completed: true,
           beta_ready: false,
-          beta_readiness_issues: ["数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度试用。"],
+          beta_readiness_issues: [
+            "数据存储曾在启动时降级：请先确认数据目录和数据库状态，再继续深度试用。",
+          ],
           builder_completion: {
             identity: 80,
             goals: 75,
@@ -350,7 +354,10 @@ describe("SettingsPage", () => {
   });
 
   it("rebuilds vector index from recovery console", async () => {
-    vi.stubGlobal("confirm", vi.fn(() => true));
+    vi.stubGlobal(
+      "confirm",
+      vi.fn(() => true)
+    );
 
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
