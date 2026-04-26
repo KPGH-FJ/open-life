@@ -1,37 +1,99 @@
 # OpenLife
 
-OpenLife 是你的**终身成长合伙人**，一款基于 Tauri + React + Rust 的桌面端 AI 伴侣应用。它以你的人生模型（Life Model）为核心，通过价值观对齐的对话、三层决策架构（Hermes）、多协议生态集成（MCP / A2A）和持续进化系统，陪伴你实现长期目标。
+OpenLife 是一个**本地优先的个人 Agent 框架**。它不是单纯的聊天应用，也不是普通的目标管理工具，而是围绕用户私人数据构建的个人 AI 操作系统雏形。
 
-## 核心特性
+OpenLife 的核心范式是：
 
-- **四维人生模型**：Identity（身份认同）、Goals（目标体系）、Capabilities（能力资源）、State（当前状态）。
-- **三层对话引擎**：Reflex 意图路由 → Tactical 本地模型 / Strategic 云端大模型 → 语义记忆注入。
-- **Hermes 三层决策总线**：Meaning / Strategy / Execution 的 JSON-RPC 2.0 风格进程内协议，带冲突仲裁器。
-- **双协议生态桥接**：MCP 工具调用 + A2A Agent 互联（客户端发现 / 服务端暴露价值观评估）。
-- **向量记忆 Tier 3**：基于 Embedding 的语义检索，自动注入对话上下文。
-- **版本控制**：Git-like 人生模型快照，支持一键回滚与差异对比。
-- **构建模式**：快速构建（60 分钟）、渐进构建、苏格拉底式峰值体验挖掘。
-- **隐私感知**：PII 检测与脱敏上云，核心价值观本地拦截。
+```text
+LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
+```
+
+用户先构建自己的 LifeModel，包括身份、目标、能力、状态、偏好和关系等私人上下文。之后，OpenLife 会让本地模型或云端模型在这个人生模型的约束下完成对话、规划、写作、复盘、工具调用、状态更新和长期反馈。系统不只是回答问题，还应该逐步理解用户，并在用户确认下持续更新 LifeModel。
+
+## 当前定位
+
+当前项目处于 **Agent Framework Alpha** 阶段：
+
+- 已经具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics 等核心材料。
+- 还没有完全完成统一的 Agent Runtime。
+- 接下来的开发重点不是继续堆页面，而是把 `AgentTask -> AgentRun -> Actions/Observations -> Proposals -> Confirmation -> Persistence` 这条架构主线打通。
+
+新的架构基准文档见：
+
+- [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+
+## 核心能力
+
+| 能力 | 当前状态 | 目标形态 |
+|---|---|---|
+| LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
+| Builder | 已支持快速、渐进、苏格拉底式构建 | 通过 Proposal 机制安全写入 LifeModel |
+| Chat | 已支持流式对话和历史持久化 | 升级为 Agent 执行界面，展示上下文、模型路由和运行轨迹 |
+| Model Router | 已支持本地 Ollama 与云端 OpenAI-compatible | 升级为按任务、隐私、能力和成本路由的 ModelRouter |
+| Memory | 已有 SQLite 与向量记忆 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
+| MCP/A2A | 已有工具和外部 Agent 接入基础 | 成为 AgentAction 执行层，并默认受权限和审计保护 |
+| Calibration/Evolution | 已有建议和校准雏形 | 统一进入 Proposal/Confirmation 机制 |
+| Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
 
 ## 技术栈
 
 | 层级 | 技术 |
-|------|------|
+|---|---|
 | 前端 | React 18 + TypeScript + Tailwind CSS + Vite |
-| 桌面壳 | Tauri 2.0 |
+| 桌面壳 | Tauri 2.x |
 | 后端核心 | Rust Workspace (`openlife-core` + `openlife-tauri`) |
-| 本地模型 | Ollama (`qwen2.5:7b` 等) |
-| 云端模型 | OpenRouter API (`claude-3.5-sonnet` 等) |
-| 数据存储 | SQLite（消息、反馈、向量记忆）+ YAML（人生模型文件） |
+| 本地模型 | Ollama |
+| 云端模型 | DeepSeek / OpenAI / OpenRouter / Custom OpenAI-compatible |
+| 数据存储 | SQLite + YAML |
+
+## 项目结构
+
+```text
+.
+├── frontend/                     # React 前端
+│   └── src/
+│       ├── pages/                # Chat / Dashboard / Builder / Settings 等当前页面
+│       ├── components/           # 通用组件
+│       ├── tauri.ts              # Tauri command 封装层
+│       └── App.tsx               # 路由与全局布局
+├── openlife-core/                # Rust 核心业务库
+│   └── src/
+│       ├── life_model.rs         # LifeModel
+│       ├── builder.rs            # LifeModel 构建与 Review
+│       ├── hermes.rs             # 早期 Meaning/Strategy/Execution 决策总线
+│       ├── scheduler.rs          # 当前模型调度器
+│       ├── llm.rs / ollama.rs    # 云端与本地模型调用
+│       ├── memory.rs             # 消息、会话、状态等 SQLite 存储
+│       ├── vectors.rs            # 向量记忆
+│       ├── mcp.rs / a2a.rs       # 工具与外部 Agent 接入
+│       ├── privacy.rs            # 隐私检测与脱敏
+│       ├── feedback.rs           # 反馈信号
+│       ├── evolution.rs          # 微进化
+│       └── versioning.rs         # 快照与回滚
+├── src-tauri/                    # Tauri 命令层和桌面壳
+│   └── src/
+│       ├── lib.rs                # 核心状态与聊天主链路
+│       └── commands/             # 按领域拆分的 Tauri commands
+├── plans/                        # 架构与开发计划
+└── OpenLife_Final_PRD.md         # 旧版 PRD，当前作为历史参考
+```
+
+## 推荐阅读顺序
+
+1. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+2. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
+3. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+4. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
+5. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
 
 ## 快速开始
 
 ### 前置要求
 
-- [Rust](https://rustup.rs/)（>= 1.75）
-- [Node.js](https://nodejs.org/) 18+
-- [pnpm](https://pnpm.io/)（推荐）或 npm
-- （可选）[Ollama](https://ollama.com/) 本地运行 `qwen2.5:7b`
+- Rust >= 1.75
+- Node.js 18+
+- pnpm 或 npm
+- 可选：Ollama，本地模型服务
 
 ### 安装依赖
 
@@ -40,24 +102,24 @@ cd frontend && pnpm install
 cd ..
 ```
 
-如果本机没有 `pnpm`，也可以直接使用项目根目录的 `./dev.sh`，它会自动 fallback 到 `npm exec tauri dev`。
+如果本机没有 `pnpm`，项目脚本会尝试 fallback 到 npm。
 
-### 配置云端 API Key（DeepSeek 优先）
+### 配置模型
 
-桌面端现在优先支持 DeepSeek 试用路径。打开应用后进入 **Settings → LLM 配置**，选择 Provider 并点击“测试”，测试通过后再保存。
+当前推荐先使用 DeepSeek 跑通云端试用链路，也可以使用 Ollama 本地模型。
 
 ```bash
-# DeepSeek（推荐试用）
+# DeepSeek，推荐试用路径
 export DEEPSEEK_API_KEY="sk-..."
 
-# 或 OpenRouter
+# OpenRouter
 export OPENROUTER_API_KEY="sk-..."
 
-# 或 OpenAI
+# OpenAI
 export OPENAI_API_KEY="sk-..."
 ```
 
-DeepSeek 默认配置为 `https://api.deepseek.com` + `deepseek-chat`，并默认关闭远端 embedding。embedding 会优先走本地 Ollama，失败时退回确定性 hash fallback，避免因为 embedding 服务不可用拖垮聊天主链路。
+桌面端中进入 `Settings`，选择 Provider，填写 Key，点击测试连接，成功后保存。
 
 ### 开发运行
 
@@ -65,137 +127,50 @@ DeepSeek 默认配置为 `https://api.deepseek.com` + `deepseek-chat`，并默�
 ./dev.sh
 ```
 
-### 构建安装包
+### 测试
 
 ```bash
-# macOS
-pnpm tauri build --target universal-apple-darwin
-
-# Windows
-pnpm tauri build --target x86_64-pc-windows-msvc
-
-# Linux
-pnpm tauri build --target x86_64-unknown-linux-gnu
+cargo test -q
+cd frontend && npm test -- --run
+cd frontend && npm run build
 ```
-
-构建产物位于 `src-tauri/target/release/bundle/`。
-
-## 项目结构
-
-```
-.
-├── frontend/               # React + Vite 前端
-│   └── src/
-│       ├── pages/          # 页面组件（Chat / Dashboard / Builder / A2A ...）
-│       ├── App.tsx
-│       └── tauri.ts        # Tauri Command 封装
-├── openlife-core/          # Rust 核心业务逻辑库
-│   └── src/
-│       ├── life_model.rs   # 人生模型数据结构
-│       ├── llm.rs          # LLM 调度（OpenRouter / Ollama）
-│       ├── scheduler.rs    # 模型调度器
-│       ├── memory.rs       # SQLite 消息与快照
-│       ├── vectors.rs      # 向量记忆（Tier 3）
-│       ├── hermes.rs       # Hermes 三层决策总线
-│       ├── a2a.rs          # A2A 协议适配
-│       ├── builder.rs      # 构建模式与苏格拉底对话
-│       ├── router.rs       # 意图路由（Layer 1）
-│       ├── privacy.rs      # 隐私检测与脱敏
-│       ├── versioning.rs   # 版本控制
-│       └── feedback.rs     # 反馈与微进化
-├── src-tauri/              # Tauri 入口与命令注册
-│   ├── src/lib.rs
-│   └── tauri.conf.json
-├── OpenLife_Final_PRD.md   # 产品需求文档
-└── README.md
-```
-
-## 当前文档入口
-
-- 长期愿景与完整需求: [OpenLife_Final_PRD.md](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)
-- 当前阶段主开发计划: [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
-- Codex 持续执行手册: [plans/openlife_codex_execution_playbook.md](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
-
-当前建议的阅读顺序是：
-
-1. 先看 `README`
-2. 再看 `plans/openlife_development_plan.md`
-3. 需要理解长期目标时再看 `OpenLife_Final_PRD.md`
-
-## 当前试用状态
-
-当前版本更准确的定位是：
-
-- **可持续试用 Alpha**
-- 不是“功能演示壳子”
-- 也还不是完全稳定的公开 Beta
-
-现在已经可以稳定体验的主链路是：
-
-1. `Settings` 完成模型配置与试用检查
-2. `Builder` 做一次快速或渐进构建
-3. `Chat` 发起第一次个性化对话
-4. `Dashboard` 查看下一步行动与依据
-5. `Calibration / VersionControl` 查看建议变化与回滚路径
-
-如果你只是第一次打开项目，建议直接按这个顺序试，不要先在高级页来回跳。
-
-## 试用前检查
-
-进入桌面端后，建议按下面这条最短闭环走：
-
-1. 打开 **Settings**
-   - 先看 `试用路径 Checklist`
-   - 再看 `试用闭环定义`
-   - 如果顶部出现 `Safe Mode`，先不要深度试用，优先处理恢复控制台
-2. 配置模型后端
-   - 如果使用 DeepSeek，选择 `DeepSeek` Provider，填入 API Key，点击“测试连接”，成功后保存
-   - 如果使用本地模型，先启动 Ollama，并确认模型名可解析，例如 `qwen2.5:7b` 或 `llama3:latest`
-3. 打开 **构建**
-   - 如果首页已经出现 `待确认 Review`，优先点“去审阅”
-   - 否则先完成一次“快速构建”，再在 Review 中确认要写入的人生模型字段
-4. 打开 **对话**
-   - 发送一条普通消息
-   - 刷新后确认 user 和 assistant 历史都还在
-5. 打开 **仪表盘 / 校准 / 版本控制**
-   - 仪表盘确认今天的建议和依据
-   - 校准确认建议来源
-   - 版本控制确认快照与回滚路径存在
-
-做到上面 5 步，才算真正完成了一次 OpenLife 试用闭环。
 
 ## 当前推荐试用路径
 
-如果你时间不多，只想快速判断项目当前能不能用，建议只做下面这套：
+当前 UI 还没有完全迁移到 Agent Workspace，因此建议按下面路径体验：
 
-1. `Settings` 里完成 DeepSeek 或 Ollama 配置
-2. `Builder` 里优先恢复 `待确认 Review`，或完成一次快速构建并应用 Review
-3. 确认 `~/Library/Application Support/ai.openlife.app/life-model/current/life_model.yaml` 已真实变化
-4. `Chat` 里发一条“帮我规划今天”
-5. `Dashboard` 看是否出现明确的下一步行动与模型依据
-6. `Calibration` 看是否能理解“为什么建议变更”
+1. `Settings` 完成模型配置、诊断检查和 Safe Mode 检查。
+2. `Builder` 完成一次快速构建，或恢复待确认 Review。
+3. 在 Review 中确认要写入 LifeModel 的字段。
+4. `Chat` 发起一次个性化对话。
+5. `Dashboard` 查看下一步行动和模型依据。
+6. `Calibration / VersionControl / Memory` 查看建议来源、记忆和回滚路径。
 
-常见错误修复：
+这条路径是当前 Alpha 的主链路。后续会被迁移为：
 
-- `start_stream_message missing required key args`：说明前后端构建版本可能不一致。请重新运行 `cd frontend && npm run build`，再重新启动 Tauri；当前版本已兼容 `args` 包裹参数和顶层参数两种形态。
-- `401 / 403 / invalid API Key`：去 Settings 重新测试当前表单内容，确认 Provider、Base URL、模型名和 API Key 匹配。
-- `Ollama connection refused / 11434`：启动 Ollama，或切换到 DeepSeek/OpenAI-compatible 云端模式。
-- 数据库 schema 错误：Settings 诊断区会显示 active data dir、legacy data dir、database status 和 startup warnings；优先备份数据目录后再做清理。
-- `Safe Mode`：说明当前数据环境存在风险。先去 Settings 的恢复控制台，优先做“导出完整备份”与“重建向量索引”，再继续试用。
-- 记忆或校准“看不懂为什么这样建议”：先去 `Memory` 看系统到底记住了什么，再回到 `Calibration` 查看建议来源，最后去 `VersionControl` 确认回滚路径。
+```text
+Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
+```
 
-## 主要页面说明
+## 当前重要开发方向
 
-| 页面 | 说明 |
-|------|------|
-| **仪表盘** (`/dashboard`) | 目标进度、能力雷达图、语义记忆检索 |
-| **人生模型** (`/`) | 表单式四维编辑 |
-| **对话** (`/chat`) | 带 Hermes 思考过程展示、点赞/点踩反馈 |
-| **版本控制** (`/versions`) | 快照列表、回滚、差异对比 |
-| **记忆检索** (`/memory`) | 向量记忆的语义搜索与手动索引 |
-| **A2A** (`/a2a`) | 发现外部 Agent、发送 Task、测试本地服务 |
-| **构建** (`/builder`) | 快速构建 / 渐进构建 / 苏格拉底对话 |
+短期不再优先扩页面，而是围绕以下主线推进：
 
-## 许可
+1. 引入 `AgentTask` 和 `AgentRun`，让每次 AI 执行可追踪。
+2. 将 Chat 升级为第一个 Agent 执行表面。
+3. 统一 Builder、Calibration、Evolution 的 Proposal/Confirmation 机制。
+4. 将 Scheduler 升级为真正的 ModelRouter。
+5. 将 Dashboard 重构为 Workspace。
+6. 建立 Proactive Agent 的安全 MVP。
+
+## 常见问题
+
+- API Key 测试失败：确认 Provider、Base URL、模型名和 API Key 匹配。
+- Ollama 连接失败：确认 Ollama 已启动，且模型名称存在。
+- Safe Mode：说明当前数据环境存在风险，先去 Settings 的恢复控制台导出备份并修复。
+- Chat 无响应或一直思考：先查看 Settings 诊断，再检查模型 Provider 测试结果。
+- Builder Review 应用后模型没有变化：检查 skipped 字段和版本快照，确认是否被安全策略阻止。
+
+## License
 
 MIT License

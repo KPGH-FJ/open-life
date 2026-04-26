@@ -14,6 +14,7 @@ import {
   generateCalibrationReport,
   generateMicroEvolutionChanges,
   applyCalibration,
+  calibrationCreateProposals,
   markCalibrationShown,
   getLifeModel,
   type EvolutionChange,
@@ -156,6 +157,46 @@ function isHighImpactChange(change: EvolutionChange) {
   return change.dimension.includes("identity") || change.dimension.includes("mission") || change.dimension.includes("long_term");
 }
 
+function getChangeRisk(change: EvolutionChange): "low" | "medium" | "high" | "critical" {
+  const path = change.dimension.toLowerCase();
+  if (path.startsWith("identity.")) {
+    if (path.includes("mission") || path.includes("values") || path.includes("philosophy")) {
+      return "high";
+    }
+    return "medium";
+  } else if (path.startsWith("goals.")) {
+    if (path.includes("long_term") || path.includes("life_goals")) {
+      return "high";
+    }
+    return "medium";
+  } else if (path.startsWith("capabilities.")) {
+    return "medium";
+  } else if (path.startsWith("state.")) {
+    return "low";
+  }
+  return "medium";
+}
+
+function riskLabel(risk: string): string {
+  switch (risk) {
+    case "low": return "低风险";
+    case "medium": return "中风险";
+    case "high": return "高风险";
+    case "critical": return "极高风险";
+    default: return "";
+  }
+}
+
+function riskClass(risk: string): string {
+  switch (risk) {
+    case "low": return "bg-emerald-50 text-emerald-700 border-emerald-200";
+    case "medium": return "bg-amber-50 text-amber-700 border-amber-200";
+    case "high": return "bg-rose-50 text-rose-700 border-rose-200";
+    case "critical": return "bg-red-50 text-red-700 border-red-200";
+    default: return "bg-gray-50 text-gray-700 border-gray-200";
+  }
+}
+
 export default function CalibrationPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
@@ -235,10 +276,38 @@ export default function CalibrationPage() {
     setApplyLoading(true);
     setPageError("");
     try {
-      const result = await applyCalibration(toApply);
+      const result = await applyCalibration(toApply, "direct");
       await markCalibrationShown("weekly");
       setPageError(result.message);
       setTimeout(() => navigate("/dashboard"), 1200);
+    } catch (e: any) {
+      setPageError(String(e?.message ?? e));
+    } finally {
+      setApplyLoading(false);
+    }
+  };
+
+  const handleSendToReview = async () => {
+    if (!model) return;
+    const toSend = Array.from(selected)
+      .sort((a, b) => a - b)
+      .map((i) => data.changes[i]);
+    if (toSend.length === 0) {
+      setPageError("请先选择至少一项变更");
+      return;
+    }
+    setApplyLoading(true);
+    setPageError("");
+    try {
+      const result = await calibrationCreateProposals(toSend);
+      await markCalibrationShown("weekly");
+      const runInfo = result.run_id ? `（Run #${result.run_id.slice(0, 8)}）` : "";
+      if (result.error_count > 0) {
+        setPageError(`${result.message}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`);
+      } else {
+        setPageError(`${result.message}${runInfo}`);
+      }
+      setTimeout(() => navigate("/review"), 1500);
     } catch (e: any) {
       setPageError(String(e?.message ?? e));
     } finally {
@@ -503,6 +572,9 @@ export default function CalibrationPage() {
                           <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${highImpact ? "bg-rose-50 text-rose-700" : "bg-slate-50 text-slate-600"}`}>
                             {highImpact ? "高影响·需手动确认" : "可选建议"}
                           </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium border ${riskClass(getChangeRisk(c))}`}>
+                            {riskLabel(getChangeRisk(c))}
+                          </span>
                         </div>
                         <div className="mt-1 flex items-center gap-3 text-sm">
                           <span className="text-gray-500">{c.old_value.toFixed(2)}</span>
@@ -587,24 +659,36 @@ export default function CalibrationPage() {
         </div>
 
         {/* Action bar */}
-        <div className="flex items-center justify-between bg-white rounded-xl shadow p-4">
-          <button
-            onClick={handleRejectAll}
-            className="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100"
-          >
-            全部拒绝
-          </button>
-          <div className="flex items-center gap-3">
+        <div className="flex flex-col gap-3 bg-white rounded-xl shadow p-4">
+          <div className="flex items-center justify-between">
+            <button
+              onClick={handleRejectAll}
+              className="px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-100"
+            >
+              全部拒绝
+            </button>
             <span className="text-sm text-gray-500">
               已选择 {selected.size} / {data.changes.length} 项
             </span>
+          </div>
+          <div className="flex items-center justify-end gap-3">
+            <button
+              onClick={handleSendToReview}
+              disabled={applyLoading || selected.size === 0}
+              className="px-5 py-2 rounded-md text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-50"
+            >
+              {applyLoading ? "发送中…" : "发送到 Review Center"}
+            </button>
             <button
               onClick={handleApply}
               disabled={applyLoading || selected.size === 0 || data.requires_confirmation === false}
               className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
             >
-              {applyLoading ? "应用中…" : "确认应用"}
+              {applyLoading ? "应用中…" : "直接应用"}
             </button>
+          </div>
+          <div className="text-xs text-gray-500 text-right">
+            高风险字段建议先发送到 Review Center 审阅，低 risk 字段可直接应用。
           </div>
         </div>
       </div>

@@ -317,6 +317,25 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve(mockChatMessages as T)
     case 'list_snapshots':
       return Promise.resolve(mockLifeModelVersions as T)
+    case 'get_agent_run':
+      return Promise.resolve(null as T)
+    case 'list_agent_runs':
+      return Promise.resolve([] as T)
+    case 'list_agent_runs_for_session':
+      return Promise.resolve([] as T)
+    case 'get_last_model_error':
+      return Promise.resolve(null as T)
+    case 'get_pending_proposals':
+      return Promise.resolve([] as T)
+    case 'list_proposals':
+      return Promise.resolve([] as T)
+    case 'batch_accept_low_risk_proposals':
+      return Promise.resolve(0 as T)
+    case 'accept_proposal':
+    case 'reject_proposal':
+    case 'edit_proposal':
+    case 'postpone_proposal':
+      return Promise.resolve(undefined as T)
     case 'diff_snapshots':
       return Promise.resolve([
         '-identity:',
@@ -516,6 +535,14 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         rejected_count: 0,
         model: null,
       } as T)
+    case 'builder_create_proposals':
+      return Promise.resolve({
+        success: true,
+        created_count: 1,
+        rejected_count: 0,
+        proposal_ids: ['proposal-1'],
+        warnings: [],
+      } as T)
     case 'add_daily_goal':
       return Promise.resolve(undefined as T)
     case 'toggle_daily_goal':
@@ -599,9 +626,17 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case 'apply_calibration':
       return Promise.resolve({
         success: true,
-        snapshot_version: '0_1_0_2026-04-17T20-00-00+08-00',
-        applied_count: (_args?.changes ?? []).length,
-        message: '已应用 1 项校准变更，并创建快照 0_1_0_2026-04-17T20-00-00+08-00',
+        snapshot_version: 'v1-test',
+        applied_count: 2,
+        message: '已应用校准',
+      } as T)
+    case 'calibration_create_proposals':
+      return Promise.resolve({
+        created_count: 2,
+        created_ids: ['p1', 'p2'],
+        error_count: 0,
+        errors: [],
+        message: '已创建 2 个 Proposal',
       } as T)
     // Milestone D mocks
     case 'get_hot_cache':

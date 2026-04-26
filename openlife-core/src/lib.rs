@@ -1,4 +1,5 @@
 pub mod a2a;
+pub mod agent;
 pub mod builder;
 pub mod config;
 pub mod evolution;

@@ -2,7 +2,9 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   addDailyGoal,
+  acceptProposal,
   builderStart,
+  editProposal,
   getStateHistory,
   recordState,
   restoreArchivedChunks,
@@ -95,6 +97,28 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith(
       "add_daily_goal",
       { name: "阅读30分钟" }
+    );
+  });
+
+  it("normalizes proposal command arguments", async () => {
+    await acceptProposal("proposal-1");
+    await editProposal("proposal-1", { name: "新值" });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "accept_proposal",
+      expect.objectContaining({
+        proposalId: "proposal-1",
+        proposal_id: "proposal-1",
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "edit_proposal",
+      expect.objectContaining({
+        proposalId: "proposal-1",
+        proposal_id: "proposal-1",
+        newAfter: { name: "新值" },
+        new_after: { name: "新值" },
+      })
     );
   });
 });

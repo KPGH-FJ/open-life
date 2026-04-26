@@ -6,10 +6,30 @@
 
 ## 📋 项目概览
 
-- **项目类型**：桌面端 AI 伴侣应用（Tauri 桌面壳 + React 前端 + Rust 核心引擎）
+- **项目类型**：本地优先的个人 Agent 框架 / 个人 AI 操作系统（Tauri 桌面壳 + React 前端 + Rust 核心引擎）
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
-- **主要功能**：OpenLife 定位为用户的"终身成长合伙人"，通过四维人生模型（Identity / Goals / Capabilities / State）管理用户成长，整合本地（Ollama）和云端（OpenRouter/OpenAI）大模型进行对话，支持 MCP 工具调用与 A2A Agent 互联。
+- **核心范式**：`LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop`
+- **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
+- **当前阶段**：Agent Framework Alpha。`AgentRun` 基线已完成（Chat/Builder/Calibration 链路插桩、SQLite 存储、模型路由 trace、前端 Trace UI）。**Proposal/Confirmation 统一层已收敛完成**：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路，AgentRun 与 Proposal 已双向关联溯源。当前具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics、Proposal/Review Center 等完整模块。
 - **仓库链接**：（需要人工补充）
+
+### 当前架构文档优先级
+
+后续 Agent 进入项目时，优先阅读：
+
+1. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：新的架构基准，优先级最高。
+2. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
+3. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+4. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+5. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+
+### 后续开发总原则
+
+- 不推倒重写，继续复用现有模块。
+- 不继续平铺新页面，优先建立 Agent Runtime 主线。
+- 新功能必须能挂到 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal`、`LifeModel`、`Memory`、`ModelRouter` 或 `Workspace` 中。
+- Chat、Builder、Calibration、Dashboard 都只是 Agent Framework 的不同表面，不是彼此孤立的产品中心。
+- 高风险 LifeModel 更新、外部工具写操作、敏感数据上云必须可解释、可确认、可回滚。
 
 ---
 
@@ -66,7 +86,7 @@
 │       ├── lib.rs                # 模块暴露入口
 │       ├── config.rs             # AppConfig (YAML + env 覆盖)
 │       ├── life_model.rs         # 四维人生模型（Identity/Goals/Capabilities/State）
-│       ├── llm.rs                # OpenRouter / OpenAI API 调用
+│       ├── llm.rs                # DeepSeek / OpenAI-compatible 云端模型调用
 │       ├── ollama.rs             # Ollama 本地模型调用
 │       ├── scheduler.rs          # 推理调度器（本地优先策略）
 │       ├── hermes.rs             # 三层决策总线 (Meaning→Strategy→Execution)
@@ -116,15 +136,19 @@
 │   └── quantize_int8.py          # ONNX INT8 量化工具
 │
 └── plans/                        # 项目规划文档
+    ├── openlife_agent_framework_architecture.md
     ├── openlife_development_plan.md
     ├── openlife_codex_execution_playbook.md
-    └── sprint_7_8_9_plan.md
+    ├── frontend_experience_rebuild_plan.md
+    └── engineering_structure_notes.md
 ```
 
 ### 核心模块
 
 | 模块 | 文件路径 | 职责 | 依赖关系 |
 |------|----------|------|----------|
+| **AgentRun** | [`openlife-core/src/agent/`](openlife-core/src/agent/) | AgentRun 追踪：每次 Chat/Builder/Calibration 生成可查询的运行记录，包含模型路由 trace、上下文摘要、成功/失败状态 | 被 chat.rs、builder.rs 使用，存储在独立 SQLite agent_runs.db |
+| **Proposal** | [`openlife-core/src/agent/proposal_store.rs`](openlife-core/src/agent/proposal_store.rs) | Proposal 统一层：LifeModel/Memory/Tool 权限变更必须经过用户确认（accept/reject/edit/postpone），应用前自动创建 snapshot | 被 builder.rs、calibration.rs 使用，存储在 SQLite proposals.db |
 | **LifeModel** | [`openlife-core/src/life_model.rs`](openlife-core/src/life_model.rs) | 四维人生模型：Identity（身份/价值观）、Goals（短中长期目标）、Capabilities（技能/资源）、State（当前状态/情绪/健康） | 被 hermes.rs、scheduler.rs、memory.rs 消费 |
 | **Hermes Bus** | [`openlife-core/src/hermes.rs`](openlife-core/src/hermes.rs) | 三层决策总线：MeaningNode（语义理解/禁忌检测）→ StrategyNode（策略规划）→ ExecutionNode（执行生成），Arbitrator 仲裁最终输出 | 依赖 scheduler.rs、life_model.rs |
 | **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型：tool prompt → 强制云端；Ollama 可用 + prefer_local → 本地；否则 fallback 云端 | 依赖 llm.rs、ollama.rs |
@@ -133,6 +157,34 @@
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
 | **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 30+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断 | 依赖 openlife-core 全部模块 |
 | **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
+
+### 目标架构主线
+
+当前代码还没有完整实现统一 Agent Runtime。后续开发应向下面这条主线迁移：
+
+```
+用户意图 / 主动触发
+    │
+    ▼
+AgentTask
+    │
+    ▼
+AgentRun
+    │
+    ├── ContextAssembler：选择 LifeModel、记忆、会话上下文
+    ├── ModelRouter：选择本地模型、云端模型或混合路径
+    ├── ReAct Engine：Reason → Act → Observe → Reflect
+    ├── ActionExecutor：内部动作 / MCP / A2A / LifeModel patch / Memory write
+    └── ProposalEngine：生成待确认的 LifeModel、Memory、Tool 权限变更
+    │
+    ▼
+用户确认 / 编辑 / 拒绝
+    │
+    ▼
+LifeModel / Memory / Audit / Snapshot 持久化
+```
+
+未来新增模块时，优先放入这些概念，而不是继续增加互相孤立的页面级逻辑。
 
 ### 数据流
 
@@ -169,6 +221,8 @@
 3. **模型调度**（[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:71)）：根据 tool prompt 和 Ollama 可用性决定使用本地或云端模型
 4. **工具调用**（[`execute_tool_call_internal`](src-tauri/src/lib.rs:264)）：MCP 工具执行 + 隐私参数脱敏 + 审计日志
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:822)）：SSE 风格流式传输到前端
+
+> 注意：上面的数据流描述的是当前实现。目标架构会把这条链路收敛到 `AgentRun`，并让每次模型调用、上下文选择、工具调用和 LifeModel 更新都具备可查询 trace。
 
 ---
 
@@ -225,6 +279,9 @@
 
 | 实体 | 关键属性 | 关系 |
 |------|----------|------|
+| **AgentTask** | `id`, `kind`, `user_intent`, `life_context_scope`, `execution_policy`, `status` | 目标架构中的任务入口；Chat、Builder、Calibration、Proactive Check-in 都应逐步映射为 AgentTask |
+| **AgentRun** | `task_id`, `model_route`, `context_summary`, `actions`, `observations`, `output`, `proposals`, `errors` | 目标架构中的一次可追踪执行；后续用于解释“用了什么上下文、哪个模型、做了什么动作” |
+| **AgentProposal** | `proposal_type`, `affected_path`, `before`, `after`, `reason`, `confidence`, `risk_level`, `status` | Builder、Calibration、Evolution、Memory 更新的统一确认结构 |
 | **LifeModel** | `metadata`, `identity`, `goals`, `capabilities`, `state`, `relationships`, `preferences` | 1 个用户 1 个当前 LifeModel；支持快照版本控制 |
 | **Identity** | `name`, `values[]`, `personality_traits[]`, `life_philosophy`, `mission_statement`, `role_definition`, `voice_style` | 属于 LifeModel 的子维度 |
 | **Goals** | `short_term[]`, `medium_term[]`, `long_term[]`, `life_goals[]`, `daily[]` | 每个 GoalItem 有 `priority`, `progress`, `deadline`, `milestones[]` |
@@ -236,7 +293,31 @@
 
 ### 状态机和流程
 
-#### 1. Hermes 三层决策流程
+#### 1. 目标 Agent Runtime 流程
+
+```
+用户请求 / 主动触发
+    │
+    ▼
+AgentTask 创建
+    │
+    ▼
+AgentRun 执行
+    │
+    ├── 组装 LifeModel + Memory + 会话上下文
+    ├── 根据隐私、能力、成本、工具需求选择模型路径
+    ├── Reason / Act / Observe 循环
+    ├── 生成用户输出
+    └── 生成 LifeModel / Memory / Tool 权限 Proposal
+    │
+    ▼
+用户确认、编辑或拒绝 Proposal
+    │
+    ▼
+写入 LifeModel / Memory / Snapshot / Audit
+```
+
+#### 2. 当前 Hermes 三层决策流程
 
 ```
 用户输入
@@ -264,7 +345,9 @@
 
 每层有独立超时（Meaning 30s / Strategy 45s / Execution 60s），失败时由 Arbitrator 决定 fallback。
 
-#### 2. 模型调度策略
+Hermes 是当前实现中的重要决策层，但后续不应把它视为最终架构边界。它可以演进为 ReAct Engine 的一部分，或成为 AgentRuntime 中的一种执行策略。
+
+#### 3. 当前模型调度策略
 
 ```
 用户消息
@@ -285,7 +368,13 @@
                    NO  ──► 返回"未配置后端"提示
 ```
 
-#### 3. 记忆检索流程
+目标状态下，这条逻辑应升级为 `ModelRouter`：
+
+- 按任务类型选择模型角色：chat / planner / tool_use / summarizer / extractor / embedding
+- 按隐私策略决定本地、云端或摘要上云
+- 记录每次 AgentRun 的 provider、model、fallback、redaction trace
+
+#### 4. 记忆检索流程
 
 ```
 用户输入
@@ -309,20 +398,22 @@ VectorStore.search(query_embedding, top_k=5)
 访问计数 +1（bump_access_for_chunks）
 ```
 
-#### 4. 每日目标自动打卡流程
+#### 5. 每日目标自动打卡流程
 
 [`try_auto_checkin_daily_goals`](src-tauri/src/lib.rs:357) 会在每次 assistant 回复后检查内容中是否提到完成了某个 daily goal 的名称，自动将 `done` 标记为 `true`。
 
 ### 业务规则约束
 
-1. **LLM 后端最低要求**：至少配置一个 LLM 后端（Ollama 或 OpenRouter/OpenAI API Key）才能使用对话功能。
-2. **工具调用强制云端**：当消息包含 tools_prompt 时，强制使用云端模型，因为 7B 参数的本地模型在工具调用上不可靠。
-3. **PII 本地拦截**：所有 outgoing 请求经过 [`PrivacyEngine`](openlife-core/src/privacy.rs) 检测，高敏感度 PII（如身份证号、银行卡号）会阻止发送或脱敏。
-4. **消息 checksum**：保存消息到 SQLite 时，根据 `content + session_id + created_at` 生成 SHA256 checksum，用于完整性校验。
-5. **Ollama 缓存 10 秒**：`ollama.rs` 每 10 秒缓存一次模型可用性检查，状态变化不会立即反映。
-6. **向量记忆 tier 维护**：`vectors.rs` 定期运行 `run_tier_maintenance()`，高频访问 chunk 晋升 tier，低频降级。
-7. **HashRouter 强制使用**：前端必须使用 `HashRouter` 而非 `BrowserRouter`，因为 Tauri 桌面应用基于 `file://` 协议。
-8. **数据目录统一**：应用数据目录已统一为 `ai.openlife.app`（与 `tauri.conf.json` 的 `identifier` 一致），macOS 路径为 `~/Library/Application Support/ai.openlife.app/`。旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
+1. **AgentRun 优先**：后续任何重要 AI 执行都应逐步记录为 AgentRun，而不是只在页面 state 中完成。
+2. **LLM 后端最低要求**：至少配置一个 LLM 后端（Ollama 或云端 API Key）才能使用模型对话功能。
+3. **工具调用默认保守**：MCP/A2A/external 写操作必须走确认或 allowlist，不能只依赖前端隐藏结果。
+4. **LifeModel 高风险更新需确认**：身份、价值观、人生使命、长期目标等字段必须由用户确认后写入。
+5. **PII 本地拦截**：所有 outgoing 请求经过 [`PrivacyEngine`](openlife-core/src/privacy.rs) 检测，高敏感度 PII 应阻止发送或脱敏。
+6. **消息 checksum**：保存消息到 SQLite 时，根据 `content + session_id + created_at` 生成 SHA256 checksum，用于完整性校验。
+7. **Ollama 缓存 10 秒**：`ollama.rs` 每 10 秒缓存一次模型可用性检查，状态变化不会立即反映。
+8. **向量记忆 tier 维护**：`vectors.rs` 定期运行 `run_tier_maintenance()`，高频访问 chunk 晋升 tier，低频降级。
+9. **HashRouter 强制使用**：前端必须使用 `HashRouter` 而非 `BrowserRouter`，因为 Tauri 桌面应用基于 `file://` 协议。
+10. **数据目录统一**：应用数据目录已统一为 `ai.openlife.app`（与 `tauri.conf.json` 的 `identifier` 一致），macOS 路径为 `~/Library/Application Support/ai.openlife.app/`。旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
 
 ---
 
@@ -332,22 +423,24 @@ VectorStore.search(query_embedding, top_k=5)
 
 | 变量名 | 用途 | 示例值 | 是否必须 |
 |--------|------|--------|----------|
-| `OPENROUTER_API_KEY` | 云端 LLM API Key（优先使用） | `sk-or-v1-xxxxxxxx` | 否（二选一） |
-| `OPENAI_API_KEY` | OpenAI API Key（备用） | `sk-xxxxxxxx` | 否（二选一） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key（当前推荐试用） | `sk-xxxxxxxx` | 否（三选一） |
+| `OPENROUTER_API_KEY` | OpenRouter API Key | `sk-or-v1-xxxxxxxx` | 否（三选一） |
+| `OPENAI_API_KEY` | OpenAI API Key | `sk-xxxxxxxx` | 否（三选一） |
 | `OPENAI_API_BASE` | 自定义 API Base URL | `https://api.openai.com/v1` | 否（有默认值） |
 | `A2A_PORT` | A2A 独立服务器端口 | `8765` | 否（默认 8765） |
 | `PORT` | Vite 开发服务器端口 | `5173` | 否（默认 5173） |
 | `TAURI_DEBUG` | Tauri 调试日志开关 | `1` | 否 |
 
-> 至少配置 `OPENROUTER_API_KEY` 或 `OPENAI_API_KEY` 之一才能使用云端模型对话。如果不配置，必须本地运行 Ollama。
+> 至少配置 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY` 或 `OPENAI_API_KEY` 之一才能使用云端模型对话。如果不配置，必须本地运行 Ollama。
 
 ### 外部服务依赖
 
 | 服务 | 用途 | 配置位置 | 本地替代方案 |
 |------|------|----------|-------------|
 | **Ollama** (localhost:11434) | 本地 LLM 推理 | `.env` / `config.yaml` | 无替代，需本地安装 |
-| **OpenRouter API** | 云端 LLM（多模型聚合） | `.env` / `config.yaml` | OpenAI API |
-| **OpenAI API** | 云端 LLM（官方） | `.env` / `config.yaml` | OpenRouter API |
+| **DeepSeek API** | 当前推荐云端试用 Provider | `.env` / `config.yaml` | OpenAI-compatible Provider |
+| **OpenRouter API** | 云端 LLM（多模型聚合） | `.env` / `config.yaml` | DeepSeek / OpenAI API |
+| **OpenAI API** | 云端 LLM（官方） | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
 | **SQLite** | 本地数据持久化 | 自动 bundled | 无需替代，零配置 |
 
 配置优先级：**环境变量 > `config.yaml` > 代码默认值**
@@ -445,10 +538,14 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 ### 待重构区域
 
 1. **reqwest 版本统一**：将 `openlife-core` 升级到 `reqwest 0.12`。
-2. **数据目录统一**：将 `app_data_dir()` 改为从 Tauri 配置读取 identifier，而非硬编码。
-3. **Hermes 层并行化**：Meaning 和 Strategy 理论上可以部分并行（如先并行获取 Meaning + 检索向量记忆）。
-4. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
-5. **核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（hermes.rs、scheduler.rs）缺乏单元测试。
+2. ~~**Agent Runtime 引入**：新增 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal` 和 `AgentRunStore`，先从 Chat 主链路接入。~~ ✅ 已完成（AgentRun/Proposal 基线已落地）
+3. **ModelRouter 升级**：将当前 Scheduler 升级为 provider-agnostic、role-aware、privacy-aware 的模型路由器。
+4. ~~**Proposal 统一**：Builder、Calibration、Evolution、Memory 更新应统一走 Proposal/Confirmation，而不是各自实现审批流。~~ ✅ 已完成（Builder/Calibration 已接入 Proposal 流）
+5. **Hermes / ReAct 边界重构**：Hermes 当前是三层决策总线，后续应纳入 ReAct Engine 或成为 AgentRuntime 的一种策略。
+6. **前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。
+7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
+8. **核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、Hermes、scheduler）需要补充测试。
+9. **Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。
 
 ---
 
@@ -490,11 +587,14 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 | 文档 | 路径 | 说明 |
 |------|------|------|
-| 产品需求文档 | [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md) | 完整产品需求 |
-| 开发计划 | [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md) | 开发路线图 |
+| 架构基准 | [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md) | 当前最高优先级文档，定义 OpenLife 作为 Agent Framework 的目标架构 |
+| 产品需求 v2 | [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md) | 当前产品定义与需求基准 |
+| 开发计划 | [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md) | 当前开发路线图，按 Agent Runtime 迁移路线维护 |
 | 执行手册 | [`plans/openlife_codex_execution_playbook.md`](plans/openlife_codex_execution_playbook.md) | 详细执行方案 |
-| Sprint 计划 | [`plans/sprint_7_8_9_plan.md`](plans/sprint_7_8_9_plan.md) | 近期迭代计划 |
+| 前端重构计划 | [`plans/frontend_experience_rebuild_plan.md`](plans/frontend_experience_rebuild_plan.md) | 历史前端体验重构计划，后续需按 Agent Workspace 更新 |
+| 工程治理笔记 | [`plans/engineering_structure_notes.md`](plans/engineering_structure_notes.md) | 工程拆分和治理记录 |
 | 用户文档 | [`README.md`](README.md) | 面向用户的快速开始指南 |
+| 历史 PRD | [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md) | 旧版完整需求，作为历史参考，不再覆盖新的 Agent Framework 定义 |
 
 ### 学习资源
 
@@ -520,6 +620,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-20 | 更新 AGENTS.md 为完整模板格式（命名约定、代码风格、业务规则、已知问题、测试策略） | AI Agent |
 | 2026-04-22 | 拆分 src-tauri/src/lib.rs：67+ 命令按领域拆分为 13 个 commands/ 模块，lib.rs 保留共享类型和核心聊天命令 | AI Agent |
 | 2026-04-22 | 清理未使用 import，cargo check 零警告零错误；前端 86 测试 + Rust 129 测试全部通过 | AI Agent |
+| 2026-04-24 | 将项目上下文从“桌面 AI 伴侣应用”更新为“本地优先个人 Agent 框架”，新增 Agent Runtime、AgentRun、Proposal、ModelRouter 作为后续开发主线 | AI Agent |
+| 2026-04-26 | Proposal/Confirmation 统一层收敛完成：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路；AgentRun ↔ Proposal 双向关联溯源；Safe Mode 限制 Proposal 操作；Review Center 强化（分类/风险筛选/编辑/批量/空状态/失败态/Dashboard 提醒） | AI Agent |
 
 ---
 

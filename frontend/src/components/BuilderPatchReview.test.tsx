@@ -152,7 +152,7 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    const saveButton = screen.getByText("保存选中内容");
+    const saveButton = screen.getByText("直接应用（快速写入）");
     fireEvent.click(saveButton);
 
     // 低风险的已默认选中，高风险的未选中 → rejected
@@ -207,7 +207,7 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    const saveButton = screen.getByText("保存选中内容");
+    const saveButton = screen.getByText("直接应用（快速写入）");
     expect(saveButton).toBeDisabled();
   });
 
@@ -273,7 +273,7 @@ describe("BuilderPatchReview", () => {
     fireEvent.click(saveEditButton);
 
     // Click main save button
-    const saveButton = screen.getByText("保存选中内容");
+    const saveButton = screen.getByText("直接应用（快速写入）");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
@@ -348,7 +348,13 @@ describe("BuilderPatchReview", () => {
       },
     });
     fireEvent.click(screen.getByText("保存"));
-    fireEvent.click(screen.getByText("保存选中内容"));
+    fireEvent.click(screen.getByText("直接应用（快速写入）"));
+    
+    // Confirm direct apply for high-risk signal
+    await waitFor(() => {
+      expect(screen.getByText("确认直接写入")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByText("确认直接写入"));
 
     await waitFor(() => {
       const decisions: BuilderSignalDecision[] = mockApply.mock.calls[0][0];
@@ -397,7 +403,7 @@ describe("BuilderPatchReview", () => {
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]); // uncheck sig_name (low risk)
 
-    const saveButton = screen.getByText("保存选中内容");
+    const saveButton = screen.getByText("直接应用（快速写入）");
     fireEvent.click(saveButton);
 
     await waitFor(() => {

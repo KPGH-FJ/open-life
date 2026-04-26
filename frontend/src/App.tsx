@@ -1,6 +1,6 @@
 import { Component, ReactNode, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import { Map, MessageSquare, GitBranch, Brain, Network, Hammer, LayoutDashboard, Settings, Wrench, SlidersHorizontal, Sparkles } from "lucide-react";
+import { Map, MessageSquare, GitBranch, Brain, Network, Hammer, LayoutDashboard, Settings, Wrench, Sparkles, Activity, ShieldCheck } from "lucide-react";
 import LifeMapPage from "./pages/LifeMapPage";
 import ChatPage from "./pages/ChatPage";
 import VersionControl from "./pages/VersionControl";
@@ -11,6 +11,7 @@ import BuilderPage from "./pages/BuilderPage";
 import DashboardPage from "./pages/DashboardPage";
 import SettingsPage from "./pages/SettingsPage";
 import CalibrationPage from "./pages/CalibrationPage";
+import ProposalReviewPage from "./pages/ProposalReviewPage";
 import OnboardingWizard from "./components/OnboardingWizard";
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
@@ -99,41 +100,53 @@ function App() {
         </div>
         <nav className="flex flex-wrap justify-end gap-2">
           <NavLink
-            to="/dashboard"
+            to="/workspace"
             className={navClass}
           >
-            <LayoutDashboard size={16} /> 今日
+            <LayoutDashboard size={16} /> Workspace
+          </NavLink>
+          <NavLink
+            to="/agent"
+            className={navClass}
+          >
+            <MessageSquare size={16} /> Agent
           </NavLink>
           <NavLink
             to="/builder"
             className={navClass}
           >
-            <Hammer size={16} /> 构建我
-          </NavLink>
-          <NavLink
-            to="/chat"
-            className={navClass}
-          >
-            <MessageSquare size={16} /> 对话
+            <Hammer size={16} /> LifeModel
           </NavLink>
           <NavLink
             to="/"
             end
             className={navClass}
           >
-            <Map size={16} /> 人生地图
+            <Map size={16} /> 地图
           </NavLink>
           <NavLink
             to="/memory"
             className={navClass}
           >
-            <Brain size={16} /> 记忆
+            <Brain size={16} /> Memory
           </NavLink>
           <NavLink
-            to="/calibration"
+            to="/runs"
             className={navClass}
           >
-            <SlidersHorizontal size={16} /> 校准
+            <Activity size={16} /> Runs
+          </NavLink>
+          <NavLink
+            to="/review"
+            className={navClass}
+          >
+            <ShieldCheck size={16} /> Review
+          </NavLink>
+          <NavLink
+            to="/settings"
+            className={navClass}
+          >
+            <Settings size={16} /> 设置
           </NavLink>
           <details className="relative group">
             <summary className="list-none flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium text-stone-600 hover:bg-stone-100 cursor-pointer">
@@ -151,12 +164,6 @@ function App() {
               </NavLink>
             </div>
           </details>
-          <NavLink
-            to="/settings"
-            className={navClass}
-          >
-            <Settings size={16} /> 设置
-          </NavLink>
         </nav>
       </header>
       {safeMode && diagnostics && (
@@ -207,8 +214,9 @@ function App() {
       <main className="flex-1 overflow-hidden">
         <ErrorBoundary>
           <Routes>
-            <Route path="/dashboard" element={<DashboardPage />} />
+            <Route path="/workspace" element={<DashboardPage />} />
             <Route path="/" element={<LifeMapPage />} />
+            <Route path="/agent" element={<ChatPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/versions" element={<VersionControl />} />
             <Route path="/memory" element={<MemorySearch />} />
@@ -216,6 +224,8 @@ function App() {
             <Route path="/mcp" element={<McpPage />} />
             <Route path="/builder" element={<BuilderPage />} />
             <Route path="/calibration" element={<CalibrationPage />} />
+            <Route path="/runs" element={<DashboardPage />} />
+            <Route path="/review" element={<ProposalReviewPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </ErrorBoundary>

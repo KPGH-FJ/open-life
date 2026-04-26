@@ -30,15 +30,17 @@ use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
 };
+use commands::agent::{get_agent_run, list_agent_runs, list_agent_runs_for_session};
 use commands::builder::{
-    builder_apply_signals, builder_delete_session, builder_get_pending_signals,
-    builder_list_unfinished, builder_start, builder_step, get_model_4d_completion,
-    goal_capability_gap_analysis, goal_capability_gap_report, identity_goal_alignment_check,
-    identity_goal_alignment_report,
+    builder_apply_signals, builder_create_proposals, builder_delete_session,
+    builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
+    get_model_4d_completion, goal_capability_gap_analysis, goal_capability_gap_report,
+    identity_goal_alignment_check, identity_goal_alignment_report,
 };
 use commands::calibration::{
-    apply_calibration, generate_calibration_report, generate_micro_evolution_changes,
-    mark_calibration_shown, run_micro_evolution, should_show_calibration,
+    apply_calibration, calibration_create_proposals, generate_calibration_report,
+    generate_micro_evolution_changes, mark_calibration_shown, run_micro_evolution,
+    should_show_calibration,
 };
 use commands::chat::{
     create_chat_session, delete_chat_session, get_chat_history, list_chat_sessions,
@@ -63,10 +65,15 @@ use commands::memory::{
     index_memory_chunk, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
+use commands::proposal::{
+    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
+    list_proposals, postpone_proposal, reject_proposal,
+};
 use commands::settings::{
-    cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config, get_privacy_policy,
-    has_completed_onboarding, import_all_data, mark_onboarding_completed, rotate_mcp_audit_key,
-    save_config, set_privacy_policy, test_api_key, test_llm_connection,
+    cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config,
+    get_last_model_error, get_privacy_policy, has_completed_onboarding, import_all_data,
+    mark_onboarding_completed, rotate_mcp_audit_key, save_config, set_privacy_policy, test_api_key,
+    test_llm_connection,
 };
 use commands::state::{
     add_daily_goal, delete_daily_goal, get_daily_goals, get_state_alerts, get_state_history,
@@ -145,6 +152,11 @@ pub struct SystemDiagnostics {
     pub beta_ready: bool,
     pub beta_readiness_issues: Vec<String>,
     pub builder_completion: BuilderCompletion,
+    pub agent_run_count: usize,
+    pub agent_run_store_status: String,
+    pub pending_proposal_count: usize,
+    pub high_risk_pending_proposal_count: usize,
+    pub proposal_store_status: String,
 }
 
 fn recovery_db_path(file_name: &str) -> std::path::PathBuf {
@@ -254,6 +266,68 @@ fn init_vector_store(
     }
 }
 
+fn init_agent_run_store(
+    db_path: &std::path::Path,
+    startup_warnings: &mut Vec<String>,
+) -> Result<openlife_core::agent::AgentRunStore, String> {
+    match openlife_core::agent::AgentRunStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("agent_runs.db");
+            startup_warnings.push(format!(
+                "agent_runs.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::AgentRunStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.push(format!(
+                        "临时 agent_runs.db 初始化也失败，已降级为内存数据库；本次会话 AgentRun 记录不会持久化：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::AgentRunStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 agent run store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_proposal_store(
+    db_path: &std::path::Path,
+    startup_warnings: &mut Vec<String>,
+) -> Result<openlife_core::agent::ProposalStore, String> {
+    match openlife_core::agent::ProposalStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("proposals.db");
+            startup_warnings.push(format!(
+                "proposals.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::ProposalStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.push(format!(
+                        "临时 proposals.db 初始化也失败，已降级为内存数据库；本次会话 Proposal 记录不会持久化：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::ProposalStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 proposal store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<AppConfig>>,
@@ -272,6 +346,8 @@ pub struct AppState {
     pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
+    pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
+    pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
 }
@@ -609,6 +685,7 @@ async fn preprocess_chat_input(
         HashMap<String, String>,
         Vec<ChatMessage>,
         Option<String>,
+        usize,
     ),
     String,
 > {
@@ -672,6 +749,7 @@ async fn preprocess_chat_input(
     };
 
     let mut embed_err = None;
+    let mut memory_hit_count = 0usize;
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
             let text_hits = {
@@ -704,6 +782,7 @@ async fn preprocess_chat_input(
             };
 
             let results = merge_memory_hits(vector_hits, text_hits, 3);
+            memory_hit_count = results.len();
             if results.is_empty() {
                 String::new()
             } else {
@@ -758,6 +837,7 @@ async fn preprocess_chat_input(
         privacy_map,
         desensitized_messages,
         embed_err,
+        memory_hit_count,
     ))
 }
 fn build_hermes_prompt(trace: &HermesTrace) -> String {
@@ -988,6 +1068,7 @@ async fn send_message(
         privacy_map,
         desensitized_messages,
         embed_err,
+        _memory_hit_count,
     ) = preprocess_chat_input(&session_id, &messages, &state).await?;
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {
@@ -1173,11 +1254,17 @@ const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
 const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
 const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
 
-fn emit_stream_error(app_handle: &tauri::AppHandle, session_id: &str, error: impl Into<String>) {
+fn emit_stream_error(
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    run_id: &str,
+    error: impl Into<String>,
+) {
     let _ = app_handle.emit(
         "stream-message-error",
         serde_json::json!({
             "session_id": session_id,
+            "run_id": run_id,
             "error": error.into(),
         }),
     );
@@ -1203,6 +1290,23 @@ async fn generate_non_stream_fallback(
     .map_err(|e| e.to_string())
 }
 
+fn preview_text(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
+    if life_model.is_effectively_empty() {
+        Vec::new()
+    } else {
+        vec![
+            "identity".to_string(),
+            "goals".to_string(),
+            "capabilities".to_string(),
+            "state".to_string(),
+        ]
+    }
+}
+
 #[tauri::command]
 async fn start_stream_message(
     args: Option<StartStreamMessageArgs>,
@@ -1219,6 +1323,18 @@ async fn start_stream_message(
             messages.ok_or_else(|| "start_stream_message 缺少 messages".to_string())?,
         )
     };
+
+    // AgentRun tracking
+    let user_input_text = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
+    let _agent_run_id = agent_run.id.clone();
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -1246,7 +1362,8 @@ async fn start_stream_message(
                 // 先保存用户消息
                 if let Some(ref user) = user_msg {
                     if user.role == "user" {
-                        let user_inserted = persist_chat_message_if_needed(&session_id, user, &state).await?;
+                        let user_inserted =
+                            persist_chat_message_if_needed(&session_id, user, &state).await?;
                         if user_inserted {
                             persist_vector_memory_for_message(&session_id, user, &state).await;
                         }
@@ -1262,6 +1379,7 @@ async fn start_stream_message(
                     "stream-message-start",
                     serde_json::json!({
                         "session_id": &session_id,
+                        "run_id": agent_run.id,
                         "hermes_trace": HermesTrace::default(),
                         "tool_calls": Vec::<ToolCallResult>::new(),
                     }),
@@ -1270,13 +1388,36 @@ async fn start_stream_message(
                     "stream-message-chunk",
                     serde_json::json!({
                         "session_id": &session_id,
+                        "run_id": agent_run.id,
                         "chunk": reply.clone(),
                     }),
                 );
+                let model_route = openlife_core::agent::ModelRouteTrace {
+                    provider: "direct".to_string(),
+                    model: "L1_reflex".to_string(),
+                    route_type: "direct".to_string(),
+                    prefer_local: false,
+                    local_model: "".to_string(),
+                    reason: "layer_1_direct_response".to_string(),
+                };
+                let context_summary = openlife_core::agent::ContextSummary {
+                    life_model_empty: true,
+                    included_life_model_sections: vec![],
+                    memory_hit_count: 0,
+                    used_tools_prompt: false,
+                    redaction_applied: false,
+                };
+                let preview = preview_text(&reply, 200);
+                agent_run.complete(&preview, model_route, context_summary);
+                if let Some(ref store_arc) = state.agent_run_store {
+                    let store = store_arc.lock().await;
+                    let _ = store.update_run(&agent_run);
+                }
                 let _ = app_handle.emit(
                     "stream-message-done",
                     serde_json::json!({
                         "session_id": &session_id,
+                        "run_id": agent_run.id,
                         "reply": reply,
                         "hermes_trace": HermesTrace::default(),
                         "tool_calls": Vec::<ToolCallResult>::new(),
@@ -1294,13 +1435,43 @@ async fn start_stream_message(
         privacy_map,
         desensitized_messages,
         _embed_err,
-    ) = preprocess_chat_input(&session_id, &messages, &state).await?;
+        memory_hit_count,
+    ) = match preprocess_chat_input(&session_id, &messages, &state).await {
+        Ok(result) => result,
+        Err(message) => {
+            let error = openlife_core::agent::AgentRunError {
+                message: message.clone(),
+                phase: "preprocess".to_string(),
+                recoverable: true,
+            };
+            agent_run.fail(error);
+            if let Some(ref store_arc) = state.agent_run_store {
+                let store = store_arc.lock().await;
+                let _ = store.update_run(&agent_run);
+            }
+            return Err(message);
+        }
+    };
 
     let auto_checkin_msg_stream = if let Some(ref m) = user_msg {
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
         capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
         if msg.is_some() {
-            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await?;
+            if let Err(message) =
+                persist_life_model(&state.inner().clone(), life_model.clone(), false).await
+            {
+                let error = openlife_core::agent::AgentRunError {
+                    message: message.clone(),
+                    phase: "preprocess".to_string(),
+                    recoverable: true,
+                };
+                agent_run.fail(error);
+                if let Some(ref store_arc) = state.agent_run_store {
+                    let store = store_arc.lock().await;
+                    let _ = store.update_run(&agent_run);
+                }
+                return Err(message);
+            }
         }
         msg
     } else {
@@ -1311,6 +1482,9 @@ async fn start_stream_message(
     let hermes_req =
         HermesRequest::new("chat", Some(serde_json::json!({"session_id": &session_id})));
     let scheduler_clone = state.scheduler.lock().await.clone();
+    let model_route = scheduler_clone
+        .preview_chat_route(Some(&tools_prompt))
+        .await;
     let hermes_bus = openlife_core::hermes::build_bus(life_model.clone(), scheduler_clone.clone());
 
     let mut hermes_trace = HermesTrace::default();
@@ -1358,6 +1532,7 @@ async fn start_stream_message(
         "stream-message-start",
         serde_json::json!({
             "session_id": &session_id,
+            "run_id": agent_run.id,
             "hermes_trace": hermes_trace.clone(),
             "tool_calls": Vec::<ToolCallResult>::new(),
         }),
@@ -1437,7 +1612,22 @@ async fn start_stream_message(
                                     "流式响应超时，非流式重试也失败：{}；重试错误：{}",
                                     stream_error, fallback_error
                                 );
-                                emit_stream_error(&app_handle, &session_id, message.clone());
+                                emit_stream_error(
+                                    &app_handle,
+                                    &session_id,
+                                    &agent_run.id,
+                                    message.clone(),
+                                );
+                                let error = openlife_core::agent::AgentRunError {
+                                    message: message.clone(),
+                                    phase: "stream".to_string(),
+                                    recoverable: true,
+                                };
+                                agent_run.fail(error);
+                                if let Some(ref store_arc) = state.agent_run_store {
+                                    let store = store_arc.lock().await;
+                                    let _ = store.update_run(&agent_run);
+                                }
                                 return Err(message);
                             }
                         }
@@ -1497,7 +1687,22 @@ async fn start_stream_message(
                                     "流式响应失败，非流式重试也失败：{}；重试错误：{}",
                                     stream_error, fallback_error
                                 );
-                                emit_stream_error(&app_handle, &session_id, message.clone());
+                                emit_stream_error(
+                                    &app_handle,
+                                    &session_id,
+                                    &agent_run.id,
+                                    message.clone(),
+                                );
+                                let error = openlife_core::agent::AgentRunError {
+                                    message: message.clone(),
+                                    phase: "stream".to_string(),
+                                    recoverable: true,
+                                };
+                                agent_run.fail(error);
+                                if let Some(ref store_arc) = state.agent_run_store {
+                                    let store = store_arc.lock().await;
+                                    let _ = store.update_run(&agent_run);
+                                }
                                 return Err(message);
                             }
                         }
@@ -1533,7 +1738,17 @@ async fn start_stream_message(
                             "流式响应初始化失败，非流式重试也失败：{}；重试错误：{}",
                             stream_error, fallback_error
                         );
-                        emit_stream_error(&app_handle, &session_id, message.clone());
+                        emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
+                        let error = openlife_core::agent::AgentRunError {
+                            message: message.clone(),
+                            phase: "stream".to_string(),
+                            recoverable: true,
+                        };
+                        agent_run.fail(error);
+                        if let Some(ref store_arc) = state.agent_run_store {
+                            let store = store_arc.lock().await;
+                            let _ = store.update_run(&agent_run);
+                        }
                         return Err(message);
                     }
                 }
@@ -1568,7 +1783,17 @@ async fn start_stream_message(
                         "流式响应为空，非流式重试也失败：{}；重试错误：{}",
                         stream_error, fallback_error
                     );
-                    emit_stream_error(&app_handle, &session_id, message.clone());
+                    emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
+                    let error = openlife_core::agent::AgentRunError {
+                        message: message.clone(),
+                        phase: "stream".to_string(),
+                        recoverable: true,
+                    };
+                    agent_run.fail(error);
+                    if let Some(ref store_arc) = state.agent_run_store {
+                        let store = store_arc.lock().await;
+                        let _ = store.update_run(&agent_run);
+                    }
                     return Err(message);
                 }
             }
@@ -1639,9 +1864,20 @@ async fn start_stream_message(
                         "stream-message-error",
                         serde_json::json!({
                             "session_id": &session_id,
+                            "run_id": agent_run.id,
                             "error": e.to_string(),
                         }),
                     );
+                    let error = openlife_core::agent::AgentRunError {
+                        message: e.to_string(),
+                        phase: "model".to_string(),
+                        recoverable: true,
+                    };
+                    agent_run.fail(error);
+                    if let Some(ref store_arc) = state.agent_run_store {
+                        let store = store_arc.lock().await;
+                        let _ = store.update_run(&agent_run);
+                    }
                     return Err(e.to_string());
                 }
             }
@@ -1665,19 +1901,34 @@ async fn start_stream_message(
 
     hermes_trace.execution_result = Some(serde_json::json!({ "text": &reply }));
 
+    if inserted {
+        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
+    }
+
+    let context_summary = openlife_core::agent::ContextSummary {
+        life_model_empty: life_model.is_effectively_empty(),
+        included_life_model_sections: included_life_model_sections(&life_model),
+        memory_hit_count: memory_hit_count as i64,
+        used_tools_prompt: !tools_prompt.is_empty(),
+        redaction_applied: !privacy_map.is_empty(),
+    };
+    let preview = preview_text(&reply, 200);
+    agent_run.complete(&preview, model_route, context_summary);
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.update_run(&agent_run);
+    }
+
     let _ = app_handle.emit(
         "stream-message-done",
         serde_json::json!({
             "session_id": &session_id,
+            "run_id": agent_run.id,
             "reply": reply,
             "hermes_trace": hermes_trace,
             "tool_calls": tool_calls,
         }),
     );
-
-    if inserted {
-        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
-    }
 
     Ok(())
 }
@@ -1725,22 +1976,36 @@ pub fn run() {
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");
-    let memory_store = init_memory_store(&db_path, &mut startup_warnings)
-        .unwrap_or_else(|e| {
-            startup_warnings.push(e);
-            MemoryStore::new_in_memory().expect("致命错误：无法初始化 memory store，系统资源耗尽")
-        });
+    let memory_store = init_memory_store(&db_path, &mut startup_warnings).unwrap_or_else(|e| {
+        startup_warnings.push(e);
+        MemoryStore::new_in_memory().expect("致命错误：无法初始化 memory store，系统资源耗尽")
+    });
     let feedback_db_path = data_dir.join("feedback.db");
     let feedback_store = init_feedback_store(&feedback_db_path, &mut startup_warnings)
         .unwrap_or_else(|e| {
             startup_warnings.push(e);
-            FeedbackStore::new_in_memory().expect("致命错误：无法初始化 feedback store，系统资源耗尽")
+            FeedbackStore::new_in_memory()
+                .expect("致命错误：无法初始化 feedback store，系统资源耗尽")
         });
     let vector_db_path = data_dir.join("vectors.db");
-    let vector_store = init_vector_store(&vector_db_path, &mut startup_warnings)
-        .unwrap_or_else(|e| {
+    let vector_store =
+        init_vector_store(&vector_db_path, &mut startup_warnings).unwrap_or_else(|e| {
             startup_warnings.push(e);
             VectorStore::new_in_memory().expect("致命错误：无法初始化 vector store，系统资源耗尽")
+        });
+    let agent_runs_db_path = data_dir.join("agent_runs.db");
+    let agent_run_store = init_agent_run_store(&agent_runs_db_path, &mut startup_warnings)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(e);
+            openlife_core::agent::AgentRunStore::new_in_memory()
+                .expect("致命错误：无法初始化 agent run store，系统资源耗尽")
+        });
+    let proposals_db_path = data_dir.join("proposals.db");
+    let proposal_store = init_proposal_store(&proposals_db_path, &mut startup_warnings)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(e);
+            openlife_core::agent::ProposalStore::new_in_memory()
+                .expect("致命错误：无法初始化 proposal store，系统资源耗尽")
         });
 
     let model_dir = data_dir.join("models");
@@ -1795,6 +2060,8 @@ pub fn run() {
         a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(8765))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
+        agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
+        proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         hot_cache,
         startup_warnings,
     });
@@ -1890,6 +2157,16 @@ pub fn run() {
             save_life_model,
             get_config,
             save_config,
+            get_agent_run,
+            list_agent_runs,
+            list_agent_runs_for_session,
+            get_pending_proposals,
+            list_proposals,
+            batch_accept_low_risk_proposals,
+            accept_proposal,
+            reject_proposal,
+            edit_proposal,
+            postpone_proposal,
             send_message,
             start_stream_message,
             get_chat_history,
@@ -1935,6 +2212,7 @@ pub fn run() {
             builder_list_unfinished,
             builder_delete_session,
             builder_get_pending_signals,
+            builder_create_proposals,
             builder_apply_signals,
             get_model_4d_completion,
             goal_capability_gap_analysis,
@@ -1945,6 +2223,7 @@ pub fn run() {
             import_all_data,
             test_api_key,
             test_llm_connection,
+            get_last_model_error,
             list_chat_sessions,
             create_chat_session,
             rename_chat_session,
@@ -1961,6 +2240,7 @@ pub fn run() {
             generate_calibration_report,
             generate_micro_evolution_changes,
             apply_calibration,
+            calibration_create_proposals,
             should_show_calibration,
             mark_calibration_shown,
             get_hot_cache,

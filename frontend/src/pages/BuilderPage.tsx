@@ -5,7 +5,7 @@ import LoadingSpinner from "../components/LoadingSpinner";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
 import type { LifeModel, BuilderProgress } from "../types";
-import { builderStart, builderStep, builderListUnfinished, builderDeleteSession, builderApplySignals, getModel4DCompletion, getSystemDiagnostics, type UnfinishedBuilderSession, type Model4DCompletion, type BuilderAnalysis, type BuilderSignal, type SystemDiagnostics } from "../tauri";
+import { builderStart, builderStep, builderListUnfinished, builderDeleteSession, builderApplySignals, builderCreateProposals, getModel4DCompletion, getSystemDiagnostics, type UnfinishedBuilderSession, type Model4DCompletion, type BuilderAnalysis, type BuilderSignal, type SystemDiagnostics, type BuilderSignalDecision } from "../tauri";
 import BuilderPatchReview from "../components/BuilderPatchReview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
@@ -227,7 +227,7 @@ export default function BuilderPage() {
   const [completion, setCompletion] = useState<Model4DCompletion | null>(null);
   const [analysis, setAnalysis] = useState<BuilderAnalysis | null>(null);
   const [builderError, setBuilderError] = useState<string | null>(null);
-  const [builderNotice, setBuilderNotice] = useState<string | null>(null);
+  const [builderNotice, setBuilderNotice] = useState<React.ReactNode>(null);
   const [lastStart, setLastStart] = useState<{
     mode: "quick" | "incremental" | "socratic";
     sessionId: string;
@@ -395,7 +395,7 @@ export default function BuilderPage() {
     loadUnfinished();
   };
 
-  const handleApplySignals = async (decisions: import("../tauri").BuilderSignalDecision[]) => {
+  const handleApplySignals = async (decisions: BuilderSignalDecision[]) => {
     if (safeMode) {
       setBuilderError(buildSafeModeBlockedMessage("人生模型写入", diagnostics));
       return;
@@ -416,6 +416,8 @@ export default function BuilderPage() {
         setBuilderNotice(
           `本轮已写入 ${res.applied_fields?.length ?? 0} 项，合并 ${res.merged_fields?.length ?? 0} 项，编辑 ${res.edited_count ?? 0} 项，拒绝 ${res.rejected_count ?? 0} 项。`
         );
+        // Clean up session after successful direct apply
+        setSessionId(crypto.randomUUID());
         if (res.skipped_fields && res.skipped_fields.length > 0) {
           setBuilderError(
             `已保存模型，但有 ${res.skipped_fields.length} 项字段未能应用。请查看下方跳过明细。`
@@ -440,6 +442,53 @@ export default function BuilderPage() {
       }
     } catch (e) {
       setBuilderError(buildRuntimeActionError("保存人生模型", e, "review"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCreateProposals = async (decisions: BuilderSignalDecision[]) => {
+    if (safeMode) {
+      setBuilderError(buildSafeModeBlockedMessage("创建模型更新 Proposal", diagnostics));
+      return;
+    }
+    setLoading(true);
+    setBuilderNotice(null);
+    try {
+      const res = await builderCreateProposals(sessionId, decisions);
+      if (res.success) {
+        setReviewMode(false);
+        setPendingSignals([]);
+        setFinished(false);
+        setPrompt(null);
+        setProgress(null);
+        setAnalysis(null);
+        setResultModel(null);
+        setMode(null);
+        setSessionId(crypto.randomUUID());
+        const runInfo = res.run_id ? `（Run #${res.run_id.slice(0, 8)}）` : "";
+        setBuilderNotice(
+          <div className="space-y-2">
+            <div>
+              已创建 <strong>{res.created_count}</strong> 条待确认 Proposal{runInfo}，拒绝 <strong>{res.rejected_count}</strong> 条。
+            </div>
+            <div>
+              <button
+                onClick={() => navigate("/review")}
+                className="inline-flex items-center gap-1.5 rounded-full bg-indigo-600 px-3 py-1.5 text-xs text-white hover:bg-indigo-700"
+              >
+                去 Review Center 确认 →
+              </button>
+            </div>
+          </div>
+        );
+        await Promise.all([
+          loadUnfinished(),
+          getSystemDiagnostics().then(setDiagnostics).catch(() => null),
+        ]);
+      }
+    } catch (e) {
+      setBuilderError(buildRuntimeActionError("创建模型更新 Proposal", e, "review"));
     } finally {
       setLoading(false);
     }
@@ -1044,6 +1093,7 @@ export default function BuilderPage() {
                 recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
               }}
               onApply={handleApplySignals}
+              onCreateProposals={handleCreateProposals}
               onReject={handleRejectSignals}
             />
           </div>

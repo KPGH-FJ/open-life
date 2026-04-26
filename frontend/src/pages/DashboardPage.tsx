@@ -796,6 +796,31 @@ export default function DashboardPage() {
             </div>
           )}
 
+        {diagnostics && diagnostics.pending_proposal_count > 0 && (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <div className="text-sm font-semibold text-amber-900">
+                  你有 {diagnostics.pending_proposal_count} 个待确认理解
+                  {diagnostics.high_risk_pending_proposal_count > 0 && (
+                    <span className="ml-2 text-rose-700">（其中 {diagnostics.high_risk_pending_proposal_count} 个高风险）</span>
+                  )}
+                </div>
+                <div className="mt-1 text-xs leading-5 text-amber-800">
+                  OpenLife 已经分析了你的人生模型并生成了更新建议。在 Review Center 确认前，这些建议不会写入模型。
+                </div>
+              </div>
+              <Link
+                to="/review"
+                className="inline-flex shrink-0 items-center gap-2 rounded-full bg-amber-900 px-4 py-2 text-sm font-medium text-amber-50 hover:bg-amber-950"
+              >
+                去 Review Center 确认
+                <ArrowRight size={14} />
+              </Link>
+            </div>
+          </div>
+        )}
+
         {loadWarnings.length > 0 && (
           <div className="rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-900">
             <div className="flex items-center justify-between mb-1">

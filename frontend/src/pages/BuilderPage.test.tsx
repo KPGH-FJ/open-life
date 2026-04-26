@@ -470,7 +470,7 @@ describe('BuilderPage', () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+      expect(screen.getByText('直接应用（快速写入）')).toBeInTheDocument()
     })
 
     // Ensure the checkbox is checked so save is enabled
@@ -492,7 +492,7 @@ describe('BuilderPage', () => {
     fireEvent.click(saveEditButton)
 
     // Click main save
-    const saveButton = screen.getByText('保存选中内容')
+    const saveButton = screen.getByText('直接应用（快速写入）')
     fireEvent.click(saveButton)
 
     await waitFor(() => {
@@ -577,7 +577,7 @@ describe('BuilderPage', () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+      expect(screen.getByText('直接应用（快速写入）')).toBeInTheDocument()
     })
 
     // Ensure checkboxes are checked so save is enabled
@@ -589,7 +589,7 @@ describe('BuilderPage', () => {
     })
 
     // Click save without editing — accepted by default
-    const saveButton = screen.getByText('保存选中内容')
+    const saveButton = screen.getByText('直接应用（快速写入）')
     fireEvent.click(saveButton)
 
     await waitFor(() => {
@@ -681,14 +681,14 @@ describe('BuilderPage', () => {
     fireEvent.click(screen.getByText('下一步'))
 
     await waitFor(() => {
-      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+      expect(screen.getByText('直接应用（快速写入）')).toBeInTheDocument()
     })
 
     const checkboxes = screen.getAllByRole('checkbox')
     checkboxes.forEach((cb) => {
       if (!(cb as HTMLInputElement).checked) fireEvent.click(cb)
     })
-    fireEvent.click(screen.getByText('保存选中内容'))
+    fireEvent.click(screen.getByText('直接应用（快速写入）'))
 
     await waitFor(() => {
       expect(screen.getByText('本轮沉淀')).toBeInTheDocument()
@@ -767,7 +767,7 @@ describe('BuilderPage', () => {
     fireEvent.click(screen.getByText('下一步'))
 
     await waitFor(() => {
-      expect(screen.getByText('保存选中内容')).toBeInTheDocument()
+      expect(screen.getByText('直接应用（快速写入）')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByText('暂不保存'))

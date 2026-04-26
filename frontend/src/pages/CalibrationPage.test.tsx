@@ -45,11 +45,11 @@ describe('CalibrationPage', () => {
     )
 
     await waitFor(() => {
-      expect(screen.getByText('确认应用')).toBeInTheDocument()
+      expect(screen.getByText('直接应用')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByRole('checkbox'))
-    fireEvent.click(screen.getByText('确认应用'))
+    fireEvent.click(screen.getByText('直接应用'))
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(

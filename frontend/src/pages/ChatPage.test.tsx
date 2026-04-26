@@ -1,9 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, fireEvent } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import { BrowserRouter, MemoryRouter } from 'react-router-dom'
 import ChatPage from './ChatPage'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { mockInvoke, mockLifeModel } from '@/test/mocks/tauri'
+import type { SystemDiagnostics } from '../tauri'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -17,6 +19,7 @@ describe('ChatPage', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     vi.mocked(invoke).mockImplementation(mockInvoke)
+    vi.mocked(listen).mockResolvedValue(() => {})
   })
 
   afterEach(() => {
@@ -187,7 +190,7 @@ describe('ChatPage', () => {
         return createEmptyModel()
       }
       if (cmd === 'get_system_diagnostics') {
-        const base = await mockInvoke(cmd, args)
+        const base = await mockInvoke(cmd, args) as SystemDiagnostics
         return {
           ...base,
           model_empty: true,
@@ -453,6 +456,73 @@ describe('ChatPage', () => {
     })
     const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'save_chat_message')
     expect(saveCalls).toHaveLength(0)
+  })
+
+  it('ignores a delayed AgentRun fetch after switching away from the originating session', async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>
+    const listeners = new Map<string, StreamListener>()
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener)
+      return Promise.resolve(() => {})
+    })
+
+    let resolveRun: ((value: any) => void) | null = null
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === 'get_agent_run') {
+        return new Promise((resolve) => {
+          resolveRun = resolve
+        }) as Promise<any>
+      }
+      return mockInvoke(cmd, args)
+    })
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    )
+
+    await screen.findByText('会话 1')
+    const startHandler = listeners.get('stream-message-start')
+    expect(startHandler).toBeDefined()
+    await act(async () => {
+      void startHandler?.({
+        payload: {
+          session_id: 'session-1',
+          run_id: 'run-old-session',
+          hermes_trace: null,
+          tool_calls: [],
+        },
+      })
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('会话 2'))
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('get_chat_history', expect.objectContaining({
+        sessionId: 'session-2',
+      }))
+    })
+
+    await act(async () => {
+      resolveRun?.({
+        id: 'run-old-session',
+        sessionId: 'session-1',
+        userMessageId: 'user-old',
+        status: 'completed',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        modelRoute: { provider: 'DeepSeek', model: 'deepseek-chat', reason: 'old session' },
+      })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Run completed · DeepSeek · deepseek-chat/)).not.toBeInTheDocument()
+    })
   })
 
   it('persists slash command messages to chat history', async () => {

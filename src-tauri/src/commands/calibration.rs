@@ -1,8 +1,89 @@
 use crate::{persist_life_model, AppState};
 use chrono::Datelike;
+use openlife_core::agent::{AgentProposal, ProposalType, RiskLevel};
 use openlife_core::evolution::{EvolutionChange, MicroEvolutionEngine};
 use std::sync::Arc;
 use tauri::State;
+
+/// 评估 calibration change 的风险级别
+fn assess_change_risk(change: &EvolutionChange) -> RiskLevel {
+    let path = change.dimension.to_lowercase();
+    if path.starts_with("identity.") {
+        if path.contains("mission") || path.contains("values") || path.contains("philosophy") {
+            RiskLevel::High
+        } else {
+            RiskLevel::Medium
+        }
+    } else if path.starts_with("goals.") {
+        if path.contains("long_term") || path.contains("life_goals") {
+            RiskLevel::High
+        } else {
+            RiskLevel::Medium
+        }
+    } else if path.starts_with("capabilities.") {
+        RiskLevel::Medium
+    } else if path.starts_with("state.") {
+        RiskLevel::Low
+    } else {
+        RiskLevel::Medium
+    }
+}
+
+/// 将 EvolutionChange 转换为 AgentProposal
+fn change_to_proposal(
+    change: &EvolutionChange,
+    source: &str,
+    before_model: &openlife_core::life_model::LifeModel,
+) -> Result<AgentProposal, String> {
+    let risk_level = assess_change_risk(change);
+    let proposal_type = if change.dimension.starts_with("goals.") {
+        ProposalType::GoalUpdate
+    } else {
+        ProposalType::LifeModelUpdate
+    };
+
+    // 提取 before 值
+    let before_value = {
+        let model_json = serde_json::to_value(before_model).map_err(|e| e.to_string())?;
+        let parts: Vec<&str> = change.dimension.split('.').collect();
+        let mut current = &model_json;
+        for part in parts.iter() {
+            current = current.get(part).ok_or_else(|| {
+                format!("无法提取 before 值：路径 {} 不存在", change.dimension)
+            })?;
+        }
+        // 进一步定位到 target_name
+        if !change.target_name.is_empty() {
+            current = current.get(&change.target_name).unwrap_or(current);
+        }
+        current.clone()
+    };
+
+    let affected_path = if change.target_name.is_empty() {
+        change.dimension.clone()
+    } else {
+        format!("{}.{}", change.dimension, change.target_name)
+    };
+
+    let mut proposal = AgentProposal::new(
+        proposal_type,
+        &affected_path,
+        serde_json::json!({
+            "dimension": change.dimension,
+            "target_name": change.target_name,
+            "new_value": change.new_value,
+            "old_value": change.old_value,
+            "reason": change.reason,
+            "confidence": change.confidence,
+        }),
+        &format!("Calibration 建议：{}", change.reason),
+        change.confidence,
+        risk_level,
+        source,
+    );
+    proposal.before = Some(before_value);
+    Ok(proposal)
+}
 
 #[tauri::command]
 pub async fn run_micro_evolution(
@@ -85,8 +166,17 @@ pub async fn generate_micro_evolution_changes(
 #[tauri::command]
 pub async fn apply_calibration(
     changes: Vec<EvolutionChange>,
+    mode: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    let mode = mode.as_deref().unwrap_or("direct");
+
+    if mode == "proposal" {
+        // 创建 Proposal 而不是直接应用
+        return calibration_create_proposals(changes, state).await;
+    }
+
+    // direct 模式：直接应用变更
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(|e| e.to_string())?;
     MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(|e| e.to_string())?;
@@ -129,6 +219,71 @@ pub async fn should_show_calibration(
         "weekly": is_monday && already_weekly == 0,
         "monthly": is_first_day && already_monthly == 0,
         "today": today,
+    }))
+}
+
+#[tauri::command]
+pub async fn calibration_create_proposals(
+    changes: Vec<EvolutionChange>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, String> {
+    // Create AgentRun for this calibration
+    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
+    let run_id = agent_run.id.clone();
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+
+    let manager = state.life_model_manager.lock().await;
+    let model = manager.load().map_err(|e| e.to_string())?;
+    drop(manager);
+
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "Proposal store 不可用".to_string())?;
+    let store = store.lock().await;
+
+    let mut created_ids = Vec::new();
+    let mut errors = Vec::new();
+
+    for change in &changes {
+        match change_to_proposal(change, "calibration:evolution", &model) {
+            Ok(mut proposal) => {
+                proposal.source_run_id = Some(run_id.clone());
+                proposal.source_kind = Some("calibration".to_string());
+                let id = proposal.id.clone();
+                if let Err(e) = store.create_proposal(&proposal) {
+                    errors.push(format!("{}: {}", proposal.affected_path, e));
+                } else {
+                    created_ids.push(id);
+                }
+            }
+            Err(e) => {
+                errors.push(format!("{}: {}", change.dimension, e));
+            }
+        }
+    }
+
+    // Update AgentRun with generated proposal IDs and mark as completed
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        for pid in &created_ids {
+            let _ = store.add_generated_proposal(&run_id, pid);
+        }
+        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+        agent_run.finished_at = Some(chrono::Utc::now());
+        let _ = store.update_run(&agent_run);
+    }
+
+    Ok(serde_json::json!({
+        "created_count": created_ids.len(),
+        "created_ids": created_ids,
+        "run_id": run_id,
+        "error_count": errors.len(),
+        "errors": errors,
+        "message": format!("已创建 {} 个 Proposal 到 Review Center", created_ids.len()),
     }))
 }
 

@@ -1,3 +1,4 @@
+use crate::agent::ModelRouteTrace;
 use crate::life_model::LifeModel;
 use crate::llm::{chat_with_openrouter, chat_with_openrouter_stream, ChatMessage, StreamResult};
 use crate::ollama::{chat_with_ollama, chat_with_ollama_raw_stream, resolve_ollama_model};
@@ -216,6 +217,52 @@ impl InferenceScheduler {
                 &self.chat_model,
             )
             .await
+        }
+    }
+
+    /// Preview the routing decision for a chat request without actually calling the LLM.
+    /// Returns a ModelRouteTrace describing which backend would be chosen and why.
+    pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
+        let resolved_local_model = resolve_ollama_model(&self.local_model).await;
+        let ollama_available = resolved_local_model.is_some();
+        let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
+
+        let (provider, model, route_type, reason) = if use_local {
+            (
+                "ollama".to_string(),
+                resolved_local_model.unwrap_or_else(|| self.local_model.clone()),
+                "local".to_string(),
+                "ollama_available_and_preferred".to_string(),
+            )
+        } else if !self.has_remote_key() {
+            (
+                "none".to_string(),
+                self.local_model.clone(),
+                "fallback".to_string(),
+                "no_backend_available".to_string(),
+            )
+        } else {
+            (
+                self.provider.clone(),
+                self.chat_model.clone(),
+                "cloud".to_string(),
+                if tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false) {
+                    "tools_prompt_requires_cloud".to_string()
+                } else if !ollama_available {
+                    "ollama_unavailable".to_string()
+                } else {
+                    "prefer_cloud".to_string()
+                },
+            )
+        };
+
+        ModelRouteTrace {
+            provider,
+            model,
+            route_type,
+            prefer_local: self.prefer_local,
+            local_model: self.local_model.clone(),
+            reason,
         }
     }
 }

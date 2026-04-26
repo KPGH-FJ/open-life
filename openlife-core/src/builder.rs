@@ -3904,18 +3904,44 @@ mod tests {
         assert!(skipped.is_empty());
         assert_eq!(model.identity.name, "fujing");
         assert_eq!(model.state.current_focus, "自我探索");
-        assert!(model.state.focus_areas.iter().any(|item| item == "自我探索"));
-        assert!(model.goals.short_term.iter().any(|goal| goal.name == "把 OpenLife 跑通"));
-        assert!(model.goals.long_term.iter().any(|goal| goal.description == "希望事业收获阶段性的成功"));
+        assert!(model
+            .state
+            .focus_areas
+            .iter()
+            .any(|item| item == "自我探索"));
+        assert!(model
+            .goals
+            .short_term
+            .iter()
+            .any(|goal| goal.name == "把 OpenLife 跑通"));
+        assert!(model
+            .goals
+            .long_term
+            .iter()
+            .any(|goal| goal.description == "希望事业收获阶段性的成功"));
         assert_eq!(model.preferences.communication_style, "苏格拉底式追问型");
-        assert!(model.identity.voice_style.tone_descriptors.iter().any(|item| item == "好奇"));
-        assert!(model.identity.voice_style.tone_descriptors.iter().any(|item| item == "探究"));
+        assert!(model
+            .identity
+            .voice_style
+            .tone_descriptors
+            .iter()
+            .any(|item| item == "好奇"));
+        assert!(model
+            .identity
+            .voice_style
+            .tone_descriptors
+            .iter()
+            .any(|item| item == "探究"));
         assert_eq!(model.state.alerts.len(), 1);
         assert!(applied.iter().any(|item| item.contains("identity.name")));
-        assert!(applied.iter().any(|item| item.contains("state.current_focus")));
+        assert!(applied
+            .iter()
+            .any(|item| item.contains("state.current_focus")));
         assert!(applied.iter().any(|item| item.contains("goals.short_term")));
         assert!(applied.iter().any(|item| item.contains("goals.long_term")));
-        assert!(applied.iter().any(|item| item.contains("preferences.communication_style")));
+        assert!(applied
+            .iter()
+            .any(|item| item.contains("preferences.communication_style")));
     }
 
     #[test]

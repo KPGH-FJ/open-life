@@ -466,7 +466,12 @@ impl LifeModel {
             && self.identity.role_definition.responsibilities.is_empty()
             && self.identity.role_definition.boundaries.is_empty()
             && self.identity.voice_style.tone_descriptors.is_empty()
-            && self.identity.voice_style.vocabulary_preference.trim().is_empty()
+            && self
+                .identity
+                .voice_style
+                .vocabulary_preference
+                .trim()
+                .is_empty()
             && self.goals.short_term.is_empty()
             && self.goals.medium_term.is_empty()
             && self.goals.long_term.is_empty()
@@ -481,10 +486,8 @@ impl LifeModel {
             && self.state.health_status.physical == default.state.health_status.physical
             && self.state.health_status.mental == default.state.health_status.mental
             && self.state.health_status.energy_level == default.state.health_status.energy_level
-            && self.state.emotional_state.current_mood
-                == default.state.emotional_state.current_mood
-            && self.state.emotional_state.stress_level
-                == default.state.emotional_state.stress_level
+            && self.state.emotional_state.current_mood == default.state.emotional_state.current_mood
+            && self.state.emotional_state.stress_level == default.state.emotional_state.stress_level
             && self.state.emotional_state.fulfillment_score
                 == default.state.emotional_state.fulfillment_score
             && self.state.recent_reflections.is_empty()
@@ -497,7 +500,12 @@ impl LifeModel {
             && self.relationships.inner_circle.is_empty()
             && self.relationships.mentors.is_empty()
             && self.relationships.collaborators.is_empty()
-            && self.preferences.work_hours.preferred_start.trim().is_empty()
+            && self
+                .preferences
+                .work_hours
+                .preferred_start
+                .trim()
+                .is_empty()
             && self.preferences.work_hours.preferred_end.trim().is_empty()
             && self.preferences.work_hours.timezone.trim().is_empty()
             && self.preferences.peak_energy_time.trim().is_empty()

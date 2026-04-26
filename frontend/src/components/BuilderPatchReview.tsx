@@ -7,6 +7,7 @@ interface Props {
   signals: BuilderSignal[];
   summary: BuilderSummary;
   onApply: (decisions: BuilderSignalDecision[]) => void;
+  onCreateProposals?: (decisions: BuilderSignalDecision[]) => void;
   onReject: () => void;
 }
 
@@ -98,7 +99,7 @@ function groupSignalsByDimension(signals: BuilderSignal[]): Record<string, Build
   }, {} as Record<string, BuilderSignal[]>);
 }
 
-export default function BuilderPatchReview({ signals, summary, onApply, onReject }: Props) {
+export default function BuilderPatchReview({ signals, summary, onApply, onCreateProposals, onReject }: Props) {
   // Track which signals are selected (checked)
   const [selected, setSelected] = useState<Set<string>>(() => {
     const initial = new Set<string>();
@@ -115,6 +116,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState<string>("");
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
+  const [showDirectApplyConfirm, setShowDirectApplyConfirm] = useState(false);
 
   const grouped = groupSignalsByDimension(signals);
   const dimensions = Object.keys(grouped);
@@ -158,8 +160,8 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
     });
   };
 
-  const handleApply = () => {
-    const decisions: BuilderSignalDecision[] = signals.map((signal) => {
+  const buildDecisions = (): BuilderSignalDecision[] => {
+    return signals.map((signal) => {
       const isSelected = selected.has(signal.id);
       const hasEdit = signal.id in editedValues;
 
@@ -181,7 +183,24 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
         status: "rejected" as const,
       };
     });
-    onApply(decisions);
+  };
+
+  const handleApply = () => {
+    // Check if any high risk signals are selected
+    const hasHighRiskSelected = signals.some(
+      (s) => selected.has(s.id) && s.risk_level === "high"
+    );
+    if (hasHighRiskSelected && !showDirectApplyConfirm) {
+      setShowDirectApplyConfirm(true);
+      return;
+    }
+    setShowDirectApplyConfirm(false);
+    onApply(buildDecisions());
+  };
+
+  const handleCreateProposals = () => {
+    setShowDirectApplyConfirm(false);
+    onCreateProposals?.(buildDecisions());
   };
 
   const acceptedCount = signals.filter((s) => selected.has(s.id) && !(s.id in editedValues)).length;
@@ -199,11 +218,11 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
           <h3 className="font-semibold text-indigo-900 text-lg">OpenLife 准备这样理解你</h3>
         </div>
         <p className="text-sm text-indigo-700">
-          基于我们的对话，我整理了对你的理解。高风险内容（价值观、使命等）需要你确认后才会写入，其他内容已根据置信度自动勾选。
+          基于我们的对话，我整理了对你的理解。<strong>建议你发送到 Review Center 逐条审阅后再写入</strong>，这样你可以清楚地看到每一项变更的前后对比。
         </p>
         <div className="mt-3 text-xs text-indigo-600 bg-indigo-100/50 px-3 py-1.5 rounded-full inline-flex items-center gap-1">
           <Info size={12} />
-          共 {signals.length} 条理解建议 · 请勾选你认可的内容
+          共 {signals.length} 条理解建议 · 高风险内容默认未勾选 · 请审阅后确认
         </div>
       </div>
 
@@ -426,18 +445,50 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
         </div>
       )}
 
-      {/* Actions */}
-      <div className="flex items-center justify-between pt-4 border-t">
-        <div className="text-sm text-gray-600">
-          已接受 <span className="font-semibold text-indigo-600">{acceptedCount}</span> 项
-          {editedCount > 0 && (
-            <span className="ml-2">已编辑 <span className="font-semibold text-amber-600">{editedCount}</span> 项</span>
-          )}
-          {rejectedCount > 0 && (
-            <span className="ml-2">已拒绝 <span className="font-semibold text-rose-600">{rejectedCount}</span> 项</span>
-          )}
+      {/* High Risk Direct Apply Warning */}
+      {showDirectApplyConfirm && (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={20} className="text-rose-600 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="font-semibold text-rose-900">高风险字段将直接写入</div>
+              <p className="mt-1 text-sm text-rose-700">
+                你选择了直接应用，其中包含高风险字段（如价值观、使命、长期目标）。这会自动更新你的人生模型且不可撤销。
+              </p>
+              <p className="mt-2 text-sm text-rose-700 font-medium">
+                建议改为「发送到 Review Center」，经你逐条审阅后再确认写入。
+              </p>
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => setShowDirectApplyConfirm(false)}
+                  className="px-3 py-1.5 text-sm text-rose-700 bg-white border border-rose-200 rounded-lg hover:bg-rose-50"
+                >
+                  取消，改用 Review Center
+                </button>
+                <button
+                  onClick={handleApply}
+                  className="px-3 py-1.5 text-sm text-white bg-rose-600 rounded-lg hover:bg-rose-700"
+                >
+                  确认直接写入
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="flex gap-3">
+      )}
+
+      {/* Actions */}
+      <div className="flex flex-col gap-3 pt-4 border-t">
+        <div className="flex items-center justify-between">
+          <div className="text-sm text-gray-600">
+            已接受 <span className="font-semibold text-indigo-600">{acceptedCount}</span> 项
+            {editedCount > 0 && (
+              <span className="ml-2">已编辑 <span className="font-semibold text-amber-600">{editedCount}</span> 项</span>
+            )}
+            {rejectedCount > 0 && (
+              <span className="ml-2">已拒绝 <span className="font-semibold text-rose-600">{rejectedCount}</span> 项</span>
+            )}
+          </div>
           <button
             onClick={onReject}
             className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg flex items-center gap-2"
@@ -445,14 +496,30 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
             <X size={18} />
             暂不保存
           </button>
+        </div>
+        <div className="flex items-center justify-end gap-3">
+          {onCreateProposals && (
+            <button
+              onClick={handleCreateProposals}
+              disabled={acceptedCount === 0 && editedCount === 0}
+              className="px-5 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              <ShieldCheck size={18} />
+              发送到 Review Center
+            </button>
+          )}
           <button
             onClick={handleApply}
             disabled={acceptedCount === 0 && editedCount === 0}
-            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
           >
             <Check size={18} />
-            保存选中内容
+            直接应用（快速写入）
           </button>
+        </div>
+        <div className="text-xs text-gray-500 text-right">
+          「发送到 Review Center」是推荐路径，你可以在 Review Center 逐条审阅后再确认写入。
+          「直接应用」会立即更新人生模型且不可撤销。
         </div>
       </div>
 
@@ -461,7 +528,7 @@ export default function BuilderPatchReview({ signals, summary, onApply, onReject
         <div className="flex items-start gap-2 text-xs text-amber-600 bg-amber-50 p-3 rounded-lg">
           <AlertTriangle size={14} className="shrink-0 mt-0.5" />
           <span>
-            你有未勾选的高风险字段（如长期目标、核心价值观等）。这些字段需要你确认后才会写入人生模型。
+            你有未勾选的高风险字段（如长期目标、核心价值观等）。建议勾选后发送到 Review Center 审阅。
           </span>
         </div>
       )}

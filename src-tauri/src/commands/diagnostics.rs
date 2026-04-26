@@ -43,7 +43,9 @@ pub async fn get_system_diagnostics(
     };
     let (unfinished_builder_sessions, pending_builder_review_sessions) = {
         let store = state.builder_session_store.lock().await;
-        let sessions = store.list_unfinished_sessions().map_err(|e| e.to_string())?;
+        let sessions = store
+            .list_unfinished_sessions()
+            .map_err(|e| e.to_string())?;
         let pending_review = sessions
             .iter()
             .filter(|session| session.finished && !session.pending_signals.is_empty())
@@ -143,6 +145,17 @@ pub async fn get_system_diagnostics(
         match store.list_chat_sessions(1000) {
             Ok(sessions) => sessions.len(),
             Err(_) => 0,
+        }
+    };
+    let (agent_run_count, agent_run_store_status) = {
+        if let Some(ref agent_run_store_arc) = state.agent_run_store {
+            let store = agent_run_store_arc.lock().await;
+            match store.run_count() {
+                Ok(count) => (count as usize, "ok".to_string()),
+                Err(_) => (0, "error".to_string()),
+            }
+        } else {
+            (0, "disabled".to_string())
         }
     };
     let onboarding_completed =
@@ -257,9 +270,26 @@ pub async fn get_system_diagnostics(
     }
     if chat_session_count > 0 && memory_chunk_count == 0 {
         beta_readiness_issues.push(
-            "已有聊天记录，但语义记忆索引仍为空：建议先重建记忆索引，再验证长期记忆与校准体验。".to_string(),
+            "已有聊天记录，但语义记忆索引仍为空：建议先重建记忆索引，再验证长期记忆与校准体验。"
+                .to_string(),
         );
     }
+    let (pending_proposal_count, high_risk_pending_proposal_count, proposal_store_status) = {
+        if let Some(ref store_arc) = state.proposal_store {
+            let store = store_arc.lock().await;
+            let pending = store.pending_count().unwrap_or(0) as usize;
+            let high_risk = store
+                .count_by_status_and_risk(
+                    openlife_core::agent::ProposalStatus::Pending,
+                    Some(openlife_core::agent::RiskLevel::High),
+                )
+                .unwrap_or(0) as usize;
+            (pending, high_risk, "ok".to_string())
+        } else {
+            (0, 0, "disabled".to_string())
+        }
+    };
+
     let beta_ready = chat_ready
         && !model_empty
         && chat_session_count > 0
@@ -307,6 +337,11 @@ pub async fn get_system_diagnostics(
         beta_ready,
         beta_readiness_issues,
         builder_completion,
+        agent_run_count,
+        agent_run_store_status,
+        pending_proposal_count,
+        high_risk_pending_proposal_count,
+        proposal_store_status,
     })
 }
 

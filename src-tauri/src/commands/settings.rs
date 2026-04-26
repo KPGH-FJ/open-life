@@ -17,6 +17,35 @@ use crate::storage::{
 };
 use crate::AppState;
 
+#[derive(serde::Serialize)]
+pub struct LastModelError {
+    pub message: String,
+    pub phase: String,
+    pub timestamp: String,
+}
+
+#[tauri::command]
+pub async fn get_last_model_error(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Option<LastModelError>, String> {
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let runs = store.list_runs(10, 0).map_err(|e| e.to_string())?;
+        let last_error = runs
+            .iter()
+            .find(|r| r.error.is_some())
+            .and_then(|r| r.error.as_ref())
+            .map(|e| LastModelError {
+                message: e.message.clone(),
+                phase: e.phase.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            });
+        Ok(last_error)
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, String> {
     let cfg = state.config.lock().await;

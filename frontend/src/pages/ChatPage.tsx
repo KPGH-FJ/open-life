@@ -27,10 +27,18 @@ import {
   recordState,
   executeToolCall,
   indexMemoryChunk,
-  type ChatSession,
-  type SystemDiagnostics,
+  listAgentRunsForSession,
+  getAgentRun,
 } from "../tauri";
-import type { HermesTrace, ToolCallResult, StreamMessageStartPayload, StreamMessageDonePayload } from "../tauri";
+import type {
+  AgentRun,
+  ChatSession,
+  HermesTrace,
+  StreamMessageDonePayload,
+  StreamMessageStartPayload,
+  SystemDiagnostics,
+  ToolCallResult,
+} from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import HermesTracePanel from "../components/HermesTracePanel";
@@ -171,6 +179,7 @@ export default function ChatPage() {
   const [editingTitle, setEditingTitle] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
+  const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -183,6 +192,33 @@ export default function ChatPage() {
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
+    try {
+      const runs = await listAgentRunsForSession(sessionId, 10);
+      if (currentSessionIdRef.current === sessionId) {
+        setCurrentRun(runs[0] ?? null);
+      }
+    } catch {
+      if (currentSessionIdRef.current === sessionId) {
+        setCurrentRun(null);
+      }
+    }
+  };
+
+  const loadAgentRunForSession = async (runId: string | undefined, sessionId: string) => {
+    if (!runId) return;
+    try {
+      const run = await getAgentRun(runId);
+      if (currentSessionIdRef.current === sessionId) {
+        setCurrentRun(run);
+      }
+    } catch {
+      if (currentSessionIdRef.current === sessionId) {
+        setCurrentRun(null);
+      }
+    }
+  };
 
   const flushStreaming = () => {
     if (streamingRafRef.current !== null) {
@@ -270,6 +306,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     setLoadingHistory(true);
+    refreshAgentRuns(currentSessionId);
     getChatHistory(currentSessionId)
       .then((history) => {
         if (history.length === 0) {
@@ -314,10 +351,11 @@ export default function ChatPage() {
     (async () => {
       unlistenStart = await listen<StreamMessageStartPayload>(
         "stream-message-start",
-        (event) => {
+        async (event) => {
           if (event.payload.session_id === currentSessionId) {
             setHermesTrace(event.payload.hermes_trace ?? null);
             setToolCalls(event.payload.tool_calls ?? []);
+            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           }
         }
       );
@@ -332,7 +370,7 @@ export default function ChatPage() {
       );
       unlistenDone = await listen<StreamMessageDonePayload>(
         "stream-message-done",
-        (event) => {
+        async (event) => {
           if (event.payload.session_id === currentSessionId) {
             flushStreaming();
             setMessages((prev) => [
@@ -344,13 +382,15 @@ export default function ChatPage() {
             setHermesTrace(event.payload.hermes_trace ?? null);
             setToolCalls(event.payload.tool_calls ?? []);
             setStreamInterrupted(false);
+            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
+            refreshAgentRuns(event.payload.session_id);
             logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
           }
         }
       );
-      unlistenError = await listen<{ session_id: string; error: string }>(
+      unlistenError = await listen<{ session_id: string; run_id?: string; error: string }>(
         "stream-message-error",
-        (event) => {
+        async (event) => {
           if (event.payload.session_id === currentSessionId) {
             flushStreaming();
             setMessages((prev) => [
@@ -361,6 +401,8 @@ export default function ChatPage() {
             setStreamingReply("");
             setSending(false);
             setStreamInterrupted(true);
+            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
+            refreshAgentRuns(event.payload.session_id);
           }
         }
       );
@@ -1196,6 +1238,31 @@ export default function ChatPage() {
             <div className="flex justify-start">
               <div className="bg-gray-100 text-gray-500 px-4 py-3 rounded-xl rounded-bl-none text-sm flex items-center gap-2">
                 <Loader2 size={16} className="animate-spin" /> 思考中...
+              </div>
+            </div>
+          )}
+          {currentRun && (
+            <div className="px-4 py-2">
+              <div className="text-xs text-gray-400 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-2 h-2 rounded-full ${
+                    currentRun.status === 'completed' ? 'bg-green-400' :
+                    currentRun.status === 'failed' ? 'bg-red-400' :
+                    currentRun.status === 'running' ? 'bg-yellow-400' :
+                    'bg-gray-400'
+                  }`} />
+                  <span>
+                    Run {currentRun.status} · {currentRun.modelRoute?.provider || "unknown"} · {currentRun.modelRoute?.model || "unknown"}
+                    {currentRun.error && ` · Error: ${currentRun.error.phase}`}
+                  </span>
+                </div>
+                {currentRun.contextSummary && (
+                  <div className="text-gray-500">
+                    Memory: {currentRun.contextSummary.memoryHitCount} hits ·
+                    LifeModel: {currentRun.contextSummary.lifeModelEmpty ? 'empty' : 'loaded'} ·
+                    Route: {currentRun.modelRoute?.reason || 'unknown'}
+                  </div>
+                )}
               </div>
             </div>
           )}

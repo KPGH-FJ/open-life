@@ -119,12 +119,14 @@ export interface SendMessageResult {
 
 export interface StreamMessageStartPayload {
   session_id: string;
+  run_id: string;
   hermes_trace: HermesTrace;
   tool_calls: ToolCallResult[];
 }
 
 export interface StreamMessageDonePayload {
   session_id: string;
+  run_id: string;
   reply: string;
   hermes_trace: HermesTrace;
   tool_calls: ToolCallResult[];
@@ -471,13 +473,28 @@ export async function generateMicroEvolutionChanges(): Promise<{
   return safeInvoke('generate_micro_evolution_changes');
 }
 
-export async function applyCalibration(changes: EvolutionChange[]): Promise<{
+export async function applyCalibration(
+  changes: EvolutionChange[],
+  mode: "direct" | "proposal" = "direct"
+): Promise<{
   success: boolean;
   snapshot_version: string;
   applied_count: number;
   message: string;
 }> {
-  return safeInvoke('apply_calibration', { changes });
+  return safeInvoke('apply_calibration', { changes, mode });
+}
+
+export async function calibrationCreateProposals(
+  changes: EvolutionChange[]
+): Promise<{
+  created_count: number;
+  created_ids: string[];
+  error_count: number;
+  errors: string[];
+  message: string;
+}> {
+  return safeInvoke('calibration_create_proposals', { changes });
 }
 
 export async function shouldShowCalibration(): Promise<{
@@ -708,6 +725,19 @@ export async function builderApplySignals(
   model: LifeModel;
 }> {
   return safeInvoke("builder_apply_signals", { ...sessionArgs(sessionId), decisions });
+}
+
+export async function builderCreateProposals(
+  sessionId: string,
+  decisions: BuilderSignalDecision[]
+): Promise<{
+  success: boolean;
+  created_count: number;
+  rejected_count: number;
+  proposal_ids: string[];
+  warnings?: string[];
+}> {
+  return safeInvoke("builder_create_proposals", { ...sessionArgs(sessionId), decisions });
 }
 
 export async function goalCapabilityGapAnalysis(): Promise<string[]> {
@@ -1006,4 +1036,126 @@ export async function hasCompletedOnboarding(): Promise<boolean> {
 
 export async function markOnboardingCompleted(): Promise<void> {
   return safeInvoke("mark_onboarding_completed");
+}
+
+export interface LastModelError {
+  message: string;
+  phase: string;
+  timestamp: string;
+}
+
+export async function getLastModelError(): Promise<LastModelError | null> {
+  return safeInvoke<LastModelError | null>("get_last_model_error");
+}
+
+// ── AgentRun ──
+export interface ModelRouteTrace {
+  provider: string;
+  model: string;
+  routeType: string;
+  preferLocal: boolean;
+  localModel: string;
+  reason: string;
+}
+
+export interface ContextSummary {
+  lifeModelEmpty: boolean;
+  includedLifeModelSections: string[];
+  memoryHitCount: number;
+  usedToolsPrompt: boolean;
+  redactionApplied: boolean;
+}
+
+export interface AgentRunError {
+  message: string;
+  phase: string;
+  recoverable: boolean;
+}
+
+export interface AgentRun {
+  id: string;
+  taskId: string;
+  sessionId?: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  kind: "conversation" | "builder" | "calibration" | "evolution" | "tool_execution" | "proactive";
+  userInput?: string;
+  contextSummary?: ContextSummary;
+  modelRoute?: ModelRouteTrace;
+  outputPreview?: string;
+  error?: AgentRunError;
+  generatedProposals?: string[];
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export async function getAgentRun(runId: string): Promise<AgentRun | null> {
+  return safeInvoke<AgentRun | null>("get_agent_run", { runId });
+}
+
+export async function listAgentRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
+  return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
+}
+
+export async function listAgentRunsForSession(sessionId: string, limit: number = 50): Promise<AgentRun[]> {
+  return safeInvoke<AgentRun[]>("list_agent_runs_for_session", { sessionId, limit });
+}
+
+export async function listProposals(
+  status?: string,
+  proposalType?: string,
+  riskLevel?: string,
+  limit: number = 50
+): Promise<AgentProposal[]> {
+  return safeInvoke<AgentProposal[]>("list_proposals", { status, proposalType, riskLevel, limit });
+}
+
+export async function batchAcceptLowRiskProposals(): Promise<number> {
+  return safeInvoke<number>("batch_accept_low_risk_proposals");
+}
+
+// ── Proposal ──
+export type ProposalStatus = "pending" | "accepted" | "rejected" | "edited" | "postponed";
+export type ProposalType = "life_model_update" | "memory_update" | "tool_permission" | "goal_update";
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface AgentProposal {
+  id: string;
+  proposalType: ProposalType;
+  affectedPath: string;
+  before?: any;
+  after: any;
+  reason: string;
+  confidence: number;
+  riskLevel: RiskLevel;
+  status: ProposalStatus;
+  source: string;
+  sourceRunId?: string;
+  sourceKind?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
+  return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
+}
+
+export async function acceptProposal(proposalId: string): Promise<void> {
+  return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
+}
+
+export async function rejectProposal(proposalId: string): Promise<void> {
+  return safeInvoke("reject_proposal", { proposalId, proposal_id: proposalId });
+}
+
+export async function editProposal(proposalId: string, newAfter: any): Promise<void> {
+  return safeInvoke("edit_proposal", {
+    proposalId,
+    proposal_id: proposalId,
+    newAfter,
+    new_after: newAfter,
+  });
+}
+
+export async function postponeProposal(proposalId: string): Promise<void> {
+  return safeInvoke("postpone_proposal", { proposalId, proposal_id: proposalId });
 }
