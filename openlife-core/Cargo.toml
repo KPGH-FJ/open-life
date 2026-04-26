@@ -26,6 +26,7 @@ ndarray = "0.16"
 aes-gcm = "0.10"
 base64 = "0.22"
 ring = "0.17"
+log = "0.4"
 
 [dev-dependencies]
 tempfile = "3.14"

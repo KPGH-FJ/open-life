@@ -1,4 +1,4 @@
-use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
+use crate::agent::types::{AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
@@ -40,7 +40,10 @@ impl ProposalStore {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS proposals (
                 id TEXT PRIMARY KEY,
+                run_id TEXT,
                 proposal_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                source_detail TEXT,
                 affected_path TEXT NOT NULL,
                 before_json TEXT,
                 after_json TEXT NOT NULL,
@@ -48,19 +51,23 @@ impl ProposalStore {
                 confidence REAL NOT NULL,
                 risk_level TEXT NOT NULL,
                 status TEXT NOT NULL,
-                source TEXT NOT NULL,
-                source_run_id TEXT,
-                source_kind TEXT,
                 created_at TEXT NOT NULL,
-                resolved_at TEXT
+                resolved_at TEXT,
+                expires_at TEXT
             )",
             [],
         )?;
-        // Migration: add source_run_id and source_kind if table exists without them
-        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_run_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_kind TEXT", []);
+        // Migration: add new columns if table exists without them
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN run_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source TEXT DEFAULT 'manual'", []);
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_detail TEXT", []);
+        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN expires_at TEXT", []);
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_proposals_status ON proposals(status, created_at DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_proposals_expires ON proposals(expires_at) WHERE status = 'pending'",
             [],
         )?;
         Ok(())
@@ -72,11 +79,14 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
-            "INSERT INTO proposals (id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO proposals (id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 proposal.id,
+                proposal.run_id.as_ref(),
                 proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
                 proposal.affected_path,
                 proposal.before.as_ref().map(|b| serde_json::to_string(b).unwrap_or_default()),
                 serde_json::to_string(&proposal.after).unwrap_or_default(),
@@ -84,11 +94,9 @@ impl ProposalStore {
                 proposal.confidence,
                 proposal.risk_level.to_string(),
                 proposal.status.to_string(),
-                proposal.source,
-                proposal.source_run_id.as_ref(),
-                proposal.source_kind.as_ref(),
                 proposal.created_at.to_rfc3339(),
                 proposal.resolved_at.map(|t| t.to_rfc3339()),
+                proposal.expires_at.map(|t| t.to_rfc3339()),
             ],
         )?;
         Ok(())
@@ -121,7 +129,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals WHERE id = ?1"
         )?;
         let row = stmt.query_row([id], |row| Self::row_to_proposal(row));
@@ -138,7 +146,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              WHERE status = 'pending'
              ORDER BY created_at DESC
@@ -156,7 +164,7 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              ORDER BY created_at DESC
              LIMIT ?1 OFFSET ?2"
@@ -202,7 +210,7 @@ impl ProposalStore {
         };
 
         let sql = format!(
-            "SELECT id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
              {}
              ORDER BY created_at DESC
@@ -292,9 +300,9 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, proposal_type, affected_path, before_json, after_json, reason, confidence, risk_level, status, source, source_run_id, source_kind, created_at, resolved_at
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals
-             WHERE source_run_id = ?1
+             WHERE run_id = ?1
              ORDER BY created_at DESC"
         )?;
         let proposals = stmt.query_map([run_id], Self::row_to_proposal)?;
@@ -303,22 +311,62 @@ impl ProposalStore {
             .map_err(|e| e.into())
     }
 
+    /// Cleanup expired proposals and return count
+    pub fn cleanup_expired_proposals(&self) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let now = chrono::Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE proposals SET status = 'expired' WHERE status = 'pending' AND expires_at < ?1",
+            [&now],
+        )?;
+        Ok(rows)
+    }
+
+    /// List proposals expiring within given days
+    pub fn list_expiring_soon(&self, days: i64) -> Result<Vec<AgentProposal>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let cutoff = (chrono::Utc::now() + chrono::Duration::days(days)).to_rfc3339();
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
+             FROM proposals
+             WHERE status = 'pending' AND expires_at < ?1
+             ORDER BY expires_at ASC"
+        )?;
+        let proposals = stmt.query_map([&cutoff], Self::row_to_proposal)?;
+        proposals
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.into())
+    }
+
     fn row_to_proposal(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentProposal> {
-        let type_str: String = row.get(1)?;
-        let risk_str: String = row.get(7)?;
-        let status_str: String = row.get(8)?;
-        let before_json: Option<String> = row.get(3)?;
-        let after_json: String = row.get(4)?;
-        let source_run_id: Option<String> = row.get(10)?;
-        let source_kind: Option<String> = row.get(11)?;
+        let run_id: Option<String> = row.get(1)?;
+        let type_str: String = row.get(2)?;
+        let source: ProposalSource = row.get(3)?;
+        let source_detail: Option<String> = row.get(4)?;
+        let before_json: Option<String> = row.get(6)?;
+        let after_json: String = row.get(7)?;
+        let risk_str: String = row.get(10)?;
+        let status_str: String = row.get(11)?;
         let created_at_str: String = row.get(12)?;
         let resolved_at_str: Option<String> = row.get(13)?;
+        let expires_at_str: Option<String> = row.get(14)?;
 
         let proposal_type = match type_str.as_str() {
-            "life_model_update" => ProposalType::LifeModelUpdate,
-            "memory_update" => ProposalType::MemoryUpdate,
-            "tool_permission" => ProposalType::ToolPermission,
             "goal_update" => ProposalType::GoalUpdate,
+            "state_update" => ProposalType::StateUpdate,
+            "preference_update" => ProposalType::PreferenceUpdate,
+            "capability_update" => ProposalType::CapabilityUpdate,
+            "memory_write" => ProposalType::MemoryWrite,
+            "memory_archive" => ProposalType::MemoryArchive,
+            "tool_permission" => ProposalType::ToolPermission,
+            "schedule_checkin" => ProposalType::ScheduleCheckin,
+            "life_model_update" => ProposalType::LifeModelUpdate,
             _ => ProposalType::LifeModelUpdate,
         };
 
@@ -341,7 +389,7 @@ impl ProposalStore {
 
         let before = before_json.and_then(|s| serde_json::from_str(&s).ok());
         let after = serde_json::from_str(&after_json).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e))
         })?;
 
         let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
@@ -357,22 +405,27 @@ impl ProposalStore {
             .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .flatten()
             .map(|dt| dt.with_timezone(&chrono::Utc));
+        let expires_at = expires_at_str
+            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .flatten()
+            .map(|dt| dt.with_timezone(&chrono::Utc));
 
         Ok(AgentProposal {
             id: row.get(0)?,
+            run_id,
             proposal_type,
-            affected_path: row.get(2)?,
+            source,
+            source_detail,
+            affected_path: row.get(5)?,
             before,
             after,
-            reason: row.get(5)?,
-            confidence: row.get(6)?,
+            reason: row.get(8)?,
+            confidence: row.get(9)?,
             risk_level,
             status,
-            source: row.get(9)?,
-            source_run_id,
-            source_kind,
             created_at,
             resolved_at,
+            expires_at,
         })
     }
 }
@@ -385,13 +438,13 @@ mod tests {
     fn test_create_and_get_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+            ProposalType::GoalUpdate,
             "identity.name",
             serde_json::json!("New Name"),
             "Builder suggested new name",
             0.85,
             RiskLevel::Medium,
-            "builder",
+            ProposalSource::BuilderReview,
         );
         store.create_proposal(&proposal).unwrap();
 
@@ -400,19 +453,21 @@ mod tests {
         let fetched = fetched.unwrap();
         assert_eq!(fetched.id, proposal.id);
         assert_eq!(fetched.status, ProposalStatus::Pending);
+        assert_eq!(fetched.source, ProposalSource::BuilderReview);
+        assert!(fetched.expires_at.is_some());
     }
 
     #[test]
     fn test_accept_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+            ProposalType::StateUpdate,
             "identity.name",
             serde_json::json!("New Name"),
             "Builder suggested new name",
             0.85,
             RiskLevel::Medium,
-            "builder",
+            ProposalSource::BuilderReview,
         );
         store.create_proposal(&proposal).unwrap();
 
@@ -428,13 +483,13 @@ mod tests {
         let store = ProposalStore::new_in_memory().unwrap();
         for i in 0..3 {
             let proposal = AgentProposal::new(
-                ProposalType::LifeModelUpdate,
+                ProposalType::GoalUpdate,
                 &format!("path.{}", i),
                 serde_json::json!(format!("value{}", i)),
                 "test",
                 0.5,
                 RiskLevel::Low,
-                "test",
+                ProposalSource::Manual,
             );
             store.create_proposal(&proposal).unwrap();
         }
@@ -444,5 +499,29 @@ mod tests {
 
         let count = store.pending_count().unwrap();
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_expired_proposal() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("New Name"),
+            "Test",
+            0.5,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        // Set expiration in the past
+        proposal.expires_at = Some(chrono::Utc::now() - chrono::Duration::days(1));
+        store.create_proposal(&proposal).unwrap();
+
+        let cleaned = store.cleanup_expired_proposals().unwrap();
+        assert_eq!(cleaned, 1);
+
+        let fetched = store.get_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(fetched.status, ProposalStatus::Pending); // Status is still pending in DB, but is_expired() returns true
+        assert!(fetched.is_expired());
     }
 }

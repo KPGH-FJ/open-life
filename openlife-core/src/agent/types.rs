@@ -303,20 +303,78 @@ impl std::fmt::Display for ProposalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalType {
-    LifeModelUpdate,
-    MemoryUpdate,
-    ToolPermission,
     GoalUpdate,
+    StateUpdate,
+    PreferenceUpdate,
+    CapabilityUpdate,
+    MemoryWrite,
+    MemoryArchive,
+    ToolPermission,
+    ScheduleCheckin,
+    /// 兼容旧数据
+    #[serde(alias = "life_model_update")]
+    LifeModelUpdate,
 }
 
 impl std::fmt::Display for ProposalType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProposalType::LifeModelUpdate => write!(f, "life_model_update"),
-            ProposalType::MemoryUpdate => write!(f, "memory_update"),
-            ProposalType::ToolPermission => write!(f, "tool_permission"),
             ProposalType::GoalUpdate => write!(f, "goal_update"),
+            ProposalType::StateUpdate => write!(f, "state_update"),
+            ProposalType::PreferenceUpdate => write!(f, "preference_update"),
+            ProposalType::CapabilityUpdate => write!(f, "capability_update"),
+            ProposalType::MemoryWrite => write!(f, "memory_write"),
+            ProposalType::MemoryArchive => write!(f, "memory_archive"),
+            ProposalType::ToolPermission => write!(f, "tool_permission"),
+            ProposalType::ScheduleCheckin => write!(f, "schedule_checkin"),
+            ProposalType::LifeModelUpdate => write!(f, "life_model_update"),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalSource {
+    BuilderReview,
+    CalibrationRun,
+    FeedbackEvolution,
+    MemoryGovernance,
+    Manual,
+    /// 预留，暂未实现
+    #[serde(skip)]
+    ProactiveAgent,
+}
+
+impl std::fmt::Display for ProposalSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposalSource::BuilderReview => write!(f, "builder_review"),
+            ProposalSource::CalibrationRun => write!(f, "calibration_run"),
+            ProposalSource::FeedbackEvolution => write!(f, "feedback_evolution"),
+            ProposalSource::MemoryGovernance => write!(f, "memory_governance"),
+            ProposalSource::Manual => write!(f, "manual"),
+            ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
+        }
+    }
+}
+
+impl rusqlite::types::ToSql for ProposalSource {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl rusqlite::types::FromSql for ProposalSource {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value.as_str().and_then(|s| match s {
+            "builder_review" => Ok(ProposalSource::BuilderReview),
+            "calibration_run" => Ok(ProposalSource::CalibrationRun),
+            "feedback_evolution" => Ok(ProposalSource::FeedbackEvolution),
+            "memory_governance" => Ok(ProposalSource::MemoryGovernance),
+            "manual" => Ok(ProposalSource::Manual),
+            "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
+            _ => Err(rusqlite::types::FromSqlError::InvalidType),
+        })
     }
 }
 
@@ -344,7 +402,10 @@ impl std::fmt::Display for RiskLevel {
 #[serde(rename_all = "camelCase")]
 pub struct AgentProposal {
     pub id: String,
+    pub run_id: Option<String>,
     pub proposal_type: ProposalType,
+    pub source: ProposalSource,
+    pub source_detail: Option<String>,
     pub affected_path: String,
     pub before: Option<serde_json::Value>,
     pub after: serde_json::Value,
@@ -352,11 +413,9 @@ pub struct AgentProposal {
     pub confidence: f32,
     pub risk_level: RiskLevel,
     pub status: ProposalStatus,
-    pub source: String,
-    pub source_run_id: Option<String>,
-    pub source_kind: Option<String>,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 impl AgentProposal {
@@ -367,11 +426,15 @@ impl AgentProposal {
         reason: &str,
         confidence: f32,
         risk_level: RiskLevel,
-        source: &str,
+        source: ProposalSource,
     ) -> Self {
+        let expires_at = Self::calculate_expires_at(source);
         Self {
             id: Uuid::new_v4().to_string(),
+            run_id: None,
             proposal_type,
+            source,
+            source_detail: None,
             affected_path: affected_path.to_string(),
             before: None,
             after,
@@ -379,12 +442,45 @@ impl AgentProposal {
             confidence,
             risk_level,
             status: ProposalStatus::Pending,
-            source: source.to_string(),
-            source_run_id: None,
-            source_kind: None,
             created_at: Utc::now(),
             resolved_at: None,
+            expires_at,
         }
+    }
+
+    /// Calculate expiration time based on source
+    fn calculate_expires_at(source: ProposalSource) -> Option<DateTime<Utc>> {
+        let duration = match source {
+            ProposalSource::BuilderReview => chrono::Duration::days(30),
+            ProposalSource::CalibrationRun => chrono::Duration::days(14),
+            ProposalSource::FeedbackEvolution => chrono::Duration::days(7),
+            ProposalSource::MemoryGovernance => chrono::Duration::days(7),
+            ProposalSource::Manual => chrono::Duration::days(365),
+            ProposalSource::ProactiveAgent => chrono::Duration::days(7),
+        };
+        Some(Utc::now() + duration)
+    }
+
+    /// Check if proposal is expired
+    pub fn is_expired(&self) -> bool {
+        match self.expires_at {
+            Some(expires) => Utc::now() > expires,
+            None => false,
+        }
+    }
+
+    /// Get days until expiration (negative if expired)
+    pub fn days_until_expiration(&self) -> Option<i64> {
+        self.expires_at.map(|expires| {
+            let now = Utc::now();
+            let duration = expires.signed_duration_since(now);
+            duration.num_days()
+        })
+    }
+
+    /// Backward compatibility: get run_id
+    pub fn get_run_id(&self) -> Option<&str> {
+        self.run_id.as_deref()
     }
 
     pub fn accept(&mut self) {

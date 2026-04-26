@@ -15,7 +15,10 @@ describe("ProposalReviewPage", () => {
         return Promise.resolve([
           {
             id: "proposal-1",
-            proposalType: "life_model_update",
+            runId: "run-1",
+            proposalType: "goal_update",
+            source: "builder_review",
+            sourceDetail: "session-123",
             affectedPath: "identity.name",
             before: "",
             after: "Fujing",
@@ -23,8 +26,8 @@ describe("ProposalReviewPage", () => {
             confidence: 0.9,
             riskLevel: "low",
             status: "pending",
-            source: "builder:test:sig_name",
             createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
           },
         ] as any);
       }

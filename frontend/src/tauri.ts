@@ -1208,17 +1208,31 @@ export async function batchAcceptLowRiskProposals(): Promise<number> {
 }
 
 // ── Proposal ──
-export type ProposalStatus = "pending" | "accepted" | "rejected" | "edited" | "postponed";
+export type ProposalStatus = "pending" | "accepted" | "rejected" | "edited" | "postponed" | "expired";
 export type ProposalType =
-  | "life_model_update"
-  | "memory_update"
+  | "goal_update"
+  | "state_update"
+  | "preference_update"
+  | "capability_update"
+  | "memory_write"
+  | "memory_archive"
   | "tool_permission"
-  | "goal_update";
+  | "schedule_checkin"
+  | "life_model_update";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
+export type ProposalSource =
+  | "builder_review"
+  | "calibration_run"
+  | "feedback_evolution"
+  | "memory_governance"
+  | "manual";
 
 export interface AgentProposal {
   id: string;
+  runId?: string;
   proposalType: ProposalType;
+  source: ProposalSource;
+  sourceDetail?: string;
   affectedPath: string;
   before?: any;
   after: any;
@@ -1226,11 +1240,9 @@ export interface AgentProposal {
   confidence: number;
   riskLevel: RiskLevel;
   status: ProposalStatus;
-  source: string;
-  sourceRunId?: string;
-  sourceKind?: string;
   createdAt: string;
   resolvedAt?: string;
+  expiresAt?: string;
 }
 
 export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
