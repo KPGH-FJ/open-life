@@ -30,7 +30,7 @@ use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
 };
-use commands::agent::{get_agent_run, list_agent_runs, list_agent_runs_for_session};
+use commands::agent::{delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session};
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -348,6 +348,7 @@ pub struct AppState {
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
+    pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
 }
@@ -685,7 +686,7 @@ async fn preprocess_chat_input(
         HashMap<String, String>,
         Vec<ChatMessage>,
         Option<String>,
-        usize,
+        openlife_core::agent::types::ContextSummary,
     ),
     String,
 > {
@@ -749,6 +750,7 @@ async fn preprocess_chat_input(
     };
 
     let mut embed_err = None;
+    let mut memory_sources: Vec<String> = Vec::new();
     let mut memory_hit_count = 0usize;
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
@@ -783,6 +785,7 @@ async fn preprocess_chat_input(
 
             let results = merge_memory_hits(vector_hits, text_hits, 3);
             memory_hit_count = results.len();
+            memory_sources = results.iter().map(|(chunk, _)| chunk.source.clone()).collect();
             if results.is_empty() {
                 String::new()
             } else {
@@ -830,6 +833,20 @@ async fn preprocess_chat_input(
         }
     }
 
+    let context_summary = openlife_core::agent::types::ContextSummary {
+        life_model_empty: life_model.identity.name.is_empty(),
+        included_life_model_sections: vec!["identity".to_string(), "goals".to_string(), "capabilities".to_string(), "state".to_string()],
+        memory_hit_count: memory_hit_count as i64,
+        memory_sources,
+        used_tools_prompt: !tools_prompt.is_empty(),
+        redaction_applied: !privacy_map.is_empty(),
+        redaction_level: if privacy_map.is_empty() {
+            openlife_core::agent::types::RedactionLevel::None
+        } else {
+            openlife_core::agent::types::RedactionLevel::Light
+        },
+    };
+
     Ok((
         life_model,
         tools_prompt,
@@ -837,7 +854,7 @@ async fn preprocess_chat_input(
         privacy_map,
         desensitized_messages,
         embed_err,
-        memory_hit_count,
+        context_summary,
     ))
 }
 fn build_hermes_prompt(trace: &HermesTrace) -> String {
@@ -1068,7 +1085,7 @@ async fn send_message(
         privacy_map,
         desensitized_messages,
         embed_err,
-        _memory_hit_count,
+        _context_summary,
     ) = preprocess_chat_input(&session_id, &messages, &state).await?;
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {
@@ -1399,13 +1416,18 @@ async fn start_stream_message(
                     prefer_local: false,
                     local_model: "".to_string(),
                     reason: "layer_1_direct_response".to_string(),
+                    privacy_level: openlife_core::agent::types::RedactionLevel::None,
+                    latency_ms: None,
+                    retry_count: 0,
                 };
                 let context_summary = openlife_core::agent::ContextSummary {
                     life_model_empty: true,
                     included_life_model_sections: vec![],
                     memory_hit_count: 0,
+                    memory_sources: vec![],
                     used_tools_prompt: false,
                     redaction_applied: false,
+                    redaction_level: openlife_core::agent::types::RedactionLevel::None,
                 };
                 let preview = preview_text(&reply, 200);
                 agent_run.complete(&preview, model_route, context_summary);
@@ -1435,7 +1457,7 @@ async fn start_stream_message(
         privacy_map,
         desensitized_messages,
         _embed_err,
-        memory_hit_count,
+        context_summary,
     ) = match preprocess_chat_input(&session_id, &messages, &state).await {
         Ok(result) => result,
         Err(message) => {
@@ -1908,9 +1930,15 @@ async fn start_stream_message(
     let context_summary = openlife_core::agent::ContextSummary {
         life_model_empty: life_model.is_effectively_empty(),
         included_life_model_sections: included_life_model_sections(&life_model),
-        memory_hit_count: memory_hit_count as i64,
+        memory_hit_count: context_summary.memory_hit_count,
+        memory_sources: context_summary.memory_sources,
         used_tools_prompt: !tools_prompt.is_empty(),
         redaction_applied: !privacy_map.is_empty(),
+        redaction_level: if privacy_map.is_empty() {
+            openlife_core::agent::types::RedactionLevel::None
+        } else {
+            openlife_core::agent::types::RedactionLevel::Light
+        },
     };
     let preview = preview_text(&reply, 200);
     agent_run.complete(&preview, model_route, context_summary);
@@ -2007,6 +2035,13 @@ pub fn run() {
             openlife_core::agent::ProposalStore::new_in_memory()
                 .expect("致命错误：无法初始化 proposal store，系统资源耗尽")
         });
+    let patches_db_path = data_dir.join("patches.db");
+    let patch_store = openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
+        .unwrap_or_else(|e| {
+            startup_warnings.push(format!("PatchStore 初始化失败: {}", e));
+            openlife_core::life_model::patch_store::PatchStore::new_in_memory()
+                .expect("致命错误：无法初始化 patch store，系统资源耗尽")
+        });
 
     let model_dir = data_dir.join("models");
     let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
@@ -2062,6 +2097,7 @@ pub fn run() {
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
+        patch_store: Some(Arc::new(Mutex::new(patch_store))),
         hot_cache,
         startup_warnings,
     });
@@ -2160,6 +2196,7 @@ pub fn run() {
             get_agent_run,
             list_agent_runs,
             list_agent_runs_for_session,
+            delete_agent_run,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

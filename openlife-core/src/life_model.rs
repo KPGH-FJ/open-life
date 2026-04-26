@@ -742,6 +742,443 @@ impl LifeModel {
             })
             .collect()
     }
+
+    /// Apply a single patch to this LifeModel.
+    pub fn apply_patch(&mut self, patch: &crate::life_model::patch::LifeModelPatch) -> Result<crate::life_model::patch::PatchApplyResult, crate::life_model::patch::PatchError> {
+        use crate::life_model::patch::{PatchApplyResult, PatchError, PatchOp};
+        
+        // 1. Serialize current model to Value
+        let mut value = serde_json::to_value(&self)
+            .map_err(|e| PatchError::Serialization(e.to_string()))?;
+        
+        // 2. Validate path exists
+        let target = value.pointer(&patch.path_pointer).ok_or_else(|| {
+            PatchError::InvalidPath(patch.path_pointer.clone())
+        })?;
+        
+        // 3. Validate before value matches (optimistic locking)
+        if let Some(ref expected_before) = patch.before {
+            if target != expected_before {
+                return Err(PatchError::BeforeMismatch {
+                    expected: expected_before.clone(),
+                    actual: target.clone(),
+                });
+            }
+        }
+        
+        // 4. Apply operation
+        let result = match patch.operation {
+            PatchOp::Replace => {
+                // Replace value at path
+                if let Some(parent_path) = get_parent_pointer(&patch.path_pointer) {
+                    let key = get_last_segment(&patch.path_pointer)
+                        .ok_or_else(|| PatchError::InvalidPath(patch.path_pointer.clone()))?;
+                    
+                    if let Some(parent) = value.pointer_mut(&parent_path) {
+                        if let Some(obj) = parent.as_object_mut() {
+                            obj.insert(key.to_string(), patch.after.clone());
+                        } else if let Some(arr) = parent.as_array_mut() {
+                            if let Ok(index) = key.parse::<usize>() {
+                                if index < arr.len() {
+                                    arr[index] = patch.after.clone();
+                                } else {
+                                    return Err(PatchError::IndexOutOfBounds {
+                                        index,
+                                        len: arr.len(),
+                                    });
+                                }
+                            } else {
+                                return Err(PatchError::InvalidOperation {
+                                    op: patch.operation,
+                                    reason: format!("Invalid array index: {}", key),
+                                });
+                            }
+                        } else {
+                            return Err(PatchError::InvalidOperation {
+                                op: patch.operation,
+                                reason: "Parent is neither object nor array".to_string(),
+                            });
+                        }
+                    }
+                } else {
+                    // Root replacement
+                    value = patch.after.clone();
+                }
+                Ok(())
+            }
+            PatchOp::Merge => {
+                // Shallow merge for objects
+                if let Some(target_mut) = value.pointer_mut(&patch.path_pointer) {
+                    if let Some(obj) = target_mut.as_object_mut() {
+                        if let Some(after_obj) = patch.after.as_object() {
+                            for (k, v) in after_obj {
+                                obj.insert(k.clone(), v.clone());
+                            }
+                            Ok(())
+                        } else {
+                            Err(PatchError::InvalidOperation {
+                                op: patch.operation,
+                                reason: "Merge requires object value".to_string(),
+                            })
+                        }
+                    } else {
+                        Err(PatchError::InvalidOperation {
+                            op: patch.operation,
+                            reason: "Merge requires object target".to_string(),
+                        })
+                    }
+                } else {
+                    Err(PatchError::InvalidPath(patch.path_pointer.clone()))
+                }
+            }
+            PatchOp::Append => {
+                // Append to array
+                if let Some(parent_path) = get_parent_pointer(&patch.path_pointer) {
+                    let parent = value.pointer_mut(&parent_path).ok_or_else(|| {
+                        PatchError::InvalidPath(parent_path)
+                    })?;
+                    
+                    if let Some(arr) = parent.as_array_mut() {
+                        arr.push(patch.after.clone());
+                        Ok(())
+                    } else {
+                        Err(PatchError::InvalidOperation {
+                            op: patch.operation,
+                            reason: "Append requires array parent".to_string(),
+                        })
+                    }
+                } else {
+                    Err(PatchError::InvalidOperation {
+                        op: patch.operation,
+                        reason: "Append requires array path".to_string(),
+                    })
+                }
+            }
+            PatchOp::Insert => {
+                // Insert at specific array index
+                if let Some(parent_path) = get_parent_pointer(&patch.path_pointer) {
+                    let key = get_last_segment(&patch.path_pointer)
+                        .ok_or_else(|| PatchError::InvalidPath(patch.path_pointer.clone()))?;
+                    
+                    let parent = value.pointer_mut(&parent_path).ok_or_else(|| {
+                        PatchError::InvalidPath(parent_path)
+                    })?;
+                    
+                    if let Some(arr) = parent.as_array_mut() {
+                        if let Ok(index) = key.parse::<usize>() {
+                            if index <= arr.len() {
+                                arr.insert(index, patch.after.clone());
+                                Ok(())
+                            } else {
+                                Err(PatchError::IndexOutOfBounds {
+                                    index,
+                                    len: arr.len(),
+                                })
+                            }
+                        } else {
+                            Err(PatchError::InvalidOperation {
+                                op: patch.operation,
+                                reason: format!("Invalid array index: {}", key),
+                            })
+                        }
+                    } else {
+                        Err(PatchError::InvalidOperation {
+                            op: patch.operation,
+                            reason: "Insert requires array parent".to_string(),
+                        })
+                    }
+                } else {
+                    Err(PatchError::InvalidOperation {
+                        op: patch.operation,
+                        reason: "Insert requires array path".to_string(),
+                    })
+                }
+            }
+            PatchOp::Delete => {
+                // Delete element
+                if let Some(parent_path) = get_parent_pointer(&patch.path_pointer) {
+                    let key = get_last_segment(&patch.path_pointer)
+                        .ok_or_else(|| PatchError::InvalidPath(patch.path_pointer.clone()))?;
+                    
+                    let parent = value.pointer_mut(&parent_path).ok_or_else(|| {
+                        PatchError::InvalidPath(parent_path)
+                    })?;
+                    
+                    if let Some(obj) = parent.as_object_mut() {
+                        obj.remove(&key);
+                        Ok(())
+                    } else if let Some(arr) = parent.as_array_mut() {
+                        if let Ok(index) = key.parse::<usize>() {
+                            if index < arr.len() {
+                                arr.remove(index);
+                                Ok(())
+                            } else {
+                                Err(PatchError::IndexOutOfBounds {
+                                    index,
+                                    len: arr.len(),
+                                })
+                            }
+                        } else {
+                            Err(PatchError::InvalidOperation {
+                                op: patch.operation,
+                                reason: format!("Invalid array index: {}", key),
+                            })
+                        }
+                    } else {
+                        Err(PatchError::InvalidOperation {
+                            op: patch.operation,
+                            reason: "Delete requires object or array parent".to_string(),
+                        })
+                    }
+                } else {
+                    Err(PatchError::InvalidOperation {
+                        op: patch.operation,
+                        reason: "Cannot delete root".to_string(),
+                    })
+                }
+            }
+        };
+        
+        if let Err(e) = result {
+            return Ok(PatchApplyResult {
+                patch_id: patch.id.clone(),
+                success: false,
+                path: patch.path_pointer.clone(),
+                operation: patch.operation.to_string(),
+                error: Some(e.to_string()),
+            });
+        }
+        
+        // 5. Deserialize back to LifeModel
+        let new_model: LifeModel = serde_json::from_value(value)
+            .map_err(|e| PatchError::Serialization(e.to_string()))?;
+        
+        // 6. Validate
+        let report = new_model.validate();
+        if !report.errors.is_empty() {
+            return Ok(PatchApplyResult {
+                patch_id: patch.id.clone(),
+                success: false,
+                path: patch.path_pointer.clone(),
+                operation: patch.operation.to_string(),
+                error: Some(format!("Validation failed: {}", report.errors.join(", "))),
+            });
+        }
+        
+        // 7. Apply changes
+        *self = new_model;
+        
+        Ok(PatchApplyResult {
+            patch_id: patch.id.clone(),
+            success: true,
+            path: patch.path_pointer.clone(),
+            operation: patch.operation.to_string(),
+            error: None,
+        })
+    }
+
+    /// Apply multiple patches with dependency analysis and transaction support.
+    pub fn apply_patches(
+        &mut self,
+        patches: &[crate::life_model::patch::LifeModelPatch],
+        policy: &crate::life_model::patch::PatchBatchPolicy,
+    ) -> Result<crate::life_model::patch::BatchApplyResult, crate::life_model::patch::PatchError> {
+        use crate::life_model::patch::*;
+        use crate::agent::types::RiskLevel;
+        
+        // Create checkpoint for rollback
+        let checkpoint = self.clone();
+        let mut applied = Vec::new();
+        let mut skipped = Vec::new();
+        
+        // Detect conflicts
+        let conflicts = if policy.detect_dependencies {
+            detect_conflicts(patches)
+        } else {
+            vec![]
+        };
+        
+        // Auto-resolve low-risk conflicts
+        let (accepted_ids, rejected_ids, pending_review) = if policy.auto_resolve_low_risk {
+            auto_resolve_conflicts(patches, &conflicts)
+        } else {
+            (
+                patches.iter().map(|p| p.id.clone()).collect(),
+                vec![],
+                conflicts.clone(),
+            )
+        };
+        
+        // Filter patches
+        let patches_to_apply: Vec<_> = patches
+            .iter()
+            .filter(|p| accepted_ids.contains(&p.id) && !rejected_ids.contains(&p.id))
+            .collect();
+        
+        // Apply patches in order
+        let mut any_critical_failure = false;
+        for patch in &patches_to_apply {
+            match self.apply_patch(patch) {
+                Ok(result) => {
+                    if result.success {
+                        applied.push(result);
+                    } else {
+                        // Check if this is a critical failure
+                        if patch.risk_level == RiskLevel::Critical {
+                            any_critical_failure = true;
+                        }
+                        
+                        match policy.failure_mode {
+                            FailureMode::Atomic => {
+                                // Rollback on any failure
+                                *self = checkpoint;
+                                return Ok(BatchApplyResult {
+                                    applied,
+                                    skipped,
+                                    pending_review,
+                                    rolled_back: true,
+                                    error: result.error,
+                                });
+                            }
+                            FailureMode::Partial => {
+                                // Skip this patch, continue
+                                skipped.push(patch.id.clone());
+                            }
+                            FailureMode::Adaptive => {
+                                if patch.risk_level == RiskLevel::Critical {
+                                    // Rollback on critical failure
+                                    *self = checkpoint;
+                                    return Ok(BatchApplyResult {
+                                        applied,
+                                        skipped,
+                                        pending_review,
+                                        rolled_back: true,
+                                        error: result.error,
+                                    });
+                                } else {
+                                    // Skip non-critical failure
+                                    skipped.push(patch.id.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    if patch.risk_level == RiskLevel::Critical {
+                        any_critical_failure = true;
+                    }
+                    
+                    match policy.failure_mode {
+                        FailureMode::Atomic => {
+                            *self = checkpoint;
+                            return Ok(BatchApplyResult {
+                                applied,
+                                skipped,
+                                pending_review,
+                                rolled_back: true,
+                                error: Some(e.to_string()),
+                            });
+                        }
+                        FailureMode::Partial => {
+                            skipped.push(patch.id.clone());
+                        }
+                        FailureMode::Adaptive => {
+                            if patch.risk_level == RiskLevel::Critical {
+                                *self = checkpoint;
+                                return Ok(BatchApplyResult {
+                                    applied,
+                                    skipped,
+                                    pending_review,
+                                    rolled_back: true,
+                                    error: Some(e.to_string()),
+                                });
+                            } else {
+                                skipped.push(patch.id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Collect rejected IDs
+        for id in rejected_ids {
+            if !skipped.contains(&id) && !applied.iter().any(|r| r.patch_id == id) {
+                skipped.push(id);
+            }
+        }
+        
+        Ok(BatchApplyResult {
+            applied,
+            skipped,
+            pending_review,
+            rolled_back: false,
+            error: None,
+        })
+    }
+
+    /// Validate the model integrity.
+    pub fn validate(&self) -> ValidationReport {
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        
+        // Check required fields
+        if self.identity.name.trim().is_empty() {
+            warnings.push("Identity name is empty".to_string());
+        }
+        
+        // Check value ranges
+        for value in &self.identity.values {
+            if value.weight > 100 {
+                errors.push(format!("Value '{}' weight {} exceeds maximum 100", value.name, value.weight));
+            }
+        }
+        
+        // Check goal priorities
+        for goal in &self.goals.short_term {
+            if goal.priority > 10 {
+                errors.push(format!("Goal '{}' priority {} exceeds maximum 10", goal.name, goal.priority));
+            }
+        }
+        
+        // Check skill proficiency
+        for skill in &self.capabilities.skills {
+            if skill.proficiency > 10 {
+                errors.push(format!("Skill '{}' proficiency {} exceeds maximum 10", skill.name, skill.proficiency));
+            }
+        }
+        
+        // Check energy level
+        if self.state.health_status.energy_level > 10 {
+            errors.push(format!("Energy level {} exceeds maximum 10", self.state.health_status.energy_level));
+        }
+        
+        ValidationReport { errors, warnings }
+    }
+}
+
+/// Report from model validation.
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Helper to get parent JSON Pointer.
+fn get_parent_pointer(pointer: &str) -> Option<String> {
+    let parts: Vec<&str> = pointer.split('/').collect();
+    if parts.len() <= 2 {
+        // Root or single segment, no parent
+        None
+    } else {
+        let parent = parts[..parts.len() - 1].join("/");
+        Some(parent)
+    }
+}
+
+/// Helper to get last segment of JSON Pointer.
+fn get_last_segment(pointer: &str) -> Option<String> {
+    pointer.split('/').last().filter(|s| !s.is_empty()).map(|s| s.to_string())
 }
 
 pub struct LifeModelManager {
@@ -791,6 +1228,9 @@ impl LifeModelManager {
         Ok(())
     }
 }
+
+pub mod patch;
+pub mod patch_store;
 
 #[cfg(test)]
 mod tests {

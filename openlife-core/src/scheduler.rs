@@ -263,6 +263,9 @@ impl InferenceScheduler {
             prefer_local: self.prefer_local,
             local_model: self.local_model.clone(),
             reason,
+            privacy_level: crate::agent::types::RedactionLevel::None,
+            latency_ms: None,
+            retry_count: 0,
         }
     }
 }

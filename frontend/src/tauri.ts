@@ -1118,14 +1118,35 @@ export interface ModelRouteTrace {
   preferLocal: boolean;
   localModel: string;
   reason: string;
+  privacyLevel: string;
+  latencyMs?: number;
+  retryCount: number;
 }
 
 export interface ContextSummary {
   lifeModelEmpty: boolean;
   includedLifeModelSections: string[];
   memoryHitCount: number;
+  memorySources: string[];
   usedToolsPrompt: boolean;
   redactionApplied: boolean;
+  redactionLevel: string;
+}
+
+export interface AgentAction {
+  id: string;
+  actionType: string;
+  input: any;
+  output?: any;
+  status: string;
+  timestamp: string;
+}
+
+export interface AgentObservation {
+  id: string;
+  content: string;
+  source: string;
+  timestamp: string;
 }
 
 export interface AgentRunError {
@@ -1139,13 +1160,17 @@ export interface AgentRun {
   taskId: string;
   sessionId?: string;
   status: "running" | "completed" | "failed" | "cancelled";
-  kind: "conversation" | "builder" | "calibration" | "evolution" | "tool_execution" | "proactive";
+  kind: "conversation" | "builder" | "calibration" | "evolution" | "tool_execution" | "proactive" | "planning" | "review" | "writing" | "memory_governance";
   userInput?: string;
   contextSummary?: ContextSummary;
   modelRoute?: ModelRouteTrace;
   outputPreview?: string;
   error?: AgentRunError;
-  generatedProposals?: string[];
+  generatedProposals: string[];
+  actions: AgentAction[];
+  observations: AgentObservation[];
+  deletedAt?: string;
+  deleteReason?: string;
   startedAt: string;
   finishedAt?: string;
 }
@@ -1163,6 +1188,10 @@ export async function listAgentRunsForSession(
   limit: number = 50
 ): Promise<AgentRun[]> {
   return safeInvoke<AgentRun[]>("list_agent_runs_for_session", { sessionId, limit });
+}
+
+export async function deleteAgentRun(runId: string, reason?: string): Promise<void> {
+  return safeInvoke("delete_agent_run", { runId, reason });
 }
 
 export async function listProposals(
@@ -1208,7 +1237,15 @@ export async function getPendingProposals(limit: number = 50): Promise<AgentProp
   return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
 
-export async function acceptProposal(proposalId: string): Promise<void> {
+export interface PatchApplyResult {
+  patchId: string;
+  success: boolean;
+  path: string;
+  operation: string;
+  error?: string;
+}
+
+export async function acceptProposal(proposalId: string): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
 
@@ -1216,13 +1253,8 @@ export async function rejectProposal(proposalId: string): Promise<void> {
   return safeInvoke("reject_proposal", { proposalId, proposal_id: proposalId });
 }
 
-export async function editProposal(proposalId: string, newAfter: any): Promise<void> {
-  return safeInvoke("edit_proposal", {
-    proposalId,
-    proposal_id: proposalId,
-    newAfter,
-    new_after: newAfter,
-  });
+export async function editProposal(proposalId: string, newAfter: any): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
+  return safeInvoke("edit_proposal", { proposalId, proposal_id: proposalId, newAfter, new_after: newAfter });
 }
 
 export async function postponeProposal(proposalId: string): Promise<void> {

@@ -6,11 +6,16 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskKind {
     Conversation,
+    /// 构建/编辑 LifeModel（用户交互式构建）
     Builder,
     Calibration,
     Evolution,
     ToolExecution,
     Proactive,
+    Planning,
+    Review,
+    Writing,
+    MemoryGovernance,
 }
 
 impl std::fmt::Display for AgentTaskKind {
@@ -22,6 +27,10 @@ impl std::fmt::Display for AgentTaskKind {
             AgentTaskKind::Evolution => write!(f, "evolution"),
             AgentTaskKind::ToolExecution => write!(f, "tool_execution"),
             AgentTaskKind::Proactive => write!(f, "proactive"),
+            AgentTaskKind::Planning => write!(f, "planning"),
+            AgentTaskKind::Review => write!(f, "review"),
+            AgentTaskKind::Writing => write!(f, "writing"),
+            AgentTaskKind::MemoryGovernance => write!(f, "memory_governance"),
         }
     }
 }
@@ -69,6 +78,28 @@ impl std::fmt::Display for AgentRunStatus {
 }
 
 /// Trace of which model was chosen and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionLevel {
+    None,
+    Light,
+    Summary,
+    Strict,
+    LocalOnly,
+}
+
+impl std::fmt::Display for RedactionLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RedactionLevel::None => write!(f, "none"),
+            RedactionLevel::Light => write!(f, "light"),
+            RedactionLevel::Summary => write!(f, "summary"),
+            RedactionLevel::Strict => write!(f, "strict"),
+            RedactionLevel::LocalOnly => write!(f, "local_only"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRouteTrace {
@@ -78,6 +109,9 @@ pub struct ModelRouteTrace {
     pub prefer_local: bool,
     pub local_model: String,
     pub reason: String,
+    pub privacy_level: RedactionLevel,
+    pub latency_ms: Option<u64>,
+    pub retry_count: u32,
 }
 
 /// Summary of what context was included in the run.
@@ -87,8 +121,30 @@ pub struct ContextSummary {
     pub life_model_empty: bool,
     pub included_life_model_sections: Vec<String>,
     pub memory_hit_count: i64,
+    pub memory_sources: Vec<String>,
     pub used_tools_prompt: bool,
     pub redaction_applied: bool,
+    pub redaction_level: RedactionLevel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAction {
+    pub id: String,
+    pub action_type: String,
+    pub input: serde_json::Value,
+    pub output: Option<serde_json::Value>,
+    pub status: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentObservation {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Error information when a run fails.
@@ -115,6 +171,10 @@ pub struct AgentRun {
     pub output_preview: Option<String>,
     pub error: Option<AgentRunError>,
     pub generated_proposals: Vec<String>,
+    pub actions: Vec<AgentAction>,
+    pub observations: Vec<AgentObservation>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub delete_reason: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
 }
@@ -134,6 +194,10 @@ impl AgentRun {
             output_preview: None,
             error: None,
             generated_proposals: Vec::new(),
+            actions: Vec::new(),
+            observations: Vec::new(),
+            deleted_at: None,
+            delete_reason: None,
             started_at: now,
             finished_at: None,
         }
@@ -153,6 +217,10 @@ impl AgentRun {
             output_preview: None,
             error: None,
             generated_proposals: Vec::new(),
+            actions: Vec::new(),
+            observations: Vec::new(),
+            deleted_at: None,
+            delete_reason: None,
             started_at: now,
             finished_at: None,
         }
@@ -172,6 +240,10 @@ impl AgentRun {
             output_preview: None,
             error: None,
             generated_proposals: Vec::new(),
+            actions: Vec::new(),
+            observations: Vec::new(),
+            deleted_at: None,
+            delete_reason: None,
             started_at: now,
             finished_at: None,
         }
@@ -248,7 +320,7 @@ impl std::fmt::Display for ProposalType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RiskLevel {
     Low,

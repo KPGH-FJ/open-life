@@ -196,6 +196,28 @@ impl VersionManager {
         })
     }
 
+    /// Create a snapshot specifically for patch application (before/after).
+    pub fn snapshot_for_patch(
+        &self,
+        model: &LifeModel,
+        patch_id: &str,
+        phase: &str, // "before" or "after"
+    ) -> Result<LifeModelVersion> {
+        let tag = format!("patch:{}:{}", patch_id, phase);
+        let note = format!("Snapshot {} patch {}", phase, patch_id);
+        self.snapshot(model, &tag, &note)
+    }
+
+    /// List snapshots associated with a specific patch.
+    pub fn get_patch_snapshots(&self, patch_id: &str) -> Result<Vec<LifeModelVersion>> {
+        let all = self.list_versions()?;
+        let prefix = format!("patch:{}:", patch_id);
+        Ok(all
+            .into_iter()
+            .filter(|v| v.tag.starts_with(&prefix))
+            .collect())
+    }
+
     pub fn has_snapshot_tag_on_date(&self, tag: &str, date: &str) -> Result<bool> {
         let manifest = self.load_manifest().unwrap_or_default();
         Ok(manifest

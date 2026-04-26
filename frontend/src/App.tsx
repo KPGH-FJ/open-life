@@ -25,6 +25,8 @@ import DashboardPage from "./pages/DashboardPage";
 import SettingsPage from "./pages/SettingsPage";
 import CalibrationPage from "./pages/CalibrationPage";
 import ProposalReviewPage from "./pages/ProposalReviewPage";
+import RunsPage from "./pages/RunsPage";
+import AgentRunDetail from "./pages/AgentRunDetail";
 import OnboardingWizard from "./components/OnboardingWizard";
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
@@ -220,7 +222,8 @@ function App() {
             <Route path="/mcp" element={<McpPage />} />
             <Route path="/builder" element={<BuilderPage />} />
             <Route path="/calibration" element={<CalibrationPage />} />
-            <Route path="/runs" element={<DashboardPage />} />
+            <Route path="/runs" element={<RunsPage />} />
+            <Route path="/runs/:runId" element={<AgentRunDetail />} />
             <Route path="/review" element={<ProposalReviewPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>

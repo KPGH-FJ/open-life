@@ -51,6 +51,10 @@ impl AgentRunStore {
                 output_preview TEXT,
                 error_json TEXT,
                 generated_proposals_json TEXT DEFAULT '[]',
+                actions_json TEXT DEFAULT '[]',
+                observations_json TEXT DEFAULT '[]',
+                deleted_at TEXT,
+                delete_reason TEXT,
                 started_at TEXT NOT NULL,
                 finished_at TEXT
             )",
@@ -61,12 +65,34 @@ impl AgentRunStore {
             "ALTER TABLE agent_runs ADD COLUMN generated_proposals_json TEXT DEFAULT '[]'",
             [],
         );
+        // Migration: add soft delete columns
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN deleted_at TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN delete_reason TEXT",
+            [],
+        );
+        // Migration: add actions and observations JSON columns
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN actions_json TEXT DEFAULT '[]'",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN observations_json TEXT DEFAULT '[]'",
+            [],
+        );
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC)",
             [],
         )?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_started ON agent_runs(started_at DESC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_runs_deleted_at ON agent_runs(deleted_at)",
             [],
         )?;
         Ok(())
@@ -81,8 +107,9 @@ impl AgentRunStore {
             "INSERT INTO agent_runs (
                 id, task_id, session_id, status, kind, user_input,
                 context_summary_json, model_route_json, output_preview, error_json,
-                generated_proposals_json, started_at, finished_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                generated_proposals_json, actions_json, observations_json,
+                deleted_at, delete_reason, started_at, finished_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 run.id,
                 run.task_id,
@@ -101,6 +128,10 @@ impl AgentRunStore {
                     .as_ref()
                     .map(|e| serde_json::to_string(e).unwrap_or_default()),
                 serde_json::to_string(&run.generated_proposals).unwrap_or_default(),
+                serde_json::to_string(&run.actions).unwrap_or_default(),
+                serde_json::to_string(&run.observations).unwrap_or_default(),
+                run.deleted_at.map(|t| t.to_rfc3339()),
+                run.delete_reason,
                 run.started_at.to_rfc3339(),
                 run.finished_at.map(|t| t.to_rfc3339()),
             ],
@@ -121,7 +152,11 @@ impl AgentRunStore {
                 output_preview = ?5,
                 error_json = ?6,
                 generated_proposals_json = ?7,
-                finished_at = ?8
+                actions_json = ?8,
+                observations_json = ?9,
+                deleted_at = ?10,
+                delete_reason = ?11,
+                finished_at = ?12
             WHERE id = ?1",
             params![
                 run.id,
@@ -137,6 +172,10 @@ impl AgentRunStore {
                     .as_ref()
                     .map(|e| serde_json::to_string(e).unwrap_or_default()),
                 serde_json::to_string(&run.generated_proposals).unwrap_or_default(),
+                serde_json::to_string(&run.actions).unwrap_or_default(),
+                serde_json::to_string(&run.observations).unwrap_or_default(),
+                run.deleted_at.map(|t| t.to_rfc3339()),
+                run.delete_reason,
                 run.finished_at.map(|t| t.to_rfc3339()),
             ],
         )?;
@@ -151,7 +190,8 @@ impl AgentRunStore {
         let mut stmt = conn.prepare(
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
-                    generated_proposals_json, started_at, finished_at
+                    generated_proposals_json, actions_json, observations_json,
+                    deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs WHERE id = ?1",
         )?;
         let row = stmt.query_row([run_id], |row| {
@@ -160,9 +200,13 @@ impl AgentRunStore {
             let context_summary_json: Option<String> = row.get(6)?;
             let model_route_json: Option<String> = row.get(7)?;
             let error_json: Option<String> = row.get(9)?;
-            let generated_proposals_json: String = row.get(10)?;
-            let started_at_str: String = row.get(11)?;
-            let finished_at_str: Option<String> = row.get(12)?;
+            let generated_proposals_json: Option<String> = row.get(10)?;
+            let actions_json: Option<String> = row.get(11)?;
+            let observations_json: Option<String> = row.get(12)?;
+            let deleted_at_str: Option<String> = row.get(13)?;
+            let delete_reason: Option<String> = row.get(14)?;
+            let started_at_str: String = row.get(15)?;
+            let finished_at_str: Option<String> = row.get(16)?;
 
             let status = match status_str.as_str() {
                 "running" => AgentRunStatus::Running,
@@ -179,19 +223,37 @@ impl AgentRunStore {
                 "evolution" => AgentTaskKind::Evolution,
                 "tool_execution" => AgentTaskKind::ToolExecution,
                 "proactive" => AgentTaskKind::Proactive,
+                "planning" => AgentTaskKind::Planning,
+                "review" => AgentTaskKind::Review,
+                "writing" => AgentTaskKind::Writing,
+                "memory_governance" => AgentTaskKind::MemoryGovernance,
                 _ => AgentTaskKind::Conversation,
             };
 
             let context_summary = context_summary_json.and_then(|s| serde_json::from_str(&s).ok());
             let model_route = model_route_json.and_then(|s| serde_json::from_str(&s).ok());
             let error = error_json.and_then(|s| serde_json::from_str(&s).ok());
-            let generated_proposals: Vec<String> =
-                serde_json::from_str(&generated_proposals_json).unwrap_or_default();
+            let generated_proposals: Vec<String> = generated_proposals_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let actions: Vec<crate::agent::types::AgentAction> = actions_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let observations: Vec<crate::agent::types::AgentObservation> = observations_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
+            let deleted_at = deleted_at_str
+                .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                .flatten()
+                .map(|dt| dt.with_timezone(&chrono::Utc));
 
             let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
                 .map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        11,
+                        15,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )
@@ -214,6 +276,10 @@ impl AgentRunStore {
                 output_preview: row.get(8)?,
                 error,
                 generated_proposals,
+                actions,
+                observations,
+                deleted_at,
+                delete_reason,
                 started_at,
                 finished_at,
             })
@@ -233,8 +299,10 @@ impl AgentRunStore {
         let mut stmt = conn.prepare(
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
-                    generated_proposals_json, started_at, finished_at
+                    generated_proposals_json, actions_json, observations_json,
+                    deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
+             WHERE deleted_at IS NULL
              ORDER BY started_at DESC
              LIMIT ?1 OFFSET ?2",
         )?;
@@ -250,9 +318,10 @@ impl AgentRunStore {
         let mut stmt = conn.prepare(
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
-                    generated_proposals_json, started_at, finished_at
+                    generated_proposals_json, actions_json, observations_json,
+                    deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
-             WHERE session_id = ?1
+             WHERE session_id = ?1 AND deleted_at IS NULL
              ORDER BY started_at DESC
              LIMIT ?2",
         )?;
@@ -266,9 +335,13 @@ impl AgentRunStore {
         let context_summary_json: Option<String> = row.get(6)?;
         let model_route_json: Option<String> = row.get(7)?;
         let error_json: Option<String> = row.get(9)?;
-        let generated_proposals_json: String = row.get(10)?;
-        let started_at_str: String = row.get(11)?;
-        let finished_at_str: Option<String> = row.get(12)?;
+        let generated_proposals_json: Option<String> = row.get(10)?;
+        let actions_json: Option<String> = row.get(11)?;
+        let observations_json: Option<String> = row.get(12)?;
+        let deleted_at_str: Option<String> = row.get(13)?;
+        let delete_reason: Option<String> = row.get(14)?;
+        let started_at_str: String = row.get(15)?;
+        let finished_at_str: Option<String> = row.get(16)?;
 
         let status = match status_str.as_str() {
             "running" => AgentRunStatus::Running,
@@ -285,19 +358,37 @@ impl AgentRunStore {
             "evolution" => AgentTaskKind::Evolution,
             "tool_execution" => AgentTaskKind::ToolExecution,
             "proactive" => AgentTaskKind::Proactive,
+            "planning" => AgentTaskKind::Planning,
+            "review" => AgentTaskKind::Review,
+            "writing" => AgentTaskKind::Writing,
+            "memory_governance" => AgentTaskKind::MemoryGovernance,
             _ => AgentTaskKind::Conversation,
         };
 
         let context_summary = context_summary_json.and_then(|s| serde_json::from_str(&s).ok());
         let model_route = model_route_json.and_then(|s| serde_json::from_str(&s).ok());
         let error = error_json.and_then(|s| serde_json::from_str(&s).ok());
-        let generated_proposals: Vec<String> =
-            serde_json::from_str(&generated_proposals_json).unwrap_or_default();
+        let generated_proposals: Vec<String> = generated_proposals_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let actions: Vec<crate::agent::types::AgentAction> = actions_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let observations: Vec<crate::agent::types::AgentObservation> = observations_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let deleted_at = deleted_at_str
+            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .flatten()
+            .map(|dt| dt.with_timezone(&chrono::Utc));
 
         let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
             .map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    11,
+                    15,
                     rusqlite::types::Type::Text,
                     Box::new(e),
                 )
@@ -320,6 +411,10 @@ impl AgentRunStore {
             output_preview: row.get(8)?,
             error,
             generated_proposals,
+            actions,
+            observations,
+            deleted_at,
+            delete_reason,
             started_at,
             finished_at,
         })
@@ -342,9 +437,10 @@ impl AgentRunStore {
         let mut stmt = conn.prepare(
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
-                    generated_proposals_json, started_at, finished_at
+                    generated_proposals_json, actions_json, observations_json,
+                    deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
-             WHERE session_id = ?1
+             WHERE session_id = ?1 AND deleted_at IS NULL
              ORDER BY started_at DESC
              LIMIT 1",
         )?;
@@ -372,6 +468,90 @@ impl AgentRunStore {
         let updated = serde_json::to_string(&proposals).unwrap_or_default();
         conn.execute(
             "UPDATE agent_runs SET generated_proposals_json = ?2 WHERE id = ?1",
+            rusqlite::params![run_id, updated],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_run(&self, run_id: &str, reason: Option<&str>) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let deleted_at = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE agent_runs SET deleted_at = ?2, delete_reason = ?3 WHERE id = ?1",
+            rusqlite::params![run_id, deleted_at, reason],
+        )?;
+        Ok(())
+    }
+
+    pub fn restore_run(&self, run_id: &str) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.execute(
+            "UPDATE agent_runs SET deleted_at = NULL, delete_reason = NULL WHERE id = ?1",
+            [run_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn cleanup_old_deleted_runs(&self, days: i64) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+        let rows_affected = conn.execute(
+            "DELETE FROM agent_runs WHERE deleted_at IS NOT NULL AND deleted_at < ?1",
+            [cutoff],
+        )?;
+        Ok(rows_affected)
+    }
+
+    pub fn add_action(&self, run_id: &str, action: &crate::agent::types::AgentAction) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let current: String = conn.query_row(
+            "SELECT actions_json FROM agent_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let mut actions: Vec<crate::agent::types::AgentAction> =
+            serde_json::from_str(&current).unwrap_or_default();
+        actions.push(action.clone());
+        let updated = serde_json::to_string(&actions).unwrap_or_default();
+        conn.execute(
+            "UPDATE agent_runs SET actions_json = ?2 WHERE id = ?1",
+            rusqlite::params![run_id, updated],
+        )?;
+        Ok(())
+    }
+
+    pub fn add_observation(
+        &self,
+        run_id: &str,
+        observation: &crate::agent::types::AgentObservation,
+    ) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let current: String = conn.query_row(
+            "SELECT observations_json FROM agent_runs WHERE id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        let mut observations: Vec<crate::agent::types::AgentObservation> =
+            serde_json::from_str(&current).unwrap_or_default();
+        observations.push(observation.clone());
+        let updated = serde_json::to_string(&observations).unwrap_or_default();
+        conn.execute(
+            "UPDATE agent_runs SET observations_json = ?2 WHERE id = ?1",
             rusqlite::params![run_id, updated],
         )?;
         Ok(())
@@ -416,13 +596,18 @@ mod tests {
             prefer_local: false,
             local_model: "llama3.2".to_string(),
             reason: "no_ollama".to_string(),
+            privacy_level: crate::agent::types::RedactionLevel::None,
+            latency_ms: None,
+            retry_count: 0,
         };
         let context_summary = ContextSummary {
             life_model_empty: true,
             included_life_model_sections: vec![],
             memory_hit_count: 0,
+            memory_sources: vec![],
             used_tools_prompt: false,
             redaction_applied: false,
+            redaction_level: crate::agent::types::RedactionLevel::None,
         };
         run.complete("Hello! How can I help?", model_route, context_summary);
         store.update_run(&run).unwrap();

@@ -45,3 +45,17 @@ pub async fn list_agent_runs_for_session(
         Ok(vec![])
     }
 }
+
+#[tauri::command]
+pub async fn delete_agent_run(
+    run_id: String,
+    reason: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        store.delete_run(&run_id, reason.as_deref()).map_err(|e| e.to_string())
+    } else {
+        Ok(())
+    }
+}

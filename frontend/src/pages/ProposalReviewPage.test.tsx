@@ -28,6 +28,17 @@ describe("ProposalReviewPage", () => {
           },
         ] as any);
       }
+      if (cmd === "accept_proposal") {
+        return Promise.resolve({
+          success: true,
+          patchResult: {
+            patchId: "patch-1",
+            success: true,
+            path: "/identity/name",
+            operation: "replace",
+          },
+        } as any);
+      }
       return mockInvoke(cmd, args);
     });
   });

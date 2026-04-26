@@ -64,16 +64,64 @@ async fn apply_proposal_to_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     after: Value,
-) -> Result<(), String> {
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
     match proposal.proposal_type {
         ProposalType::LifeModelUpdate | ProposalType::GoalUpdate => {
-            let model = {
+            let mut model = {
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
             };
-            let updated = apply_life_model_value(&model, &proposal.affected_path, after)?;
-            persist_life_model(state, updated, true).await?;
-            Ok(())
+            
+            // 1. Create Before Snapshot
+            let _before_snapshot = {
+                let vm = state.version_manager.lock().await;
+                vm.snapshot_for_patch(&model, &proposal.id, "before")
+                    .map_err(|e| e.to_string())?
+            };
+            
+            // 2. Generate Patch from Proposal
+            let path_pointer = openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
+            let path_display = openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+            
+            let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
+                &proposal.id,
+                &path_pointer,
+                &path_display,
+                openlife_core::life_model::patch::PatchOp::Replace,
+                proposal.before.clone(),
+                after.clone(),
+                &proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.clone(),
+                openlife_core::life_model::patch::PatchSource::BuilderReview,
+            );
+            
+            // 3. Apply Patch using new engine
+            let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
+            
+            if !result.success {
+                return Ok(result);
+            }
+            
+            // 4. Persist updated model
+            persist_life_model(state, model.clone(), true).await?;
+            
+            // 5. Create After Snapshot
+            let _after_snapshot = {
+                let vm = state.version_manager.lock().await;
+                vm.snapshot_for_patch(&model, &proposal.id, "after")
+                    .map_err(|e| e.to_string())?
+            };
+            
+            // 6. Save Patch to PatchStore
+            if let Some(ref patch_store_arc) = state.patch_store {
+                let patch_store = patch_store_arc.lock().await;
+                let mut patch_to_save = patch.clone();
+                patch_to_save.mark_applied();
+                let _ = patch_store.create_patch(&patch_to_save);
+            }
+            
+            Ok(result)
         }
         ProposalType::MemoryUpdate => {
             Err("Memory Proposal 尚未接入应用器；当前只支持 LifeModel/Goal 更新。".to_string())
@@ -128,13 +176,20 @@ pub(crate) async fn get_pending_proposals_with_state(
 pub(crate) async fn accept_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
-    apply_proposal_to_state(state, &proposal, proposal.after.clone()).await?;
+    let result = apply_proposal_to_state(state, &proposal, proposal.after.clone()).await?;
+    if !result.success {
+        return Err(format!("Patch 应用失败: {}", result.error.unwrap_or_default()));
+    }
     proposal.accept();
-    update_proposal_with_state(state, &proposal).await
+    update_proposal_with_state(state, &proposal).await?;
+    Ok(serde_json::json!({
+        "success": true,
+        "patch_result": result,
+    }))
 }
 
 pub(crate) async fn reject_proposal_with_state(
@@ -151,13 +206,20 @@ pub(crate) async fn edit_proposal_with_state(
     proposal_id: String,
     new_after: Value,
     state: &Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     check_safe_mode(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
-    apply_proposal_to_state(state, &proposal, new_after.clone()).await?;
+    let result = apply_proposal_to_state(state, &proposal, new_after.clone()).await?;
+    if !result.success {
+        return Err(format!("Patch 应用失败: {}", result.error.unwrap_or_default()));
+    }
     proposal.edit(new_after);
-    update_proposal_with_state(state, &proposal).await
+    update_proposal_with_state(state, &proposal).await?;
+    Ok(serde_json::json!({
+        "success": true,
+        "patch_result": result,
+    }))
 }
 
 pub(crate) async fn postpone_proposal_with_state(
@@ -244,11 +306,10 @@ pub async fn batch_accept_low_risk_proposals(
 
     let mut accepted_count = 0i64;
     for proposal in proposals {
-        if let Err(e) = accept_proposal_with_state(proposal.id.clone(), state.inner()).await {
-            eprintln!("Batch accept failed for proposal {}: {}", proposal.id, e);
-            continue;
+        match accept_proposal_with_state(proposal.id.clone(), state.inner()).await {
+            Ok(_) => accepted_count += 1,
+            Err(e) => eprintln!("Batch accept failed for proposal {}: {}", proposal.id, e),
         }
-        accepted_count += 1;
     }
 
     Ok(accepted_count)
@@ -258,7 +319,7 @@ pub async fn batch_accept_low_risk_proposals(
 pub async fn accept_proposal(
     proposal_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     accept_proposal_with_state(proposal_id, state.inner()).await
 }
 
@@ -275,7 +336,7 @@ pub async fn edit_proposal(
     proposal_id: String,
     new_after: Value,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     edit_proposal_with_state(proposal_id, new_after, state.inner()).await
 }
 
