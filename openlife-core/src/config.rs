@@ -90,6 +90,10 @@ pub struct AppConfig {
     pub local_model: String,
     #[serde(default)]
     pub chat_proposal: ChatProposalConfig,
+    #[serde(default)]
+    pub experimental_context_assembler: bool,
+    #[serde(default)]
+    pub experimental_model_router: bool,
 }
 
 impl Default for AppConfig {
@@ -99,6 +103,8 @@ impl Default for AppConfig {
             prefer_local_model: true,
             local_model: default_local_model(),
             chat_proposal: ChatProposalConfig::default(),
+            experimental_context_assembler: false,
+            experimental_model_router: false,
         }
     }
 }
@@ -240,6 +246,8 @@ mod tests {
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
             chat_proposal: ChatProposalConfig::default(),
+            experimental_context_assembler: false,
+            experimental_model_router: false,
         };
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();

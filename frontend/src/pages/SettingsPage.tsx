@@ -1240,6 +1240,48 @@ export default function SettingsPage() {
           </div>
         </section>
 
+        {/* Experimental Features */}
+        <section className="space-y-4 border-t pt-4">
+          <h3 className="text-sm font-medium text-gray-700">实验性功能</h3>
+          <div className="grid gap-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={config.experimental_context_assembler ?? false}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    experimental_context_assembler: e.target.checked,
+                  }))
+                }
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">启用 ContextAssembler V2（灰度测试）</span>
+            </label>
+
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={config.experimental_model_router ?? false}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    experimental_model_router: e.target.checked,
+                  }))
+                }
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">启用 ModelRouter（灰度测试）</span>
+            </label>
+
+            <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
+              <p>⚠️ 实验性功能可能导致不稳定行为。</p>
+              <p>开启后会同时使用新旧实现，用于对比测试。</p>
+              <p>如遇到问题，请关闭后反馈。</p>
+            </div>
+          </div>
+        </section>
+
         {/* Beta readiness */}
         <section className="space-y-4 border-t pt-4">
           <h3 className="text-sm font-medium text-gray-700">Beta 发布准备检查</h3>

@@ -14,11 +14,11 @@ pub trait ContextAssembler: Send + Sync {
 /// A single memory hit from vector or text search.
 #[derive(Debug, Clone)]
 pub struct MemoryHit {
-    pub id: String,
+    pub id: i64,
     pub content: String,
     pub source: String,
     pub score: f32,
-    pub tier: i32,
+    pub tier: i64,
 }
 
 /// Input to context assembly.
@@ -345,14 +345,14 @@ mod tests {
         input.memory_context = Some("最近讨论了三体问题".to_string());
         input.memory_hits = vec![
             MemoryHit {
-                id: "m1".to_string(),
+                id: 1,
                 content: "三体问题讨论".to_string(),
                 source: "chat".to_string(),
                 score: 0.92,
                 tier: 1,
             },
             MemoryHit {
-                id: "m2".to_string(),
+                id: 2,
                 content: "时间管理技巧".to_string(),
                 source: "note".to_string(),
                 score: 0.85,
@@ -379,7 +379,7 @@ mod tests {
         let mut input = create_test_input();
         input.memory_context = Some("关键记忆".to_string());
         input.memory_hits = vec![MemoryHit {
-            id: "m1".to_string(),
+            id: 1,
             content: "测试".to_string(),
             source: "test".to_string(),
             score: 0.9,
