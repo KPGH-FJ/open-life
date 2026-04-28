@@ -180,6 +180,9 @@ async fn builder_step_with_state(
     user_reply: String,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
+    // Create AgentRun for Builder tracking
+    let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
+    
     let mut session = {
         let mut sessions = state.builder_sessions.lock().await;
         sessions
@@ -243,6 +246,15 @@ async fn builder_step_with_state(
             .remove_session(&session_id)
             .map_err(|e| e.to_string())?;
     }
+    // Complete AgentRun
+    agent_run.output_preview = Some(prompt.clone());
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.finished_at = Some(chrono::Utc::now());
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+
     Ok(serde_json::json!({
         "prompt": prompt,
         "finished": finished,

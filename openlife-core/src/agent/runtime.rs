@@ -41,7 +41,7 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub fn new(life_model: LifeModel, scheduler: InferenceScheduler) -> Self {
+    pub fn new(life_model: LifeModel, scheduler: InferenceScheduler, app_config: &crate::config::AppConfig) -> Self {
         let mut strategies: HashMap<String, Box<dyn ReasoningStrategy>> = HashMap::new();
         
         // Register LayeredReasoner (default)
@@ -49,9 +49,9 @@ impl AgentRuntime {
             scheduler.clone(),
             life_model.clone(),
             ReasoningConfig {
-                meaning_timeout_ms: 5000,
-                strategy_timeout_ms: 15000,
-                generation_timeout_ms: 30000,
+                meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
+                strategy_timeout_ms: app_config.reasoning.strategy_timeout_ms,
+                generation_timeout_ms: app_config.reasoning.generation_timeout_ms,
                 max_retries: 1,
             },
         );
@@ -68,7 +68,12 @@ impl AgentRuntime {
                 .with(Box::new(crate::agent::MemoryAssembler))
                 .with(Box::new(crate::agent::ToolsAssembler)),
             reasoning_strategies: strategies,
-            config: AgentRuntimeConfig::default(),
+            config: AgentRuntimeConfig {
+                default_strategy: app_config.reasoning.default_strategy.clone(),
+                meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
+                strategy_timeout_ms: app_config.reasoning.strategy_timeout_ms,
+                generation_timeout_ms: app_config.reasoning.generation_timeout_ms,
+            },
         }
     }
 
@@ -77,7 +82,16 @@ impl AgentRuntime {
         scheduler: InferenceScheduler,
         config: AgentRuntimeConfig,
     ) -> Self {
-        let mut runtime = Self::new(life_model, scheduler);
+        let app_config = crate::config::AppConfig {
+            reasoning: crate::config::ReasoningConfig {
+                default_strategy: config.default_strategy.clone(),
+                meaning_timeout_ms: config.meaning_timeout_ms,
+                strategy_timeout_ms: config.strategy_timeout_ms,
+                generation_timeout_ms: config.generation_timeout_ms,
+            },
+            ..Default::default()
+        };
+        let mut runtime = Self::new(life_model, scheduler, &app_config);
         runtime.config = config;
         runtime
     }

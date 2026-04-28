@@ -1307,10 +1307,13 @@ async fn send_message(
 
     // AgentRuntime: unified execution entry
     let scheduler_clone = state.scheduler.lock().await.clone();
+    let cfg = state.config.lock().await;
     let agent_runtime = openlife_core::agent::AgentRuntime::new(
         life_model.clone(),
         scheduler_clone.clone(),
+        &cfg,
     );
+    drop(cfg);
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
@@ -1727,10 +1730,13 @@ async fn start_stream_message(
     let model_route = scheduler_clone
         .preview_chat_route(Some(&tools_prompt))
         .await;
+    let cfg = state.config.lock().await;
     let agent_runtime = openlife_core::agent::AgentRuntime::new(
         life_model.clone(),
         scheduler_clone.clone(),
+        &cfg,
     );
+    drop(cfg);
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,

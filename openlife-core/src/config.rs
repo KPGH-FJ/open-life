@@ -81,6 +81,45 @@ fn default_cooldown_seconds() -> i64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReasoningConfig {
+    #[serde(default = "default_reasoning_strategy")]
+    pub default_strategy: String,
+    #[serde(default = "default_meaning_timeout_ms")]
+    pub meaning_timeout_ms: u64,
+    #[serde(default = "default_strategy_timeout_ms")]
+    pub strategy_timeout_ms: u64,
+    #[serde(default = "default_generation_timeout_ms")]
+    pub generation_timeout_ms: u64,
+}
+
+impl Default for ReasoningConfig {
+    fn default() -> Self {
+        Self {
+            default_strategy: default_reasoning_strategy(),
+            meaning_timeout_ms: default_meaning_timeout_ms(),
+            strategy_timeout_ms: default_strategy_timeout_ms(),
+            generation_timeout_ms: default_generation_timeout_ms(),
+        }
+    }
+}
+
+fn default_reasoning_strategy() -> String {
+    "layered".to_string()
+}
+
+fn default_meaning_timeout_ms() -> u64 {
+    5000
+}
+
+fn default_strategy_timeout_ms() -> u64 {
+    15000
+}
+
+fn default_generation_timeout_ms() -> u64 {
+    30000
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmConfig,
@@ -94,6 +133,8 @@ pub struct AppConfig {
     pub experimental_context_assembler: bool,
     #[serde(default)]
     pub experimental_model_router: bool,
+    #[serde(default)]
+    pub reasoning: ReasoningConfig,
 }
 
 impl Default for AppConfig {
@@ -105,6 +146,7 @@ impl Default for AppConfig {
             chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
             experimental_model_router: false,
+            reasoning: ReasoningConfig::default(),
         }
     }
 }
@@ -248,6 +290,7 @@ mod tests {
             chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
             experimental_model_router: false,
+            reasoning: ReasoningConfig::default(),
         };
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();

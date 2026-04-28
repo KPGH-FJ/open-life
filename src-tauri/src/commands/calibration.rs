@@ -150,6 +150,8 @@ pub async fn generate_calibration_report(
 pub async fn generate_micro_evolution_changes(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
+    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
+    
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(|e| e.to_string())?;
     let store = state.feedback_store.lock().await;
@@ -158,6 +160,16 @@ pub async fn generate_micro_evolution_changes(
     let signal_summary = signals.summary();
     let mut after_model = model.clone();
     let _ = MicroEvolutionEngine::apply_changes(&mut after_model, &result.changes);
+    
+    // Complete AgentRun
+    agent_run.output_preview = Some(result.message.clone());
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.finished_at = Some(chrono::Utc::now());
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+    
     Ok(serde_json::json!({
         "applied": result.applied,
         "message": result.message,
@@ -183,6 +195,8 @@ pub async fn apply_calibration(
     }
 
     // direct 模式：直接应用变更
+    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
+    
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(|e| e.to_string())?;
     MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(|e| e.to_string())?;
@@ -198,6 +212,16 @@ pub async fn apply_calibration(
         None,
         Some(&format!("applied_changes={}", changes.len())),
     );
+    
+    // Complete AgentRun
+    agent_run.output_preview = Some(format!("Applied {} calibration changes", changes.len()));
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.finished_at = Some(chrono::Utc::now());
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+    
     Ok(serde_json::json!({
         "success": true,
         "snapshot_version": snap.version,
