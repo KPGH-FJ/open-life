@@ -53,6 +53,8 @@ impl AgentRunStore {
                 generated_proposals_json TEXT DEFAULT '[]',
                 actions_json TEXT DEFAULT '[]',
                 observations_json TEXT DEFAULT '[]',
+                reasoning_strategy TEXT,
+                reasoning_trace_json TEXT,
                 deleted_at TEXT,
                 delete_reason TEXT,
                 started_at TEXT NOT NULL,
@@ -77,6 +79,9 @@ impl AgentRunStore {
             "ALTER TABLE agent_runs ADD COLUMN observations_json TEXT DEFAULT '[]'",
             [],
         );
+        // Migration: add reasoning columns
+        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN reasoning_strategy TEXT", []);
+        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN reasoning_trace_json TEXT", []);
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC)",
             [],
@@ -102,8 +107,9 @@ impl AgentRunStore {
                 id, task_id, session_id, status, kind, user_input,
                 context_summary_json, model_route_json, output_preview, error_json,
                 generated_proposals_json, actions_json, observations_json,
+                reasoning_strategy, reasoning_trace_json,
                 deleted_at, delete_reason, started_at, finished_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 run.id,
                 run.task_id,
@@ -124,6 +130,10 @@ impl AgentRunStore {
                 serde_json::to_string(&run.generated_proposals).unwrap_or_default(),
                 serde_json::to_string(&run.actions).unwrap_or_default(),
                 serde_json::to_string(&run.observations).unwrap_or_default(),
+                run.reasoning_strategy,
+                run.reasoning_trace
+                    .as_ref()
+                    .map(|t| serde_json::to_string(t).unwrap_or_default()),
                 run.deleted_at.map(|t| t.to_rfc3339()),
                 run.delete_reason,
                 run.started_at.to_rfc3339(),
@@ -148,9 +158,11 @@ impl AgentRunStore {
                 generated_proposals_json = ?7,
                 actions_json = ?8,
                 observations_json = ?9,
-                deleted_at = ?10,
-                delete_reason = ?11,
-                finished_at = ?12
+                reasoning_strategy = ?10,
+                reasoning_trace_json = ?11,
+                deleted_at = ?12,
+                delete_reason = ?13,
+                finished_at = ?14
             WHERE id = ?1",
             params![
                 run.id,
@@ -168,6 +180,10 @@ impl AgentRunStore {
                 serde_json::to_string(&run.generated_proposals).unwrap_or_default(),
                 serde_json::to_string(&run.actions).unwrap_or_default(),
                 serde_json::to_string(&run.observations).unwrap_or_default(),
+                run.reasoning_strategy,
+                run.reasoning_trace
+                    .as_ref()
+                    .map(|t| serde_json::to_string(t).unwrap_or_default()),
                 run.deleted_at.map(|t| t.to_rfc3339()),
                 run.delete_reason,
                 run.finished_at.map(|t| t.to_rfc3339()),
@@ -185,6 +201,7 @@ impl AgentRunStore {
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
+                    reasoning_strategy, reasoning_trace_json,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs WHERE id = ?1",
         )?;
@@ -197,10 +214,12 @@ impl AgentRunStore {
             let generated_proposals_json: Option<String> = row.get(10)?;
             let actions_json: Option<String> = row.get(11)?;
             let observations_json: Option<String> = row.get(12)?;
-            let deleted_at_str: Option<String> = row.get(13)?;
-            let delete_reason: Option<String> = row.get(14)?;
-            let started_at_str: String = row.get(15)?;
-            let finished_at_str: Option<String> = row.get(16)?;
+            let reasoning_strategy: Option<String> = row.get(13)?;
+            let reasoning_trace_json: Option<String> = row.get(14)?;
+            let deleted_at_str: Option<String> = row.get(15)?;
+            let delete_reason: Option<String> = row.get(16)?;
+            let started_at_str: String = row.get(17)?;
+            let finished_at_str: Option<String> = row.get(18)?;
 
             let status = match status_str.as_str() {
                 "running" => AgentRunStatus::Running,
@@ -239,6 +258,7 @@ impl AgentRunStore {
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
+            let reasoning_trace = reasoning_trace_json.and_then(|s| serde_json::from_str(&s).ok());
             let deleted_at = deleted_at_str
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
@@ -246,7 +266,7 @@ impl AgentRunStore {
             let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
                 .map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        15,
+                        17,
                         rusqlite::types::Type::Text,
                         Box::new(e),
                     )
@@ -270,6 +290,8 @@ impl AgentRunStore {
                 generated_proposals,
                 actions,
                 observations,
+                reasoning_strategy,
+                reasoning_trace,
                 deleted_at,
                 delete_reason,
                 started_at,
@@ -292,6 +314,7 @@ impl AgentRunStore {
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
+                    reasoning_strategy, reasoning_trace_json,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
              WHERE deleted_at IS NULL
@@ -311,6 +334,7 @@ impl AgentRunStore {
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
+                    reasoning_strategy, reasoning_trace_json,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
              WHERE session_id = ?1 AND deleted_at IS NULL
@@ -330,10 +354,12 @@ impl AgentRunStore {
         let generated_proposals_json: Option<String> = row.get(10)?;
         let actions_json: Option<String> = row.get(11)?;
         let observations_json: Option<String> = row.get(12)?;
-        let deleted_at_str: Option<String> = row.get(13)?;
-        let delete_reason: Option<String> = row.get(14)?;
-        let started_at_str: String = row.get(15)?;
-        let finished_at_str: Option<String> = row.get(16)?;
+        let reasoning_strategy: Option<String> = row.get(13)?;
+        let reasoning_trace_json: Option<String> = row.get(14)?;
+        let deleted_at_str: Option<String> = row.get(15)?;
+        let delete_reason: Option<String> = row.get(16)?;
+        let started_at_str: String = row.get(17)?;
+        let finished_at_str: Option<String> = row.get(18)?;
 
         let status = match status_str.as_str() {
             "running" => AgentRunStatus::Running,
@@ -372,6 +398,7 @@ impl AgentRunStore {
             .as_deref()
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
+        let reasoning_trace = reasoning_trace_json.and_then(|s| serde_json::from_str(&s).ok());
         let deleted_at = deleted_at_str
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
@@ -379,7 +406,7 @@ impl AgentRunStore {
         let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
             .map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    15,
+                    17,
                     rusqlite::types::Type::Text,
                     Box::new(e),
                 )
@@ -403,6 +430,8 @@ impl AgentRunStore {
             generated_proposals,
             actions,
             observations,
+            reasoning_strategy,
+            reasoning_trace,
             deleted_at,
             delete_reason,
             started_at,
@@ -428,6 +457,7 @@ impl AgentRunStore {
             "SELECT id, task_id, session_id, status, kind, user_input,
                     context_summary_json, model_route_json, output_preview, error_json,
                     generated_proposals_json, actions_json, observations_json,
+                    reasoning_strategy, reasoning_trace_json,
                     deleted_at, delete_reason, started_at, finished_at
              FROM agent_runs
              WHERE session_id = ?1 AND deleted_at IS NULL

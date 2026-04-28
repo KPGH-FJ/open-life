@@ -1299,6 +1299,12 @@ async fn send_message(
         None
     };
 
+    // Create AgentRun for tracking
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
+        &session_id,
+        &user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+    );
+
     // AgentRuntime: unified execution entry
     let scheduler_clone = state.scheduler.lock().await.clone();
     let agent_runtime = openlife_core::agent::AgentRuntime::new(
@@ -1338,15 +1344,19 @@ async fn send_message(
                     messages_with_reasoning = output.final_messages;
                 }
                 reasoning_trace = output.reasoning_trace;
+                agent_run.reasoning_strategy = Some("layered".to_string());
+                agent_run.reasoning_trace = Some(reasoning_trace.clone());
                 Layer::L3
             }
             Err(e) => {
                 eprintln!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
+                agent_run.reasoning_strategy = Some("direct".to_string());
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
             }
         }
     } else {
+        agent_run.reasoning_strategy = Some("direct".to_string());
         layer
     };
 
@@ -1444,6 +1454,16 @@ async fn send_message(
     if let Some(err) = embed_err {
         reasoning_trace.errors.push(err);
     }
+    // Update and save AgentRun
+    agent_run.output_preview = Some(reply.clone());
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.finished_at = Some(chrono::Utc::now());
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+
     if inserted {
         persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
     }
@@ -1737,15 +1757,19 @@ async fn start_stream_message(
             Ok(output) => {
                 messages_with_reasoning = output.final_messages;
                 reasoning_trace = output.reasoning_trace;
+                agent_run.reasoning_strategy = Some("layered".to_string());
+                agent_run.reasoning_trace = Some(reasoning_trace.clone());
                 Layer::L3
             }
             Err(e) => {
                 eprintln!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
+                agent_run.reasoning_strategy = Some("direct".to_string());
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
             }
         }
     } else {
+        agent_run.reasoning_strategy = Some("direct".to_string());
         layer
     };
 
@@ -2141,6 +2165,7 @@ async fn start_stream_message(
     };
     let preview = preview_text(&reply, 200);
     agent_run.complete(&preview, model_route, context_summary);
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         let _ = store.update_run(&agent_run);
