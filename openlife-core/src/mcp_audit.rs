@@ -15,8 +15,10 @@ use ring::digest::{Context as DigestContext, SHA256};
 
 /// Key management mode for MCP audit encryption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum KeyMode {
     /// Derive key from a fixed app secret (default, backward-compatible)
+    #[default]
     Derived,
     /// User-provided passphrase (more secure, user-controlled)
     Passphrase,
@@ -24,11 +26,6 @@ pub enum KeyMode {
     Env,
 }
 
-impl Default for KeyMode {
-    fn default() -> Self {
-        KeyMode::Derived
-    }
-}
 
 /// Key management configuration for MCP audit logs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,7 +292,7 @@ impl McpAuditStore {
         let plaintext = cipher
             .decrypt(nonce, ciphertext)
             .map_err(|e| anyhow::anyhow!("decrypt failed: {:?}", e))?;
-        Ok(String::from_utf8(plaintext).context("utf8 decode")?)
+        String::from_utf8(plaintext).context("utf8 decode")
     }
 
     pub fn insert_log(

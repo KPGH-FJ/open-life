@@ -14,7 +14,7 @@ pub enum VersionBump {
 
 fn parse_version(v: &str) -> (u64, u64, u64) {
     let parts: Vec<&str> = v.split('.').collect();
-    let a = parts.get(0).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let a = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0);
     let b = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let c = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     (a, b, c)
@@ -86,7 +86,7 @@ pub fn prepare_model_for_save(previous: Option<&LifeModel>, next: &mut LifeModel
     let base_version = previous
         .map(|model| model.metadata.version.as_str())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
+        .unwrap_or({
             if next.metadata.version.is_empty() {
                 "0.1.0"
             } else {
@@ -236,7 +236,7 @@ impl VersionManager {
             .context("读取版本目录失败")?
             .filter_map(|e| e.ok())
             .collect();
-        entries.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
         for entry in entries {
             let path = entry.path();
@@ -255,7 +255,7 @@ impl VersionManager {
                 .find(|entry| entry.version == version);
             let timestamp = metadata
                 .map(|entry| entry.timestamp.clone())
-                .unwrap_or_else(|| version.split('_').last().unwrap_or("").replace("-", ":"));
+                .unwrap_or_else(|| version.split('_').next_back().unwrap_or("").replace("-", ":"));
             versions.push(LifeModelVersion {
                 version,
                 timestamp,

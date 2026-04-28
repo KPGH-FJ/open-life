@@ -144,7 +144,7 @@ impl PatchStore {
                     risk_level, status, created_at, applied_at
              FROM life_model_patches WHERE id = ?1",
         )?;
-        let row = stmt.query_row([patch_id], |row| Self::row_to_patch(row));
+        let row = stmt.query_row([patch_id], Self::row_to_patch);
         match row {
             Ok(p) => Ok(Some(p)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -276,8 +276,7 @@ impl PatchStore {
                 })?
                 .with_timezone(&chrono::Utc),
             applied_at: applied_at_str
-                .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                .flatten()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc)),
         })
     }

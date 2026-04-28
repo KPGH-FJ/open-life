@@ -240,8 +240,7 @@ impl AgentRunStore {
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or_default();
             let deleted_at = deleted_at_str
-                .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                .flatten()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
 
             let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
@@ -254,8 +253,7 @@ impl AgentRunStore {
                 })?
                 .with_timezone(&chrono::Utc);
             let finished_at = finished_at_str
-                .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-                .flatten()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc));
 
             Ok(AgentRun {
@@ -375,8 +373,7 @@ impl AgentRunStore {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
         let deleted_at = deleted_at_str
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .flatten()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
         let started_at = chrono::DateTime::parse_from_rfc3339(&started_at_str)
@@ -389,8 +386,7 @@ impl AgentRunStore {
             })?
             .with_timezone(&chrono::Utc);
         let finished_at = finished_at_str
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .flatten()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
         Ok(AgentRun {

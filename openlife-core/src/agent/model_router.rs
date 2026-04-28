@@ -257,7 +257,7 @@ impl ModelRouter {
                     let entry = self
                         .provider_health
                         .entry(provider.to_string())
-                        .or_insert_with(ProviderHealth::default);
+                        .or_default();
                     entry.available = true;
                     entry.latency_ms = Some(latency);
                     entry.last_error = None;
@@ -268,7 +268,7 @@ impl ModelRouter {
                     let entry = self
                         .provider_health
                         .entry(provider.to_string())
-                        .or_insert_with(ProviderHealth::default);
+                        .or_default();
                     entry.available = false;
                     entry.latency_ms = None;
                     entry.last_error = Some(e.to_string());
@@ -422,8 +422,8 @@ impl ModelRouter {
                 .get(provider)
                 .and_then(|a| a.models.first().cloned())
                 .unwrap_or_else(|| "default".to_string()),
-            score: score.max(0.0).min(100.0),
-            latency_ms: latency_ms,
+            score: score.clamp(0.0, 100.0),
+            latency_ms,
             cost_per_1k_tokens: None,
             capability_score: capability.min(10),
             privacy_level: privacy_requirement,
@@ -496,7 +496,7 @@ impl ModelRouter {
     pub fn route_chat(
         &self,
         tools_prompt: Option<&str>,
-        prefer_local: bool,
+        _prefer_local: bool,
     ) -> Result<ModelRouteDecision> {
         let tools_needed = tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false);
 

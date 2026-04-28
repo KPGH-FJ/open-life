@@ -1,4 +1,4 @@
-use crate::agent::types::{AgentProposal, AgentRun, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::types::{AgentProposal, AgentRun, ProposalSource};
 use crate::life_model::LifeModel;
 use anyhow::Result;
 

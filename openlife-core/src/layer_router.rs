@@ -25,7 +25,7 @@ impl TaskComplexity {
     pub fn from_message(message: &str, context_len: usize) -> Self {
         let token_estimate = message.chars().count();
         let sentence_count = message
-            .split(|c| c == '。' || c == '?' || c == '？' || c == '!' || c == '\n')
+            .split(['。', '?', '？', '!', '\n'])
             .filter(|s| !s.trim().is_empty())
             .count();
         let tool_keywords = vec![
@@ -122,7 +122,7 @@ impl LayerRouter {
         // Default heuristic: long messages (>80 chars or multi-sentence) -> L3
         let len = message.chars().count();
         let sentence_count = message
-            .split(|c| c == '。' || c == '?' || c == '？' || c == '!')
+            .split(['。', '?', '？', '!'])
             .count();
         if len > 80 || sentence_count > 2 {
             Layer::L3

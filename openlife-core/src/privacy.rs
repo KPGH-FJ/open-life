@@ -290,7 +290,7 @@ impl PrivacyEngine {
     pub fn reconstruct(&self, message: &str, map: &HashMap<String, String>) -> String {
         let mut text = message.to_string();
         let mut keys: Vec<_> = map.keys().cloned().collect();
-        keys.sort_by(|a, b| b.len().cmp(&a.len()));
+        keys.sort_by_key(|b| std::cmp::Reverse(b.len()));
         for key in keys {
             if let Some(original) = map.get(&key) {
                 text = text.replace(&key, original);

@@ -135,7 +135,7 @@ impl ProposalStore {
             "SELECT id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at
              FROM proposals WHERE id = ?1"
         )?;
-        let row = stmt.query_row([id], |row| Self::row_to_proposal(row));
+        let row = stmt.query_row([id], Self::row_to_proposal);
         match row {
             Ok(p) => Ok(Some(p)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -270,13 +270,13 @@ impl ProposalStore {
             };
             format!(
                 "SELECT COUNT(*) FROM proposals WHERE status = '{}' AND {}",
-                status.to_string(),
+                status,
                 risk_order
             )
         } else {
             format!(
                 "SELECT COUNT(*) FROM proposals WHERE status = '{}'",
-                status.to_string()
+                status
             )
         };
 
@@ -405,12 +405,10 @@ impl ProposalStore {
             })?
             .with_timezone(&chrono::Utc);
         let resolved_at = resolved_at_str
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .flatten()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
         let expires_at = expires_at_str
-            .map(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .flatten()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
         Ok(AgentProposal {

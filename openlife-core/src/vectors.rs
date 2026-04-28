@@ -304,7 +304,7 @@ impl VectorStore {
             "UPDATE vectors SET tier = 3 WHERE archived = 0 AND tier < 3 AND (last_accessed_at IS NULL OR last_accessed_at < ?1) AND importance_score < 0.4",
             params![&retrieval_cutoff],
         )?;
-        Ok((promoted as usize, demoted as usize))
+        Ok((promoted, demoted))
     }
 
     pub fn count_all_chunks(&self) -> Result<i64> {
@@ -428,7 +428,7 @@ impl VectorStore {
             params![&now, &cutoff],
         )?;
         tx.commit()?;
-        Ok(archived as usize)
+        Ok(archived)
     }
 
     /// Restore archived memories back to active state.

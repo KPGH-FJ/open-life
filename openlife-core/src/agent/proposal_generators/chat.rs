@@ -197,7 +197,7 @@ impl ChatProposalGenerator {
                 let remaining = &text[start..];
                 // Extract up to punctuation or 20 chars
                 let end_pos = remaining
-                    .find(|c: char| c == '。' || c == '，' || c == '！' || c == '\n')
+                    .find(['。', '，', '！', '\n'])
                     .unwrap_or(remaining.len().min(30));
                 let goal_text = remaining[..end_pos].trim();
                 if !goal_text.is_empty() && goal_text.len() > 2 {
@@ -205,7 +205,6 @@ impl ChatProposalGenerator {
                         name: goal_text.to_string(),
                         description: format!("Extracted from chat: {}", goal_text),
                         priority: 5,
-                        confidence: 0.65,
                     });
                 }
             }
@@ -217,7 +216,7 @@ impl ChatProposalGenerator {
                 let start = pos + keyword.len();
                 let remaining = &text[start..];
                 let end_pos = remaining
-                    .find(|c: char| c == '.' || c == ',' || c == '!' || c == '\n')
+                    .find(['.', ',', '!', '\n'])
                     .unwrap_or(remaining.len().min(40));
                 let goal_text = remaining[..end_pos].trim();
                 if !goal_text.is_empty() && goal_text.len() > 3 {
@@ -225,7 +224,6 @@ impl ChatProposalGenerator {
                         name: goal_text.to_string(),
                         description: format!("Extracted from chat: {}", goal_text),
                         priority: 5,
-                        confidence: 0.65,
                     });
                 }
             }
@@ -364,15 +362,11 @@ impl ChatProposalGenerator {
             None
         };
 
-        if let Some(skill) = skill_name {
-            Some(serde_json::json!({
+        skill_name.map(|skill| serde_json::json!({
                 "name": skill,
                 "proficiency": 7,
                 "description": format!("Extracted from chat: user mentioned {} skill", skill),
             }))
-        } else {
-            None
-        }
     }
 }
 
@@ -381,7 +375,6 @@ struct ExtractedGoal {
     name: String,
     description: String,
     priority: u8,
-    confidence: f32,
 }
 
 #[cfg(test)]

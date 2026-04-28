@@ -215,6 +215,12 @@ pub struct CompositeAssembler {
     assemblers: Vec<Box<dyn ContextAssembler>>,
 }
 
+impl Default for CompositeAssembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CompositeAssembler {
     pub fn new() -> Self {
         Self {

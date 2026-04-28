@@ -123,6 +123,7 @@ impl LifeModelPatch {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn from_proposal(
         proposal_id: &str,
         path_pointer: &str,

@@ -227,6 +227,7 @@ impl MemoryStore {
         out
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_memory_row(
         conn: &Connection,
         session_id: &str,
@@ -622,6 +623,7 @@ impl MemoryStore {
         Ok(entries)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn save_memory_record(
         &self,
         session_id: &str,

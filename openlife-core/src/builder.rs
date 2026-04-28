@@ -85,17 +85,14 @@ pub struct PeakExperience {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum RiskLevel {
     Low,
+    #[default]
     Medium,
     High,
 }
 
-impl Default for RiskLevel {
-    fn default() -> Self {
-        RiskLevel::Medium
-    }
-}
 
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -123,7 +120,9 @@ pub struct BuilderSignal {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum SignalUserStatus {
+    #[default]
     Pending,
     Accepted,
     Edited,
@@ -146,11 +145,6 @@ pub struct SkippedField {
     pub expected: Option<String>,
 }
 
-impl Default for SignalUserStatus {
-    fn default() -> Self {
-        SignalUserStatus::Pending
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderPatchReview {
@@ -281,7 +275,7 @@ impl BuilderSession {
             BuilderMode::Socratic => {
                 const MAX_TURNS: usize = 8;
                 let idx = self.step_index.min(MAX_TURNS);
-                let session_num = self.current_session.max(1).min(4);
+                let session_num = self.current_session.clamp(1, 4);
                 let session_labels = [
                     "",
                     "价值观与峰值体验",
@@ -879,7 +873,7 @@ impl<'a> BuilderEngine<'a> {
             .iter()
             .map(|v| {
                 let count = counts.get(&v.name).copied().unwrap_or(0);
-                let weight = ((5 + count * 2) as u8).min(10).max(1);
+                let weight = ((5 + count * 2) as u8).clamp(1, 10);
                 ValueItem {
                     name: v.name.clone(),
                     weight,
@@ -1099,8 +1093,8 @@ impl<'a> BuilderEngine<'a> {
         let mut current_step: Option<usize> = None;
 
         for line in draft.lines() {
-            if line.starts_with("# step ") {
-                if let Ok(step) = line[7..].parse::<usize>() {
+            if let Some(rest) = line.strip_prefix("# step ") {
+                if let Ok(step) = rest.parse::<usize>() {
                     current_step = Some(step);
                 }
             } else if let Some(step) = current_step {
@@ -1194,7 +1188,7 @@ impl<'a> BuilderEngine<'a> {
                 // Parse goals (split by newlines, support bullet formats)
                 let goals: Vec<String> = goals_text
                     .lines()
-                    .map(|l| normalize_list_line(l))
+                    .map(normalize_list_line)
                     .filter(|l| !l.is_empty())
                     .collect();
 
@@ -1255,7 +1249,7 @@ impl<'a> BuilderEngine<'a> {
             if !caps_text.is_empty() {
                 let skills: Vec<String> = caps_text
                     .lines()
-                    .map(|l| normalize_list_line(l))
+                    .map(normalize_list_line)
                     .filter(|l| !l.is_empty())
                     .take(5) // Limit to top 5
                     .collect();
@@ -1291,9 +1285,7 @@ impl<'a> BuilderEngine<'a> {
             let blockers = ans.trim().to_string();
             if !blockers.is_empty() {
                 // Extract emotional state
-                let emotional_keywords = vec![
-                    "焦虑", "压力", "疲惫", "迷茫", "沮丧", "困惑", "紧张", "担忧",
-                ];
+                let emotional_keywords = ["焦虑", "压力", "疲惫", "迷茫", "沮丧", "困惑", "紧张", "担忧"];
                 let found_emotion = emotional_keywords
                     .iter()
                     .find(|&&k| blockers.contains(k))
@@ -2483,60 +2475,58 @@ impl<'a> BuilderEngine<'a> {
             return model;
         }
 
-        let system_prompt = format!(
-            r#"你是一个结构化信息提取助手。请根据用户在 OpenLife 构建模式中的回答，提取人生模型信息，并严格只输出一段合法的 JSON（不要 Markdown 代码块，不要解释）。
+        let system_prompt = r#"你是一个结构化信息提取助手。请根据用户在 OpenLife 构建模式中的回答，提取人生模型信息，并严格只输出一段合法的 JSON（不要 Markdown 代码块，不要解释）。
 
 JSON 结构如下：
-{{
-  "identity": {{
+{
+  "identity": {
     "name": "",
     "life_philosophy": "",
     "mission_statement": "",
-    "role_definition": {{
+    "role_definition": {
       "primary_role": "",
       "secondary_roles": [],
       "responsibilities": [],
       "boundaries": []
-    }},
-    "values": [{{"name":"", "weight":1, "description":""}}],
-    "personality_traits": [{{"trait_name":"", "score":5}}]
-  }},
-  "goals": {{
-    "short_term": [{{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}}],
-    "medium_term": [{{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}}],
-    "long_term": [{{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}}],
-    "life_goals": [{{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}}]
-  }},
-  "capabilities": {{
-    "skills": [{{"name":"", "proficiency":5, "description":""}}],
-    "resources": [{{"name":"", "type":"other", "description":""}}],
+    },
+    "values": [{"name":"", "weight":1, "description":""}],
+    "personality_traits": [{"trait_name":"", "score":5}]
+  },
+  "goals": {
+    "short_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
+    "medium_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
+    "long_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
+    "life_goals": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}]
+  },
+  "capabilities": {
+    "skills": [{"name":"", "proficiency":5, "description":""}],
+    "resources": [{"name":"", "type":"other", "description":""}],
     "networks": [""],
-    "tools": [{{"name":"", "proficiency":5, "description":""}}],
-    "knowledge_domains": [{{"domain":"", "level":5, "description":""}}]
-  }},
-  "state": {{
+    "tools": [{"name":"", "proficiency":5, "description":""}],
+    "knowledge_domains": [{"domain":"", "level":5, "description":""}]
+  },
+  "state": {
     "current_focus": "",
-    "emotional_state": {{"current_mood":"", "stress_level":5, "fulfillment_score":5}},
-    "health_status": {{"physical":"", "mental":"", "energy_level":5}}
-  }},
-  "relationships": {{
-    "inner_circle": [{{"name":"", "relationship_type":"", "importance":5, "notes":""}}],
-    "mentors": [{{"name":"", "relationship_type":"mentor", "importance":5, "notes":""}}],
-    "collaborators": [{{"name":"", "relationship_type":"collaborator", "importance":5, "notes":""}}]
-  }},
-  "preferences": {{
+    "emotional_state": {"current_mood":"", "stress_level":5, "fulfillment_score":5},
+    "health_status": {"physical":"", "mental":"", "energy_level":5}
+  },
+  "relationships": {
+    "inner_circle": [{"name":"", "relationship_type":"", "importance":5, "notes":""}],
+    "mentors": [{"name":"", "relationship_type":"mentor", "importance":5, "notes":""}],
+    "collaborators": [{"name":"", "relationship_type":"collaborator", "importance":5, "notes":""}]
+  },
+  "preferences": {
     "peak_energy_time": "",
     "communication_style": "",
     "learning_style": "",
     "decision_making_style": ""
-  }}
-}}
+  }
+}
 
 规则：
 1. 如果某字段无法从回答中推断，使用空字符串或空数组。
 2. weight、priority、proficiency、score、stress_level、fulfillment_score、energy_level 是 1-10 的整数，请根据上下文合理推断。
-3. 只输出 JSON，不要任何其他文字。"#
-        );
+3. 只输出 JSON，不要任何其他文字。"#.to_string();
 
         let messages = vec![ChatMessage {
             role: "user".into(),

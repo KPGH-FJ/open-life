@@ -840,7 +840,7 @@ impl LifeModel {
                 if let Some(parent_path) = get_parent_pointer(&patch.path_pointer) {
                     let parent = value
                         .pointer_mut(&parent_path)
-                        .ok_or_else(|| PatchError::InvalidPath(parent_path))?;
+                        .ok_or(PatchError::InvalidPath(parent_path))?;
 
                     if let Some(arr) = parent.as_array_mut() {
                         arr.push(patch.after.clone());
@@ -866,7 +866,7 @@ impl LifeModel {
 
                     let parent = value
                         .pointer_mut(&parent_path)
-                        .ok_or_else(|| PatchError::InvalidPath(parent_path))?;
+                        .ok_or(PatchError::InvalidPath(parent_path))?;
 
                     if let Some(arr) = parent.as_array_mut() {
                         if let Ok(index) = key.parse::<usize>() {
@@ -906,7 +906,7 @@ impl LifeModel {
 
                     let parent = value
                         .pointer_mut(&parent_path)
-                        .ok_or_else(|| PatchError::InvalidPath(parent_path))?;
+                        .ok_or(PatchError::InvalidPath(parent_path))?;
 
                     if let Some(obj) = parent.as_object_mut() {
                         obj.remove(&key);
@@ -1021,18 +1021,12 @@ impl LifeModel {
             .collect();
 
         // Apply patches in order
-        let mut any_critical_failure = false;
         for patch in &patches_to_apply {
             match self.apply_patch(patch) {
                 Ok(result) => {
                     if result.success {
                         applied.push(result);
                     } else {
-                        // Check if this is a critical failure
-                        if patch.risk_level == RiskLevel::Critical {
-                            any_critical_failure = true;
-                        }
-
                         match policy.failure_mode {
                             FailureMode::Atomic => {
                                 // Rollback on any failure
@@ -1069,10 +1063,6 @@ impl LifeModel {
                     }
                 }
                 Err(e) => {
-                    if patch.risk_level == RiskLevel::Critical {
-                        any_critical_failure = true;
-                    }
-
                     match policy.failure_mode {
                         FailureMode::Atomic => {
                             *self = checkpoint;
@@ -1197,7 +1187,7 @@ fn get_parent_pointer(pointer: &str) -> Option<String> {
 fn get_last_segment(pointer: &str) -> Option<String> {
     pointer
         .split('/')
-        .last()
+        .next_back()
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
 }

@@ -128,13 +128,15 @@ impl HermesBus {
         req: &HermesRequest,
         ctx: &mut HermesContext,
     ) -> Result<HermesTrace, String> {
-        let mut trace = HermesTrace::default();
-        trace.input = req
-            .params
-            .as_ref()
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string());
+        let mut trace = HermesTrace {
+            input: req
+                .params
+                .as_ref()
+                .and_then(|p| p.get("text"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string()),
+            ..Default::default()
+        };
 
         for layer in [
             HermesLayer::Meaning,
@@ -294,11 +296,10 @@ impl Arbitrator {
             if let Some(forbidden) = meaning.get("forbidden_keywords").and_then(|v| v.as_array()) {
                 for kw in forbidden {
                     if let Some(k) = kw.as_str() {
-                        if execution.to_lowercase().contains(&k.to_lowercase()) {
-                            if self.strict_mode {
+                        if execution.to_lowercase().contains(&k.to_lowercase())
+                            && self.strict_mode {
                                 return Err(format!("Execution 包含禁止关键词: {}", k));
                             }
-                        }
                     }
                 }
             }
@@ -309,11 +310,10 @@ impl Arbitrator {
             if let Some(required) = strategy.get("required_keywords").and_then(|v| v.as_array()) {
                 for kw in required {
                     if let Some(k) = kw.as_str() {
-                        if !execution.to_lowercase().contains(&k.to_lowercase()) {
-                            if self.strict_mode {
+                        if !execution.to_lowercase().contains(&k.to_lowercase())
+                            && self.strict_mode {
                                 return Err(format!("Execution 未包含必须关键词: {}", k));
                             }
-                        }
                     }
                 }
             }
@@ -601,20 +601,20 @@ impl HermesNode for StrategyNode {
                     .trim();
                 match serde_json::from_str::<serde_json::Value>(cleaned) {
                     Ok(mut v) => {
-                        if !v.get("text").is_some() {
+                        if v.get("text").is_none() {
                             v["text"] =
                                 serde_json::Value::String("继续作为人生伴侣进行深度对话。".into());
                         }
-                        if !v.get("plan_steps").is_some() {
+                        if v.get("plan_steps").is_none() {
                             v["plan_steps"] = serde_json::json!(["先理解问题，再给出下一步建议"]);
                         }
-                        if !v.get("needs_tools").is_some() {
+                        if v.get("needs_tools").is_none() {
                             v["needs_tools"] = serde_json::Value::Bool(false);
                         }
-                        if !v.get("suggested_tools").is_some() {
+                        if v.get("suggested_tools").is_none() {
                             v["suggested_tools"] = serde_json::json!([]);
                         }
-                        if !v.get("conflict_flags").is_some() {
+                        if v.get("conflict_flags").is_none() {
                             v["conflict_flags"] = serde_json::json!([]);
                         }
                         Ok(v)

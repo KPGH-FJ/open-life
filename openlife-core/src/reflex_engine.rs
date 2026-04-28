@@ -7,8 +7,10 @@ use tract_onnx::prelude::*;
 
 use crate::router::Intent;
 
+type TypedPlan = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+
 pub struct ReflexEngine {
-    model: SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>,
+    model: TypedPlan,
     tokenizer: Tokenizer,
     labels: Vec<String>,
 }

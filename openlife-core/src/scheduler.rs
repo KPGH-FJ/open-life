@@ -71,6 +71,7 @@ impl InferenceScheduler {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         local_model: String,
         prefer_local: bool,

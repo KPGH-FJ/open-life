@@ -633,7 +633,7 @@ impl FeedbackStore {
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(period_days as i64)).to_rfc3339();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(period_days)).to_rfc3339();
 
         let feedback_up: i64 = conn
             .query_row(
