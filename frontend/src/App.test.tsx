@@ -123,7 +123,7 @@ describe("App onboarding", () => {
     );
 
     expect(await screen.findByText(/Safe Mode：当前数据环境存在风险/)).toBeInTheDocument();
-    expect(screen.getByText(/memory.db 初始化失败/)).toBeInTheDocument();
+    expect(screen.getAllByText(/memory.db 初始化失败/).length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("打开恢复控制台")).toBeInTheDocument();
   });
 

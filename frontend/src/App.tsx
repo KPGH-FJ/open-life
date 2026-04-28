@@ -121,7 +121,7 @@ function App() {
           )}
         </div>
         <nav className="flex flex-wrap justify-end gap-2">
-          <NavLink to="/workspace" className={navClass}>
+          <NavLink to="/" end className={navClass}>
             <LayoutDashboard size={16} /> Workspace
           </NavLink>
           <NavLink to="/agent" className={navClass}>
@@ -129,9 +129,6 @@ function App() {
           </NavLink>
           <NavLink to="/builder" className={navClass}>
             <Hammer size={16} /> LifeModel
-          </NavLink>
-          <NavLink to="/" end className={navClass}>
-            <Map size={16} /> 地图
           </NavLink>
           <NavLink to="/memory" className={navClass}>
             <Brain size={16} /> Memory
@@ -150,6 +147,9 @@ function App() {
               <Wrench size={16} /> 高级
             </summary>
             <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-stone-200 bg-white p-2 shadow-lg">
+              <NavLink to="/map" className={navClass}>
+                <Map size={16} /> 人生地图
+              </NavLink>
               <NavLink to="/versions" className={navClass}>
                 <GitBranch size={16} /> 版本控制
               </NavLink>
@@ -213,7 +213,8 @@ function App() {
         <ErrorBoundary>
           <Routes>
             <Route path="/workspace" element={<DashboardPage />} />
-            <Route path="/" element={<LifeMapPage />} />
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/map" element={<LifeMapPage />} />
             <Route path="/agent" element={<ChatPage />} />
             <Route path="/chat" element={<ChatPage />} />
             <Route path="/versions" element={<VersionControl />} />
