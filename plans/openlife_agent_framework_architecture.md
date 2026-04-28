@@ -166,7 +166,7 @@ The right path is:
 | LifeModel | `openlife-core/src/life_model.rs` | Strong foundation for personal context | Needs clearer patch/proposal semantics and stronger field ownership rules |
 | Builder | `openlife-core/src/builder.rs`, `frontend/src/pages/BuilderPage.tsx` | Can guide initial model construction | Too large, complex, and not yet framed as an AgentTask lifecycle |
 | Chat | `src-tauri/src/lib.rs`, `frontend/src/pages/ChatPage.tsx` | Main user interaction surface | Should become an Agent workspace, not a standalone chat pipeline |
-| Hermes | `openlife-core/src/hermes.rs` | Early Meaning/Strategy/Execution abstraction | Should evolve into ReAct runtime or become one strategy inside it |
+| LayeredReasoner | `openlife-core/src/reasoning/layered.rs` | Early Meaning/Strategy/Execution abstraction | Should evolve into ReAct runtime or become one strategy inside it |
 | Scheduler | `openlife-core/src/scheduler.rs`, `llm.rs`, `ollama.rs` | Local/cloud routing exists | Needs provider-agnostic model policies and per-task routing traces |
 | Memory | `memory.rs`, `vectors.rs`, `memory_cache.rs` | Persistent and semantic memory exist | Needs explicit governance, context selection, corruption diagnostics, and task linkage |
 | Feedback/Evolution | `feedback.rs`, `evolution.rs`, `calibration.rs` | Early LifeModel improvement loop | Needs unified Proposal model and confirmation workflow |
@@ -458,7 +458,7 @@ Loop:
 Plan -> Act -> Observe -> Decide -> Continue or Finish
 ```
 
-Hermes can evolve into this layer or remain one strategy inside it.
+LayeredReasoner can evolve into this layer or remain one strategy inside it.
 
 Important design rule:
 

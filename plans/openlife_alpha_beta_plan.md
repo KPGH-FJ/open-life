@@ -124,7 +124,7 @@ graph LR
 #### 3.1 对话模式固定化
 
 - [ ] 顶部模式选择器：今日规划、情绪复盘、目标拆解、决策陪跑、自由聊天
-- [ ] 每种模式有不同 prompt 策略（后端 Hermes 层注入不同 system prompt）
+- [ ] 每种模式有不同 prompt 策略（后端 LayeredReasoner 层注入不同 system prompt）
 - [ ] 每种模式有对应 UI 入口和图标
 - [ ] 模式切换不丢失对话上下文
 
@@ -138,7 +138,7 @@ graph LR
 - [ ] 点击脉搏展开完整模型片段
 - [ ] 对话中 Assistant 引用模型内容时高亮显示来源
 
-#### 3.3 Hermes Trace 用户化
+#### 3.3 Reasoning Trace 用户化
 
 - [ ] 不展示内部 JSON，展示「为什么这样回答」
 - [ ] 用自然语言摘要：「基于你的价值观 X，我认为你应该优先做 Y」
@@ -334,7 +334,7 @@ graph TD
 ### 具体开发内容
 
 1. **Chat 里加入「本次回答依据」摘要**
-   - Hermes Trace 去技术化
+   - Reasoning Trace 去技术化
    - 用一句话总结「基于你当前的 X 状态，我建议 Y」
 
 2. **Assistant 回复后操作升级**

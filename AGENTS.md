@@ -89,7 +89,10 @@
 │       ├── llm.rs                # DeepSeek / OpenAI-compatible 云端模型调用
 │       ├── ollama.rs             # Ollama 本地模型调用
 │       ├── scheduler.rs          # 推理调度器（本地优先策略）
-│       ├── hermes.rs             # 三层决策总线 (Meaning→Strategy→Execution)
+│       ├── reasoning/            # 推理策略模块
+│       │   ├── mod.rs            # ReasoningStrategy trait
+│       │   ├── layered.rs        # 三层推理策略 (Meaning→Strategy→Generation)
+│       │   └── direct.rs         # 直接推理策略
 │       ├── memory.rs             # SQLite 消息/会话/状态存储
 │       ├── vectors.rs            # 向量记忆 Tier 3（SQLite + 本地 embedding）
 │       ├── router.rs             # 意图路由
@@ -122,7 +125,7 @@
 │       │   ├── chat.rs           # 6 个 Chat 会话命令
 │       │   ├── diagnostics.rs    # 5 个诊断命令
 │       │   ├── feedback.rs       # 5 个反馈命令
-│       │   ├── hermes.rs         # 1 个 Hermes 命令
+│       │   ├── reasoning.rs      # 推理策略命令
 │       │   ├── life_model.rs     # 2 个 LifeModel 命令
 │       │   ├── mcp.rs            # 8 个 MCP 命令
 │       │   ├── memory.rs         # 10 个 Memory 命令
@@ -149,8 +152,8 @@
 |------|----------|------|----------|
 | **AgentRun** | [`openlife-core/src/agent/`](openlife-core/src/agent/) | AgentRun 追踪：每次 Chat/Builder/Calibration 生成可查询的运行记录，包含模型路由 trace、上下文摘要、成功/失败状态 | 被 chat.rs、builder.rs 使用，存储在独立 SQLite agent_runs.db |
 | **Proposal** | [`openlife-core/src/agent/proposal_store.rs`](openlife-core/src/agent/proposal_store.rs) | Proposal 统一层：LifeModel/Memory/Tool 权限变更必须经过用户确认（accept/reject/edit/postpone），应用前自动创建 snapshot | 被 builder.rs、calibration.rs 使用，存储在 SQLite proposals.db |
-| **LifeModel** | [`openlife-core/src/life_model.rs`](openlife-core/src/life_model.rs) | 四维人生模型：Identity（身份/价值观）、Goals（短中长期目标）、Capabilities（技能/资源）、State（当前状态/情绪/健康） | 被 hermes.rs、scheduler.rs、memory.rs 消费 |
-| **Hermes Bus** | [`openlife-core/src/hermes.rs`](openlife-core/src/hermes.rs) | 三层决策总线：MeaningNode（语义理解/禁忌检测）→ StrategyNode（策略规划）→ ExecutionNode（执行生成），Arbitrator 仲裁最终输出 | 依赖 scheduler.rs、life_model.rs |
+| **LifeModel** | [`openlife-core/src/life_model.rs`](openlife-core/src/life_model.rs) | 四维人生模型：Identity（身份/价值观）、Goals（短中长期目标）、Capabilities（技能/资源）、State（当前状态/情绪/健康） | 被 reasoning.rs、scheduler.rs、memory.rs 消费 |
+| **LayeredReasoner** | [`openlife-core/src/agent/reasoning/layered.rs`](openlife-core/src/agent/reasoning/layered.rs) | 三层推理策略：MeaningPhase（语义理解/禁忌检测）→ StrategyPhase（策略规划）→ GenerationPhase（回复生成），SafetyChecker 安全检查。作为 AgentRuntime 的默认推理策略 | 依赖 scheduler.rs、life_model.rs |
 | **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型：tool prompt → 强制云端；Ollama 可用 + prefer_local → 本地；否则 fallback 云端 | 依赖 llm.rs、ollama.rs |
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
@@ -196,8 +199,8 @@ LifeModel / Memory / Audit / Snapshot 持久化
     │                                    │
     │    ┌───────────────────────────────┼───────────────────────────────┐
     │    ▼                               ▼                               ▼
-[Stream UI]                    [Hermes Bus]                      [MemoryStore]
-(逐字显示)               Meaning→Strategy→Execution         (保存消息/快照)
+[Stream UI]                    [LayeredReasoner]                 [MemoryStore]
+(逐字显示)               Meaning→Strategy→Generation        (保存消息/快照)
     │                            │
     │                    [InferenceScheduler]
     │                    ┌────────┴────────┐
@@ -217,7 +220,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 
 关键处理节点：
 1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:391)）：用户消息 → 向量检索相关记忆 → Hermes 请求构建
-2. **三层决策**（[`HermesBus::dispatch`](openlife-core/src/hermes.rs:122)）：Meaning（语义理解）→ Strategy（JSON 策略）→ Execution（最终回复）
+2. **三层推理**（[`LayeredReasoner::reason`](openlife-core/src/agent/reasoning/layered.rs)）：MeaningPhase（语义理解）→ StrategyPhase（JSON 策略）→ GenerationPhase（回复生成）
 3. **模型调度**（[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:71)）：根据 tool prompt 和 Ollama 可用性决定使用本地或云端模型
 4. **工具调用**（[`execute_tool_call_internal`](src-tauri/src/lib.rs:264)）：MCP 工具执行 + 隐私参数脱敏 + 审计日志
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:822)）：SSE 风格流式传输到前端
@@ -233,7 +236,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 | 范畴 | 约定 | 示例 |
 |------|------|------|
 | **Rust 文件/目录** | `snake_case` | `life_model.rs`, `mcp_audit.rs` |
-| **Rust 结构体/枚举** | `PascalCase` | `LifeModel`, `HermesBus`, `AlertLevel` |
+| **Rust 结构体/枚举** | `PascalCase` | `LifeModel`, `LayeredReasoner`, `AlertLevel` |
 | **Rust 方法/函数** | `snake_case` | `save_message()`, `run_tier_maintenance()` |
 | **Rust 常量** | `UPPER_SNAKE_CASE` | `OLLAMA_CACHE_TTL = 10` |
 | **Rust 模块** | `snake_case` | `mod memory;` |
@@ -317,35 +320,35 @@ AgentRun 执行
 写入 LifeModel / Memory / Snapshot / Audit
 ```
 
-#### 2. 当前 Hermes 三层决策流程
+#### 2. 当前 LayeredReasoner 三层推理流程
 
 ```
 用户输入
     │
     ▼
 ┌─────────────┐    语义理解 + 禁忌话题检测
-│ MeaningNode │ ──► 输出：user_text, forbidden_topics[]
+│ MeaningPhase│ ──► 输出：user_text, forbidden_topics[]
 └─────────────┘
     │
     ▼
 ┌───────────────┐    策略规划（JSON 输出）
-│ StrategyNode  │ ──► 输出：strategy_json（含工具调用意图）
+│ StrategyPhase │ ──► 输出：strategy_json（含工具调用意图）
 └───────────────┘
     │
     ▼
-┌───────────────┐    执行生成（最终回复）
-│ ExecutionNode │ ──► 输出：assistant_reply
-└───────────────┘
+┌─────────────────┐    回复生成（最终回复）
+│ GenerationPhase │ ──► 输出：assistant_reply
+└─────────────────┘
     │
     ▼
-┌─────────────┐    仲裁：选择最佳层输出或合并
-│ Arbitrator  │ ──► 最终返回给用户
-└─────────────┘
+┌──────────────┐    安全检查：验证输出是否偏离策略/意义
+│ SafetyChecker│ ──► 最终返回给用户
+└──────────────┘
 ```
 
-每层有独立超时（Meaning 30s / Strategy 45s / Execution 60s），失败时由 Arbitrator 决定 fallback。
+每层有独立超时（Meaning 5s / Strategy 15s / Generation 30s，可配置），失败时由 AgentRuntime 决定降级策略。
 
-Hermes 是当前实现中的重要决策层，但后续不应把它视为最终架构边界。它可以演进为 ReAct Engine 的一部分，或成为 AgentRuntime 中的一种执行策略。
+LayeredReasoner 是 AgentRuntime 的默认推理策略，通过 `ReasoningStrategy` trait 注册。未来可扩展 DirectReasoner（直接推理）、ReActReasoner（工具循环推理）等策略。
 
 #### 3. 当前模型调度策略
 
@@ -531,7 +534,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 1. **向量检索余弦相似度**：[`cosine_similarity`](openlife-core/src/vectors.rs:285) 在 Rust 中逐对计算，大规模向量库时可能成为瓶颈。目前使用 `f32` 运算，可考虑 SIMD 优化。
 2. **embedding 生成**：每次用户输入都调用 embedding API（或本地 ONNX 模型），是延迟的主要来源。可考虑缓存高频查询的 embedding。
-3. **Hermes 三层串行调用**：Meaning → Strategy → Execution 是串行的，每层都有 LLM 请求，总延迟 = 三层之和。Strategy 层要求输出合法 JSON，重试逻辑可能增加额外延迟。
+3. **LayeredReasoner 三层串行调用**：Meaning → Strategy → Generation 是串行的，每层都有 LLM 请求，总延迟 = 三层之和。Strategy 层要求输出合法 JSON，重试逻辑可能增加额外延迟。作为 AgentRuntime 的默认推理策略，可通过配置调整超时或切换为 DirectReasoner 降低延迟。
 4. **SQLite 写入锁**：`MemoryStore` 使用 `Mutex<Connection>`，高并发写入（如同时保存消息 + 向量化 + 审计日志）会串行化。
 5. **Ollama 首次加载延迟**：本地模型首次加载到 GPU 内存时可能有数秒延迟，缓存机制只检查可用性，不预热模型。
 
@@ -541,10 +544,10 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 2. ~~**Agent Runtime 引入**：新增 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal` 和 `AgentRunStore`，先从 Chat 主链路接入。~~ ✅ 已完成（AgentRun/Proposal 基线已落地）
 3. **ModelRouter 升级**：将当前 Scheduler 升级为 provider-agnostic、role-aware、privacy-aware 的模型路由器。
 4. ~~**Proposal 统一**：Builder、Calibration、Evolution、Memory 更新应统一走 Proposal/Confirmation，而不是各自实现审批流。~~ ✅ 已完成（Builder/Calibration 已接入 Proposal 流）
-5. **Hermes / ReAct 边界重构**：Hermes 当前是三层决策总线，后续应纳入 ReAct Engine 或成为 AgentRuntime 的一种策略。
+5. ~~**Hermes / ReAct 边界重构**：Hermes 当前是三层决策总线，后续应纳入 ReAct Engine 或成为 AgentRuntime 的一种策略。~~ ✅ 已完成（Hermes 已重构为 LayeredReasoner，作为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册）
 6. **前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。
 7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
-8. **核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、Hermes、scheduler）需要补充测试。
+8. **核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。
 9. **Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。
 
 ---
@@ -622,6 +625,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-22 | 清理未使用 import，cargo check 零警告零错误；前端 86 测试 + Rust 129 测试全部通过 | AI Agent |
 | 2026-04-24 | 将项目上下文从“桌面 AI 伴侣应用”更新为“本地优先个人 Agent 框架”，新增 Agent Runtime、AgentRun、Proposal、ModelRouter 作为后续开发主线 | AI Agent |
 | 2026-04-26 | Proposal/Confirmation 统一层收敛完成：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路；AgentRun ↔ Proposal 双向关联溯源；Safe Mode 限制 Proposal 操作；Review Center 强化（分类/风险筛选/编辑/批量/空状态/失败态/Dashboard 提醒） | AI Agent |
+| 2026-04-28 | Hermes 架构治理：将 HermesBus 重构为 LayeredReasoner，作为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册；新增 DirectReasoner 作为备选策略；统一超时配置；SafetyChecker 替代 Arbitrator；更新 AGENTS.md 和架构文档 | AI Agent |
 
 ---
 

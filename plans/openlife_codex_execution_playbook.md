@@ -350,7 +350,7 @@ Codex 做任何新增功能时，都应显式回答：
 ### 第四组
 
 - MCP 模板化
-- A2A/Hermes 桥接
+- A2A/LayeredReasoner 桥接
 - 工具推荐与更复杂生态
 
 ---

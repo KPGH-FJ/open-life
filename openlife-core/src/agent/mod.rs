@@ -5,6 +5,7 @@ pub mod model_router;
 pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_store;
+pub mod reasoning;
 pub mod store;
 pub mod types;
 
@@ -15,5 +16,10 @@ pub use model_router::{ModelRouteDecision, ModelRouteScore, ModelRouter, Privacy
 pub use proposal_engine::{BuilderProposalGenerator, CalibrationProposalGenerator, FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator};
 pub use proposal_generators::ChatProposalGenerator;
 pub use proposal_store::ProposalStore;
+pub use reasoning::{
+    DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
+    ReasoningOutput, ReasoningPhaseKind, ReasoningStrategy, ReasoningTrace,
+};
+pub use reasoning::layered::{SafetyChecker, SafetyCheckResult};
 pub use store::AgentRunStore;
 pub use types::*;
