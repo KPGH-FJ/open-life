@@ -56,6 +56,7 @@ import {
 import { getModelEmptyState } from "../utils/modelEmpty";
 import EmptyState from "../components/EmptyState";
 import ErrorBanner from "../components/ErrorBanner";
+import WorkspaceOverview from "../components/WorkspaceOverview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
 type TrendDirection = "up" | "down" | "stable";
@@ -813,6 +814,9 @@ export default function DashboardPage() {
             </div>
           )}
         </div>
+
+        {/* Workspace Overview */}
+        <WorkspaceOverview />
 
         <section className="relative overflow-hidden rounded-3xl border border-stone-200 bg-[#fbf7ef] p-6 shadow-sm">
           <div className="absolute -right-10 -top-16 h-52 w-52 rounded-full bg-amber-200/40 blur-2xl" />
