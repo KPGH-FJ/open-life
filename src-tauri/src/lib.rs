@@ -949,6 +949,128 @@ async fn preprocess_chat_input(
         context_summary,
     ))
 }
+
+/// V2 preprocessing using ContextAssembler.
+/// This is functionally equivalent to preprocess_chat_input but uses
+/// the modular ContextAssembler trait for better testability and extensibility.
+async fn preprocess_chat_input_v2(
+    session_id: &str,
+    messages: &[ChatMessage],
+    state: &State<'_, Arc<AppState>>,
+) -> Result<
+    (
+        LifeModel,
+        String,
+        PrivacyEngine,
+        HashMap<String, String>,
+        Vec<ChatMessage>,
+        Option<String>,
+        openlife_core::agent::types::ContextSummary,
+    ),
+    String,
+> {
+    // Step 1: Persist user message (same as v1)
+    if let Some(user_msg) = messages.last() {
+        if user_msg.role == "user" {
+            let inserted = persist_chat_message_if_needed(session_id, user_msg, state).await?;
+            if inserted {
+                persist_vector_memory_for_message(session_id, user_msg, state).await;
+            }
+        }
+    }
+
+    // Step 2: Load LifeModel
+    let life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+
+    // Step 3: Refresh hot cache
+    {
+        let mut cache = state.hot_cache.lock().unwrap();
+        if cache.is_stale(&life_model) {
+            cache.refresh(&life_model);
+        }
+    }
+
+    // Step 4: Get tools prompt
+    let tools_prompt = {
+        let reg = state.mcp_registry.lock().await;
+        reg.tools_prompt()
+    };
+
+    // Step 5: Prefetch memory (async)
+    let (memory_context_opt, memory_hits, memory_retrieval_time_ms) = 
+        if let Some(user_msg) = messages.last() {
+            prefetch_memory_context(session_id, user_msg, state).await
+        } else {
+            (None, vec![], 0)
+        };
+
+    // Step 6: Build privacy engine
+    let privacy_engine = state.privacy_engine.lock().await.clone();
+
+    // Step 7: Assemble using ContextAssembler
+    let input = openlife_core::agent::AssembleInput {
+        session_id: session_id.to_string(),
+        messages: messages.to_vec(),
+        life_model,
+        tools_prompt: tools_prompt.clone(),
+        privacy_engine: privacy_engine.clone(),
+        memory_context: memory_context_opt,
+        memory_hits,
+        memory_retrieval_time_ms,
+    };
+
+    let assembler = openlife_core::agent::CompositeAssembler::new()
+        .with(Box::new(openlife_core::agent::LifeModelAssembler))
+        .with(Box::new(openlife_core::agent::PrivacyAssembler))
+        .with(Box::new(openlife_core::agent::MemoryAssembler))
+        .with(Box::new(openlife_core::agent::ToolsAssembler));
+
+    let output = assembler.assemble(&input).map_err(|e| e.to_string())?;
+
+    // Step 8: Apply hot cache (same as v1)
+    let mut desensitized_messages = output.desensitized_messages;
+    let hot_context = {
+        let cache = state.hot_cache.lock().unwrap();
+        cache.to_context_string()
+    };
+    if !hot_context.is_empty() {
+        desensitized_messages.insert(
+            0,
+            ChatMessage {
+                role: "system".into(),
+                content: hot_context,
+            },
+        );
+    }
+
+    // Step 9: Apply memory context to last user message (same as v1)
+    if !output.memory_context.is_empty() {
+        if let Some(last_user) = desensitized_messages.iter_mut().rfind(|m| m.role == "user") {
+            last_user.content = format!("{}\n\n{}", last_user.content, output.memory_context);
+        }
+    }
+
+    // Step 10: Build embed_err if memory retrieval had issues
+    let embed_err = if memory_retrieval_time_ms == 0 && input.memory_context.is_none() {
+        None
+    } else {
+        None // Memory retrieval succeeded or wasn't attempted
+    };
+
+    Ok((
+        output.life_model,
+        output.tools_prompt,
+        privacy_engine,
+        output.privacy_map,
+        desensitized_messages,
+        embed_err,
+        output.context_summary,
+    ))
+}
+
 fn build_hermes_prompt(trace: &HermesTrace) -> String {
     let mut prompt = String::new();
     if let Some(ref m) = trace.meaning_result {
@@ -1170,6 +1292,12 @@ async fn send_message(
         }
     }
 
+    // Gradual rollout: use v2 if experimental flag is enabled
+    let use_v2 = {
+        let cfg = state.config.lock().await;
+        cfg.experimental_context_assembler
+    };
+
     let (
         mut life_model,
         tools_prompt,
@@ -1178,7 +1306,11 @@ async fn send_message(
         desensitized_messages,
         embed_err,
         _context_summary,
-    ) = preprocess_chat_input(&session_id, &messages, &state).await?;
+    ) = if use_v2 {
+        preprocess_chat_input_v2(&session_id, &messages, &state).await?
+    } else {
+        preprocess_chat_input(&session_id, &messages, &state).await?
+    };
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
@@ -1542,6 +1674,12 @@ async fn start_stream_message(
         }
     }
 
+    // Gradual rollout: use v2 if experimental flag is enabled
+    let use_v2 = {
+        let cfg = state.config.lock().await;
+        cfg.experimental_context_assembler
+    };
+
     let (
         mut life_model,
         tools_prompt,
@@ -1550,7 +1688,11 @@ async fn start_stream_message(
         desensitized_messages,
         _embed_err,
         context_summary,
-    ) = match preprocess_chat_input(&session_id, &messages, &state).await {
+    ) = match if use_v2 {
+        preprocess_chat_input_v2(&session_id, &messages, &state).await
+    } else {
+        preprocess_chat_input(&session_id, &messages, &state).await
+    } {
         Ok(result) => result,
         Err(message) => {
             let error = openlife_core::agent::AgentRunError {
