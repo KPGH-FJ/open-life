@@ -54,7 +54,9 @@ pub async fn delete_agent_run(
 ) -> Result<(), String> {
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        store.delete_run(&run_id, reason.as_deref()).map_err(|e| e.to_string())
+        store
+            .delete_run(&run_id, reason.as_deref())
+            .map_err(|e| e.to_string())
     } else {
         Ok(())
     }

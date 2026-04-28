@@ -1161,8 +1161,8 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={config.chat_proposal?.enabled ?? true}
-                onChange={(e) =>
-                  setConfig((prev) => ({
+                onChange={e =>
+                  setConfig(prev => ({
                     ...prev,
                     chat_proposal: {
                       ...prev.chat_proposal,
@@ -1184,8 +1184,8 @@ export default function SettingsPage() {
                   max="1"
                   step="0.1"
                   value={config.chat_proposal?.confidence_threshold ?? 0.6}
-                  onChange={(e) =>
-                    setConfig((prev) => ({
+                  onChange={e =>
+                    setConfig(prev => ({
                       ...prev,
                       chat_proposal: {
                         ...prev.chat_proposal,
@@ -1203,8 +1203,8 @@ export default function SettingsPage() {
                   min="5"
                   max="100"
                   value={config.chat_proposal?.min_message_length ?? 10}
-                  onChange={(e) =>
-                    setConfig((prev) => ({
+                  onChange={e =>
+                    setConfig(prev => ({
                       ...prev,
                       chat_proposal: {
                         ...prev.chat_proposal,
@@ -1225,8 +1225,8 @@ export default function SettingsPage() {
                 max="3600"
                 step="60"
                 value={config.chat_proposal?.cooldown_seconds ?? 300}
-                onChange={(e) =>
-                  setConfig((prev) => ({
+                onChange={e =>
+                  setConfig(prev => ({
                     ...prev,
                     chat_proposal: {
                       ...prev.chat_proposal,
@@ -1248,8 +1248,8 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={config.experimental_context_assembler ?? false}
-                onChange={(e) =>
-                  setConfig((prev) => ({
+                onChange={e =>
+                  setConfig(prev => ({
                     ...prev,
                     experimental_context_assembler: e.target.checked,
                   }))
@@ -1263,8 +1263,8 @@ export default function SettingsPage() {
               <input
                 type="checkbox"
                 checked={config.experimental_model_router ?? false}
-                onChange={(e) =>
-                  setConfig((prev) => ({
+                onChange={e =>
+                  setConfig(prev => ({
                     ...prev,
                     experimental_model_router: e.target.checked,
                   }))

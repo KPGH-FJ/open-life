@@ -111,9 +111,11 @@ impl InferenceScheduler {
         // Use ModelRouter if available (experimental)
         if let Some(ref router) = self.model_router {
             let decision = router.route_chat(tools_prompt, self.prefer_local)?;
-            eprintln!("[ModelRouter] Route decision: provider={}, model={}, reason={}",
-                decision.provider, decision.model, decision.reason);
-            
+            eprintln!(
+                "[ModelRouter] Route decision: provider={}, model={}, reason={}",
+                decision.provider, decision.model, decision.reason
+            );
+
             if decision.provider == "ollama" {
                 let resolved_local_model = resolve_ollama_model(&self.local_model).await;
                 chat_with_ollama(
@@ -203,9 +205,11 @@ impl InferenceScheduler {
         // Use ModelRouter if available (experimental)
         if let Some(ref router) = self.model_router {
             let decision = router.route_chat(tools_prompt, self.prefer_local)?;
-            eprintln!("[ModelRouter] Stream route decision: provider={}, model={}, reason={}",
-                decision.provider, decision.model, decision.reason);
-            
+            eprintln!(
+                "[ModelRouter] Stream route decision: provider={}, model={}, reason={}",
+                decision.provider, decision.model, decision.reason
+            );
+
             if decision.provider == "ollama" {
                 let resolved_local_model = resolve_ollama_model(&self.local_model).await;
                 let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);

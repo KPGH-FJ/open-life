@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use openlife_core::agent::ContextAssembler;
 use openlife_core::builder::{BuilderSession, BuilderSessionStore};
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -12,7 +13,6 @@ use openlife_core::memory::{MemorySearchHit, MemoryStore};
 use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::router::{IntentRouter, RouterStatus};
-use openlife_core::agent::ContextAssembler;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertItem, VectorStore};
 use openlife_core::versioning::VersionManager;
@@ -31,7 +31,9 @@ use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
 };
-use commands::agent::{delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session};
+use commands::agent::{
+    delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
+};
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -678,9 +680,13 @@ async fn prefetch_memory_context(
     session_id: &str,
     user_message: &ChatMessage,
     state: &State<'_, Arc<AppState>>,
-) -> (Option<String>, Vec<openlife_core::agent::context_assembler::MemoryHit>, u64) {
+) -> (
+    Option<String>,
+    Vec<openlife_core::agent::context_assembler::MemoryHit>,
+    u64,
+) {
     let start = std::time::Instant::now();
-    
+
     if user_message.role != "user" {
         return (None, vec![], 0);
     }
@@ -735,13 +741,15 @@ async fn prefetch_memory_context(
 
     let memory_hits: Vec<openlife_core::agent::context_assembler::MemoryHit> = results
         .iter()
-        .map(|(chunk, score)| openlife_core::agent::context_assembler::MemoryHit {
-            id: chunk.id.clone(),
-            content: chunk.content.clone(),
-            source: chunk.source.clone(),
-            score: *score,
-            tier: chunk.tier,
-        })
+        .map(
+            |(chunk, score)| openlife_core::agent::context_assembler::MemoryHit {
+                id: chunk.id.clone(),
+                content: chunk.content.clone(),
+                source: chunk.source.clone(),
+                score: *score,
+                tier: chunk.tier,
+            },
+        )
         .collect();
 
     let snippets: Vec<String> = results
@@ -878,7 +886,10 @@ async fn preprocess_chat_input(
 
             let results = merge_memory_hits(vector_hits, text_hits, 3);
             memory_hit_count = results.len();
-            memory_sources = results.iter().map(|(chunk, _)| chunk.source.clone()).collect();
+            memory_sources = results
+                .iter()
+                .map(|(chunk, _)| chunk.source.clone())
+                .collect();
             if results.is_empty() {
                 String::new()
             } else {
@@ -928,7 +939,12 @@ async fn preprocess_chat_input(
 
     let context_summary = openlife_core::agent::types::ContextSummary {
         life_model_empty: life_model.identity.name.is_empty(),
-        included_life_model_sections: vec!["identity".to_string(), "goals".to_string(), "capabilities".to_string(), "state".to_string()],
+        included_life_model_sections: vec![
+            "identity".to_string(),
+            "goals".to_string(),
+            "capabilities".to_string(),
+            "state".to_string(),
+        ],
         memory_hit_count: memory_hit_count as i64,
         memory_sources,
         used_tools_prompt: !tools_prompt.is_empty(),
@@ -1001,7 +1017,7 @@ async fn preprocess_chat_input_v2(
     };
 
     // Step 5: Prefetch memory (async)
-    let (memory_context_opt, memory_hits, memory_retrieval_time_ms) = 
+    let (memory_context_opt, memory_hits, memory_retrieval_time_ms) =
         if let Some(user_msg) = messages.last() {
             prefetch_memory_context(session_id, user_msg, state).await
         } else {
@@ -2193,7 +2209,7 @@ async fn start_stream_message(
                 config.chat_proposal.cooldown_seconds,
             );
             drop(config);
-            
+
             if enabled {
                 match generator.generate_proposals(&session_id, &user_msg.content, &life_model) {
                     Ok(proposals) if !proposals.is_empty() => {

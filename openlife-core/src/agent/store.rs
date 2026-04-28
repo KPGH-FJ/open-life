@@ -66,14 +66,8 @@ impl AgentRunStore {
             [],
         );
         // Migration: add soft delete columns
-        let _ = conn.execute(
-            "ALTER TABLE agent_runs ADD COLUMN deleted_at TEXT",
-            [],
-        );
-        let _ = conn.execute(
-            "ALTER TABLE agent_runs ADD COLUMN delete_reason TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN deleted_at TEXT", []);
+        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN delete_reason TEXT", []);
         // Migration: add actions and observations JSON columns
         let _ = conn.execute(
             "ALTER TABLE agent_runs ADD COLUMN actions_json TEXT DEFAULT '[]'",
@@ -511,7 +505,11 @@ impl AgentRunStore {
         Ok(rows_affected)
     }
 
-    pub fn add_action(&self, run_id: &str, action: &crate::agent::types::AgentAction) -> Result<()> {
+    pub fn add_action(
+        &self,
+        run_id: &str,
+        action: &crate::agent::types::AgentAction,
+    ) -> Result<()> {
         let conn = self
             .conn
             .lock()

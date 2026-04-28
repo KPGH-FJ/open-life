@@ -29,11 +29,14 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
 | Builder | 已支持快速、渐进、苏格拉底式构建 | 通过 Proposal 机制安全写入 LifeModel |
 | Chat | 已支持流式对话和历史持久化 | 升级为 Agent 执行界面，展示上下文、模型路由和运行轨迹 |
-| Model Router | 已支持本地 Ollama 与云端 OpenAI-compatible | 升级为按任务、隐私、能力和成本路由的 ModelRouter |
+| **ModelRouter** | ✅ **已升级为任务/隐私感知的智能路由** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
 | MCP/A2A | 已有工具和外部 Agent 接入基础 | 成为 AgentAction 执行层，并默认受权限和审计保护 |
 | Calibration/Evolution | 已有建议和校准雏形 | 统一进入 Proposal/Confirmation 机制 |
 | Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
+| **Chat Proposal** | ✅ **自动从对话中提取目标/状态/能力** | 自动感知用户意图并生成 LifeModel 更新提案 |
+| **ContextAssembler** | ✅ **模块化上下文组装（V2 灰度中）** | 可插拔的记忆/隐私/工具上下文组装 |
+| **Workspace** | ✅ **驾驶舱首页，实时状态概览** | 统一的 Agent 任务入口和监控中心 |
 
 ## 技术栈
 
@@ -137,31 +140,54 @@ cd frontend && npm run build
 
 ## 当前推荐试用路径
 
-当前 UI 还没有完全迁移到 Agent Workspace，因此建议按下面路径体验：
+### 主线体验（推荐）
 
-1. `Settings` 完成模型配置、诊断检查和 Safe Mode 检查。
-2. `Builder` 完成一次快速构建，或恢复待确认 Review。
-3. 在 Review 中确认要写入 LifeModel 的字段。
-4. `Chat` 发起一次个性化对话。
-5. `Dashboard` 查看下一步行动和模型依据。
-6. `Calibration / VersionControl / Memory` 查看建议来源、记忆和回滚路径。
+1. **`Workspace`**（首页驾驶舱）查看系统状态、待处理 Proposal、今日 AgentRun 统计。
+2. **`Agent`** 发起个性化对话，观察 Chat Proposal 自动提取目标和状态。
+3. **`Review`** 审查 AI 生成的 LifeModel 更新提案，确认或拒绝。
+4. **`Builder`** 完成一次快速构建，或恢复待确认 Review。
+5. **`Runs`** 查看所有 Agent 执行记录，按状态/类型过滤，批量管理。
+6. **`Settings`** 完成模型配置、诊断检查，开启实验性功能（ContextAssembler V2 / ModelRouter）。
 
-这条路径是当前 Alpha 的主链路。后续会被迁移为：
+### 实验性功能（灰度测试）
+
+在 Settings → 实验性功能中可开启：
+
+- **ContextAssembler V2**：使用模块化组装器构建对话上下文（默认关闭，可回滚）
+- **ModelRouter**：智能路由选择本地/云端模型（默认关闭，带健康检查）
 
 ```text
 Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
 ```
 
+## 最近完成的重要更新
+
+### Phase 1-3: Agent Runtime 基础设施
+- ✅ AgentRun 增强（RedactionLevel、AgentAction、AgentObservation）
+- ✅ LifeModel Patch 系统（5 种操作、冲突检测、自动解决）
+- ✅ Proposal 统一层（Builder/Calibration/Feedback/Memory 统一确认流）
+
+### Phase 4-5: 路由与上下文
+- ✅ **ModelRouter**：任务类型感知、隐私级别、Provider 健康检查
+- ✅ **ContextAssembler**：模块化 LifeModel/Memory/Privacy/Tools 组装
+
+### Phase 2.5: Chat Proposal
+- ✅ 关键词提取（中英文目标/状态/能力识别）
+- ✅ 动态置信度计算（信号强度 + 强调标记）
+- ✅ 可配置冷却时间和阈值
+
+### Phase 6: Workspace 重设计
+- ✅ Workspace 驾驶舱（系统状态、待处理 Proposal、Run 统计）
+- ✅ Runs 页面增强（过滤、搜索、分页、批量操作、回收站）
+- ✅ 导航重构（Workspace 为默认首页）
+
 ## 当前重要开发方向
 
-短期不再优先扩页面，而是围绕以下主线推进：
-
-1. 引入 `AgentTask` 和 `AgentRun`，让每次 AI 执行可追踪。
-2. 将 Chat 升级为第一个 Agent 执行表面。
-3. 统一 Builder、Calibration、Evolution 的 Proposal/Confirmation 机制。
-4. 将 Scheduler 升级为真正的 ModelRouter。
-5. 将 Dashboard 重构为 Workspace。
-6. 建立 Proactive Agent 的安全 MVP。
+1. 灰度测试 ContextAssembler V2 和 ModelRouter，收集反馈。
+2. 建立 RolloutMetrics 监控和自动回滚机制。
+3. 实现 Proactive Agent 的安全 MVP。
+4. 将 MemoryAssembler 接入真实的 VectorStore。
+5. 完善 E2E 测试覆盖和性能基准。
 
 ## 常见问题
 

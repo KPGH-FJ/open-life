@@ -182,11 +182,20 @@ pub struct PatchApplyResult {
 #[derive(Debug, Clone)]
 pub enum PatchError {
     InvalidPath(String),
-    BeforeMismatch { expected: serde_json::Value, actual: serde_json::Value },
-    InvalidOperation { op: PatchOp, reason: String },
+    BeforeMismatch {
+        expected: serde_json::Value,
+        actual: serde_json::Value,
+    },
+    InvalidOperation {
+        op: PatchOp,
+        reason: String,
+    },
     Serialization(String),
     Validation(String),
-    IndexOutOfBounds { index: usize, len: usize },
+    IndexOutOfBounds {
+        index: usize,
+        len: usize,
+    },
 }
 
 impl std::fmt::Display for PatchError {
@@ -194,7 +203,11 @@ impl std::fmt::Display for PatchError {
         match self {
             PatchError::InvalidPath(p) => write!(f, "Invalid path: {}", p),
             PatchError::BeforeMismatch { expected, actual } => {
-                write!(f, "Before mismatch: expected {:?}, got {:?}", expected, actual)
+                write!(
+                    f,
+                    "Before mismatch: expected {:?}, got {:?}",
+                    expected, actual
+                )
             }
             PatchError::InvalidOperation { op, reason } => {
                 write!(f, "Invalid operation {:?}: {}", op, reason)
@@ -316,7 +329,7 @@ pub fn pointer_to_display(pointer: &str, _model: &crate::life_model::LifeModel) 
             }
         })
         .collect();
-    
+
     if parts.is_empty() {
         "Root".to_string()
     } else {
@@ -328,12 +341,12 @@ pub fn pointer_to_display(pointer: &str, _model: &crate::life_model::LifeModel) 
 /// Returns a list of conflicts that need resolution.
 pub fn detect_conflicts(patches: &[LifeModelPatch]) -> Vec<PatchConflict> {
     let mut conflicts = Vec::new();
-    
+
     for i in 0..patches.len() {
         for j in (i + 1)..patches.len() {
             let p1 = &patches[i];
             let p2 = &patches[j];
-            
+
             // Check for same path conflict
             if p1.path_pointer == p2.path_pointer {
                 // Append + Append on same array is not a conflict
@@ -349,10 +362,15 @@ pub fn detect_conflicts(patches: &[LifeModelPatch]) -> Vec<PatchConflict> {
                 });
                 continue;
             }
-            
+
             // Check for parent-child conflict
-            if p1.path_pointer.starts_with(&format!("{}/", p2.path_pointer)) ||
-               p2.path_pointer.starts_with(&format!("{}/", p1.path_pointer)) {
+            if p1
+                .path_pointer
+                .starts_with(&format!("{}/", p2.path_pointer))
+                || p2
+                    .path_pointer
+                    .starts_with(&format!("{}/", p1.path_pointer))
+            {
                 conflicts.push(PatchConflict {
                     patch_id_1: p1.id.clone(),
                     patch_id_2: p2.id.clone(),
@@ -362,9 +380,11 @@ pub fn detect_conflicts(patches: &[LifeModelPatch]) -> Vec<PatchConflict> {
                 });
                 continue;
             }
-            
+
             // Check for array index conflict
-            if let Some(conflict_type) = detect_array_index_conflict(&p1.path_pointer, &p2.path_pointer) {
+            if let Some(conflict_type) =
+                detect_array_index_conflict(&p1.path_pointer, &p2.path_pointer)
+            {
                 conflicts.push(PatchConflict {
                     patch_id_1: p1.id.clone(),
                     patch_id_2: p2.id.clone(),
@@ -375,7 +395,7 @@ pub fn detect_conflicts(patches: &[LifeModelPatch]) -> Vec<PatchConflict> {
             }
         }
     }
-    
+
     conflicts
 }
 
@@ -383,14 +403,14 @@ pub fn detect_conflicts(patches: &[LifeModelPatch]) -> Vec<PatchConflict> {
 fn detect_array_index_conflict(path1: &str, path2: &str) -> Option<ConflictType> {
     let parts1: Vec<&str> = path1.split('/').filter(|s| !s.is_empty()).collect();
     let parts2: Vec<&str> = path2.split('/').filter(|s| !s.is_empty()).collect();
-    
+
     if parts1.len() != parts2.len() {
         return None;
     }
-    
+
     let mut index_diff: Option<(usize, usize)> = None;
     let mut diff_count = 0;
-    
+
     for (p1, p2) in parts1.iter().zip(parts2.iter()) {
         if p1 != p2 {
             if let (Ok(i1), Ok(i2)) = (p1.parse::<usize>(), p2.parse::<usize>()) {
@@ -405,7 +425,7 @@ fn detect_array_index_conflict(path1: &str, path2: &str) -> Option<ConflictType>
             }
         }
     }
-    
+
     if diff_count == 1 && index_diff.is_some() {
         Some(ConflictType::ArrayIndex)
     } else {
@@ -422,11 +442,11 @@ pub fn auto_resolve_conflicts(
     let mut accepted: Vec<String> = patches.iter().map(|p| p.id.clone()).collect();
     let mut rejected: Vec<String> = Vec::new();
     let mut manual: Vec<PatchConflict> = Vec::new();
-    
+
     for conflict in conflicts {
         let p1 = patches.iter().find(|p| p.id == conflict.patch_id_1);
         let p2 = patches.iter().find(|p| p.id == conflict.patch_id_2);
-        
+
         if let (Some(patch1), Some(patch2)) = (p1, p2) {
             // Low risk: auto-resolve by timestamp (keep latest)
             if patch1.risk_level == RiskLevel::Low && patch2.risk_level == RiskLevel::Low {
@@ -440,7 +460,7 @@ pub fn auto_resolve_conflicts(
                 } else {
                     patch1.id.clone()
                 };
-                
+
                 accepted.retain(|id| id != &reject);
                 if !rejected.contains(&reject) {
                     rejected.push(reject);
@@ -451,7 +471,7 @@ pub fn auto_resolve_conflicts(
             }
         }
     }
-    
+
     (accepted, rejected, manual)
 }
 
@@ -461,7 +481,10 @@ mod tests {
 
     #[test]
     fn test_dot_to_pointer() {
-        assert_eq!(dot_to_pointer("identity.values.0.weight"), "/identity/values/0/weight");
+        assert_eq!(
+            dot_to_pointer("identity.values.0.weight"),
+            "/identity/values/0/weight"
+        );
         assert_eq!(dot_to_pointer("goals.short_term"), "/goals/short_term");
     }
 
@@ -469,7 +492,10 @@ mod tests {
     fn test_pointer_to_display() {
         use crate::life_model::LifeModel;
         let model = LifeModel::default();
-        assert_eq!(pointer_to_display("/identity/values/0/weight", &model), "Identity > Values > [0] > Weight");
+        assert_eq!(
+            pointer_to_display("/identity/values/0/weight", &model),
+            "Identity > Values > [0] > Weight"
+        );
     }
 
     #[test]
@@ -492,7 +518,7 @@ mod tests {
             RiskLevel::Medium,
             PatchSource::Manual,
         );
-        
+
         let conflicts = detect_conflicts(&[p1, p2]);
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_type, ConflictType::SamePath);
@@ -518,7 +544,7 @@ mod tests {
             RiskLevel::Low,
             PatchSource::Manual,
         );
-        
+
         let conflicts = detect_conflicts(&[p1, p2]);
         assert!(conflicts.is_empty());
     }
@@ -543,10 +569,10 @@ mod tests {
             RiskLevel::Low,
             PatchSource::Manual,
         );
-        
+
         let conflicts = detect_conflicts(&[p1.clone(), p2.clone()]);
         let (accepted, rejected, manual) = auto_resolve_conflicts(&[p1, p2], &conflicts);
-        
+
         assert_eq!(accepted.len(), 1);
         assert_eq!(rejected.len(), 1);
         assert!(manual.is_empty());

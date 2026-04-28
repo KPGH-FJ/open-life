@@ -1170,7 +1170,17 @@ export interface AgentRun {
   taskId: string;
   sessionId?: string;
   status: "running" | "completed" | "failed" | "cancelled";
-  kind: "conversation" | "builder" | "calibration" | "evolution" | "tool_execution" | "proactive" | "planning" | "review" | "writing" | "memory_governance";
+  kind:
+    | "conversation"
+    | "builder"
+    | "calibration"
+    | "evolution"
+    | "tool_execution"
+    | "proactive"
+    | "planning"
+    | "review"
+    | "writing"
+    | "memory_governance";
   userInput?: string;
   contextSummary?: ContextSummary;
   modelRoute?: ModelRouteTrace;
@@ -1218,7 +1228,13 @@ export async function batchAcceptLowRiskProposals(): Promise<number> {
 }
 
 // ── Proposal ──
-export type ProposalStatus = "pending" | "accepted" | "rejected" | "edited" | "postponed" | "expired";
+export type ProposalStatus =
+  | "pending"
+  | "accepted"
+  | "rejected"
+  | "edited"
+  | "postponed"
+  | "expired";
 export type ProposalType =
   | "goal_update"
   | "state_update"
@@ -1267,7 +1283,9 @@ export interface PatchApplyResult {
   error?: string;
 }
 
-export async function acceptProposal(proposalId: string): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
+export async function acceptProposal(
+  proposalId: string
+): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
 
@@ -1275,8 +1293,16 @@ export async function rejectProposal(proposalId: string): Promise<void> {
   return safeInvoke("reject_proposal", { proposalId, proposal_id: proposalId });
 }
 
-export async function editProposal(proposalId: string, newAfter: any): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
-  return safeInvoke("edit_proposal", { proposalId, proposal_id: proposalId, newAfter, new_after: newAfter });
+export async function editProposal(
+  proposalId: string,
+  newAfter: any
+): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
+  return safeInvoke("edit_proposal", {
+    proposalId,
+    proposal_id: proposalId,
+    newAfter,
+    new_after: newAfter,
+  });
 }
 
 export async function postponeProposal(proposalId: string): Promise<void> {

@@ -1,5 +1,7 @@
 use crate::{persist_life_model, AppState};
-use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel};
+use openlife_core::agent::{
+    AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
+};
 use openlife_core::builder::{
     BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary, SignalUserStatus,
 };

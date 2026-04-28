@@ -78,7 +78,7 @@ export default function RunsPage() {
     }
   }
 
-  const filteredRuns = runs.filter((run) => {
+  const filteredRuns = runs.filter(run => {
     // Trash filter
     if (showTrash) {
       return run.deleted_at !== null;
@@ -119,7 +119,7 @@ export default function RunsPage() {
     if (selectedRuns.size === paginatedRuns.length) {
       setSelectedRuns(new Set());
     } else {
-      setSelectedRuns(new Set(paginatedRuns.map((r) => r.id)));
+      setSelectedRuns(new Set(paginatedRuns.map(r => r.id)));
     }
   }
 
@@ -179,9 +179,7 @@ export default function RunsPage() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-stone-900">
-              {showTrash ? "回收站" : "Runs"}
-            </h1>
+            <h1 className="text-2xl font-bold text-stone-900">{showTrash ? "回收站" : "Runs"}</h1>
             <div className="text-sm text-stone-500">
               共 {filteredRuns.length} 条记录
               {showTrash && " (已删除)"}
@@ -219,12 +217,15 @@ export default function RunsPage() {
             {/* Search */}
             <div className="flex-1 min-w-[200px]">
               <div className="relative">
-                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400" />
+                <Search
+                  size={16}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-stone-400"
+                />
                 <input
                   type="text"
                   placeholder="搜索输入内容或输出..."
                   value={searchQuery}
-                  onChange={(e) => {
+                  onChange={e => {
                     setSearchQuery(e.target.value);
                     setPage(0);
                   }}
@@ -238,13 +239,13 @@ export default function RunsPage() {
               <Filter size={16} className="text-stone-400" />
               <select
                 value={statusFilter}
-                onChange={(e) => {
+                onChange={e => {
                   setStatusFilter(e.target.value);
                   setPage(0);
                 }}
                 className="px-3 py-2 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
               >
-                {statusOptions.map((opt) => (
+                {statusOptions.map(opt => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>
@@ -255,13 +256,13 @@ export default function RunsPage() {
             {/* Kind filter */}
             <select
               value={kindFilter}
-              onChange={(e) => {
+              onChange={e => {
                 setKindFilter(e.target.value);
                 setPage(0);
               }}
               className="px-3 py-2 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-stone-900"
             >
-              {kindOptions.map((opt) => (
+              {kindOptions.map(opt => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
@@ -272,9 +273,7 @@ export default function RunsPage() {
           {/* Batch actions */}
           {selectedRuns.size > 0 && (
             <div className="flex items-center gap-3 pt-3 border-t border-stone-100">
-              <span className="text-sm text-stone-600">
-                已选择 {selectedRuns.size} 条
-              </span>
+              <span className="text-sm text-stone-600">已选择 {selectedRuns.size} 条</span>
               {showTrash ? (
                 <button
                   onClick={handleBatchRestore}
@@ -308,9 +307,7 @@ export default function RunsPage() {
             <Activity size={48} className="mx-auto mb-4 opacity-30" />
             <p>{showTrash ? "回收站为空" : "暂无运行记录"}</p>
             <p className="text-sm mt-1">
-              {showTrash
-                ? "删除的 Run 将显示在这里"
-                : "开始对话或构建 LifeModel 后将在此显示"}
+              {showTrash ? "删除的 Run 将显示在这里" : "开始对话或构建 LifeModel 后将在此显示"}
             </p>
           </div>
         ) : (
@@ -321,8 +318,7 @@ export default function RunsPage() {
                 <input
                   type="checkbox"
                   checked={
-                    paginatedRuns.length > 0 &&
-                    paginatedRuns.every((r) => selectedRuns.has(r.id))
+                    paginatedRuns.length > 0 && paginatedRuns.every(r => selectedRuns.has(r.id))
                   }
                   onChange={selectAll}
                   className="rounded border-stone-300"
@@ -330,7 +326,7 @@ export default function RunsPage() {
                 <span className="text-xs text-stone-500">全选本页</span>
               </div>
 
-              {paginatedRuns.map((run) => (
+              {paginatedRuns.map(run => (
                 <div
                   key={run.id}
                   className={`bg-white rounded-xl border p-4 cursor-pointer hover:shadow-md transition-shadow ${
@@ -343,23 +339,18 @@ export default function RunsPage() {
                     <input
                       type="checkbox"
                       checked={selectedRuns.has(run.id)}
-                      onChange={(e) => {
+                      onChange={e => {
                         e.stopPropagation();
                         toggleSelect(run.id);
                       }}
                       className="mt-1 rounded border-stone-300"
                     />
-                    <div
-                      className="flex-1"
-                      onClick={() => navigate(`/runs/${run.id}`)}
-                    >
+                    <div className="flex-1" onClick={() => navigate(`/runs/${run.id}`)}>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                           {statusIcon(run.status)}
                           <div>
-                            <div className="font-medium text-stone-900">
-                              {kindLabel(run.kind)}
-                            </div>
+                            <div className="font-medium text-stone-900">{kindLabel(run.kind)}</div>
                             <div className="text-xs text-stone-500 mt-0.5">
                               {run.user_input
                                 ? run.user_input.slice(0, 60) + "..."

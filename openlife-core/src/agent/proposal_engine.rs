@@ -6,9 +6,9 @@ use anyhow::Result;
 pub trait ProposalGenerator: Send + Sync {
     fn name(&self) -> &'static str;
     fn source(&self) -> ProposalSource;
-    
+
     /// Generate proposals from an agent run output.
-    /// 
+    ///
     /// # Arguments
     /// * `run` - The agent run that produced the output
     /// * `output` - The output text to analyze
@@ -52,7 +52,7 @@ impl ProposalEngine {
         life_model: &LifeModel,
     ) -> Result<Vec<AgentProposal>> {
         let mut all_proposals = Vec::new();
-        
+
         for generator in &self.generators {
             match generator.generate(run, output, life_model) {
                 Ok(proposals) => {
@@ -68,7 +68,7 @@ impl ProposalEngine {
                 }
             }
         }
-        
+
         Ok(all_proposals)
     }
 }
@@ -175,7 +175,7 @@ mod tests {
         let mut engine = ProposalEngine::new();
         engine.register(Box::new(BuilderProposalGenerator));
         engine.register(Box::new(CalibrationProposalGenerator));
-        
+
         assert_eq!(engine.generators.len(), 2);
     }
 

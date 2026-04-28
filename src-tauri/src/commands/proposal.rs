@@ -71,18 +71,20 @@ async fn apply_proposal_to_state(
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
             };
-            
+
             // 1. Create Before Snapshot
             let _before_snapshot = {
                 let vm = state.version_manager.lock().await;
                 vm.snapshot_for_patch(&model, &proposal.id, "before")
                     .map_err(|e| e.to_string())?
             };
-            
+
             // 2. Generate Patch from Proposal
-            let path_pointer = openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
-            let path_display = openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
-            
+            let path_pointer =
+                openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
+            let path_display =
+                openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+
             let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
                 &proposal.id,
                 &path_pointer,
@@ -95,24 +97,24 @@ async fn apply_proposal_to_state(
                 proposal.risk_level.clone(),
                 openlife_core::life_model::patch::PatchSource::BuilderReview,
             );
-            
+
             // 3. Apply Patch using new engine
             let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
-            
+
             if !result.success {
                 return Ok(result);
             }
-            
+
             // 4. Persist updated model
             persist_life_model(state, model.clone(), true).await?;
-            
+
             // 5. Create After Snapshot
             let _after_snapshot = {
                 let vm = state.version_manager.lock().await;
                 vm.snapshot_for_patch(&model, &proposal.id, "after")
                     .map_err(|e| e.to_string())?
             };
-            
+
             // 6. Save Patch to PatchStore
             if let Some(ref patch_store_arc) = state.patch_store {
                 let patch_store = patch_store_arc.lock().await;
@@ -120,7 +122,7 @@ async fn apply_proposal_to_state(
                 patch_to_save.mark_applied();
                 let _ = patch_store.create_patch(&patch_to_save);
             }
-            
+
             Ok(result)
         }
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => {
@@ -183,7 +185,10 @@ pub(crate) async fn accept_proposal_with_state(
     ensure_pending_or_postponed(&proposal)?;
     let result = apply_proposal_to_state(state, &proposal, proposal.after.clone()).await?;
     if !result.success {
-        return Err(format!("Patch 应用失败: {}", result.error.unwrap_or_default()));
+        return Err(format!(
+            "Patch 应用失败: {}",
+            result.error.unwrap_or_default()
+        ));
     }
     proposal.accept();
     update_proposal_with_state(state, &proposal).await?;
@@ -213,7 +218,10 @@ pub(crate) async fn edit_proposal_with_state(
     ensure_pending_or_postponed(&proposal)?;
     let result = apply_proposal_to_state(state, &proposal, new_after.clone()).await?;
     if !result.success {
-        return Err(format!("Patch 应用失败: {}", result.error.unwrap_or_default()));
+        return Err(format!(
+            "Patch 应用失败: {}",
+            result.error.unwrap_or_default()
+        ));
     }
     proposal.edit(new_after);
     update_proposal_with_state(state, &proposal).await?;

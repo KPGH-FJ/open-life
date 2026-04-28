@@ -59,7 +59,10 @@ impl ProposalStore {
         )?;
         // Migration: add new columns if table exists without them
         let _ = conn.execute("ALTER TABLE proposals ADD COLUMN run_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source TEXT DEFAULT 'manual'", []);
+        let _ = conn.execute(
+            "ALTER TABLE proposals ADD COLUMN source TEXT DEFAULT 'manual'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE proposals ADD COLUMN source_detail TEXT", []);
         let _ = conn.execute("ALTER TABLE proposals ADD COLUMN expires_at TEXT", []);
         conn.execute(

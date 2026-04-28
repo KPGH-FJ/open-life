@@ -11,7 +11,8 @@ pub struct ChatProposalGenerator {
     /// Cooldown duration in seconds between extractions for the same session
     pub cooldown_seconds: i64,
     /// Last extraction timestamp per session
-    last_extraction: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    last_extraction:
+        std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
 }
 
 impl Default for ChatProposalGenerator {
@@ -108,9 +109,7 @@ impl ChatProposalGenerator {
         // Extract state changes
         if let Some(state_update) = Self::extract_state_changes(message) {
             // Count matched state signals
-            let signal_count = state_update.as_object()
-                .map(|obj| obj.len())
-                .unwrap_or(0);
+            let signal_count = state_update.as_object().map(|obj| obj.len()).unwrap_or(0);
             let confidence = Self::calculate_confidence(signal_count, text_len, has_emphasis);
             if confidence >= self.confidence_threshold {
                 let mut proposal = AgentProposal::new(
@@ -168,15 +167,22 @@ impl ChatProposalGenerator {
     /// Extract goals from text using keyword matching.
     fn extract_goals(text: &str) -> Option<Vec<ExtractedGoal>> {
         let text_lower = text.to_lowercase();
-        
+
         // Chinese keywords
         let cn_keywords = ["我想", "我要", "计划", "目标", "打算", "希望", "准备"];
         // English keywords
-        let en_keywords = ["want to", "plan to", "goal", "objective", "aim to", "would like to"];
-        
+        let en_keywords = [
+            "want to",
+            "plan to",
+            "goal",
+            "objective",
+            "aim to",
+            "would like to",
+        ];
+
         let has_goal_signal = cn_keywords.iter().any(|kw| text_lower.contains(kw))
             || en_keywords.iter().any(|kw| text_lower.contains(kw));
-        
+
         if !has_goal_signal {
             return None;
         }
@@ -190,7 +196,8 @@ impl ChatProposalGenerator {
                 let start = pos + keyword.len();
                 let remaining = &text[start..];
                 // Extract up to punctuation or 20 chars
-                let end_pos = remaining.find(|c: char| c == '。' || c == '，' || c == '！' || c == '\n')
+                let end_pos = remaining
+                    .find(|c: char| c == '。' || c == '，' || c == '！' || c == '\n')
                     .unwrap_or(remaining.len().min(30));
                 let goal_text = remaining[..end_pos].trim();
                 if !goal_text.is_empty() && goal_text.len() > 2 {
@@ -209,7 +216,8 @@ impl ChatProposalGenerator {
             if let Some(pos) = text_lower.find(keyword) {
                 let start = pos + keyword.len();
                 let remaining = &text[start..];
-                let end_pos = remaining.find(|c: char| c == '.' || c == ',' || c == '!' || c == '\n')
+                let end_pos = remaining
+                    .find(|c: char| c == '.' || c == ',' || c == '!' || c == '\n')
                     .unwrap_or(remaining.len().min(40));
                 let goal_text = remaining[..end_pos].trim();
                 if !goal_text.is_empty() && goal_text.len() > 3 {
@@ -233,44 +241,65 @@ impl ChatProposalGenerator {
     /// Extract state changes from text.
     fn extract_state_changes(text: &str) -> Option<serde_json::Value> {
         let text_lower = text.to_lowercase();
-        
+
         // Energy level detection
-        let energy_level = if text_lower.contains("累") || text_lower.contains(" tired") 
-            || text_lower.contains(" exhausted") || text_lower.contains(" fatigue") {
+        let energy_level = if text_lower.contains("累")
+            || text_lower.contains(" tired")
+            || text_lower.contains(" exhausted")
+            || text_lower.contains(" fatigue")
+        {
             Some(2u8)
-        } else if text_lower.contains("精力充沛") || text_lower.contains(" energetic")
-            || text_lower.contains(" excited") || text_lower.contains("活力") {
+        } else if text_lower.contains("精力充沛")
+            || text_lower.contains(" energetic")
+            || text_lower.contains(" excited")
+            || text_lower.contains("活力")
+        {
             Some(8u8)
-        } else if text_lower.contains("还行") || text_lower.contains("okay")
-            || text_lower.contains("一般") {
+        } else if text_lower.contains("还行")
+            || text_lower.contains("okay")
+            || text_lower.contains("一般")
+        {
             Some(5u8)
         } else {
             None
         };
 
         // Mood detection
-        let mood = if text_lower.contains("开心") || text_lower.contains("高兴")
-            || text_lower.contains("happy") || text_lower.contains(" great")
-            || text_lower.contains("不错") {
+        let mood = if text_lower.contains("开心")
+            || text_lower.contains("高兴")
+            || text_lower.contains("happy")
+            || text_lower.contains(" great")
+            || text_lower.contains("不错")
+        {
             Some("positive")
-        } else if text_lower.contains("难过") || text_lower.contains("伤心")
-            || text_lower.contains("sad") || text_lower.contains(" upset")
-            || text_lower.contains("沮丧") {
+        } else if text_lower.contains("难过")
+            || text_lower.contains("伤心")
+            || text_lower.contains("sad")
+            || text_lower.contains(" upset")
+            || text_lower.contains("沮丧")
+        {
             Some("negative")
-        } else if text_lower.contains("平静") || text_lower.contains("calm")
-            || text_lower.contains(" relaxed") {
+        } else if text_lower.contains("平静")
+            || text_lower.contains("calm")
+            || text_lower.contains(" relaxed")
+        {
             Some("neutral")
         } else {
             None
         };
 
         // Stress level detection
-        let stress_level = if text_lower.contains("压力") || text_lower.contains("焦虑")
-            || text_lower.contains("stress") || text_lower.contains(" anxious")
-            || text_lower.contains("紧张") {
+        let stress_level = if text_lower.contains("压力")
+            || text_lower.contains("焦虑")
+            || text_lower.contains("stress")
+            || text_lower.contains(" anxious")
+            || text_lower.contains("紧张")
+        {
             Some(7u8)
-        } else if text_lower.contains("放松") || text_lower.contains("relaxed")
-            || text_lower.contains(" calm") {
+        } else if text_lower.contains("放松")
+            || text_lower.contains("relaxed")
+            || text_lower.contains(" calm")
+        {
             Some(2u8)
         } else {
             None
@@ -296,14 +325,25 @@ impl ChatProposalGenerator {
     /// Extract capabilities from text.
     fn extract_capabilities(text: &str) -> Option<serde_json::Value> {
         let text_lower = text.to_lowercase();
-        
+
         // Capability detection keywords
         let cn_capability_keywords = ["会", "擅长", "学会了", "掌握", "精通", "熟悉"];
-        let en_capability_keywords = ["know", "can", "skilled in", "proficient in", "good at", "expert in"];
-        
-        let has_capability_signal = cn_capability_keywords.iter().any(|kw| text_lower.contains(kw))
-            || en_capability_keywords.iter().any(|kw| text_lower.contains(kw));
-        
+        let en_capability_keywords = [
+            "know",
+            "can",
+            "skilled in",
+            "proficient in",
+            "good at",
+            "expert in",
+        ];
+
+        let has_capability_signal = cn_capability_keywords
+            .iter()
+            .any(|kw| text_lower.contains(kw))
+            || en_capability_keywords
+                .iter()
+                .any(|kw| text_lower.contains(kw));
+
         if !has_capability_signal {
             return None;
         }
@@ -394,28 +434,32 @@ mod tests {
     fn test_generate_proposals() {
         let generator = create_test_generator();
         let model = LifeModel::default();
-        let proposals = generator.generate_proposals(
-            "session-1",
-            "我想学习 Rust 编程，今天感觉很累",
-            &model,
-        ).unwrap();
-        
+        let proposals = generator
+            .generate_proposals("session-1", "我想学习 Rust 编程，今天感觉很累", &model)
+            .unwrap();
+
         // Should have at least goal and state proposals
         assert!(!proposals.is_empty());
-        assert!(proposals.iter().any(|p| p.proposal_type == ProposalType::GoalUpdate));
+        assert!(proposals
+            .iter()
+            .any(|p| p.proposal_type == ProposalType::GoalUpdate));
     }
 
     #[test]
     fn test_cooldown() {
         let generator = ChatProposalGenerator::new(5, 0.5, 3600); // 1 hour cooldown
         let model = LifeModel::default();
-        
+
         // First extraction should work
-        let proposals1 = generator.generate_proposals("session-1", "我想学习 Rust", &model).unwrap();
+        let proposals1 = generator
+            .generate_proposals("session-1", "我想学习 Rust", &model)
+            .unwrap();
         assert!(!proposals1.is_empty());
-        
+
         // Second extraction within cooldown should return empty
-        let proposals2 = generator.generate_proposals("session-1", "我想学习 Python", &model).unwrap();
+        let proposals2 = generator
+            .generate_proposals("session-1", "我想学习 Python", &model)
+            .unwrap();
         assert!(proposals2.is_empty());
     }
 
@@ -423,7 +467,9 @@ mod tests {
     fn test_min_length_filter() {
         let generator = ChatProposalGenerator::new(20, 0.5, 0);
         let model = LifeModel::default();
-        let proposals = generator.generate_proposals("session-1", "短", &model).unwrap();
+        let proposals = generator
+            .generate_proposals("session-1", "短", &model)
+            .unwrap();
         assert!(proposals.is_empty());
     }
 
@@ -431,29 +477,32 @@ mod tests {
     fn test_dynamic_confidence_with_emphasis() {
         let generator = ChatProposalGenerator::new(5, 0.5, 0);
         let model = LifeModel::default();
-        
+
         // With emphasis markers
-        let proposals_emphasis = generator.generate_proposals(
-            "session-1",
-            "我想学习 Rust！非常有兴趣！",
-            &model,
-        ).unwrap();
-        
+        let proposals_emphasis = generator
+            .generate_proposals("session-1", "我想学习 Rust！非常有兴趣！", &model)
+            .unwrap();
+
         // Without emphasis markers
-        let proposals_normal = generator.generate_proposals(
-            "session-2",
-            "我想学习 Rust",
-            &model,
-        ).unwrap();
-        
+        let proposals_normal = generator
+            .generate_proposals("session-2", "我想学习 Rust", &model)
+            .unwrap();
+
         // Emphasis should produce higher confidence
         if let (Some(emph), Some(norm)) = (
-            proposals_emphasis.iter().find(|p| p.proposal_type == ProposalType::GoalUpdate),
-            proposals_normal.iter().find(|p| p.proposal_type == ProposalType::GoalUpdate),
+            proposals_emphasis
+                .iter()
+                .find(|p| p.proposal_type == ProposalType::GoalUpdate),
+            proposals_normal
+                .iter()
+                .find(|p| p.proposal_type == ProposalType::GoalUpdate),
         ) {
-            assert!(emph.confidence > norm.confidence,
+            assert!(
+                emph.confidence > norm.confidence,
                 "Emphasis confidence ({}) should be > normal confidence ({})",
-                emph.confidence, norm.confidence);
+                emph.confidence,
+                norm.confidence
+            );
         }
     }
 
@@ -463,11 +512,24 @@ mod tests {
         let conf_1 = ChatProposalGenerator::calculate_confidence(1, 50, false);
         let conf_3 = ChatProposalGenerator::calculate_confidence(3, 50, false);
         let conf_5 = ChatProposalGenerator::calculate_confidence(5, 50, false);
-        
-        assert!(conf_3 > conf_1, "3 signals ({}) > 1 signal ({})", conf_3, conf_1);
-        assert!(conf_5 > conf_3, "5 signals ({}) > 3 signals ({})", conf_5, conf_3);
-        assert_eq!(conf_5, ChatProposalGenerator::calculate_confidence(10, 50, false),
-            "Signal count capped at 4 (0.2 bonus max)");
+
+        assert!(
+            conf_3 > conf_1,
+            "3 signals ({}) > 1 signal ({})",
+            conf_3,
+            conf_1
+        );
+        assert!(
+            conf_5 > conf_3,
+            "5 signals ({}) > 3 signals ({})",
+            conf_5,
+            conf_3
+        );
+        assert_eq!(
+            conf_5,
+            ChatProposalGenerator::calculate_confidence(10, 50, false),
+            "Signal count capped at 4 (0.2 bonus max)"
+        );
     }
 
     #[test]
@@ -475,7 +537,7 @@ mod tests {
         // Minimum confidence
         let min_conf = ChatProposalGenerator::calculate_confidence(0, 1000, false);
         assert!(min_conf >= 0.5, "Minimum confidence should be >= 0.5");
-        
+
         // Maximum confidence
         let max_conf = ChatProposalGenerator::calculate_confidence(10, 10, true);
         assert!(max_conf <= 0.95, "Maximum confidence should be <= 0.95");

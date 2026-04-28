@@ -50,9 +50,7 @@ export default function WorkspaceOverview() {
 
       setDiagnostics(diag);
 
-      const pendingCount = proposals.filter(
-        (p: any) => p.status === "pending"
-      ).length;
+      const pendingCount = proposals.filter((p: any) => p.status === "pending").length;
 
       const recentCount = runs.filter((r: any) => {
         const runTime = new Date(r.created_at);
@@ -74,10 +72,7 @@ export default function WorkspaceOverview() {
         totalRuns: runs.length,
         recentRuns: recentCount,
         systemStatus: status,
-        lastActivity:
-          runs.length > 0
-            ? new Date(runs[0].created_at).toLocaleString("zh-CN")
-            : "-",
+        lastActivity: runs.length > 0 ? new Date(runs[0].created_at).toLocaleString("zh-CN") : "-",
       });
     } catch (e) {
       console.error("Failed to load workspace data:", e);
@@ -112,7 +107,7 @@ export default function WorkspaceOverview() {
       <div className="animate-pulse space-y-4">
         <div className="h-32 bg-gray-100 rounded-xl" />
         <div className="grid grid-cols-4 gap-4">
-          {[1, 2, 3, 4].map((i) => (
+          {[1, 2, 3, 4].map(i => (
             <div key={i} className="h-24 bg-gray-100 rounded-xl" />
           ))}
         </div>
@@ -123,16 +118,12 @@ export default function WorkspaceOverview() {
   return (
     <div className="space-y-4">
       {/* System Status Banner */}
-      <div
-        className={`rounded-xl border p-4 flex items-center justify-between ${status.class}`}
-      >
+      <div className={`rounded-xl border p-4 flex items-center justify-between ${status.class}`}>
         <div className="flex items-center gap-3">
           <StatusIcon size={20} />
           <div>
             <div className="font-semibold text-sm">{status.label}</div>
-            <div className="text-xs opacity-75">
-              上次活动: {stats.lastActivity}
-            </div>
+            <div className="text-xs opacity-75">上次活动: {stats.lastActivity}</div>
           </div>
         </div>
         {diagnostics && (
@@ -156,9 +147,7 @@ export default function WorkspaceOverview() {
               </span>
             )}
           </div>
-          <div className="text-2xl font-bold text-stone-900">
-            {stats.pendingProposals}
-          </div>
+          <div className="text-2xl font-bold text-stone-900">{stats.pendingProposals}</div>
           <div className="text-xs text-stone-500">待处理 Proposal</div>
         </Link>
 
@@ -169,9 +158,7 @@ export default function WorkspaceOverview() {
           <div className="flex items-center justify-between mb-2">
             <Activity size={18} className="text-blue-600" />
           </div>
-          <div className="text-2xl font-bold text-stone-900">
-            {stats.recentRuns}
-          </div>
+          <div className="text-2xl font-bold text-stone-900">{stats.recentRuns}</div>
           <div className="text-xs text-stone-500">今日 Agent Run</div>
         </Link>
 
@@ -182,9 +169,7 @@ export default function WorkspaceOverview() {
           <div className="flex items-center justify-between mb-2">
             <Cpu size={18} className="text-emerald-600" />
           </div>
-          <div className="text-2xl font-bold text-stone-900">
-            {stats.totalRuns}
-          </div>
+          <div className="text-2xl font-bold text-stone-900">{stats.totalRuns}</div>
           <div className="text-xs text-stone-500">累计运行次数</div>
         </Link>
 

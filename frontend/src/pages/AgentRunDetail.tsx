@@ -156,9 +156,7 @@ export default function AgentRunDetail() {
           <div className="flex items-center gap-3 mb-6">
             {statusIcon(run.status)}
             <div>
-              <h1 className="text-xl font-bold text-stone-900">
-                {kindLabel(run.kind)}
-              </h1>
+              <h1 className="text-xl font-bold text-stone-900">{kindLabel(run.kind)}</h1>
               <div className="text-sm text-stone-500 flex items-center gap-2 mt-1">
                 <span>ID: {run.id.slice(0, 8)}...</span>
                 <span>·</span>
@@ -170,9 +168,7 @@ export default function AgentRunDetail() {
 
           {run.userInput && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                用户输入
-              </h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
                 {run.userInput}
               </div>
@@ -181,9 +177,7 @@ export default function AgentRunDetail() {
 
           {run.outputPreview && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                输出预览
-              </h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出预览</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
                 {run.outputPreview}
               </div>
@@ -192,9 +186,7 @@ export default function AgentRunDetail() {
 
           {run.error && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-red-700 mb-2">
-                错误
-              </h3>
+              <h3 className="text-sm font-semibold text-red-700 mb-2">错误</h3>
               <div className="bg-red-50 rounded-lg p-3 text-sm text-red-800">
                 <div className="font-medium">{run.error.message}</div>
                 <div className="text-xs text-red-600 mt-1">
@@ -206,9 +198,7 @@ export default function AgentRunDetail() {
 
           {run.contextSummary && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                上下文摘要
-              </h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">上下文摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
                 <div>LifeModel 空: {run.contextSummary.lifeModelEmpty ? "是" : "否"}</div>
                 <div>记忆命中: {run.contextSummary.memoryHitCount}</div>
@@ -220,9 +210,7 @@ export default function AgentRunDetail() {
 
           {run.modelRoute && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                模型路由
-              </h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">模型路由</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
                 <div>Provider: {run.modelRoute.provider}</div>
                 <div>Model: {run.modelRoute.model}</div>
@@ -234,15 +222,10 @@ export default function AgentRunDetail() {
 
           {run.generatedProposals.length > 0 && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                生成的提案
-              </h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">生成的提案</h3>
               <div className="space-y-2">
-                {run.generatedProposals.map((proposalId) => (
-                  <div
-                    key={proposalId}
-                    className="bg-blue-50 rounded-lg p-3 text-sm text-blue-800"
-                  >
+                {run.generatedProposals.map(proposalId => (
+                  <div key={proposalId} className="bg-blue-50 rounded-lg p-3 text-sm text-blue-800">
                     {proposalId}
                   </div>
                 ))}
@@ -256,14 +239,9 @@ export default function AgentRunDetail() {
                 动作 ({run.actions.length})
               </h3>
               <div className="space-y-2">
-                {run.actions.map((action) => (
-                  <div
-                    key={action.id}
-                    className="bg-stone-50 rounded-lg p-3 text-sm"
-                  >
-                    <div className="font-medium text-stone-800">
-                      {action.actionType}
-                    </div>
+                {run.actions.map(action => (
+                  <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm">
+                    <div className="font-medium text-stone-800">{action.actionType}</div>
                     <div className="text-xs text-stone-500 mt-1">
                       Status: {action.status} · {new Date(action.timestamp).toLocaleString()}
                     </div>
@@ -279,11 +257,8 @@ export default function AgentRunDetail() {
                 观察 ({run.observations.length})
               </h3>
               <div className="space-y-2">
-                {run.observations.map((obs) => (
-                  <div
-                    key={obs.id}
-                    className="bg-stone-50 rounded-lg p-3 text-sm"
-                  >
+                {run.observations.map(obs => (
+                  <div key={obs.id} className="bg-stone-50 rounded-lg p-3 text-sm">
                     <div className="text-stone-800">{obs.content}</div>
                     <div className="text-xs text-stone-500 mt-1">
                       Source: {obs.source} · {new Date(obs.timestamp).toLocaleString()}

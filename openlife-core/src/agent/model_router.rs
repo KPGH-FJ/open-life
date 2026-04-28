@@ -1,5 +1,5 @@
-use crate::agent::ModelRouteTrace;
 use crate::agent::types::RedactionLevel;
+use crate::agent::ModelRouteTrace;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,7 +57,11 @@ impl ModelRouteDecision {
             model: self.model.clone(),
             route_type: self.route_type.clone(),
             prefer_local: self.prefer_local,
-            local_model: if self.prefer_local { self.model.clone() } else { String::new() },
+            local_model: if self.prefer_local {
+                self.model.clone()
+            } else {
+                String::new()
+            },
             reason: self.reason.clone(),
             privacy_level: self.privacy_level,
             latency_ms: self.estimated_latency_ms,
@@ -126,11 +130,26 @@ pub struct ModelRouter {
 impl Default for ModelRouter {
     fn default() -> Self {
         let mut task_preferences = HashMap::new();
-        task_preferences.insert(TaskType::Chat, vec!["ollama".into(), "deepseek".into(), "openrouter".into()]);
-        task_preferences.insert(TaskType::Planner, vec!["deepseek".into(), "openrouter".into(), "ollama".into()]);
-        task_preferences.insert(TaskType::ToolUse, vec!["deepseek".into(), "openrouter".into()]);
-        task_preferences.insert(TaskType::Summarizer, vec!["ollama".into(), "deepseek".into()]);
-        task_preferences.insert(TaskType::Extractor, vec!["deepseek".into(), "openrouter".into()]);
+        task_preferences.insert(
+            TaskType::Chat,
+            vec!["ollama".into(), "deepseek".into(), "openrouter".into()],
+        );
+        task_preferences.insert(
+            TaskType::Planner,
+            vec!["deepseek".into(), "openrouter".into(), "ollama".into()],
+        );
+        task_preferences.insert(
+            TaskType::ToolUse,
+            vec!["deepseek".into(), "openrouter".into()],
+        );
+        task_preferences.insert(
+            TaskType::Summarizer,
+            vec!["ollama".into(), "deepseek".into()],
+        );
+        task_preferences.insert(
+            TaskType::Extractor,
+            vec!["deepseek".into(), "openrouter".into()],
+        );
         task_preferences.insert(TaskType::Embedding, vec!["ollama".into(), "openai".into()]);
 
         let mut privacy_policies = HashMap::new();
@@ -185,7 +204,7 @@ impl ModelRouter {
     /// Check and update provider availability.
     pub async fn check_availability(&mut self) -> Result<()> {
         let now = chrono::Utc::now();
-        
+
         // Check Ollama
         let ollama_available = crate::ollama::is_ollama_available("").await;
         let ollama_latency = if ollama_available {
@@ -193,25 +212,31 @@ impl ModelRouter {
         } else {
             None
         };
-        
-        self.providers.insert("ollama".into(), ProviderAvailability {
-            provider: "ollama".into(),
-            available: ollama_available,
-            latency_ms: ollama_latency,
-            models: vec![], // Could populate with installed models
-            last_checked: now,
-        });
+
+        self.providers.insert(
+            "ollama".into(),
+            ProviderAvailability {
+                provider: "ollama".into(),
+                available: ollama_available,
+                latency_ms: ollama_latency,
+                models: vec![], // Could populate with installed models
+                last_checked: now,
+            },
+        );
 
         // Check cloud providers (basic connectivity check)
         // In production, this would do actual health checks
         for provider in &["deepseek", "openrouter", "openai"] {
-            self.providers.insert(provider.to_string(), ProviderAvailability {
-                provider: provider.to_string(),
-                available: true, // Assume available unless proven otherwise
-                latency_ms: Some(500), // Estimated 500ms for cloud
-                models: vec![],
-                last_checked: now,
-            });
+            self.providers.insert(
+                provider.to_string(),
+                ProviderAvailability {
+                    provider: provider.to_string(),
+                    available: true,       // Assume available unless proven otherwise
+                    latency_ms: Some(500), // Estimated 500ms for cloud
+                    models: vec![],
+                    last_checked: now,
+                },
+            );
         }
 
         self.last_availability_check = Some(now);
@@ -229,7 +254,9 @@ impl ModelRouter {
         for provider in &["deepseek", "openrouter"] {
             match self.probe_provider_lightweight(provider).await {
                 Ok(latency) => {
-                    let entry = self.provider_health.entry(provider.to_string())
+                    let entry = self
+                        .provider_health
+                        .entry(provider.to_string())
                         .or_insert_with(ProviderHealth::default);
                     entry.available = true;
                     entry.latency_ms = Some(latency);
@@ -238,7 +265,9 @@ impl ModelRouter {
                     entry.consecutive_failures = 0;
                 }
                 Err(e) => {
-                    let entry = self.provider_health.entry(provider.to_string())
+                    let entry = self
+                        .provider_health
+                        .entry(provider.to_string())
                         .or_insert_with(ProviderHealth::default);
                     entry.available = false;
                     entry.latency_ms = None;
@@ -271,12 +300,15 @@ impl ModelRouter {
             .build()?;
 
         let res = client.head(url).send().await?;
-        
+
         // Accept 2xx and 404 as "available" (API exists even if auth fails)
         if res.status().is_success() || res.status() == 404 {
             Ok(start.elapsed().as_millis() as u64)
         } else {
-            Err(anyhow::anyhow!("provider returned status: {}", res.status()))
+            Err(anyhow::anyhow!(
+                "provider returned status: {}",
+                res.status()
+            ))
         }
     }
 
@@ -306,7 +338,7 @@ impl ModelRouter {
         } else {
             return None;
         };
-        
+
         if !is_available {
             return None;
         }
@@ -385,7 +417,9 @@ impl ModelRouter {
 
         Some(ModelRouteScore {
             provider: provider.to_string(),
-            model: self.providers.get(provider)
+            model: self
+                .providers
+                .get(provider)
                 .and_then(|a| a.models.first().cloned())
                 .unwrap_or_else(|| "default".to_string()),
             score: score.max(0.0).min(100.0),
@@ -409,13 +443,18 @@ impl ModelRouter {
 
         let mut scores = Vec::new();
         for provider in self.providers.keys() {
-            if let Some(score) = self.score_provider(provider, task_type, privacy_requirement, tools_needed) {
+            if let Some(score) =
+                self.score_provider(provider, task_type, privacy_requirement, tools_needed)
+            {
                 scores.push(score);
             }
         }
 
         if scores.is_empty() {
-            return Err(anyhow::anyhow!("No available providers for task {:?}", task_type));
+            return Err(anyhow::anyhow!(
+                "No available providers for task {:?}",
+                task_type
+            ));
         }
 
         // Sort by score descending
@@ -460,7 +499,7 @@ impl ModelRouter {
         prefer_local: bool,
     ) -> Result<ModelRouteDecision> {
         let tools_needed = tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false);
-        
+
         // If tools are needed and we have cloud providers, prefer cloud
         if tools_needed {
             if let Ok(decision) = self.route(TaskType::ToolUse, true, None) {
@@ -481,27 +520,36 @@ mod tests {
 
     fn create_test_router() -> ModelRouter {
         let mut router = ModelRouter::new();
-        router.providers.insert("ollama".into(), ProviderAvailability {
-            provider: "ollama".into(),
-            available: true,
-            latency_ms: Some(100),
-            models: vec!["qwen2.5:7b".into()],
-            last_checked: chrono::Utc::now(),
-        });
-        router.providers.insert("deepseek".into(), ProviderAvailability {
-            provider: "deepseek".into(),
-            available: true,
-            latency_ms: Some(500),
-            models: vec!["deepseek-chat".into()],
-            last_checked: chrono::Utc::now(),
-        });
-        router.providers.insert("openrouter".into(), ProviderAvailability {
-            provider: "openrouter".into(),
-            available: true,
-            latency_ms: Some(600),
-            models: vec!["openai/gpt-4o".into()],
-            last_checked: chrono::Utc::now(),
-        });
+        router.providers.insert(
+            "ollama".into(),
+            ProviderAvailability {
+                provider: "ollama".into(),
+                available: true,
+                latency_ms: Some(100),
+                models: vec!["qwen2.5:7b".into()],
+                last_checked: chrono::Utc::now(),
+            },
+        );
+        router.providers.insert(
+            "deepseek".into(),
+            ProviderAvailability {
+                provider: "deepseek".into(),
+                available: true,
+                latency_ms: Some(500),
+                models: vec!["deepseek-chat".into()],
+                last_checked: chrono::Utc::now(),
+            },
+        );
+        router.providers.insert(
+            "openrouter".into(),
+            ProviderAvailability {
+                provider: "openrouter".into(),
+                available: true,
+                latency_ms: Some(600),
+                models: vec!["openai/gpt-4o".into()],
+                last_checked: chrono::Utc::now(),
+            },
+        );
         router
     }
 
@@ -509,7 +557,7 @@ mod tests {
     fn test_route_chat_local_preferred() {
         let router = create_test_router();
         let decision = router.route_chat(None, true).unwrap();
-        
+
         // Should prefer ollama when no tools and prefer_local
         assert_eq!(decision.provider, "ollama");
         assert!(decision.prefer_local);
@@ -519,7 +567,7 @@ mod tests {
     fn test_route_chat_with_tools() {
         let router = create_test_router();
         let decision = router.route_chat(Some("tools available"), true).unwrap();
-        
+
         // Should prefer cloud when tools are needed
         assert_ne!(decision.provider, "ollama");
     }
@@ -527,8 +575,10 @@ mod tests {
     #[test]
     fn test_route_extractor_high_privacy() {
         let router = create_test_router();
-        let decision = router.route(TaskType::Extractor, false, Some(PrivacyRequirement::High)).unwrap();
-        
+        let decision = router
+            .route(TaskType::Extractor, false, Some(PrivacyRequirement::High))
+            .unwrap();
+
         // High privacy should prefer local
         assert_eq!(decision.provider, "ollama");
     }
@@ -550,14 +600,17 @@ mod tests {
     fn test_provider_unavailable_triggers_fallback() {
         let mut router = create_test_router();
         // Mark deepseek as unavailable via provider_health
-        router.provider_health.insert("deepseek".into(), ProviderHealth {
-            available: false,
-            latency_ms: None,
-            last_error: Some("connection refused".into()),
-            last_check_at: std::time::Instant::now(),
-            consecutive_failures: 3,
-        });
-        
+        router.provider_health.insert(
+            "deepseek".into(),
+            ProviderHealth {
+                available: false,
+                latency_ms: None,
+                last_error: Some("connection refused".into()),
+                last_check_at: std::time::Instant::now(),
+                consecutive_failures: 3,
+            },
+        );
+
         // Route should not pick deepseek
         let decision = router.route_chat(None, true).unwrap();
         assert_ne!(decision.provider, "deepseek");
@@ -569,14 +622,17 @@ mod tests {
     fn test_provider_health_overrides_availability() {
         let mut router = create_test_router();
         // providers says available=true, but health says false
-        router.provider_health.insert("ollama".into(), ProviderHealth {
-            available: false,
-            latency_ms: None,
-            last_error: Some("ollama not running".into()),
-            last_check_at: std::time::Instant::now(),
-            consecutive_failures: 3,
-        });
-        
+        router.provider_health.insert(
+            "ollama".into(),
+            ProviderHealth {
+                available: false,
+                latency_ms: None,
+                last_error: Some("ollama not running".into()),
+                last_check_at: std::time::Instant::now(),
+                consecutive_failures: 3,
+            },
+        );
+
         let decision = router.route_chat(None, true).unwrap();
         // Should not pick ollama even though providers map says available
         assert_ne!(decision.provider, "ollama");

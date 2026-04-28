@@ -92,14 +92,12 @@ impl ContextAssembler for MemoryAssembler {
     fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
         let hit_count = input.memory_hits.len();
         let memory_context = input.memory_context.clone().unwrap_or_default();
-        
+
         // Build memory section for system prompt injection
         let memory_section = if hit_count > 0 {
             format!(
                 "【相关记忆】\n{}\n\n[检索到 {} 条记忆，耗时 {}ms]",
-                memory_context,
-                hit_count,
-                input.memory_retrieval_time_ms
+                memory_context, hit_count, input.memory_retrieval_time_ms
             )
         } else {
             String::new()
@@ -269,13 +267,21 @@ impl ContextAssembler for CompositeAssembler {
             }
             // Merge context summary
             output.context_summary.memory_hit_count += partial.context_summary.memory_hit_count;
-            output.context_summary.memory_sources.extend(partial.context_summary.memory_sources);
+            output
+                .context_summary
+                .memory_sources
+                .extend(partial.context_summary.memory_sources);
             if partial.context_summary.redaction_applied {
                 output.context_summary.redaction_applied = true;
                 output.context_summary.redaction_level = partial.context_summary.redaction_level;
             }
-            if !partial.context_summary.included_life_model_sections.is_empty() {
-                output.context_summary.included_life_model_sections = partial.context_summary.included_life_model_sections;
+            if !partial
+                .context_summary
+                .included_life_model_sections
+                .is_empty()
+            {
+                output.context_summary.included_life_model_sections =
+                    partial.context_summary.included_life_model_sections;
             }
         }
 
@@ -291,12 +297,10 @@ mod tests {
     fn create_test_input() -> AssembleInput {
         AssembleInput {
             session_id: "test-session".to_string(),
-            messages: vec![
-                ChatMessage {
-                    role: "user".to_string(),
-                    content: "Hello world".to_string(),
-                },
-            ],
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello world".to_string(),
+            }],
             life_model: LifeModel::default(),
             tools_prompt: String::new(),
             privacy_engine: PrivacyEngine::default(),
@@ -311,7 +315,7 @@ mod tests {
         let assembler = LifeModelAssembler;
         let input = create_test_input();
         let output = assembler.assemble(&input).unwrap();
-        
+
         assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
         // Note: LifeModel::default() may not be effectively empty depending on implementation
     }
@@ -321,9 +325,9 @@ mod tests {
         let assembler = PrivacyAssembler;
         let mut input = create_test_input();
         input.messages[0].content = "我的电话是 13800138000".to_string();
-        
+
         let output = assembler.assemble(&input).unwrap();
-        
+
         assert!(!output.privacy_map.is_empty());
         assert!(output.context_summary.redaction_applied);
     }
@@ -333,7 +337,7 @@ mod tests {
         let assembler = MemoryAssembler;
         let input = create_test_input();
         let output = assembler.assemble(&input).unwrap();
-        
+
         assert!(output.memory_context.is_empty());
         assert_eq!(output.context_summary.memory_hit_count, 0);
     }
@@ -360,9 +364,9 @@ mod tests {
             },
         ];
         input.memory_retrieval_time_ms = 45;
-        
+
         let output = assembler.assemble(&input).unwrap();
-        
+
         assert!(output.memory_context.contains("最近讨论了三体问题"));
         assert!(output.memory_context.contains("检索到 2 条记忆"));
         assert!(output.memory_context.contains("耗时 45ms"));
@@ -375,7 +379,7 @@ mod tests {
         let assembler = CompositeAssembler::new()
             .with(Box::new(LifeModelAssembler))
             .with(Box::new(MemoryAssembler));
-        
+
         let mut input = create_test_input();
         input.memory_context = Some("关键记忆".to_string());
         input.memory_hits = vec![MemoryHit {
@@ -385,9 +389,9 @@ mod tests {
             score: 0.9,
             tier: 1,
         }];
-        
+
         let output = assembler.assemble(&input).unwrap();
-        
+
         assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
         assert!(output.memory_context.contains("关键记忆"));
         assert_eq!(output.context_summary.memory_hit_count, 1);
