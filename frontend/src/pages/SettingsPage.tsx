@@ -43,6 +43,12 @@ function defaultConfig(): AppConfig {
     },
     prefer_local_model: false,
     local_model: "llama2",
+    chat_proposal: {
+      enabled: true,
+      confidence_threshold: 0.6,
+      min_message_length: 10,
+      cooldown_seconds: 300,
+    },
   };
 }
 
@@ -1143,6 +1149,93 @@ export default function SettingsPage() {
               <span>
                 {routerStatus ? `${Math.round(routerStatus.latency_threshold_us / 1000)}ms` : "-"}
               </span>
+            </div>
+          </div>
+        </section>
+
+        {/* Chat Proposal Settings */}
+        <section className="space-y-4 border-t pt-4">
+          <h3 className="text-sm font-medium text-gray-700">Chat Proposal 设置</h3>
+          <div className="grid gap-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={config.chat_proposal?.enabled ?? true}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    chat_proposal: {
+                      ...prev.chat_proposal,
+                      enabled: e.target.checked,
+                    },
+                  }))
+                }
+                className="rounded border-gray-300"
+              />
+              <span className="text-sm text-gray-700">启用 Chat Proposal 自动提取</span>
+            </label>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">置信度阈值</label>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={config.chat_proposal?.confidence_threshold ?? 0.6}
+                  onChange={(e) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      chat_proposal: {
+                        ...prev.chat_proposal,
+                        confidence_threshold: parseFloat(e.target.value),
+                      },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-500 mb-1">最小消息长度</label>
+                <input
+                  type="number"
+                  min="5"
+                  max="100"
+                  value={config.chat_proposal?.min_message_length ?? 10}
+                  onChange={(e) =>
+                    setConfig((prev) => ({
+                      ...prev,
+                      chat_proposal: {
+                        ...prev.chat_proposal,
+                        min_message_length: parseInt(e.target.value),
+                      },
+                    }))
+                  }
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">提取冷却时间（秒）</label>
+              <input
+                type="number"
+                min="0"
+                max="3600"
+                step="60"
+                value={config.chat_proposal?.cooldown_seconds ?? 300}
+                onChange={(e) =>
+                  setConfig((prev) => ({
+                    ...prev,
+                    chat_proposal: {
+                      ...prev.chat_proposal,
+                      cooldown_seconds: parseInt(e.target.value),
+                    },
+                  }))
+                }
+                className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm"
+              />
             </div>
           </div>
         </section>

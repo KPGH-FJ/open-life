@@ -52,6 +52,34 @@ fn default_embedding_enabled() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ChatProposalConfig {
+    #[serde(default = "default_enable_chat_proposals")]
+    pub enabled: bool,
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f32,
+    #[serde(default = "default_min_message_length")]
+    pub min_message_length: usize,
+    #[serde(default = "default_cooldown_seconds")]
+    pub cooldown_seconds: i64,
+}
+
+fn default_enable_chat_proposals() -> bool {
+    true
+}
+
+fn default_confidence_threshold() -> f32 {
+    0.6
+}
+
+fn default_min_message_length() -> usize {
+    10
+}
+
+fn default_cooldown_seconds() -> i64 {
+    300
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -60,6 +88,8 @@ pub struct AppConfig {
     pub prefer_local_model: bool,
     #[serde(default = "default_local_model")]
     pub local_model: String,
+    #[serde(default)]
+    pub chat_proposal: ChatProposalConfig,
 }
 
 impl Default for AppConfig {
@@ -68,6 +98,7 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
+            chat_proposal: ChatProposalConfig::default(),
         }
     }
 }
@@ -208,6 +239,7 @@ mod tests {
             },
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
+            chat_proposal: ChatProposalConfig::default(),
         };
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();

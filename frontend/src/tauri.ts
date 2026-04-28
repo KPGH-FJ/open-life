@@ -55,6 +55,13 @@ export async function saveLifeModel(model: LifeModel): Promise<void> {
   return safeInvoke("save_life_model", { lifeModel: model });
 }
 
+export interface ChatProposalConfig {
+  enabled?: boolean;
+  confidence_threshold?: number;
+  min_message_length?: number;
+  cooldown_seconds?: number;
+}
+
 export interface AppConfig {
   llm: {
     provider?:
@@ -74,6 +81,7 @@ export interface AppConfig {
   };
   prefer_local_model: boolean;
   local_model: string;
+  chat_proposal?: ChatProposalConfig;
 }
 
 export async function getConfig(): Promise<AppConfig> {

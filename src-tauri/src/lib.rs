@@ -1947,6 +1947,39 @@ async fn start_stream_message(
         let _ = store.update_run(&agent_run);
     }
 
+    // Chat Proposal generation
+    if let Some(ref user_msg) = user_msg {
+        if user_msg.role == "user" {
+            let config = state.config.lock().await;
+            let enabled = config.chat_proposal.enabled;
+            let generator = openlife_core::agent::ChatProposalGenerator::new(
+                config.chat_proposal.min_message_length,
+                config.chat_proposal.confidence_threshold,
+                config.chat_proposal.cooldown_seconds,
+            );
+            drop(config);
+            
+            if enabled {
+                match generator.generate_proposals(&session_id, &user_msg.content, &life_model) {
+                    Ok(proposals) if !proposals.is_empty() => {
+                        let proposal_store = openlife_core::agent::ProposalStore::new(
+                            crate::storage::app_data_dir().join("proposals.db"),
+                        );
+                        if let Ok(store) = proposal_store {
+                            for mut proposal in proposals {
+                                proposal.run_id = Some(agent_run.id.clone());
+                                if let Err(e) = store.create_proposal(&proposal) {
+                                    eprintln!("[ChatProposal] Failed to save proposal: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     let _ = app_handle.emit(
         "stream-message-done",
         serde_json::json!({
