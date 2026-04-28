@@ -64,7 +64,7 @@ pub async fn save_config(
     let mut cfg = state.config.lock().await;
     *cfg = config.clone();
     let mut scheduler = state.scheduler.lock().await;
-    *scheduler = InferenceScheduler::new(
+    let mut new_scheduler = InferenceScheduler::new(
         config.local_model,
         config.prefer_local_model,
         config.llm.provider,
@@ -74,6 +74,15 @@ pub async fn save_config(
         config.llm.embedding_model,
         config.llm.embedding_enabled,
     );
+    
+    // Add ModelRouter if experimental feature is enabled
+    if config.experimental_model_router {
+        let router = openlife_core::agent::ModelRouter::new();
+        new_scheduler = new_scheduler.with_model_router(router);
+        eprintln!("[Scheduler] ModelRouter enabled (experimental)");
+    }
+    
+    *scheduler = new_scheduler;
     Ok(())
 }
 

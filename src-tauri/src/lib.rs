@@ -12,6 +12,7 @@ use openlife_core::memory::{MemorySearchHit, MemoryStore};
 use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::router::{IntentRouter, RouterStatus};
+use openlife_core::agent::ContextAssembler;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertItem, VectorStore};
 use openlife_core::versioning::VersionManager;

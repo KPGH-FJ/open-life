@@ -99,6 +99,7 @@ pub struct ProviderAvailability {
 }
 
 /// Intelligent model router with provider-agnostic, role-aware, privacy-aware routing.
+#[derive(Clone)]
 pub struct ModelRouter {
     /// Available providers and their status
     pub providers: HashMap<String, ProviderAvailability>,
