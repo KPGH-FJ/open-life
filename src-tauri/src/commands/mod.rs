@@ -5,7 +5,7 @@ pub mod calibration;
 pub mod chat;
 pub mod diagnostics;
 pub mod feedback;
-pub mod hermes;
+// pub mod hermes; // Removed: replaced by agent::reasoning module
 pub mod life_model;
 pub mod metrics;
 pub mod mcp;

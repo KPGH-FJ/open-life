@@ -225,7 +225,9 @@ impl Default for A2AClient {
 // A2A Server (in-process handlers, no HTTP server yet)
 // ========================================
 
-use crate::hermes::{HermesContext, HermesRequest, HermesTrace};
+use crate::agent::{LayeredReasoner, ReasoningInput, ReasoningStrategy, ReasoningTrace};
+use crate::agent::context_assembler::AssembleOutput;
+use crate::agent::types::{AgentTaskKind, ContextSummary, RedactionLevel};
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -303,10 +305,10 @@ impl A2AServerHandler {
                     output_modes: None,
                 },
                 AgentSkill {
-                    id: "openlife.hermes_bridge".into(),
-                    name: "Hermes Bridge".into(),
-                    description: "Runs the Hermes Meaning→Strategy→Execution pipeline and returns a structured trace".into(),
-                    tags: vec!["hermes".into(), "decision".into()],
+                    id: "openlife.reasoning_bridge".into(),
+                    name: "Reasoning Bridge".into(),
+                    description: "Runs the Layered Reasoning Meaning→Strategy→Generation pipeline and returns a structured trace".into(),
+                    tags: vec!["reasoning".into(), "decision".into()],
                     examples: None,
                     input_modes: None,
                     output_modes: None,
@@ -325,7 +327,7 @@ impl A2AServerHandler {
 
         let result = match skill_hint {
             "openlife.assess_values" => self.assess_values(&req),
-            "openlife.hermes_bridge" => self.hermes_bridge(&req),
+            "openlife.reasoning_bridge" => self.reasoning_bridge(&req),
             _ => self.query_life_model(),
         };
 
@@ -435,57 +437,67 @@ impl A2AServerHandler {
         })).unwrap_or_default()
     }
 
-    fn hermes_bridge(&self, req: &SendTaskRequest) -> String {
+    fn reasoning_bridge(&self, req: &SendTaskRequest) -> String {
         let user_text = extract_text_from_message(&req.message);
-        let yaml = serde_yaml::to_string(&self.life_model).unwrap_or_default();
-        let hermes_req = HermesRequest::new("chat", Some(serde_json::json!({"text": &user_text})));
+        let session_id = req.session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        
+        let reasoning_input = ReasoningInput {
+            task_kind: AgentTaskKind::Conversation,
+            user_text: user_text.clone(),
+            session_id: session_id.clone(),
+        };
+        
+        let assemble_output = AssembleOutput {
+            life_model: self.life_model.clone(),
+            tools_prompt: String::new(),
+            privacy_map: HashMap::new(),
+            desensitized_messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: user_text,
+            }],
+            memory_context: String::new(),
+            context_summary: ContextSummary {
+                life_model_empty: self.life_model.is_effectively_empty(),
+                included_life_model_sections: vec![],
+                memory_hit_count: 0,
+                memory_sources: vec![],
+                used_tools_prompt: false,
+                redaction_applied: false,
+                redaction_level: RedactionLevel::None,
+            },
+            embed_error: None,
+        };
+        
+        let run_id = uuid::Uuid::new_v4().to_string();
         let life_model_clone = self.life_model.clone();
+        
         let rt = tokio::runtime::Handle::try_current();
-        let trace: HermesTrace = match rt {
+        let trace: ReasoningTrace = match rt {
             Ok(handle) => handle.block_on(async move {
-                let bus = crate::hermes::build_bus(
-                    life_model_clone.clone(),
-                    crate::scheduler::InferenceScheduler::default(),
-                );
-                let mut ctx = HermesContext {
-                    life_model_yaml: yaml,
-                    life_model: Some(life_model_clone),
-                    recent_messages: vec![ChatMessage {
-                        role: "user".into(),
-                        content: user_text,
-                    }],
-                    tools_prompt: None,
-                    memory_context: String::new(),
-                    extras: HashMap::new(),
-                    ..Default::default()
-                };
-                bus.dispatch(&hermes_req, &mut ctx)
-                    .await
-                    .unwrap_or_default()
+                let scheduler = crate::scheduler::InferenceScheduler::default();
+                let reasoner = LayeredReasoner::new(scheduler, life_model_clone);
+                match reasoner.reason(&reasoning_input, &assemble_output, &run_id).await {
+                    Ok(output) => output.trace,
+                    Err(e) => {
+                        let mut trace = ReasoningTrace::default();
+                        trace.errors.push(e.to_string());
+                        trace
+                    }
+                }
             }),
             Err(_) => {
-                // fallback to new runtime if not in async context (shouldn't happen in Tauri)
                 let new_rt = tokio::runtime::Runtime::new().unwrap();
                 new_rt.block_on(async move {
-                    let bus = crate::hermes::build_bus(
-                        life_model_clone.clone(),
-                        crate::scheduler::InferenceScheduler::default(),
-                    );
-                    let mut ctx = HermesContext {
-                        life_model_yaml: yaml,
-                        life_model: Some(life_model_clone),
-                        recent_messages: vec![ChatMessage {
-                            role: "user".into(),
-                            content: user_text,
-                        }],
-                        tools_prompt: None,
-                        memory_context: String::new(),
-                        extras: HashMap::new(),
-                        ..Default::default()
-                    };
-                    bus.dispatch(&hermes_req, &mut ctx)
-                        .await
-                        .unwrap_or_default()
+                    let scheduler = crate::scheduler::InferenceScheduler::default();
+                    let reasoner = LayeredReasoner::new(scheduler, life_model_clone);
+                    match reasoner.reason(&reasoning_input, &assemble_output, &run_id).await {
+                        Ok(output) => output.trace,
+                        Err(e) => {
+                            let mut trace = ReasoningTrace::default();
+                            trace.errors.push(e.to_string());
+                            trace
+                        }
+                    }
                 })
             }
         };
@@ -505,47 +517,35 @@ fn extract_text_from_message(msg: &Message) -> String {
 }
 
 // ========================================
-// Hermes <-> A2A Bridge helpers
+// Reasoning <-> A2A Bridge helpers
 // ========================================
 
-pub fn hermes_request_to_a2a_task(
-    req: &HermesRequest,
-    session_id: Option<String>,
+pub fn reasoning_input_to_a2a_task(
+    req: &ReasoningInput,
+    skill: Option<&str>,
+    tool_calls: Option<&serde_json::Value>,
 ) -> SendTaskRequest {
-    let text = req
-        .params
-        .as_ref()
-        .and_then(|p| p.get("text"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let mut task = A2AClient::build_text_task(session_id.clone(), text);
-    // Map optional metadata: session_id, explicit tool_calls, and skill hint
-    if let Some(params) = &req.params {
-        if let Some(skill) = params.get("skill").and_then(|v| v.as_str()) {
-            task.metadata = Some({
-                let mut m = HashMap::new();
-                m.insert(
-                    "skill".to_string(),
-                    serde_json::Value::String(skill.to_string()),
-                );
-                m
-            });
-        }
-        if let Some(tools) = params.get("tool_calls") {
-            task.metadata
-                .get_or_insert_with(HashMap::new)
-                .insert("tool_calls".to_string(), tools.clone());
-        }
-        if let Some(sid) = params.get("session_id").and_then(|v| v.as_str()) {
-            task.session_id = Some(sid.to_string());
-        } else if session_id.is_some() {
-            task.session_id = session_id;
-        }
+    let text = &req.user_text;
+    let mut task = A2AClient::build_text_task(Some(req.session_id.clone()), text);
+    if let Some(skill) = skill {
+        task.metadata = Some({
+            let mut m = HashMap::new();
+            m.insert(
+                "skill".to_string(),
+                serde_json::Value::String(skill.to_string()),
+            );
+            m
+        });
+    }
+    if let Some(tools) = tool_calls {
+        task.metadata
+            .get_or_insert_with(HashMap::new)
+            .insert("tool_calls".to_string(), tools.clone());
     }
     task
 }
 
-pub fn a2a_response_to_hermes_result(resp: &SendTaskResponse) -> Result<serde_json::Value, String> {
+pub fn a2a_response_to_reasoning_result(resp: &SendTaskResponse) -> Result<serde_json::Value, String> {
     // Aggregate text from artifacts (primary) and status message (fallback)
     let artifact_text: String = resp
         .artifacts
@@ -582,7 +582,7 @@ pub fn a2a_response_to_hermes_result(resp: &SendTaskResponse) -> Result<serde_js
     // Extract any structured metadata that the A2A handler may have returned
     let metadata = resp.metadata.clone().unwrap_or_default();
 
-    // Build a Hermes-compatible result object
+    // Build a reasoning-compatible result object
     let result = serde_json::json!({
         "text": text,
         "state": resp.status.state,
@@ -602,7 +602,7 @@ pub fn a2a_response_to_hermes_result(resp: &SendTaskResponse) -> Result<serde_js
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hermes::HermesRequest;
+    use crate::agent::{ReasoningInput, AgentTaskKind};
 
     #[test]
     fn build_text_task_basic() {
@@ -614,17 +614,17 @@ mod tests {
     }
 
     #[test]
-    fn hermes_request_to_a2a_task_maps_text_and_metadata() {
-        let req = HermesRequest::new(
-            "a2a.send",
-            Some(serde_json::json!({
-                "text": "do something",
-                "skill": "coding",
-                "tool_calls": [{"name": "tool1"}],
-                "session_id": "sess-42"
-            })),
+    fn reasoning_input_to_a2a_task_maps_text_and_metadata() {
+        let req = ReasoningInput {
+            task_kind: AgentTaskKind::Conversation,
+            user_text: "do something".to_string(),
+            session_id: "sess-42".to_string(),
+        };
+        let task = reasoning_input_to_a2a_task(
+            &req,
+            Some("coding"),
+            Some(&serde_json::json!([{"name": "tool1"}])),
         );
-        let task = hermes_request_to_a2a_task(&req, Some("fallback-sid".into()));
         assert_eq!(task.session_id, Some("sess-42".into()));
         let meta = task.metadata.as_ref().unwrap();
         assert_eq!(meta.get("skill").unwrap().as_str().unwrap(), "coding");
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn a2a_response_to_hermes_result_prefers_artifacts() {
+    fn a2a_response_to_reasoning_result_prefers_artifacts() {
         let resp = SendTaskResponse {
             id: "task-1".into(),
             status: TaskStatus {
@@ -663,13 +663,13 @@ mod tests {
                 m
             }),
         };
-        let result = a2a_response_to_hermes_result(&resp).unwrap();
+        let result = a2a_response_to_reasoning_result(&resp).unwrap();
         assert_eq!(result["text"].as_str().unwrap(), "artifact text");
         assert_eq!(result["metadata"]["key"].as_str().unwrap(), "value");
     }
 
     #[test]
-    fn a2a_response_to_hermes_result_fallback_to_status() {
+    fn a2a_response_to_reasoning_result_fallback_to_status() {
         let resp = SendTaskResponse {
             id: "task-2".into(),
             status: TaskStatus {
@@ -686,7 +686,7 @@ mod tests {
             history: None,
             metadata: None,
         };
-        let result = a2a_response_to_hermes_result(&resp).unwrap();
+        let result = a2a_response_to_reasoning_result(&resp).unwrap();
         assert_eq!(result["text"].as_str().unwrap(), "working on it");
     }
 

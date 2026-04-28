@@ -1,9 +1,9 @@
 use crate::AppState;
 use openlife_core::a2a::{
-    a2a_response_to_hermes_result, hermes_request_to_a2a_task, A2AClient, A2AServerHandler,
+    a2a_response_to_reasoning_result, reasoning_input_to_a2a_task, A2AClient, A2AServerHandler,
     AgentCard, SendTaskRequest,
 };
-use openlife_core::hermes::HermesRequest;
+use openlife_core::agent::ReasoningInput;
 use std::sync::Arc;
 use tauri::State;
 
@@ -63,15 +63,12 @@ pub async fn a2a_bridge_local(
     skill: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    let req = HermesRequest::new(
-        method.clone(),
-        Some(serde_json::json!({
-            "text": text.clone(),
-            "session_id": session_id.clone(),
-            "skill": skill.clone(),
-        })),
-    );
-    let a2a_req = hermes_request_to_a2a_task(&req, session_id.clone());
+    let req = ReasoningInput {
+        task_kind: openlife_core::agent::AgentTaskKind::Conversation,
+        user_text: text.clone(),
+        session_id: session_id.clone().unwrap_or_default(),
+    };
+    let a2a_req = reasoning_input_to_a2a_task(&req, skill.as_deref(), None);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(|e| e.to_string())?
@@ -82,23 +79,25 @@ pub async fn a2a_bridge_local(
         privacy_engine,
     };
     let resp = handler.handle_task(a2a_req);
-    let hermes_result = a2a_response_to_hermes_result(&resp).map_err(|e| e.to_string())?;
-    let bridge_preview = hermes_request_to_a2a_task(
-        &HermesRequest::new(
-            method,
-            Some(serde_json::json!({
-                "text": text,
-                "session_id": session_id,
-                "skill": skill,
-            })),
-        ),
+    let reasoning_result = a2a_response_to_reasoning_result(&resp).map_err(|e| e.to_string())?;
+    let bridge_preview = reasoning_input_to_a2a_task(
+        &ReasoningInput {
+            task_kind: openlife_core::agent::AgentTaskKind::Conversation,
+            user_text: text,
+            session_id: session_id.unwrap_or_default(),
+        },
+        None,
         None,
     );
     Ok(serde_json::json!({
-        "request": req,
+        "request": {
+            "task_kind": "conversation",
+            "user_text": req.user_text,
+            "session_id": req.session_id,
+        },
         "a2a_request": bridge_preview,
         "response": resp,
-        "hermes_result": hermes_result,
+        "reasoning_result": reasoning_result,
     }))
 }
 

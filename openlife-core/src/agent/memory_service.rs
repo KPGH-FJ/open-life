@@ -18,6 +18,12 @@ pub struct MemoryContext {
 /// Service for retrieving relevant memories from both text and vector stores.
 pub struct MemoryService;
 
+impl Default for MemoryService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryService {
     pub fn new() -> Self {
         Self
@@ -172,25 +178,13 @@ impl MemoryService {
 }
 
 /// Configuration for embedding-based memory retrieval.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EmbeddingConfig {
     pub enabled: bool,
     pub provider: String,
     pub openai_base: String,
     pub openai_key: String,
     pub embedding_model: String,
-}
-
-impl Default for EmbeddingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            provider: String::new(),
-            openai_base: String::new(),
-            openai_key: String::new(),
-            embedding_model: String::new(),
-        }
-    }
 }
 
 #[cfg(test)]

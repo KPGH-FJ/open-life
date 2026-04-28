@@ -41,7 +41,7 @@ impl ReasoningStrategy for DirectReasoner {
     async fn reason(
         &self,
         _input: &ReasoningInput,
-        context: &AssembleOutput,
+        _context: &AssembleOutput,
         _run_id: &str,
     ) -> Result<ReasoningOutput, ReasoningError> {
         Ok(ReasoningOutput {

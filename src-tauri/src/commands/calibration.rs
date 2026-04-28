@@ -98,7 +98,7 @@ pub async fn run_micro_evolution(
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(|e| e.to_string())?;
     let store = state.feedback_store.lock().await;
-    let engine = MicroEvolutionEngine::new(&*store);
+    let engine = MicroEvolutionEngine::new(&store);
     let (result, signals) = engine.run_with_signals(&model).map_err(|e| e.to_string())?;
     let signal_summary = signals.summary();
     let mut snapshot_version = None;
@@ -155,7 +155,7 @@ pub async fn generate_micro_evolution_changes(
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(|e| e.to_string())?;
     let store = state.feedback_store.lock().await;
-    let engine = MicroEvolutionEngine::new(&*store);
+    let engine = MicroEvolutionEngine::new(&store);
     let (result, signals) = engine.run_with_signals(&model).map_err(|e| e.to_string())?;
     let signal_summary = signals.summary();
     let mut after_model = model.clone();

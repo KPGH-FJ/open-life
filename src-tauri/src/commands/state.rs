@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tauri::State;
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn record_state(
     dimension_name: String,
     value: f64,

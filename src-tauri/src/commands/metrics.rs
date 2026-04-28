@@ -1,7 +1,6 @@
-use openlife_core::agent::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
+use openlife_core::agent::{RolloutMetric, RolloutSummary};
 use std::sync::Arc;
 use tauri::State;
-use tokio::sync::Mutex;
 
 #[tauri::command]
 pub async fn get_rollout_metrics(

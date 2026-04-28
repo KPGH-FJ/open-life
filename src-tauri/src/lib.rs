@@ -57,7 +57,7 @@ use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
 };
-use commands::hermes::hermes_dispatch;
+// use commands::hermes::hermes_dispatch; // Removed: replaced by AgentRuntime
 use commands::life_model::{get_life_model, save_life_model};
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
@@ -945,8 +945,8 @@ async fn preprocess_chat_input_v2(
                 match service.retrieve_context(
                     session_id,
                     &user_msg.content,
-                    &*memory_store,
-                    &*vector_store,
+                    &memory_store,
+                    &vector_store,
                     &embedding_config,
                 ).await {
                     Ok(ctx) => {
@@ -1013,11 +1013,7 @@ async fn preprocess_chat_input_v2(
     }
 
     // Step 10: Build embed_err if memory retrieval had issues
-    let embed_err = if memory_retrieval_time_ms == 0 && input.memory_context.is_none() {
-        None
-    } else {
-        None // Memory retrieval succeeded or wasn't attempted
-    };
+    let embed_err = None; // Memory retrieval succeeded or wasn't attempted
 
     // Record rollout metric for context assembler v2
     if let Some(ref store_arc) = state.rollout_metrics_store {
@@ -1047,6 +1043,7 @@ async fn preprocess_chat_input_v2(
     ))
 }
 
+#[allow(dead_code)]
 fn build_hermes_prompt(trace: &ReasoningTrace) -> String {
     let mut prompt = String::new();
     if let Some(ref m) = trace.meaning_result {
@@ -2509,7 +2506,6 @@ pub fn run() {
             log_analytics_event,
             index_memory_chunk,
             search_memory,
-            hermes_dispatch,
             a2a_discover_agent,
             a2a_send_task,
             a2a_local_agent_card,

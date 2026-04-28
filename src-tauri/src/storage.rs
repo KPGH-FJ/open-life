@@ -52,19 +52,10 @@ pub(crate) fn save_privacy_policy_to_path(
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Default)]
 pub(crate) struct OnboardingStatus {
     pub completed: bool,
     pub completed_at: Option<String>,
-}
-
-impl Default for OnboardingStatus {
-    fn default() -> Self {
-        Self {
-            completed: false,
-            completed_at: None,
-        }
-    }
 }
 
 pub(crate) fn onboarding_status_path() -> std::path::PathBuf {

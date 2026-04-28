@@ -28,6 +28,7 @@ fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
     }
 }
 
+#[allow(dead_code)]
 fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), String> {
     let mut current = root;
     let mut parts = path.split('.').peekable();
@@ -50,6 +51,7 @@ fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), Stri
     Err("Proposal affected_path 不能为空。".to_string())
 }
 
+#[allow(dead_code)]
 fn apply_life_model_value(
     model: &LifeModel,
     path: &str,
@@ -94,7 +96,7 @@ async fn apply_proposal_to_state(
                 after.clone(),
                 &proposal.reason,
                 proposal.confidence,
-                proposal.risk_level.clone(),
+                proposal.risk_level,
                 openlife_core::life_model::patch::PatchSource::BuilderReview,
             );
 

@@ -435,7 +435,7 @@ async fn builder_apply_signals_with_state(
                         edited_fields.push(format!("{}: edited", signal.affected_path));
                     }
                 }
-                "rejected" | _ => {
+                _ => {
                     signal.user_status = SignalUserStatus::Rejected;
                     rejected_count += 1;
                 }
@@ -662,7 +662,7 @@ pub async fn get_model_4d_completion(
         manager.load().map_err(|e| e.to_string())?
     };
     let completion = model.calculate_4d_completion();
-    Ok(serde_json::to_value(completion).map_err(|e| e.to_string())?)
+    serde_json::to_value(completion).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

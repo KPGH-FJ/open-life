@@ -3,7 +3,7 @@ use crate::agent::reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
     ReasoningStrategy, ReasoningTrace,
 };
-use crate::agent::types::{AgentTask, AgentTaskKind};
+use crate::agent::types::AgentTask;
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -143,7 +143,7 @@ impl AgentRuntime {
         let run_id = Uuid::new_v4().to_string();
         let reasoning_output = strategy.reason(&reasoning_input, &context, &run_id)
             .await
-            .map_err(|e| AgentRuntimeError::Reasoning(e))?;
+            .map_err(AgentRuntimeError::Reasoning)?;
 
         // 6. Build final messages with system prompt
         let mut final_messages = context.desensitized_messages.clone();
