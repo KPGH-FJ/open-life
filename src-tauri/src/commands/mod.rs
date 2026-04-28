@@ -7,6 +7,7 @@ pub mod diagnostics;
 pub mod feedback;
 pub mod hermes;
 pub mod life_model;
+pub mod metrics;
 pub mod mcp;
 pub mod memory;
 pub mod proposal;

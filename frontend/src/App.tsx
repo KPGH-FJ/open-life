@@ -27,6 +27,7 @@ import CalibrationPage from "./pages/CalibrationPage";
 import ProposalReviewPage from "./pages/ProposalReviewPage";
 import RunsPage from "./pages/RunsPage";
 import AgentRunDetail from "./pages/AgentRunDetail";
+import MetricsPage from "./pages/MetricsPage";
 import OnboardingWizard from "./components/OnboardingWizard";
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
@@ -159,6 +160,9 @@ function App() {
               <NavLink to="/a2a" className={navClass}>
                 <Network size={16} /> A2A
               </NavLink>
+              <NavLink to="/metrics" className={navClass}>
+                <Activity size={16} /> 监控
+              </NavLink>
             </div>
           </details>
         </nav>
@@ -226,6 +230,7 @@ function App() {
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:runId" element={<AgentRunDetail />} />
             <Route path="/review" element={<ProposalReviewPage />} />
+            <Route path="/metrics" element={<MetricsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </ErrorBoundary>

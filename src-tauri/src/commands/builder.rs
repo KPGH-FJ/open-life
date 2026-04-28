@@ -771,6 +771,7 @@ mod tests {
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
+            rollout_metrics_store: None,
             hot_cache,
             startup_warnings: vec![],
         })

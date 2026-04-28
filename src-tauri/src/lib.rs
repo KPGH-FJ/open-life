@@ -68,6 +68,9 @@ use commands::memory::{
     index_memory_chunk, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
+use commands::metrics::{
+    get_rollout_errors, get_rollout_metrics, get_rollout_summary,
+};
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
     list_proposals, postpone_proposal, reject_proposal,
@@ -352,6 +355,7 @@ pub struct AppState {
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
+    pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
 }
@@ -888,6 +892,8 @@ async fn preprocess_chat_input_v2(
     ),
     String,
 > {
+    let start = std::time::Instant::now();
+
     // Step 1: Persist user message (same as v1)
     if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
@@ -1012,6 +1018,23 @@ async fn preprocess_chat_input_v2(
     } else {
         None // Memory retrieval succeeded or wasn't attempted
     };
+
+    // Record rollout metric for context assembler v2
+    if let Some(ref store_arc) = state.rollout_metrics_store {
+        let elapsed_ms = start.elapsed().as_millis() as i64;
+        let metric = openlife_core::agent::RolloutMetric {
+            id: None,
+            experiment: "context_assembler".into(),
+            version: "v2".into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            duration_ms: elapsed_ms,
+            success: true,
+            error: None,
+            metadata: Some(format!("memory_hits:{}", input.memory_hits.len())),
+        };
+        let store = store_arc.lock().await;
+        let _ = store.record_metric(&metric);
+    }
 
     Ok((
         output.life_model,
@@ -2318,6 +2341,16 @@ pub fn run() {
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
+        rollout_metrics_store: {
+            let store_path = data_dir.join("rollout_metrics.db");
+            match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
+                Ok(store) => Some(Arc::new(Mutex::new(store))),
+                Err(e) => {
+                    startup_warnings.push(format!("rollout_metrics.db 初始化失败: {}", e));
+                    None
+                }
+            }
+        },
         hot_cache,
         startup_warnings,
     });
@@ -2513,6 +2546,9 @@ pub fn run() {
             set_privacy_policy,
             has_completed_onboarding,
             mark_onboarding_completed,
+            get_rollout_metrics,
+            get_rollout_summary,
+            get_rollout_errors,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| eprintln!("Tauri runtime exited with error: {}", e));
