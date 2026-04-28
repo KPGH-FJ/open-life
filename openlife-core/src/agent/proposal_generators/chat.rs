@@ -35,6 +35,26 @@ impl ChatProposalGenerator {
         }
     }
 
+    /// Calculate dynamic confidence based on signal count, strength, and context.
+    fn calculate_confidence(signal_count: usize, text_len: usize, has_emphasis: bool) -> f32 {
+        let base = 0.5f32;
+        let count_bonus = (signal_count as f32 * 0.05).min(0.2);
+        let strength = if text_len > 0 {
+            (20.0 / text_len as f32).min(1.0)
+        } else {
+            0.0
+        };
+        let strength_bonus = strength * 0.2;
+        let context_bonus = if has_emphasis { 0.1 } else { 0.0 };
+        (base + count_bonus + strength_bonus + context_bonus).min(0.95)
+    }
+
+    /// Check if text contains emphasis markers (exclamation, strong words).
+    fn has_emphasis_markers(text: &str) -> bool {
+        let emphasis_words = ["!", "！", "非常", "特别", "强烈", "一定", "必须", "绝对"];
+        emphasis_words.iter().any(|word| text.contains(word))
+    }
+
     /// Generate proposals from a chat message.
     pub fn generate_proposals(
         &self,
@@ -57,10 +77,14 @@ impl ChatProposalGenerator {
 
         let mut proposals = Vec::new();
 
+        let has_emphasis = Self::has_emphasis_markers(message);
+        let text_len = message.len();
+
         // Extract goals
         if let Some(goals) = Self::extract_goals(message) {
+            let signal_count = goals.len();
             for goal in goals {
-                let confidence = goal.confidence.min(0.95);
+                let confidence = Self::calculate_confidence(signal_count, text_len, has_emphasis);
                 if confidence >= self.confidence_threshold {
                     let mut proposal = AgentProposal::new(
                         ProposalType::GoalUpdate,
@@ -83,7 +107,11 @@ impl ChatProposalGenerator {
 
         // Extract state changes
         if let Some(state_update) = Self::extract_state_changes(message) {
-            let confidence = 0.55f32;
+            // Count matched state signals
+            let signal_count = state_update.as_object()
+                .map(|obj| obj.len())
+                .unwrap_or(0);
+            let confidence = Self::calculate_confidence(signal_count, text_len, has_emphasis);
             if confidence >= self.confidence_threshold {
                 let mut proposal = AgentProposal::new(
                     ProposalType::StateUpdate,
@@ -102,7 +130,8 @@ impl ChatProposalGenerator {
 
         // Extract capabilities
         if let Some(capability) = Self::extract_capabilities(message) {
-            let confidence = 0.60f32;
+            let signal_count = 1; // One capability per extraction
+            let confidence = Self::calculate_confidence(signal_count, text_len, has_emphasis);
             if confidence >= self.confidence_threshold {
                 let mut proposal = AgentProposal::new(
                     ProposalType::CapabilityUpdate,
@@ -396,5 +425,60 @@ mod tests {
         let model = LifeModel::default();
         let proposals = generator.generate_proposals("session-1", "短", &model).unwrap();
         assert!(proposals.is_empty());
+    }
+
+    #[test]
+    fn test_dynamic_confidence_with_emphasis() {
+        let generator = ChatProposalGenerator::new(5, 0.5, 0);
+        let model = LifeModel::default();
+        
+        // With emphasis markers
+        let proposals_emphasis = generator.generate_proposals(
+            "session-1",
+            "我想学习 Rust！非常有兴趣！",
+            &model,
+        ).unwrap();
+        
+        // Without emphasis markers
+        let proposals_normal = generator.generate_proposals(
+            "session-2",
+            "我想学习 Rust",
+            &model,
+        ).unwrap();
+        
+        // Emphasis should produce higher confidence
+        if let (Some(emph), Some(norm)) = (
+            proposals_emphasis.iter().find(|p| p.proposal_type == ProposalType::GoalUpdate),
+            proposals_normal.iter().find(|p| p.proposal_type == ProposalType::GoalUpdate),
+        ) {
+            assert!(emph.confidence > norm.confidence,
+                "Emphasis confidence ({}) should be > normal confidence ({})",
+                emph.confidence, norm.confidence);
+        }
+    }
+
+    #[test]
+    fn test_dynamic_confidence_signal_count() {
+        // More signals = higher confidence
+        let conf_1 = ChatProposalGenerator::calculate_confidence(1, 50, false);
+        let conf_3 = ChatProposalGenerator::calculate_confidence(3, 50, false);
+        let conf_5 = ChatProposalGenerator::calculate_confidence(5, 50, false);
+        
+        assert!(conf_3 > conf_1, "3 signals ({}) > 1 signal ({})", conf_3, conf_1);
+        assert!(conf_5 > conf_3, "5 signals ({}) > 3 signals ({})", conf_5, conf_3);
+        assert_eq!(conf_5, ChatProposalGenerator::calculate_confidence(10, 50, false),
+            "Signal count capped at 4 (0.2 bonus max)");
+    }
+
+    #[test]
+    fn test_dynamic_confidence_bounds() {
+        // Minimum confidence
+        let min_conf = ChatProposalGenerator::calculate_confidence(0, 1000, false);
+        assert!(min_conf >= 0.5, "Minimum confidence should be >= 0.5");
+        
+        // Maximum confidence
+        let max_conf = ChatProposalGenerator::calculate_confidence(10, 10, true);
+        assert!(max_conf <= 0.95, "Maximum confidence should be <= 0.95");
+        assert!(max_conf > 0.8, "High signal + emphasis should be > 0.8");
     }
 }
