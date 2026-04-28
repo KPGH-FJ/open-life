@@ -671,6 +671,98 @@ async fn persist_vector_memory_for_message(
     }
 }
 
+/// Prefetch memory context for a chat session.
+/// Returns (memory_context_string, memory_hits, retrieval_time_ms).
+async fn prefetch_memory_context(
+    session_id: &str,
+    user_message: &ChatMessage,
+    state: &State<'_, Arc<AppState>>,
+) -> (Option<String>, Vec<openlife_core::agent::context_assembler::MemoryHit>, u64) {
+    let start = std::time::Instant::now();
+    
+    if user_message.role != "user" {
+        return (None, vec![], 0);
+    }
+
+    let text_hits = {
+        let store = state.memory_store.lock().await;
+        store
+            .search_text_memories(Some(session_id), &user_message.content, 3)
+            .unwrap_or_default()
+    };
+
+    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.llm.provider.clone(),
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.embedding_model.clone(),
+            cfg.llm.embedding_enabled,
+        )
+    };
+
+    let mut embed_err = None;
+    let vector_hits = match embed_text_with_config(
+        &user_message.content,
+        &provider,
+        &openai_base,
+        &openai_key,
+        &embedding_model,
+        embedding_enabled,
+    )
+    .await
+    {
+        Ok(emb) => {
+            let store = state.vector_store.lock().await;
+            store
+                .search_by_session(session_id, &emb, 3, 1000)
+                .unwrap_or_default()
+        }
+        Err(e) => {
+            embed_err = Some(format!("向量记忆检索失败，已降级到关键词检索: {}", e));
+            vec![]
+        }
+    };
+
+    let results = merge_memory_hits(vector_hits, text_hits, 3);
+    let retrieval_time_ms = start.elapsed().as_millis() as u64;
+
+    if results.is_empty() {
+        return (None, vec![], retrieval_time_ms);
+    }
+
+    let memory_hits: Vec<openlife_core::agent::context_assembler::MemoryHit> = results
+        .iter()
+        .map(|(chunk, score)| openlife_core::agent::context_assembler::MemoryHit {
+            id: chunk.id.clone(),
+            content: chunk.content.clone(),
+            source: chunk.source.clone(),
+            score: *score,
+            tier: chunk.tier,
+        })
+        .collect();
+
+    let snippets: Vec<String> = results
+        .iter()
+        .map(|(chunk, score)| {
+            format!(
+                "- [{}] {} (相关度: {:.2})",
+                chunk.source,
+                chunk.content.replace('\n', " "),
+                score
+            )
+        })
+        .collect();
+
+    let memory_context = format!(
+        "以下是你过去记忆中的相关内容，请在回应中自然地参考它们：\n{}",
+        snippets.join("\n")
+    );
+
+    (Some(memory_context), memory_hits, retrieval_time_ms)
+}
+
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.

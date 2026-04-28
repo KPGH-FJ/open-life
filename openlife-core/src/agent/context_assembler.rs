@@ -11,6 +11,16 @@ pub trait ContextAssembler: Send + Sync {
     fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput>;
 }
 
+/// A single memory hit from vector or text search.
+#[derive(Debug, Clone)]
+pub struct MemoryHit {
+    pub id: String,
+    pub content: String,
+    pub source: String,
+    pub score: f32,
+    pub tier: i32,
+}
+
 /// Input to context assembly.
 pub struct AssembleInput {
     pub session_id: String,
@@ -18,6 +28,10 @@ pub struct AssembleInput {
     pub life_model: LifeModel,
     pub tools_prompt: String,
     pub privacy_engine: PrivacyEngine,
+    // Memory prefetch data (async-retrieved, passed in for sync assembly)
+    pub memory_context: Option<String>,
+    pub memory_hits: Vec<MemoryHit>,
+    pub memory_retrieval_time_ms: u64,
 }
 
 /// Output from context assembly.
@@ -67,7 +81,7 @@ impl ContextAssembler for LifeModelAssembler {
     }
 }
 
-/// Memory assembler: retrieves relevant memories and builds context.
+/// Memory assembler: injects prefetched memory context into the assembled output.
 pub struct MemoryAssembler;
 
 impl ContextAssembler for MemoryAssembler {
@@ -76,20 +90,39 @@ impl ContextAssembler for MemoryAssembler {
     }
 
     fn assemble(&self, input: &AssembleInput) -> Result<AssembleOutput> {
-        // TODO: Implement actual memory retrieval logic.
-        // This requires async access to MemoryStore and VectorStore.
-        // For now, return empty to maintain the trait contract.
+        let hit_count = input.memory_hits.len();
+        let memory_context = input.memory_context.clone().unwrap_or_default();
+        
+        // Build memory section for system prompt injection
+        let memory_section = if hit_count > 0 {
+            format!(
+                "【相关记忆】\n{}\n\n[检索到 {} 条记忆，耗时 {}ms]",
+                memory_context,
+                hit_count,
+                input.memory_retrieval_time_ms
+            )
+        } else {
+            String::new()
+        };
+
+        // Extract memory sources for context summary
+        let memory_sources: Vec<String> = input
+            .memory_hits
+            .iter()
+            .map(|hit| hit.source.clone())
+            .collect();
+
         Ok(AssembleOutput {
             life_model: input.life_model.clone(),
             tools_prompt: input.tools_prompt.clone(),
             privacy_map: HashMap::new(),
             desensitized_messages: input.messages.clone(),
-            memory_context: String::new(),
+            memory_context: memory_section,
             context_summary: ContextSummary {
                 life_model_empty: input.life_model.is_effectively_empty(),
                 included_life_model_sections: vec![],
-                memory_hit_count: 0,
-                memory_sources: vec![],
+                memory_hit_count: hit_count as i64,
+                memory_sources,
                 used_tools_prompt: !input.tools_prompt.is_empty(),
                 redaction_applied: false,
                 redaction_level: crate::agent::types::RedactionLevel::None,
@@ -267,6 +300,9 @@ mod tests {
             life_model: LifeModel::default(),
             tools_prompt: String::new(),
             privacy_engine: PrivacyEngine::default(),
+            memory_context: None,
+            memory_hits: vec![],
+            memory_retrieval_time_ms: 0,
         }
     }
 
@@ -293,17 +329,67 @@ mod tests {
     }
 
     #[test]
-    fn test_composite_assembler() {
+    fn test_memory_assembler_empty() {
+        let assembler = MemoryAssembler;
+        let input = create_test_input();
+        let output = assembler.assemble(&input).unwrap();
+        
+        assert!(output.memory_context.is_empty());
+        assert_eq!(output.context_summary.memory_hit_count, 0);
+    }
+
+    #[test]
+    fn test_memory_assembler_with_hits() {
+        let assembler = MemoryAssembler;
+        let mut input = create_test_input();
+        input.memory_context = Some("最近讨论了三体问题".to_string());
+        input.memory_hits = vec![
+            MemoryHit {
+                id: "m1".to_string(),
+                content: "三体问题讨论".to_string(),
+                source: "chat".to_string(),
+                score: 0.92,
+                tier: 1,
+            },
+            MemoryHit {
+                id: "m2".to_string(),
+                content: "时间管理技巧".to_string(),
+                source: "note".to_string(),
+                score: 0.85,
+                tier: 2,
+            },
+        ];
+        input.memory_retrieval_time_ms = 45;
+        
+        let output = assembler.assemble(&input).unwrap();
+        
+        assert!(output.memory_context.contains("最近讨论了三体问题"));
+        assert!(output.memory_context.contains("检索到 2 条记忆"));
+        assert!(output.memory_context.contains("耗时 45ms"));
+        assert_eq!(output.context_summary.memory_hit_count, 2);
+        assert_eq!(output.context_summary.memory_sources, vec!["chat", "note"]);
+    }
+
+    #[test]
+    fn test_composite_assembler_with_memory() {
         let assembler = CompositeAssembler::new()
             .with(Box::new(LifeModelAssembler))
-            .with(Box::new(PrivacyAssembler));
+            .with(Box::new(MemoryAssembler));
         
         let mut input = create_test_input();
-        input.messages[0].content = "我的电话是 13800138000".to_string();
+        input.memory_context = Some("关键记忆".to_string());
+        input.memory_hits = vec![MemoryHit {
+            id: "m1".to_string(),
+            content: "测试".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+            tier: 1,
+        }];
         
         let output = assembler.assemble(&input).unwrap();
         
         assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
-        assert!(!output.privacy_map.is_empty());
+        assert!(output.memory_context.contains("关键记忆"));
+        assert_eq!(output.context_summary.memory_hit_count, 1);
     }
 }
