@@ -6,6 +6,7 @@ pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_store;
 pub mod reasoning;
+pub mod runtime;
 pub mod store;
 pub mod types;
 
@@ -21,5 +22,6 @@ pub use reasoning::{
     ReasoningOutput, ReasoningPhaseKind, ReasoningStrategy, ReasoningTrace,
 };
 pub use reasoning::layered::{SafetyChecker, SafetyCheckResult};
+pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use store::AgentRunStore;
 pub use types::*;

@@ -57,6 +57,16 @@ impl std::fmt::Display for AgentTaskStatus {
     }
 }
 
+/// A task submitted to the AgentRuntime for execution.
+#[derive(Debug, Clone)]
+pub struct AgentTask {
+    pub kind: AgentTaskKind,
+    pub session_id: String,
+    pub user_text: String,
+    pub messages: Vec<crate::llm::ChatMessage>,
+    pub layer: crate::layer_router::Layer,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {

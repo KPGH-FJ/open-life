@@ -3,7 +3,7 @@ use openlife_core::agent::ContextAssembler;
 use openlife_core::builder::{BuilderSession, BuilderSessionStore};
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
-use openlife_core::hermes::{HermesContext, HermesRequest, HermesTrace};
+use openlife_core::agent::ReasoningTrace;
 use openlife_core::layer_router::{Layer, LayerRouter};
 use openlife_core::life_model::{LifeModel, LifeModelManager};
 use openlife_core::llm::ChatMessage;
@@ -109,7 +109,7 @@ pub struct ToolCallResult {
 #[derive(serde::Serialize)]
 pub struct SendMessageResult {
     pub reply: String,
-    pub hermes_trace: HermesTrace,
+    pub reasoning_trace: openlife_core::agent::ReasoningTrace,
     pub tool_calls: Vec<ToolCallResult>,
 }
 
@@ -1047,7 +1047,7 @@ async fn preprocess_chat_input_v2(
     ))
 }
 
-fn build_hermes_prompt(trace: &HermesTrace) -> String {
+fn build_hermes_prompt(trace: &ReasoningTrace) -> String {
     let mut prompt = String::new();
     if let Some(ref m) = trace.meaning_result {
         if let Some(text) = m.get("text").and_then(|t| t.as_str()) {
@@ -1069,15 +1069,15 @@ fn build_hermes_prompt(trace: &HermesTrace) -> String {
             }
         }
     }
-    if let Some(ref arbitration) = trace.arbitration_result {
-        if let Some(warnings) = arbitration.get("warnings").and_then(|v| v.as_array()) {
+    if let Some(ref safety) = trace.safety_check_result {
+        if let Some(warnings) = safety.get("warnings").and_then(|v| v.as_array()) {
             let text = warnings
                 .iter()
                 .filter_map(|item| item.as_str())
                 .collect::<Vec<_>>()
                 .join("；");
             if !text.is_empty() {
-                prompt.push_str(&format!("【仲裁提醒】{}\n", text));
+                prompt.push_str(&format!("【安全检查提醒】{}\n", text));
             }
         }
     }
@@ -1261,7 +1261,7 @@ async fn send_message(
                 );
                 return Ok(SendMessageResult {
                     reply,
-                    hermes_trace: HermesTrace::default(),
+                    reasoning_trace: ReasoningTrace::default(),
                     tool_calls: vec![],
                 });
             }
@@ -1299,46 +1299,49 @@ async fn send_message(
         None
     };
 
-    let life_model_yaml = serde_yaml::to_string(&life_model).unwrap_or_default();
-    let hermes_req =
-        HermesRequest::new("chat", Some(serde_json::json!({"session_id": &session_id})));
+    // AgentRuntime: unified execution entry
     let scheduler_clone = state.scheduler.lock().await.clone();
-    let hermes_bus = openlife_core::hermes::build_bus(life_model.clone(), scheduler_clone.clone());
+    let agent_runtime = openlife_core::agent::AgentRuntime::new(
+        life_model.clone(),
+        scheduler_clone.clone(),
+    );
 
-    let mut hermes_trace = HermesTrace::default();
-    let mut messages_with_hermes = desensitized_messages.clone();
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Conversation,
+        session_id: session_id.clone(),
+        user_text: user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+        messages: desensitized_messages.clone(),
+        layer,
+    };
 
-    // Layer 3: invoke Hermes for deep reasoning; on failure fallback to L2
+    let mut messages_with_reasoning = desensitized_messages.clone();
+    let mut reasoning_trace = openlife_core::agent::ReasoningTrace::default();
+
+    // Layer 3: use LayeredReasoner for deep reasoning; on failure fallback to L2
     let _actual_layer = if layer == Layer::L3 {
-        let mut hermes_ctx = HermesContext {
-            life_model_yaml,
-            life_model: Some(life_model.clone()),
-            recent_messages: desensitized_messages.clone(),
-            tools_prompt: Some(tools_prompt.clone()),
-            memory_context: String::new(),
-            extras: HashMap::new(),
-            ..Default::default()
-        };
-        match hermes_bus
-            .dispatch_with_arbitration(&hermes_req, &mut hermes_ctx)
-            .await
-        {
-            Ok(trace) => {
-                let prompt = build_hermes_prompt(&trace);
-                if !prompt.is_empty() {
-                    messages_with_hermes.insert(
-                        0,
-                        ChatMessage {
-                            role: "system".into(),
-                            content: prompt.trim().to_string(),
-                        },
-                    );
+        let runtime_output = agent_runtime.execute_task(
+            &task,
+            &life_model,
+            &tools_prompt,
+            None, // memory_context handled in preprocess
+            vec![], // memory_hits handled in preprocess
+            privacy_engine.clone(),
+        ).await;
+
+        match runtime_output {
+            Ok(output) => {
+                if !output.reasoning_trace.output.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                    // Use reasoning trace output directly if available
+                    messages_with_reasoning = output.final_messages;
+                } else {
+                    // Use system prompt from reasoning
+                    messages_with_reasoning = output.final_messages;
                 }
-                hermes_trace = trace;
+                reasoning_trace = output.reasoning_trace;
                 Layer::L3
             }
             Err(e) => {
-                hermes_trace.errors.push(e);
+                eprintln!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
             }
@@ -1347,24 +1350,14 @@ async fn send_message(
         layer
     };
 
-    let first_reply = if let Some(ref ex) = hermes_trace.execution_result {
-        ex.get("text")
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-    } else {
-        None
-    };
-    let first_reply = match first_reply {
-        Some(text) => text,
-        None => scheduler_clone
-            .generate(
-                messages_with_hermes.clone(),
-                &life_model,
-                Some(&tools_prompt),
-            )
-            .await
-            .map_err(|e| e.to_string())?,
-    };
+    let first_reply = scheduler_clone
+        .generate(
+            messages_with_reasoning.clone(),
+            &life_model,
+            Some(&tools_prompt),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
 
     let tool_results = {
         let (reg, audit) = state.get_mcp_state().await;
@@ -1404,7 +1397,7 @@ async fn send_message(
                 first_reply
             }
         } else {
-            let mut follow_up = messages_with_hermes.clone();
+            let mut follow_up = messages_with_reasoning.clone();
             follow_up.push(ChatMessage {
                 role: "assistant".into(),
                 content: first_reply,
@@ -1446,10 +1439,10 @@ async fn send_message(
     };
     let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
 
-    hermes_trace.execution_result = Some(serde_json::json!({ "text": &reply }));
+    reasoning_trace.generation_result = Some(serde_json::json!({ "text": &reply }));
 
     if let Some(err) = embed_err {
-        hermes_trace.errors.push(err);
+        reasoning_trace.errors.push(err);
     }
     if inserted {
         persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
@@ -1457,7 +1450,7 @@ async fn send_message(
 
     Ok(SendMessageResult {
         reply,
-        hermes_trace,
+        reasoning_trace,
         tool_calls,
     })
 }
@@ -1597,7 +1590,7 @@ async fn start_stream_message(
                     serde_json::json!({
                         "session_id": &session_id,
                         "run_id": agent_run.id,
-                        "hermes_trace": HermesTrace::default(),
+                        "reasoning_trace": ReasoningTrace::default(),
                         "tool_calls": Vec::<ToolCallResult>::new(),
                     }),
                 );
@@ -1641,7 +1634,7 @@ async fn start_stream_message(
                         "session_id": &session_id,
                         "run_id": agent_run.id,
                         "reply": reply,
-                        "hermes_trace": HermesTrace::default(),
+                        "reasoning_trace": ReasoningTrace::default(),
                         "tool_calls": Vec::<ToolCallResult>::new(),
                     }),
                 );
@@ -1710,48 +1703,44 @@ async fn start_stream_message(
         None
     };
 
-    let life_model_yaml = serde_yaml::to_string(&life_model).unwrap_or_default();
-    let hermes_req =
-        HermesRequest::new("chat", Some(serde_json::json!({"session_id": &session_id})));
     let scheduler_clone = state.scheduler.lock().await.clone();
     let model_route = scheduler_clone
         .preview_chat_route(Some(&tools_prompt))
         .await;
-    let hermes_bus = openlife_core::hermes::build_bus(life_model.clone(), scheduler_clone.clone());
+    let agent_runtime = openlife_core::agent::AgentRuntime::new(
+        life_model.clone(),
+        scheduler_clone.clone(),
+    );
 
-    let mut hermes_trace = HermesTrace::default();
-    let mut messages_with_hermes = desensitized_messages.clone();
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Conversation,
+        session_id: session_id.clone(),
+        user_text: user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+        messages: desensitized_messages.clone(),
+        layer,
+    };
+
+    let mut reasoning_trace = ReasoningTrace::default();
+    let mut messages_with_reasoning = desensitized_messages.clone();
 
     let _actual_layer = if layer == Layer::L3 {
-        let mut hermes_ctx = HermesContext {
-            life_model_yaml,
-            life_model: Some(life_model.clone()),
-            recent_messages: desensitized_messages.clone(),
-            tools_prompt: Some(tools_prompt.clone()),
-            memory_context: String::new(),
-            extras: HashMap::new(),
-            ..Default::default()
-        };
-        match hermes_bus
-            .dispatch_with_arbitration(&hermes_req, &mut hermes_ctx)
-            .await
-        {
-            Ok(trace) => {
-                let prompt = build_hermes_prompt(&trace);
-                if !prompt.is_empty() {
-                    messages_with_hermes.insert(
-                        0,
-                        ChatMessage {
-                            role: "system".into(),
-                            content: prompt.trim().to_string(),
-                        },
-                    );
-                }
-                hermes_trace = trace;
+        let runtime_output = agent_runtime.execute_task(
+            &task,
+            &life_model,
+            &tools_prompt,
+            None,
+            vec![],
+            privacy_engine.clone(),
+        ).await;
+
+        match runtime_output {
+            Ok(output) => {
+                messages_with_reasoning = output.final_messages;
+                reasoning_trace = output.reasoning_trace;
                 Layer::L3
             }
             Err(e) => {
-                hermes_trace.errors.push(e);
+                eprintln!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
             }
@@ -1765,13 +1754,13 @@ async fn start_stream_message(
         serde_json::json!({
             "session_id": &session_id,
             "run_id": agent_run.id,
-            "hermes_trace": hermes_trace.clone(),
+            "reasoning_trace": reasoning_trace.clone(),
             "tool_calls": Vec::<ToolCallResult>::new(),
         }),
     );
 
     let mut full_reply = String::new();
-    if let Some(ref ex) = hermes_trace.execution_result {
+    if let Some(ref ex) = reasoning_trace.generation_result {
         if let Some(text) = ex.get("text").and_then(|t| t.as_str()) {
             full_reply = text.to_string();
             let _ = app_handle.emit(
@@ -1788,7 +1777,7 @@ async fn start_stream_message(
         match timeout(
             Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
             scheduler_clone.generate_stream(
-                messages_with_hermes.clone(),
+                messages_with_reasoning.clone(),
                 &life_model,
                 Some(&tools_prompt),
             ),
@@ -1810,7 +1799,7 @@ async fn start_stream_message(
                             format!("超过 {} 秒没有收到模型输出", STREAM_CHUNK_TIMEOUT_SECS);
                         match generate_non_stream_fallback(
                             &scheduler_clone,
-                            messages_with_hermes.clone(),
+                            messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
                         )
@@ -1825,7 +1814,7 @@ async fn start_stream_message(
                                             reply
                                         )
                                 };
-                                hermes_trace.errors.push(format!(
+                                reasoning_trace.errors.push(format!(
                                     "流式响应超时，已降级为非流式响应：{}",
                                     stream_error
                                 ));
@@ -1885,7 +1874,7 @@ async fn start_stream_message(
                         let stream_error = e.to_string();
                         match generate_non_stream_fallback(
                             &scheduler_clone,
-                            messages_with_hermes.clone(),
+                            messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
                         )
@@ -1900,7 +1889,7 @@ async fn start_stream_message(
                                             reply
                                         )
                                 };
-                                hermes_trace.errors.push(format!(
+                                reasoning_trace.errors.push(format!(
                                     "流式响应中断，已降级为非流式响应：{}",
                                     stream_error
                                 ));
@@ -1945,14 +1934,14 @@ async fn start_stream_message(
                 let stream_error = stream_error.to_string();
                 match generate_non_stream_fallback(
                     &scheduler_clone,
-                    messages_with_hermes.clone(),
+                    messages_with_reasoning.clone(),
                     &life_model,
                     &tools_prompt,
                 )
                 .await
                 {
                     Ok(reply) => {
-                        hermes_trace.errors.push(format!(
+                        reasoning_trace.errors.push(format!(
                             "流式响应初始化失败，已降级为非流式响应：{}",
                             stream_error
                         ));
@@ -1990,14 +1979,14 @@ async fn start_stream_message(
             let stream_error = "流式响应已结束，但没有收到可显示内容".to_string();
             match generate_non_stream_fallback(
                 &scheduler_clone,
-                messages_with_hermes.clone(),
+                messages_with_reasoning.clone(),
                 &life_model,
                 &tools_prompt,
             )
             .await
             {
                 Ok(reply) => {
-                    hermes_trace.errors.push(format!(
+                    reasoning_trace.errors.push(format!(
                         "流式响应为空，已降级为非流式响应：{}",
                         stream_error
                     ));
@@ -2076,7 +2065,7 @@ async fn start_stream_message(
                 first_reply
             }
         } else {
-            let mut follow_up = messages_with_hermes.clone();
+            let mut follow_up = messages_with_reasoning.clone();
             follow_up.push(ChatMessage {
                 role: "assistant".into(),
                 content: first_reply,
@@ -2131,7 +2120,7 @@ async fn start_stream_message(
     };
     let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
 
-    hermes_trace.execution_result = Some(serde_json::json!({ "text": &reply }));
+    reasoning_trace.generation_result = Some(serde_json::json!({ "text": &reply }));
 
     if inserted {
         persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
@@ -2196,7 +2185,7 @@ async fn start_stream_message(
             "session_id": &session_id,
             "run_id": agent_run.id,
             "reply": reply,
-            "hermes_trace": hermes_trace,
+            "reasoning_trace": reasoning_trace,
             "tool_calls": tool_calls,
         }),
     );
