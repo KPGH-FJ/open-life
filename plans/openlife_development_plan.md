@@ -38,27 +38,45 @@ Does this make OpenLife more like a trustworthy personal Agent framework?
 
 ### 3.1 Architecture Gaps
 
-- No first-class `AgentTask`.
-- No first-class `AgentRun`.
-- No central `AgentRuntime`.
-- No unified `AgentProposal`.
-- No consistent representation of tool actions, model actions, memory writes, and LifeModel patches.
-- Chat, Builder, Calibration, and Evolution still use separate pipelines.
+- ~~No first-class `AgentTask`.~~ ✅ 已实现
+- ~~No first-class `AgentRun`.~~ ✅ 已实现（Chat/Builder/Calibration 全链路追踪）
+- ~~No central `AgentRuntime`.~~ ✅ 已实现（LayeredReasoner + DirectReasoner 策略注册）
+- ~~No unified `AgentProposal`.~~ ✅ 已实现（ProposalEngine + ProposalStore）
+- ~~No consistent representation of tool actions, model actions, memory writes, and LifeModel patches.~~ ✅ 已实现（统一 Proposal 结构）
+- ~~Chat, Builder, Calibration, and Evolution still use separate pipelines.~~ ✅ 已完成（Chat 已接入 Proposal 流）
 
 ### 3.2 Product Gaps
 
 - UI still looks like a set of app pages, not an Agent framework.
 - Users cannot clearly see what context was used by the model.
 - Users cannot clearly see why local or cloud model was chosen.
-- LifeModel updates are not yet presented as one consistent reviewable proposal stream.
+- ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
 - Dashboard is still closer to a summary page than an operating workspace.
 
 ### 3.3 Engineering Gaps
 
 - Several large files are difficult to maintain, especially Builder and page components.
 - Tauri command contracts are still manually maintained.
-- Provider configuration is better than before, but ModelRouter semantics are still incomplete.
-- ReAct execution and tool permissioning are not yet represented by one action model.
+- ~~Provider configuration is better than before, but ModelRouter semantics are still incomplete.~~ ✅ 已补充（SystemConfig 配置化）
+- ~~ReAct execution and tool permissioning are not yet represented by one action model.~~ ✅ 已补充（错误处理增强 + 安全模式）
+
+### 3.4 Recently Completed (2026-04-29)
+
+- **Phase 1: 稳定性增强**
+  - 生产代码 unwrap() 清理（0 个剩余）
+  - hot_cache Mutex → RwLock 修复
+  - AgentRuntime 4 个核心测试
+- **Phase 2: Chat 提案流**
+  - ProposalEngine 存根实现（含 ChatProposalGeneratorAdapter）
+  - Chat 主流程接入 Proposal 生成
+  - 错误处理增强（关键操作静默忽略修复）
+- **Phase 3: 性能优化**
+  - 硬编码值配置化（Ollama TTL、memory top_k）
+  - LRU Embedding 缓存（1000 条，1h TTL）
+  - 余弦相似度 4-wide SIMD 向量化
+- **Phase 4: 集成测试**
+  - Tauri 命令测试 +6（life_model 2 + chat 2 + state 2）
+  - 前端类型同步（HermesTrace → ReasoningTrace）
 
 ## 4. Development Principles
 

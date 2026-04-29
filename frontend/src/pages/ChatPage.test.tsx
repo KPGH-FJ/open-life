@@ -525,7 +525,7 @@ describe("ChatPage", () => {
         payload: {
           session_id: "session-1",
           run_id: "run-old-session",
-          hermes_trace: null,
+          reasoning_trace: null,
           tool_calls: [],
         },
       });

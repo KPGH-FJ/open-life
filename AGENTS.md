@@ -65,7 +65,7 @@
 │       │   ├── setup.ts          # 测试初始化 (mock ResizeObserver 等)
 │       │   └── mocks/tauri.ts    # Tauri invoke mock（约 30+ 命令）
 │       ├── components/           # 通用组件
-│       │   ├── HermesTracePanel.tsx
+│       │   ├── ReasoningTracePanel.tsx
 │       │   ├── ToolCallCard.tsx
 │       │   └── LoadingSpinner.tsx
 │       └── pages/                # 页面组件
@@ -292,7 +292,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 | **ChatMessage** | `role` (system/user/assistant), `content`, `tool_calls?`, `name?` | 属于 ChatSession；持久化到 SQLite |
 | **MemoryChunk** | `session_id`, `content`, `embedding[]`, `source`, `tier`, `access_count` | 向量记忆，tier 1/2/3 分层 |
 | **ToolManifest** | `name`, `description`, `source` (builtin/mcp/external), `parameters` | 注册到 McpRegistry |
-| **HermesTrace** | `meaning_result`, `strategy_result`, `execution_result`, `arbitration` | 一次对话请求的三层决策痕迹 |
+| **ReasoningTrace** | `meaning_result`, `strategy_result`, `generation_result`, `safety_check_result` | 一次对话请求的推理过程痕迹 |
 
 ### 状态机和流程
 
@@ -450,6 +450,15 @@ VectorStore.search(query_embedding, top_k=5)
 
 运行时配置文件路径（macOS）：`~/Library/Application Support/ai.openlife.app/config.yaml`
 
+### SystemConfig 配置项
+
+`config.yaml` 中新增 `system` 字段，支持以下配置：
+
+| 配置项 | 类型 | 默认值 | 说明 |
+|--------|------|--------|------|
+| `system.ollama_cache_ttl_seconds` | u64 | 10 | Ollama 模型可用性缓存 TTL |
+| `system.memory_search_top_k` | usize | 3 | Chat 流程中记忆检索数量 |
+
 ### 启动和测试命令
 
 #### 开发模式
@@ -518,7 +527,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 ### 历史遗留问题
 
 1. **reqwest 版本不一致**：`openlife-core` 使用 `reqwest 0.11`，`src-tauri` 使用 `reqwest 0.12`。目前编译通过，但建议统一版本以避免潜在兼容性问题。
-2. **Ollama 缓存固定 10 秒**：`ollama.rs` 中 `OLLAMA_CACHE_TTL = 10s` 硬编码。如果用户刚启动 Ollama，需要等缓存过期才能被检测到。
+2. ~~Ollama 缓存固定 10 秒~~ **已修复**：`ollama_cache_ttl_seconds` 已加入 `SystemConfig`，可通过 `config.yaml` 配置，默认仍为 10 秒。
 3. ~~数据目录与 Tauri identifier 不一致~~ **已修复**：数据目录已统一为 `ai.openlife.app`。旧版本数据如需迁移请手动复制。
 4. **MCP 审计日志单独数据库**：`mcp_audit.db` 与 `messages.db`/`vectors.db` 分开存储，这是设计上的隔离，但备份/迁移时容易遗漏。
 
@@ -532,8 +541,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 ### 性能敏感区域
 
-1. **向量检索余弦相似度**：[`cosine_similarity`](openlife-core/src/vectors.rs:285) 在 Rust 中逐对计算，大规模向量库时可能成为瓶颈。目前使用 `f32` 运算，可考虑 SIMD 优化。
-2. **embedding 生成**：每次用户输入都调用 embedding API（或本地 ONNX 模型），是延迟的主要来源。可考虑缓存高频查询的 embedding。
+1. **向量检索余弦相似度**：[`cosine_similarity`](openlife-core/src/vectors.rs:285) 已改为 4-wide 手动向量化，提升指令吞吐。
+2. **embedding 生成**：已实现 LRU Embedding 缓存（默认 1000 条，1 小时 TTL），避免重复计算相同文本的 embedding。
 3. **LayeredReasoner 三层串行调用**：Meaning → Strategy → Generation 是串行的，每层都有 LLM 请求，总延迟 = 三层之和。Strategy 层要求输出合法 JSON，重试逻辑可能增加额外延迟。作为 AgentRuntime 的默认推理策略，可通过配置调整超时或切换为 DirectReasoner 降低延迟。
 4. **SQLite 写入锁**：`MemoryStore` 使用 `Mutex<Connection>`，高并发写入（如同时保存消息 + 向量化 + 审计日志）会串行化。
 5. **Ollama 首次加载延迟**：本地模型首次加载到 GPU 内存时可能有数秒延迟，缓存机制只检查可用性，不预热模型。
@@ -547,8 +556,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 5. ~~**Hermes / ReAct 边界重构**：Hermes 当前是三层决策总线，后续应纳入 ReAct Engine 或成为 AgentRuntime 的一种策略。~~ ✅ 已完成（Hermes 已重构为 LayeredReasoner，作为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册）
 6. **前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。
 7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
-8. **核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。
-9. **Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。
+8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试）
+9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
 
 ---
 
