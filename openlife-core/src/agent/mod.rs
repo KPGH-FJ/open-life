@@ -23,6 +23,7 @@ pub use model_router::{
 pub use proposal_engine::{
     BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter,
     FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator,
+    ToolProposalGenerator,
 };
 pub use proposal_generators::ChatProposalGenerator;
 pub use proposal_store::ProposalStore;

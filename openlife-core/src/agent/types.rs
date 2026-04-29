@@ -148,6 +148,10 @@ pub struct ModelRouteTrace {
     pub privacy_level: RedactionLevel,
     pub latency_ms: Option<u64>,
     pub retry_count: u32,
+    #[serde(default)]
+    pub fallback_reason: Option<String>,
+    #[serde(default)]
+    pub provider_health_is_estimated: Option<bool>,
 }
 
 /// Summary of what context was included in the run.

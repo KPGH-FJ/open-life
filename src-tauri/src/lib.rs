@@ -924,6 +924,53 @@ async fn persist_vector_memory_for_message(
     }
 }
 
+async fn finalize_chat_agent_run(
+    session_id: &str,
+    assistant_message: &ChatMessage,
+    reply: &str,
+    reasoning_trace: &mut ReasoningTrace,
+    agent_run: &mut openlife_core::agent::AgentRun,
+    life_model: &LifeModel,
+    state: &State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    let inserted = persist_chat_message_if_needed(session_id, assistant_message, state).await?;
+
+    reasoning_trace.generation_result = Some(serde_json::json!({ "text": reply }));
+    agent_run.output_preview = Some(preview_text(reply, 200));
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.finished_at = Some(chrono::Utc::now());
+    agent_run.reasoning_trace = Some(reasoning_trace.clone());
+
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        match store.get_run(&agent_run.id) {
+            Ok(Some(_)) => {
+                if let Err(e) = store.update_run(agent_run) {
+                    eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                }
+            }
+            Ok(None) => {
+                if let Err(e) = store.create_run(agent_run) {
+                    eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+                }
+            }
+            Err(e) => {
+                eprintln!("[AgentRun] 查询运行记录失败: {}", e);
+                if let Err(e) = store.create_run(agent_run) {
+                    eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+                }
+            }
+        }
+    }
+
+    if inserted {
+        persist_vector_memory_for_message(session_id, assistant_message, state).await;
+    }
+
+    generate_and_persist_chat_proposals(state.inner(), agent_run, reply, life_model).await;
+    Ok(())
+}
+
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
@@ -1734,30 +1781,20 @@ async fn send_message(
         role: "assistant".into(),
         content: reply.clone(),
     };
-    let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
-
-    reasoning_trace.generation_result = Some(serde_json::json!({ "text": &reply }));
 
     if let Some(err) = embed_err {
         reasoning_trace.errors.push(err);
     }
-    // Update and save AgentRun
-    agent_run.output_preview = Some(reply.clone());
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    agent_run.finished_at = Some(chrono::Utc::now());
-    agent_run.reasoning_trace = Some(reasoning_trace.clone());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.create_run(&agent_run) {
-            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
-        }
-    }
-
-    if inserted {
-        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
-    }
-
-    generate_and_persist_chat_proposals(&state, &agent_run, &reply, &life_model).await;
+    finalize_chat_agent_run(
+        &session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        &state,
+    )
+    .await?;
 
     Ok(SendMessageResult {
         reply,
@@ -1925,6 +1962,8 @@ async fn start_stream_message(
                     privacy_level: openlife_core::agent::types::RedactionLevel::None,
                     latency_ms: None,
                     retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
                 };
                 let context_summary = openlife_core::agent::ContextSummary {
                     life_model_empty: true,
@@ -2459,13 +2498,6 @@ async fn start_stream_message(
         role: "assistant".into(),
         content: reply.clone(),
     };
-    let inserted = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await?;
-
-    reasoning_trace.generation_result = Some(serde_json::json!({ "text": &reply }));
-
-    if inserted {
-        persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
-    }
 
     let context_summary = openlife_core::agent::ContextSummary {
         life_model_empty: life_model.is_effectively_empty(),
@@ -2482,15 +2514,16 @@ async fn start_stream_message(
     };
     let preview = preview_text(&reply, 200);
     agent_run.complete(&preview, model_route, context_summary);
-    agent_run.reasoning_trace = Some(reasoning_trace.clone());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.update_run(&agent_run) {
-            eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-        }
-    }
-
-    generate_and_persist_chat_proposals(&state, &agent_run, &reply, &life_model).await;
+    finalize_chat_agent_run(
+        &session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        &state,
+    )
+    .await?;
 
     let _ = app_handle.emit(
         "stream-message-done",
@@ -2704,6 +2737,7 @@ pub fn run() {
             ));
             engine.register(Box::new(openlife_core::agent::FeedbackProposalGenerator));
             engine.register(Box::new(openlife_core::agent::MemoryProposalGenerator));
+            engine.register(Box::new(openlife_core::agent::ToolProposalGenerator));
             engine
         })),
         startup_warnings,

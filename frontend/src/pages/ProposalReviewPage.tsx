@@ -44,8 +44,18 @@ const TYPE_OPTIONS = [
   { value: "", label: "全部类型" },
   { value: "life_model_update", label: "LifeModel" },
   { value: "goal_update", label: "Goal" },
-  { value: "memory_update", label: "Memory" },
+  { value: "state_update", label: "State" },
+  { value: "preference_update", label: "Preference" },
+  { value: "capability_update", label: "Capability" },
+  { value: "memory_write", label: "Memory Write" },
+  { value: "memory_archive", label: "Memory Archive" },
   { value: "tool_permission", label: "Tool" },
+  { value: "plugin_permission", label: "Plugin" },
+  { value: "schedule_checkin", label: "Schedule Check-in" },
+  { value: "scheduled_task", label: "Scheduled Task" },
+  { value: "external_write_action", label: "External Write" },
+  { value: "model_policy_change", label: "Model Policy" },
+  { value: "data_export", label: "Data Export" },
 ];
 
 const RISK_OPTIONS = [
@@ -72,6 +82,25 @@ export default function ProposalReviewPage() {
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
+
+  const appliedNotice = (proposal: AgentProposal): string => {
+    if (proposal.proposalType === "tool_permission") {
+      return `已更新工具权限：${proposal.affectedPath}`;
+    }
+    if (proposal.proposalType === "memory_write" || proposal.proposalType === "memory_archive") {
+      return `已应用到记忆治理：${proposal.affectedPath}`;
+    }
+    if (
+      proposal.proposalType === "plugin_permission" ||
+      proposal.proposalType === "scheduled_task" ||
+      proposal.proposalType === "external_write_action" ||
+      proposal.proposalType === "model_policy_change" ||
+      proposal.proposalType === "data_export"
+    ) {
+      return `已处理 Proposal：${proposal.affectedPath}`;
+    }
+    return `已应用到人生模型：${proposal.affectedPath}`;
+  };
 
   const load = async () => {
     setLoading(true);
@@ -102,7 +131,7 @@ export default function ProposalReviewPage() {
     try {
       if (action === "accept") {
         await acceptProposal(proposal.id);
-        setNotice(`已应用到人生模型：${proposal.affectedPath}`);
+        setNotice(appliedNotice(proposal));
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
         setNotice(`已拒绝：${proposal.affectedPath}`);

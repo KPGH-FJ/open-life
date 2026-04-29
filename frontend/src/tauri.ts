@@ -1139,6 +1139,8 @@ export interface ModelRouteTrace {
   privacyLevel: string;
   latencyMs?: number;
   retryCount: number;
+  fallbackReason?: string;
+  providerHealthIsEstimated?: boolean;
 }
 
 export interface ContextSummary {

@@ -333,6 +333,12 @@ impl InferenceScheduler {
             )
         };
 
+        let fallback_reason = if reason == "ollama_unavailable" {
+            Some(reason.clone())
+        } else {
+            None
+        };
+
         ModelRouteTrace {
             provider,
             model,
@@ -343,6 +349,8 @@ impl InferenceScheduler {
             privacy_level: crate::agent::types::RedactionLevel::None,
             latency_ms: None,
             retry_count: 0,
+            fallback_reason,
+            provider_health_is_estimated: Some(true),
         }
     }
 }

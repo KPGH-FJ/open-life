@@ -629,6 +629,8 @@ mod tests {
             privacy_level: crate::agent::types::RedactionLevel::None,
             latency_ms: None,
             retry_count: 0,
+            fallback_reason: Some("no_ollama".to_string()),
+            provider_health_is_estimated: Some(true),
         };
         let context_summary = ContextSummary {
             life_model_empty: true,

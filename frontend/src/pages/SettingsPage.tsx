@@ -1144,6 +1144,10 @@ export default function SettingsPage() {
         <section className="space-y-4 border-t pt-4">
           <h3 className="text-sm font-medium text-gray-700">Layer 1 路由状态</h3>
           <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 space-y-2">
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              ModelRouter 仍为灰度能力；AgentRun trace 会记录 privacy、retry、fallback 与 provider
+              health 是否为估算值。
+            </div>
             <div className="flex items-center justify-between">
               <span>当前后端</span>
               <span className="font-medium uppercase">

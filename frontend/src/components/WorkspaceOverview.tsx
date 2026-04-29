@@ -11,7 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { SystemDiagnostics } from "../tauri";
-import { getSystemDiagnostics, listProposals, listRuns, listSkills, runSkill } from "../tauri";
+import { getSystemDiagnostics, listAgentRuns, listProposals, listSkills, runSkill } from "../tauri";
 import { isSafeMode } from "../utils/safeMode";
 
 interface WorkspaceStats {
@@ -47,7 +47,7 @@ export default function WorkspaceOverview() {
       const [diag, proposals, runs, skillList] = await Promise.all([
         getSystemDiagnostics().catch(() => null),
         listProposals().catch(() => []),
-        listRuns(100, 0).catch(() => []),
+        listAgentRuns(100, 0).catch(() => []),
         listSkills().catch(() => []),
       ]);
 

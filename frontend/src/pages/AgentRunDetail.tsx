@@ -215,6 +215,17 @@ export default function AgentRunDetail() {
                 <div>Model: {run.modelRoute.model}</div>
                 <div>Route: {run.modelRoute.routeType}</div>
                 <div>Reason: {run.modelRoute.reason}</div>
+                <div>Privacy: {run.modelRoute.privacyLevel}</div>
+                <div>Retry: {run.modelRoute.retryCount}</div>
+                {run.modelRoute.fallbackReason && (
+                  <div>Fallback: {run.modelRoute.fallbackReason}</div>
+                )}
+                {run.modelRoute.providerHealthIsEstimated !== undefined && (
+                  <div>
+                    Health:{" "}
+                    {run.modelRoute.providerHealthIsEstimated ? "estimated / gray" : "probed"}
+                  </div>
+                )}
               </div>
             </div>
           )}

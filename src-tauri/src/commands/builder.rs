@@ -482,7 +482,11 @@ async fn builder_apply_signals_with_state(
             edited_fields,
             rejected_count
         );
-        let _ = feedback.log_event("builder_apply_signals", Some(&session_id), Some(&audit));
+        let _ = feedback.log_event(
+            "legacy_builder_apply_signals_invoked",
+            Some(&session_id),
+            Some(&audit),
+        );
     }
 
     // Clean up session
@@ -502,8 +506,14 @@ async fn builder_apply_signals_with_state(
         let _ = store.update_run(&agent_run);
     }
 
+    let legacy_warning =
+        "legacy direct apply path bypasses Review Center; use builder_create_proposals for product flow";
+    warnings.push(legacy_warning.to_string());
+
     let mut result = serde_json::json!({
         "success": true,
+        "legacy": true,
+        "warning": legacy_warning,
         "applied_fields": applied,
         "merged_fields": merged,
         "skipped_fields": skipped,
@@ -853,7 +863,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn builder_apply_signals_updates_model_and_removes_persisted_session() {
+    async fn legacy_direct_apply_builder_apply_signals_updates_model_and_removes_persisted_session()
+    {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut session = BuilderSession::new("apply-session", BuilderMode::Quick);
@@ -935,6 +946,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(res.get("legacy").and_then(|v| v.as_bool()), Some(true));
+        assert!(res
+            .get("warning")
+            .and_then(|v| v.as_str())
+            .is_some_and(|warning| warning.contains("Review Center")));
+        assert!(res
+            .get("warnings")
+            .and_then(|v| v.as_array())
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                .as_str()
+                .is_some_and(|warning| warning.contains("legacy direct apply")))));
         assert!(res
             .get("applied_fields")
             .and_then(|v| v.as_array())

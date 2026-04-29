@@ -69,9 +69,9 @@ OpenLife 有多个模块会产生 LifeModel 更新：
 
 | 模块 | 接入方式 | 默认路径 |
 |------|---------|----------|
-| Builder | `builder_create_proposals` | Proposal（推荐）/ 直接应用（兼容） |
+| Builder | `builder_create_proposals` | Proposal（默认）；`builder_apply_signals` 仅 legacy/migration/debug |
 | Calibration | `calibration_create_proposals` | Proposal（推荐）/ 直接应用（兼容） |
-| Chat | 未来接入 | 仅 Proposal |
+| Chat | Chat Proposal generator | Proposal；执行状态经 AgentRun 关联 |
 | Evolution | 未来接入 | 仅 Proposal |
 
 ## 后果
@@ -88,7 +88,7 @@ OpenLife 有多个模块会产生 LifeModel 更新：
 
 - ⚠️ Builder/Calibration 需要额外步骤（发送到 Review Center）
 - ⚠️ 需要维护 proposals.db 的迁移兼容
-- ⚠️ 直接应用路径仍保留，需要用户教育
+- ⚠️ Builder legacy direct apply 后端命令仍保留，但必须通过日志、返回值和测试明确标记为 migration/debug-only；正常 UI 不应调用
 
 ## 相关
 

@@ -66,6 +66,11 @@ impl ModelRouteDecision {
             privacy_level: self.privacy_level,
             latency_ms: self.estimated_latency_ms,
             retry_count: 0,
+            fallback_reason: self
+                .fallback_provider
+                .as_ref()
+                .map(|provider| format!("fallback_provider_selected:{}", provider)),
+            provider_health_is_estimated: None,
         }
     }
 }
