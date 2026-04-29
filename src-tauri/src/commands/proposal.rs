@@ -28,6 +28,75 @@ fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
     }
 }
 
+fn patch_result_for_proposal(
+    proposal: &AgentProposal,
+    success: bool,
+    operation: &str,
+    error: Option<String>,
+) -> openlife_core::life_model::patch::PatchApplyResult {
+    openlife_core::life_model::patch::PatchApplyResult {
+        patch_id: proposal.id.clone(),
+        success,
+        path: proposal.affected_path.clone(),
+        operation: operation.to_string(),
+        error,
+    }
+}
+
+fn memory_session_id(after: &Value) -> String {
+    after
+        .get("session_id")
+        .or_else(|| after.get("sessionId"))
+        .and_then(Value::as_str)
+        .unwrap_or("proposal")
+        .to_string()
+}
+
+fn memory_source(after: &Value) -> String {
+    after
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("proposal")
+        .to_string()
+}
+
+fn memory_content(after: &Value) -> Result<String, String> {
+    if let Some(content) = after.get("content").and_then(Value::as_str) {
+        let content = content.trim();
+        if !content.is_empty() {
+            return Ok(content.to_string());
+        }
+    }
+    if let Some(content) = after.as_str() {
+        let content = content.trim();
+        if !content.is_empty() {
+            return Ok(content.to_string());
+        }
+    }
+    Err("MemoryWrite Proposal 缺少 after.content。".to_string())
+}
+
+fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
+    let value = after
+        .get("chunk_ids")
+        .or_else(|| after.get("chunkIds"))
+        .or_else(|| after.get("ids"))
+        .unwrap_or(after);
+
+    if let Some(id) = value.as_i64() {
+        return Ok(vec![id]);
+    }
+
+    if let Some(ids) = value.as_array() {
+        let parsed: Vec<i64> = ids.iter().filter_map(Value::as_i64).collect();
+        if !parsed.is_empty() {
+            return Ok(parsed);
+        }
+    }
+
+    Err("MemoryArchive Proposal 缺少 after.chunk_ids。".to_string())
+}
+
 #[allow(dead_code)]
 fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), String> {
     let mut current = root;
@@ -68,7 +137,11 @@ async fn apply_proposal_to_state(
     after: Value,
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
     match proposal.proposal_type {
-        ProposalType::LifeModelUpdate | ProposalType::GoalUpdate => {
+        ProposalType::LifeModelUpdate
+        | ProposalType::GoalUpdate
+        | ProposalType::StateUpdate
+        | ProposalType::PreferenceUpdate
+        | ProposalType::CapabilityUpdate => {
             let mut model = {
                 let manager = state.life_model_manager.lock().await;
                 manager.load().map_err(|e| e.to_string())?
@@ -127,13 +200,167 @@ async fn apply_proposal_to_state(
 
             Ok(result)
         }
-        ProposalType::MemoryWrite | ProposalType::MemoryArchive => {
-            Err("Memory Proposal 尚未接入应用器；当前只支持 LifeModel/Goal 更新。".to_string())
+        ProposalType::MemoryWrite | ProposalType::MemoryArchive => match proposal.proposal_type {
+            ProposalType::MemoryWrite => {
+                let content = memory_content(&after)?;
+                let session_id = memory_session_id(&after);
+                let source = memory_source(&after);
+                let embedding_id = {
+                    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+                        let cfg = state.config.lock().await;
+                        (
+                            cfg.llm.provider.clone(),
+                            cfg.llm.openai_base.clone(),
+                            cfg.llm.openai_key.clone(),
+                            cfg.llm.embedding_model.clone(),
+                            cfg.llm.embedding_enabled,
+                        )
+                    };
+                    match openlife_core::vectors::embed_text_with_config(
+                        &content,
+                        &provider,
+                        &openai_base,
+                        &openai_key,
+                        &embedding_model,
+                        embedding_enabled,
+                    )
+                    .await
+                    {
+                        Ok(embedding) if !embedding.is_empty() => {
+                            let store = state.vector_store.lock().await;
+                            store
+                                .insert(&session_id, &content, &embedding, &source)
+                                .map_err(|e| e.to_string())
+                                .ok()
+                        }
+                        Ok(_) | Err(_) => None,
+                    }
+                };
+                {
+                    let store = state.memory_store.lock().await;
+                    let tags = vec![
+                        "proposal".to_string(),
+                        format!("proposal_id:{}", proposal.id),
+                        format!("source:{}", source),
+                    ];
+                    store
+                        .save_memory_record(
+                            &session_id,
+                            &content,
+                            "proposal_memory",
+                            &source,
+                            &tags,
+                            "private",
+                            embedding_id,
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(patch_result_for_proposal(
+                    proposal,
+                    true,
+                    "memory_write",
+                    None,
+                ))
+            }
+            ProposalType::MemoryArchive => {
+                let ids = memory_archive_ids(&after)?;
+                let archived = {
+                    let store = state.vector_store.lock().await;
+                    store.archive_chunks(&ids).map_err(|e| e.to_string())?
+                };
+                if archived == 0 {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "memory_archive",
+                        Some("没有匹配到可归档的 active memory chunk。".to_string()),
+                    ));
+                }
+                Ok(patch_result_for_proposal(
+                    proposal,
+                    true,
+                    "memory_archive",
+                    None,
+                ))
+            }
+            _ => unreachable!(),
+        },
+        ProposalType::ToolPermission => {
+            let tool_name = after
+                .get("tool_name")
+                .or_else(|| after.get("toolName"))
+                .or_else(|| after.get("name"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
+            let permission = after
+                .get("permission")
+                .or_else(|| after.get("level"))
+                .and_then(Value::as_str)
+                .unwrap_or("allow_until_revoked");
+            let policy = match permission {
+                "allowed" | "allow" => {
+                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+                }
+                "deny" => openlife_core::tool_permissions::ToolPermissionPolicy::Deny,
+                "ask_every_time" => {
+                    openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime
+                }
+                "allow_once" => openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
+                "allow_until_revoked" => {
+                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+                }
+                other => return Err(format!("未知 ToolPermission policy: {}", other)),
+            };
+            let source = after.get("source").and_then(Value::as_str).unwrap_or("*");
+            let risk_level = after
+                .get("risk_level")
+                .or_else(|| after.get("riskLevel"))
+                .and_then(Value::as_str)
+                .unwrap_or("*");
+            let action_type = after
+                .get("action_type")
+                .or_else(|| after.get("actionType"))
+                .and_then(Value::as_str)
+                .unwrap_or("*");
+            {
+                let permission_store = state.tool_permission_store.lock().await;
+                permission_store
+                    .grant(tool_name, source, risk_level, action_type, policy, None)
+                    .map_err(|e| e.to_string())?;
+            }
+            {
+                let feedback = state.feedback_store.lock().await;
+                let detail = serde_json::json!({
+                    "proposal_id": proposal.id,
+                    "tool_name": tool_name,
+                    "permission": permission,
+                    "source_detail": proposal.source_detail,
+                });
+                let detail_text = detail.to_string();
+                feedback
+                    .log_event(
+                        "tool_permission_accepted",
+                        proposal.run_id.as_deref(),
+                        Some(&detail_text),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(patch_result_for_proposal(
+                proposal,
+                true,
+                "tool_permission",
+                None,
+            ))
         }
-        ProposalType::ToolPermission => Err(
-            "Tool Permission Proposal 尚未接入应用器；当前只支持 LifeModel/Goal 更新。".to_string(),
-        ),
-        _ => Err("该类型 Proposal 尚未接入应用器。".to_string()),
+        ProposalType::PluginPermission
+        | ProposalType::ScheduledTask
+        | ProposalType::ExternalWriteAction
+        | ProposalType::ModelPolicyChange
+        | ProposalType::DataExport
+        | ProposalType::ScheduleCheckin => Err(format!(
+            "{} Proposal 尚未接入应用器，已保持 pending。",
+            proposal.proposal_type
+        )),
     }
 }
 
@@ -277,6 +504,11 @@ pub async fn list_proposals(
         "memory_write" => Some(ProposalType::MemoryWrite),
         "memory_archive" => Some(ProposalType::MemoryArchive),
         "tool_permission" => Some(ProposalType::ToolPermission),
+        "plugin_permission" => Some(ProposalType::PluginPermission),
+        "scheduled_task" => Some(ProposalType::ScheduledTask),
+        "external_write_action" => Some(ProposalType::ExternalWriteAction),
+        "model_policy_change" => Some(ProposalType::ModelPolicyChange),
+        "data_export" => Some(ProposalType::DataExport),
         "schedule_checkin" => Some(ProposalType::ScheduleCheckin),
         _ => None,
     });
@@ -369,7 +601,9 @@ mod tests {
     use super::*;
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
-        agent::{AgentProposal, ProposalEngine, ProposalSource, ProposalStore, ProposalType, RiskLevel},
+        agent::{
+            AgentProposal, ProposalEngine, ProposalSource, ProposalStore, ProposalType, RiskLevel,
+        },
         builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
@@ -388,7 +622,8 @@ mod tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = AppConfig::default();
-        let hot_cache: SharedHotCache = Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
+        let hot_cache: SharedHotCache =
+            Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
         Arc::new(AppState {
             config: Arc::new(Mutex::new(config.clone())),
             life_model_manager: Arc::new(Mutex::new(LifeModelManager::new(
@@ -431,10 +666,15 @@ mod tests {
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
             rollout_metrics_store: None,
-            hot_cache,
-            proposal_engine: Arc::new(tokio::sync::Mutex::new(
-                ProposalEngine::new(),
+            tool_permission_store: Arc::new(Mutex::new(
+                openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
             )),
+            skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
+            plugin_registry: Arc::new(Mutex::new(openlife_core::plugins::PluginRegistry::new(
+                temp_dir.path().join("plugins"),
+            ))),
+            hot_cache,
+            proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
             startup_warnings: vec![],
         })
     }
@@ -519,6 +759,177 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Edited);
+    }
+
+    #[tokio::test]
+    async fn accept_memory_write_proposal_records_memory_without_life_model_patch() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-session",
+                "content": "用户偏好早上做深度工作",
+                "source": "review_center"
+            }),
+            "用户确认写入长期记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(result["success"], true);
+
+        let hits = state
+            .memory_store
+            .lock()
+            .await
+            .search_text_memories(Some("proposal-session"), "深度工作", 10)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_memory_archive_proposal_archives_specific_chunk() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let chunk_id = state
+            .vector_store
+            .lock()
+            .await
+            .insert("s1", "temporary memory", &[0.1, 0.2, 0.3, 0.4], "test")
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryArchive,
+            "memory.chunks",
+            serde_json::json!({ "chunk_ids": [chunk_id] }),
+            "用户确认归档低价值记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let archived = state.vector_store.lock().await.list_archived(10).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, chunk_id);
+    }
+
+    #[tokio::test]
+    async fn accept_memory_archive_without_chunk_ids_keeps_pending() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryArchive,
+            "memory.chunks",
+            serde_json::json!({ "reason": "missing ids" }),
+            "无效归档请求",
+            0.5,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let err = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("chunk_ids"));
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn accept_tool_permission_proposal_records_permission_event() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tools.filesystem.write",
+            serde_json::json!({
+                "tool_name": "filesystem.write",
+                "permission": "allowed"
+            }),
+            "用户确认工具权限",
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
     }
 
     #[tokio::test]

@@ -1062,9 +1062,22 @@ impl LifeModel {
                         }
                     }
                 }
-                Err(e) => {
-                    match policy.failure_mode {
-                        FailureMode::Atomic => {
+                Err(e) => match policy.failure_mode {
+                    FailureMode::Atomic => {
+                        *self = checkpoint;
+                        return Ok(BatchApplyResult {
+                            applied,
+                            skipped,
+                            pending_review,
+                            rolled_back: true,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                    FailureMode::Partial => {
+                        skipped.push(patch.id.clone());
+                    }
+                    FailureMode::Adaptive => {
+                        if patch.risk_level == RiskLevel::Critical {
                             *self = checkpoint;
                             return Ok(BatchApplyResult {
                                 applied,
@@ -1073,26 +1086,11 @@ impl LifeModel {
                                 rolled_back: true,
                                 error: Some(e.to_string()),
                             });
-                        }
-                        FailureMode::Partial => {
+                        } else {
                             skipped.push(patch.id.clone());
                         }
-                        FailureMode::Adaptive => {
-                            if patch.risk_level == RiskLevel::Critical {
-                                *self = checkpoint;
-                                return Ok(BatchApplyResult {
-                                    applied,
-                                    skipped,
-                                    pending_review,
-                                    rolled_back: true,
-                                    error: Some(e.to_string()),
-                                });
-                            } else {
-                                skipped.push(patch.id.clone());
-                            }
-                        }
                     }
-                }
+                },
             }
         }
 

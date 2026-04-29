@@ -90,7 +90,11 @@ pub struct ReasoningError {
 
 impl std::fmt::Display for ReasoningError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "[{}] {} (recoverable: {})", self.phase, self.message, self.recoverable)
+        write!(
+            f,
+            "[{}] {} (recoverable: {})",
+            self.phase, self.message, self.recoverable
+        )
     }
 }
 

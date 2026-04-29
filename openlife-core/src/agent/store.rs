@@ -80,8 +80,14 @@ impl AgentRunStore {
             [],
         );
         // Migration: add reasoning columns
-        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN reasoning_strategy TEXT", []);
-        let _ = conn.execute("ALTER TABLE agent_runs ADD COLUMN reasoning_trace_json TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN reasoning_strategy TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE agent_runs ADD COLUMN reasoning_trace_json TEXT",
+            [],
+        );
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC)",
             [],

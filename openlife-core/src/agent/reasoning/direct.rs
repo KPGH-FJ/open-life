@@ -1,6 +1,7 @@
 use crate::agent::context_assembler::AssembleOutput;
 use crate::agent::reasoning::{
-    ReasoningConfig, ReasoningError, ReasoningInput, ReasoningOutput, ReasoningStrategy, ReasoningTrace,
+    ReasoningConfig, ReasoningError, ReasoningInput, ReasoningOutput, ReasoningStrategy,
+    ReasoningTrace,
 };
 
 /// Direct reasoning strategy: passes context through without layered reasoning.

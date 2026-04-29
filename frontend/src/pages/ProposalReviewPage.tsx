@@ -9,7 +9,6 @@ import {
   ShieldCheck,
   X,
   Edit2,
-  ChevronDown,
   Hammer,
   SlidersHorizontal,
 } from "lucide-react";
@@ -24,7 +23,6 @@ import {
   type AgentProposal,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
-import ErrorBanner from "../components/ErrorBanner";
 
 function valuePreview(value: unknown): string {
   if (value === null || value === undefined) return "空";
@@ -372,19 +370,19 @@ export default function ProposalReviewPage() {
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400">
                           <span>来源：{proposal.source}</span>
                           <span>置信度：{Math.round(proposal.confidence * 100)}%</span>
-                          {proposal.sourceKind && (
+                          {proposal.source && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[10px]">
-                              {proposal.sourceKind === "builder"
-                                ? "🏗️ Builder"
-                                : proposal.sourceKind === "calibration"
-                                  ? "⚖️ Calibration"
-                                  : proposal.sourceKind}
-                              {proposal.sourceRunId && (
+                              {proposal.source === "builder_review"
+                                ? "Builder"
+                                : proposal.source === "calibration_run"
+                                  ? "Calibration"
+                                  : proposal.source}
+                              {proposal.runId && (
                                 <span
                                   className="text-stone-300"
-                                  title={`Run ID: ${proposal.sourceRunId}`}
+                                  title={`Run ID: ${proposal.runId}`}
                                 >
-                                  #{proposal.sourceRunId.slice(0, 8)}
+                                  #{proposal.runId.slice(0, 8)}
                                 </span>
                               )}
                             </span>

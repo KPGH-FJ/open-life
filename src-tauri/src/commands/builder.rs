@@ -182,7 +182,7 @@ async fn builder_step_with_state(
 ) -> Result<serde_json::Value, String> {
     // Create AgentRun for Builder tracking
     let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
-    
+
     let mut session = {
         let mut sessions = state.builder_sessions.lock().await;
         sessions
@@ -376,12 +376,19 @@ pub async fn builder_get_pending_signals(
     }))
 }
 
-/// Apply accepted signals from Quick Build
+/// Legacy direct apply path for migration/dev diagnostics.
+///
+/// Normal product flow should call `builder_create_proposals` and apply changes through
+/// Review Center so LifeModel writes remain reviewable, traceable, and reversible.
 async fn builder_apply_signals_with_state(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
+    eprintln!(
+        "[Builder] legacy builder_apply_signals invoked for session {}; normal flow should use builder_create_proposals",
+        session_id
+    );
     // Create AgentRun for this direct apply
     let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
     let run_id = agent_run.id.clone();
@@ -732,7 +739,8 @@ mod tests {
         let config = AppConfig::default();
         let life_model_manager =
             LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
-        let hot_cache: SharedHotCache = Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
+        let hot_cache: SharedHotCache =
+            Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
 
         Arc::new(AppState {
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
@@ -784,6 +792,15 @@ mod tests {
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
             rollout_metrics_store: None,
+            tool_permission_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            )),
+            skill_registry: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::skills::SkillRegistry::built_in(),
+            )),
+            plugin_registry: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
+            )),
             hot_cache,
             proposal_engine: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalEngine::new(),

@@ -66,7 +66,17 @@ pub async fn record_state(
     alert_days: Option<u32>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<i64, String> {
-    record_state_with_state(dimension_name, value, unit, note, min_threshold, max_threshold, alert_days, &state.inner().clone()).await
+    record_state_with_state(
+        dimension_name,
+        value,
+        unit,
+        note,
+        min_threshold,
+        max_threshold,
+        alert_days,
+        &state.inner().clone(),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -141,7 +151,9 @@ pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<Sta
     Ok(alerts)
 }
 
-pub(crate) async fn get_daily_goals_with_state(state: &Arc<AppState>) -> Result<Vec<DailyGoal>, String> {
+pub(crate) async fn get_daily_goals_with_state(
+    state: &Arc<AppState>,
+) -> Result<Vec<DailyGoal>, String> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(|e| e.to_string())?;
     Ok(model.goals.daily)
@@ -241,8 +253,9 @@ mod tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
-        let hot_cache: openlife_core::memory_cache::SharedHotCache = 
-            Arc::new(tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()));
+        let hot_cache: openlife_core::memory_cache::SharedHotCache = Arc::new(
+            tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
+        );
         Arc::new(AppState {
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
@@ -253,23 +266,35 @@ mod tests {
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
-            mcp_registry: Arc::new(tokio::sync::Mutex::new(openlife_core::mcp::McpRegistry::new())),
-            intent_router: Arc::new(tokio::sync::Mutex::new(openlife_core::router::IntentRouter::new())),
-            layer_router: Arc::new(tokio::sync::Mutex::new(openlife_core::layer_router::LayerRouter::new())),
-            scheduler: Arc::new(tokio::sync::Mutex::new(openlife_core::scheduler::InferenceScheduler::new(
-                config.local_model.clone(),
-                config.prefer_local_model,
-                config.llm.provider.clone(),
-                config.llm.openai_base.clone(),
-                config.llm.openai_key.clone(),
-                config.llm.chat_model.clone(),
-                config.llm.embedding_model.clone(),
-                config.llm.embedding_enabled,
-            ))),
-            privacy_engine: Arc::new(tokio::sync::Mutex::new(openlife_core::privacy::PrivacyEngine::new())),
-            version_manager: Arc::new(tokio::sync::Mutex::new(openlife_core::versioning::VersionManager::new(
-                temp_dir.path().join("life-model").join("versions"),
-            ))),
+            mcp_registry: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::mcp::McpRegistry::new(),
+            )),
+            intent_router: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::router::IntentRouter::new(),
+            )),
+            layer_router: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::layer_router::LayerRouter::new(),
+            )),
+            scheduler: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::scheduler::InferenceScheduler::new(
+                    config.local_model.clone(),
+                    config.prefer_local_model,
+                    config.llm.provider.clone(),
+                    config.llm.openai_base.clone(),
+                    config.llm.openai_key.clone(),
+                    config.llm.chat_model.clone(),
+                    config.llm.embedding_model.clone(),
+                    config.llm.embedding_enabled,
+                ),
+            )),
+            privacy_engine: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::privacy::PrivacyEngine::new(),
+            )),
+            version_manager: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::versioning::VersionManager::new(
+                    temp_dir.path().join("life-model").join("versions"),
+                ),
+            )),
             feedback_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::feedback::FeedbackStore::new_in_memory().unwrap(),
             )),
@@ -282,11 +307,13 @@ mod tests {
                     temp_dir.path().join("builder_sessions.json"),
                 ),
             )),
-            a2a_sidecar: Arc::new(tokio::sync::Mutex::new(crate::a2a_sidecar::A2ASidecar::new(8765))),
+            a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
+                crate::a2a_sidecar::A2ASidecar::new(8765),
+            )),
             last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
-            mcp_audit_store: Arc::new(tokio::sync::Mutex::new(openlife_core::mcp_audit::McpAuditStore::new(
-                temp_dir.path().join("mcp_audit.db"),
-            ))),
+            mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
+            )),
             agent_run_store: None,
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
@@ -295,6 +322,15 @@ mod tests {
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
             rollout_metrics_store: None,
+            tool_permission_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            )),
+            skill_registry: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::skills::SkillRegistry::built_in(),
+            )),
+            plugin_registry: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
+            )),
             hot_cache,
             proposal_engine: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalEngine::new(),
@@ -307,7 +343,7 @@ mod tests {
     async fn add_and_get_daily_goal() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        
+
         // Add a daily goal directly via LifeModel
         {
             let manager = state.life_model_manager.lock().await;
@@ -319,7 +355,7 @@ mod tests {
             });
             manager.save(&model).unwrap();
         }
-        
+
         // Get daily goals
         let goals = get_daily_goals_with_state(&state).await.unwrap();
         assert_eq!(goals.len(), 1);
@@ -331,7 +367,7 @@ mod tests {
     async fn toggle_daily_goal_changes_state() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-        
+
         // Add a goal directly
         {
             let manager = state.life_model_manager.lock().await;
@@ -343,15 +379,15 @@ mod tests {
             });
             manager.save(&model).unwrap();
         }
-        
+
         // Toggle it
         let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
         assert!(completed);
-        
+
         // Verify
         let goals = get_daily_goals_with_state(&state).await.unwrap();
         assert!(goals[0].done);
-        
+
         // Toggle back
         let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
         assert!(!completed);

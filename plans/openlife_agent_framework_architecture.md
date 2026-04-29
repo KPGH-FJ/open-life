@@ -20,7 +20,7 @@ The current codebase already contains many necessary building blocks:
 
 - `LifeModel`: private structured representation of identity, goals, capabilities, and state.
 - `Builder`: guided construction of the LifeModel.
-- `Hermes`: early decision bus for meaning, strategy, and execution.
+- `LayeredReasoner`: current reasoning strategy for meaning, strategy, generation, and safety checks.
 - `Scheduler`: local/cloud model routing.
 - `MemoryStore` and `VectorStore`: persistent chat and semantic memory.
 - `MCP` and `A2A`: tool and agent interoperability foundations.
@@ -1149,4 +1149,3 @@ Make one user task fully traceable from intent to context to model route to outp
 ```
 
 Once that loop works, the rest of the product can grow around a stable center.
-

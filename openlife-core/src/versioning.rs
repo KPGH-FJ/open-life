@@ -255,7 +255,13 @@ impl VersionManager {
                 .find(|entry| entry.version == version);
             let timestamp = metadata
                 .map(|entry| entry.timestamp.clone())
-                .unwrap_or_else(|| version.split('_').next_back().unwrap_or("").replace("-", ":"));
+                .unwrap_or_else(|| {
+                    version
+                        .split('_')
+                        .next_back()
+                        .unwrap_or("")
+                        .replace("-", ":")
+                });
             versions.push(LifeModelVersion {
                 version,
                 timestamp,

@@ -13,11 +13,14 @@ pub mod mcp_audit;
 pub mod memory;
 pub mod memory_cache;
 pub mod ollama;
+pub mod plugins;
 pub mod privacy;
 pub mod reflex_engine;
 pub mod router;
 pub mod scheduler;
+pub mod skills;
 pub mod tool_manifest;
+pub mod tool_permissions;
 pub mod vectors;
 pub mod versioning;
 

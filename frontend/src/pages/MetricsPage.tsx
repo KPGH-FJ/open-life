@@ -66,9 +66,6 @@ const MetricsPage: React.FC = () => {
     );
   }
 
-  const v2Metrics = metrics.filter((m) => m.version === "v2");
-  const v1Metrics = metrics.filter((m) => m.version === "v1");
-
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between mb-6">
@@ -150,9 +147,7 @@ const MetricsPage: React.FC = () => {
 
       {/* Recent Metrics */}
       <div className="bg-white rounded-lg shadow p-6 mb-8">
-        <h2 className="text-lg font-semibold mb-4">
-          最近调用记录 ({metrics.length})
-        </h2>
+        <h2 className="text-lg font-semibold mb-4">最近调用记录 ({metrics.length})</h2>
         <div className="overflow-x-auto">
           <table className="min-w-full">
             <thead>
@@ -165,7 +160,7 @@ const MetricsPage: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {metrics.slice(0, 20).map((metric) => (
+              {metrics.slice(0, 20).map(metric => (
                 <tr key={metric.id} className="border-b hover:bg-gray-50">
                   <td className="py-2 px-3">
                     <span
@@ -182,9 +177,7 @@ const MetricsPage: React.FC = () => {
                   <td className="py-2 px-3">
                     <span
                       className={`inline-flex px-2 py-1 text-xs rounded-full ${
-                        metric.success
-                          ? "bg-green-100 text-green-800"
-                          : "bg-red-100 text-red-800"
+                        metric.success ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"
                       }`}
                     >
                       {metric.success ? "成功" : "失败"}
@@ -193,9 +186,7 @@ const MetricsPage: React.FC = () => {
                   <td className="py-2 px-3 text-sm text-gray-500">
                     {new Date(metric.timestamp).toLocaleString()}
                   </td>
-                  <td className="py-2 px-3 text-sm text-gray-500">
-                    {metric.metadata || "-"}
-                  </td>
+                  <td className="py-2 px-3 text-sm text-gray-500">{metric.metadata || "-"}</td>
                 </tr>
               ))}
             </tbody>
@@ -206,15 +197,10 @@ const MetricsPage: React.FC = () => {
       {/* Errors */}
       {errors.length > 0 && (
         <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-lg font-semibold mb-4 text-red-600">
-            最近错误 ({errors.length})
-          </h2>
+          <h2 className="text-lg font-semibold mb-4 text-red-600">最近错误 ({errors.length})</h2>
           <div className="space-y-3">
-            {errors.map((error) => (
-              <div
-                key={error.id}
-                className="p-3 bg-red-50 border border-red-200 rounded text-sm"
-              >
+            {errors.map(error => (
+              <div key={error.id} className="p-3 bg-red-50 border border-red-200 rounded text-sm">
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-medium">{error.version}</span>
                   <span className="text-gray-500">

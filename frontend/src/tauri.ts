@@ -115,6 +115,8 @@ export interface ToolCallResult {
   requires_confirmation?: boolean;
   pii_found?: boolean;
   privacy_warnings?: string[];
+  action_id?: string;
+  permission_decision?: string;
 }
 
 export interface ReasoningTrace {
@@ -257,6 +259,11 @@ export interface SystemDiagnostics {
   data_files: DataFileStatus;
   ollama_models: OllamaModelInfo[];
   config_source: string;
+  agent_run_count: number;
+  agent_run_store_status: string;
+  pending_proposal_count: number;
+  high_risk_pending_proposal_count: number;
+  proposal_store_status: string;
 }
 
 export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {
@@ -367,12 +374,21 @@ export async function listMcpTemplates(): Promise<McpTemplate[]> {
 }
 
 export interface ToolManifest {
+  id: string;
   name: string;
   description: string;
   parameters: any;
   permission_level: string;
+  risk_level: string;
   version: string;
-  source: { type: "BuiltIn" } | { type: "Mcp"; server_name: string };
+  source:
+    | { type: "BuiltIn" }
+    | { type: "Mcp"; server_name: string }
+    | { type: "A2A"; agent_name: string }
+    | { type: "Plugin"; plugin_id: string };
+  capabilities: string[];
+  requires_confirmation: boolean;
+  enabled: boolean;
   tags: string[];
 }
 
@@ -525,6 +541,7 @@ export async function applyCalibration(
 export async function calibrationCreateProposals(changes: EvolutionChange[]): Promise<{
   created_count: number;
   created_ids: string[];
+  run_id: string;
   error_count: number;
   errors: string[];
   message: string;
@@ -787,6 +804,7 @@ export async function builderCreateProposals(
   created_count: number;
   rejected_count: number;
   proposal_ids: string[];
+  run_id: string;
   warnings?: string[];
 }> {
   return safeInvoke("builder_create_proposals", { ...sessionArgs(sessionId), decisions });
@@ -1136,16 +1154,23 @@ export interface ContextSummary {
 export interface AgentAction {
   id: string;
   actionType: string;
+  target?: string;
   input: any;
   output?: any;
   status: string;
+  permissionDecision?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
   timestamp: string;
 }
 
 export interface AgentObservation {
   id: string;
+  actionId?: string;
   content: string;
   source: string;
+  structuredResult?: any;
   timestamp: string;
 }
 
@@ -1170,7 +1195,9 @@ export interface AgentRun {
     | "planning"
     | "review"
     | "writing"
-    | "memory_governance";
+    | "memory_governance"
+    | "skill"
+    | "plugin";
   userInput?: string;
   contextSummary?: ContextSummary;
   modelRoute?: ModelRouteTrace;
@@ -1193,6 +1220,10 @@ export async function listAgentRuns(limit: number = 50, offset: number = 0): Pro
   return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
 }
 
+export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
+  return listAgentRuns(limit, offset);
+}
+
 export async function listAgentRunsForSession(
   sessionId: string,
   limit: number = 50
@@ -1202,6 +1233,113 @@ export async function listAgentRunsForSession(
 
 export async function deleteAgentRun(runId: string, reason?: string): Promise<void> {
   return safeInvoke("delete_agent_run", { runId, reason });
+}
+
+export type ToolPermissionPolicy =
+  | "allow"
+  | "deny"
+  | "ask_every_time"
+  | "allow_once"
+  | "allow_until_revoked";
+
+export interface ToolPermissionRecord {
+  id: string;
+  toolName: string;
+  source: string;
+  riskLevel: string;
+  actionType: string;
+  policy: ToolPermissionPolicy;
+  createdAt: string;
+  expiresAt?: string;
+  consumedAt?: string;
+}
+
+export interface ToolPermissionDecision {
+  allowed: boolean;
+  requiresConfirmation: boolean;
+  decision: string;
+  reason: string;
+  policyId?: string;
+}
+
+export async function listToolPermissions(): Promise<ToolPermissionRecord[]> {
+  return safeInvoke<ToolPermissionRecord[]>("list_tool_permissions");
+}
+
+export async function revokeToolPermission(permissionId: string): Promise<boolean> {
+  return safeInvoke<boolean>("revoke_tool_permission", {
+    permissionId,
+    permission_id: permissionId,
+  });
+}
+
+export interface SkillManifest {
+  id: string;
+  name: string;
+  description: string;
+  requiredContext: string[];
+  allowedTools: string[];
+  executionBudget: {
+    maxSteps: number;
+    maxToolCalls: number;
+    timeoutSeconds: number;
+    allowCloud: boolean;
+    allowWrites: boolean;
+  };
+  outputSchema: any;
+  proposalPolicy: string;
+}
+
+export interface SkillRunResponse {
+  runId: string;
+  status: string;
+  summary: string;
+  generatedProposals: string[];
+}
+
+export async function listSkills(): Promise<SkillManifest[]> {
+  return safeInvoke<SkillManifest[]>("list_skills");
+}
+
+export async function runSkill(skillId: string, input: any): Promise<SkillRunResponse> {
+  return safeInvoke<SkillRunResponse>("run_skill", { skillId, skill_id: skillId, input });
+}
+
+export interface PluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  tools: ToolManifest[];
+  skills: SkillManifest[];
+  permissions: string[];
+  settingsSchema?: any;
+  enabled: boolean;
+  trustLevel: string;
+}
+
+export interface PluginRecord {
+  manifest: PluginManifest;
+  path: string;
+  enabled: boolean;
+  error?: string;
+}
+
+export async function listPlugins(): Promise<PluginRecord[]> {
+  return safeInvoke<PluginRecord[]>("list_plugins");
+}
+
+export async function reloadPlugins(): Promise<PluginRecord[]> {
+  return safeInvoke<PluginRecord[]>("reload_plugins");
+}
+
+export async function enablePlugin(pluginId: string): Promise<void> {
+  return safeInvoke("enable_plugin", { pluginId, plugin_id: pluginId });
+}
+
+export async function disablePlugin(pluginId: string): Promise<void> {
+  return safeInvoke("disable_plugin", { pluginId, plugin_id: pluginId });
 }
 
 export async function listProposals(
@@ -1233,6 +1371,11 @@ export type ProposalType =
   | "memory_write"
   | "memory_archive"
   | "tool_permission"
+  | "plugin_permission"
+  | "scheduled_task"
+  | "external_write_action"
+  | "model_policy_change"
+  | "data_export"
   | "schedule_checkin"
   | "life_model_update";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
@@ -1241,7 +1384,10 @@ export type ProposalSource =
   | "calibration_run"
   | "feedback_evolution"
   | "memory_governance"
-  | "manual";
+  | "skill_runtime"
+  | "plugin"
+  | "manual"
+  | "proactive_agent";
 
 export interface AgentProposal {
   id: string;

@@ -26,9 +26,7 @@ pub async fn get_rollout_summary(
 ) -> Result<RolloutSummary, String> {
     if let Some(ref store_arc) = state.rollout_metrics_store {
         let store = store_arc.lock().await;
-        store
-            .get_summary(&experiment)
-            .map_err(|e| e.to_string())
+        store.get_summary(&experiment).map_err(|e| e.to_string())
     } else {
         Ok(RolloutSummary {
             total: 0,

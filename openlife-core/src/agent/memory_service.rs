@@ -56,17 +56,15 @@ impl MemoryService {
 
         // 2. Vector search (if embedding is enabled)
         let (vector_hits, used_embedding) = if embedding_config.enabled {
-            match Self::search_vector_memories(
-                session_id,
-                query,
-                vector_store,
-                embedding_config,
-            )
-            .await
+            match Self::search_vector_memories(session_id, query, vector_store, embedding_config)
+                .await
             {
                 Ok(hits) => (hits, true),
                 Err(e) => {
-                    eprintln!("[MemoryService] Vector search failed, falling back to text: {}", e);
+                    eprintln!(
+                        "[MemoryService] Vector search failed, falling back to text: {}",
+                        e
+                    );
                     (vec![], false)
                 }
             }
@@ -200,15 +198,13 @@ mod tests {
 
     #[test]
     fn test_format_context_with_hits() {
-        let hits = vec![
-            MemoryHit {
-                id: 1,
-                content: "测试内容".to_string(),
-                source: "chat".to_string(),
-                score: 0.92,
-                tier: 1,
-            },
-        ];
+        let hits = vec![MemoryHit {
+            id: 1,
+            content: "测试内容".to_string(),
+            source: "chat".to_string(),
+            score: 0.92,
+            tier: 1,
+        }];
         let context = MemoryService::format_context(&hits);
         assert!(context.contains("测试内容"));
         assert!(context.contains("chat"));

@@ -84,15 +84,13 @@ pub struct PeakExperience {
     pub emotional_signal: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RiskLevel {
     Low,
     #[default]
     Medium,
     High,
 }
-
 
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -119,8 +117,7 @@ pub struct BuilderSignal {
     pub user_status: SignalUserStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SignalUserStatus {
     #[default]
     Pending,
@@ -144,7 +141,6 @@ pub struct SkippedField {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderPatchReview {
@@ -1285,7 +1281,9 @@ impl<'a> BuilderEngine<'a> {
             let blockers = ans.trim().to_string();
             if !blockers.is_empty() {
                 // Extract emotional state
-                let emotional_keywords = ["焦虑", "压力", "疲惫", "迷茫", "沮丧", "困惑", "紧张", "担忧"];
+                let emotional_keywords = [
+                    "焦虑", "压力", "疲惫", "迷茫", "沮丧", "困惑", "紧张", "担忧",
+                ];
                 let found_emotion = emotional_keywords
                     .iter()
                     .find(|&&k| blockers.contains(k))

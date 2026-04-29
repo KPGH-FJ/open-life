@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -84,7 +84,7 @@ impl RolloutMetricsStore {
              FROM rollout_metrics
              WHERE experiment = ?1
              ORDER BY timestamp DESC
-             LIMIT ?2 OFFSET ?3"
+             LIMIT ?2 OFFSET ?3",
         )?;
 
         let metrics = stmt
@@ -115,7 +115,7 @@ impl RolloutMetricsStore {
                 AVG(CASE WHEN version = 'v2' THEN duration_ms END) as v2_avg_duration,
                 AVG(CASE WHEN version = 'v1' THEN duration_ms END) as v1_avg_duration
              FROM rollout_metrics
-             WHERE experiment = ?1"
+             WHERE experiment = ?1",
         )?;
 
         let summary = stmt.query_row([experiment], |row| {
@@ -138,7 +138,7 @@ impl RolloutMetricsStore {
              FROM rollout_metrics
              WHERE experiment = ?1 AND success = 0
              ORDER BY timestamp DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?;
 
         let metrics = stmt
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_record_and_list() {
         let store = create_test_store();
-        
+
         let metric = RolloutMetric {
             id: None,
             experiment: "context_assembler".into(),
@@ -204,32 +204,36 @@ mod tests {
     #[test]
     fn test_summary() {
         let store = create_test_store();
-        
+
         // Record 3 v2, 2 v1
         for i in 0..3 {
-            store.record_metric(&RolloutMetric {
-                id: None,
-                experiment: "test".into(),
-                version: "v2".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                duration_ms: 40 + i,
-                success: true,
-                error: None,
-                metadata: None,
-            }).unwrap();
+            store
+                .record_metric(&RolloutMetric {
+                    id: None,
+                    experiment: "test".into(),
+                    version: "v2".into(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    duration_ms: 40 + i,
+                    success: true,
+                    error: None,
+                    metadata: None,
+                })
+                .unwrap();
         }
-        
+
         for i in 0..2 {
-            store.record_metric(&RolloutMetric {
-                id: None,
-                experiment: "test".into(),
-                version: "v1".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                duration_ms: 50 + i,
-                success: true,
-                error: None,
-                metadata: None,
-            }).unwrap();
+            store
+                .record_metric(&RolloutMetric {
+                    id: None,
+                    experiment: "test".into(),
+                    version: "v1".into(),
+                    timestamp: chrono::Utc::now().to_rfc3339(),
+                    duration_ms: 50 + i,
+                    success: true,
+                    error: None,
+                    metadata: None,
+                })
+                .unwrap();
         }
 
         let summary = store.get_summary("test").unwrap();

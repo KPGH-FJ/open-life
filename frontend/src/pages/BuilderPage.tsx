@@ -24,7 +24,6 @@ import {
   builderStep,
   builderListUnfinished,
   builderDeleteSession,
-  builderApplySignals,
   builderCreateProposals,
   getModel4DCompletion,
   getSystemDiagnostics,
@@ -474,60 +473,6 @@ export default function BuilderPage() {
     setRejectedCount(0);
     setSessionId(crypto.randomUUID());
     loadUnfinished();
-  };
-
-  const handleApplySignals = async (decisions: BuilderSignalDecision[]) => {
-    if (safeMode) {
-      setBuilderError(buildSafeModeBlockedMessage("人生模型写入", diagnostics));
-      return;
-    }
-    setLoading(true);
-    setBuilderNotice(null);
-    try {
-      const res = await builderApplySignals(sessionId, decisions);
-      if (res.success) {
-        setResultModel(res.model);
-        setReviewMode(false);
-        setPendingSignals([]);
-        setAppliedFields(res.applied_fields ?? []);
-        setMergedFields(res.merged_fields ?? []);
-        setSkippedFields(res.skipped_fields ?? []);
-        setEditedCount(res.edited_count ?? 0);
-        setRejectedCount(res.rejected_count ?? 0);
-        setBuilderNotice(
-          `本轮已写入 ${res.applied_fields?.length ?? 0} 项，合并 ${res.merged_fields?.length ?? 0} 项，编辑 ${res.edited_count ?? 0} 项，拒绝 ${res.rejected_count ?? 0} 项。`
-        );
-        // Clean up session after successful direct apply
-        setSessionId(crypto.randomUUID());
-        if (res.skipped_fields && res.skipped_fields.length > 0) {
-          setBuilderError(
-            `已保存模型，但有 ${res.skipped_fields.length} 项字段未能应用。请查看下方跳过明细。`
-          );
-        } else {
-          setBuilderError(null);
-        }
-        await Promise.all([
-          loadCompletion(),
-          loadUnfinished(),
-          getSystemDiagnostics()
-            .then(setDiagnostics)
-            .catch(() => null),
-        ]);
-        // For incremental mode, return to dimension selection after applying
-        if (mode === "incremental") {
-          setMode(null);
-          setIncrementalDimension(null);
-          setPrompt(null);
-          setFinished(false);
-          setProgress(null);
-          setAnalysis(null);
-        }
-      }
-    } catch (e) {
-      setBuilderError(buildRuntimeActionError("保存人生模型", e, "review"));
-    } finally {
-      setLoading(false);
-    }
   };
 
   const handleCreateProposals = async (decisions: BuilderSignalDecision[]) => {
@@ -1272,7 +1217,6 @@ export default function BuilderPage() {
                 unresolved_questions: [],
                 recommended_next_steps: ["审阅并确认信号", "可选择进入渐进构建继续完善"],
               }}
-              onApply={handleApplySignals}
               onCreateProposals={handleCreateProposals}
               onReject={handleRejectSignals}
             />

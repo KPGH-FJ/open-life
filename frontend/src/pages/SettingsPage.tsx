@@ -24,6 +24,14 @@ import {
   type PrivacyPolicy,
   type RouterStatus,
   type SystemDiagnostics,
+  listToolPermissions,
+  revokeToolPermission,
+  listPlugins,
+  reloadPlugins,
+  enablePlugin,
+  disablePlugin,
+  type ToolPermissionRecord,
+  type PluginRecord,
 } from "../tauri";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
@@ -164,6 +172,8 @@ export default function SettingsPage() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
+  const [toolPermissions, setToolPermissions] = useState<ToolPermissionRecord[]>([]);
+  const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
 
@@ -195,16 +205,20 @@ export default function SettingsPage() {
   }, []);
 
   const refreshAllDiagnostics = async () => {
-    const [router, diag, cache, policy] = await Promise.all([
+    const [router, diag, cache, policy, permissions, pluginRecords] = await Promise.all([
       getRouterStatus().catch(() => null),
       getSystemDiagnostics().catch(() => null),
       getHotCache().catch(() => null),
       getPrivacyPolicy().catch(() => null),
+      listToolPermissions().catch(() => []),
+      listPlugins().catch(() => []),
     ]);
     setRouterStatus(router);
     setDiagnostics(diag);
     setHotCache(cache);
     setPrivacyPolicyState(policy);
+    setToolPermissions(permissions);
+    setPlugins(pluginRecords);
     return diag;
   };
 
@@ -1541,6 +1555,121 @@ export default function SettingsPage() {
             导出将包含 LifeModel、聊天记录与向量记忆数据，格式为
             JSON（带版本号与主版本校验）。导入会覆盖当前数据，跨主版本导入会被拒绝，请谨慎操作。
           </p>
+        </section>
+
+        {/* Agent Execution Governance */}
+        <section className="space-y-4 border-t pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium text-gray-700">Agent 执行权限</h3>
+              <p className="mt-1 text-xs text-gray-500">
+                高风险工具和写操作默认进入确认流；这里展示已经授予或拒绝的后端权限策略。
+              </p>
+            </div>
+            <button
+              onClick={refreshAllDiagnostics}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              刷新
+            </button>
+          </div>
+          <div className="space-y-2">
+            {toolPermissions.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+                暂无工具权限策略。高风险工具会在执行前请求确认。
+              </div>
+            ) : (
+              toolPermissions.map(permission => (
+                <div
+                  key={permission.id}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-gray-200 bg-white px-3 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900">{permission.toolName}</div>
+                    <div className="mt-1 text-xs text-gray-500">
+                      {permission.policy} · {permission.source} · {permission.riskLevel} ·{" "}
+                      {permission.actionType}
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => {
+                      await revokeToolPermission(permission.id);
+                      await refreshAllDiagnostics();
+                    }}
+                    className="shrink-0 rounded-md border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-700 hover:bg-rose-50"
+                  >
+                    撤销
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        {/* Local Plugins */}
+        <section className="space-y-4 border-t pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-medium text-gray-700">本地 Plugins</h3>
+              <p className="mt-1 text-xs text-gray-500">
+                当前只读取本地 manifest，不执行远程代码；禁用后相关 tool / skill 不会进入注册表。
+              </p>
+            </div>
+            <button
+              onClick={async () => {
+                const records = await reloadPlugins();
+                setPlugins(records);
+              }}
+              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              重新加载
+            </button>
+          </div>
+          <div className="space-y-2">
+            {plugins.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+                暂未发现本地 plugin manifest。
+              </div>
+            ) : (
+              plugins.map(plugin => (
+                <div
+                  key={plugin.manifest.id}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-3"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-gray-900">
+                        {plugin.manifest.name}
+                      </div>
+                      <div className="mt-1 text-xs text-gray-500">
+                        {plugin.manifest.id} · v{plugin.manifest.version} ·{" "}
+                        {plugin.enabled ? "enabled" : "disabled"}
+                      </div>
+                    </div>
+                    <button
+                      onClick={async () => {
+                        if (plugin.enabled) {
+                          await disablePlugin(plugin.manifest.id);
+                        } else {
+                          await enablePlugin(plugin.manifest.id);
+                        }
+                        await refreshAllDiagnostics();
+                      }}
+                      disabled={Boolean(plugin.error)}
+                      className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      {plugin.enabled ? "禁用" : "启用"}
+                    </button>
+                  </div>
+                  {plugin.error && (
+                    <div className="mt-2 rounded-md bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
+                      {plugin.error}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
         </section>
 
         {/* Maintenance */}

@@ -362,11 +362,13 @@ impl ChatProposalGenerator {
             None
         };
 
-        skill_name.map(|skill| serde_json::json!({
+        skill_name.map(|skill| {
+            serde_json::json!({
                 "name": skill,
                 "proficiency": 7,
                 "description": format!("Extracted from chat: user mentioned {} skill", skill),
-            }))
+            })
+        })
     }
 }
 

@@ -202,7 +202,8 @@ impl ProposalGenerator for ChatProposalGeneratorAdapter {
     ) -> Result<Vec<AgentProposal>> {
         let session_id = run.session_id.as_deref().unwrap_or("unknown");
         let user_input = run.user_input.as_deref().unwrap_or("");
-        self.inner.generate_proposals(session_id, user_input, life_model)
+        self.inner
+            .generate_proposals(session_id, user_input, life_model)
     }
 }
 

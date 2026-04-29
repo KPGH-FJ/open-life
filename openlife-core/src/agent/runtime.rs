@@ -1,8 +1,8 @@
 use crate::agent::context_assembler::{AssembleInput, CompositeAssembler, ContextAssembler};
-    use crate::agent::reasoning::{
-        DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
-        ReasoningStrategy, ReasoningTrace,
-    };
+use crate::agent::reasoning::{
+    DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
+    ReasoningStrategy, ReasoningTrace,
+};
 use crate::agent::types::AgentTask;
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -41,9 +41,13 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub fn new(life_model: LifeModel, scheduler: InferenceScheduler, app_config: &crate::config::AppConfig) -> Self {
+    pub fn new(
+        life_model: LifeModel,
+        scheduler: InferenceScheduler,
+        app_config: &crate::config::AppConfig,
+    ) -> Self {
         let mut strategies: HashMap<String, Box<dyn ReasoningStrategy>> = HashMap::new();
-        
+
         // Register LayeredReasoner (default)
         let layered = LayeredReasoner::with_config(
             scheduler.clone(),
@@ -56,11 +60,11 @@ impl AgentRuntime {
             },
         );
         strategies.insert("layered".to_string(), Box::new(layered));
-        
+
         // Register DirectReasoner (fallback)
         let direct = DirectReasoner::new();
         strategies.insert("direct".to_string(), Box::new(direct));
-        
+
         Self {
             context_assembler: CompositeAssembler::new()
                 .with(Box::new(crate::agent::LifeModelAssembler))
@@ -120,7 +124,9 @@ impl AgentRuntime {
         };
 
         // 2. Assemble context
-        let context = self.context_assembler.assemble(&input)
+        let context = self
+            .context_assembler
+            .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
         // 3. Select reasoning strategy based on layer
@@ -128,9 +134,17 @@ impl AgentRuntime {
             self.reasoning_strategies.get("layered")
         } else {
             self.reasoning_strategies.get("direct")
-        }.ok_or_else(|| AgentRuntimeError::StrategyNotFound(
-            if task.layer == Layer::L3 { "layered" } else { "direct" }.to_string()
-        ))?;
+        }
+        .ok_or_else(|| {
+            AgentRuntimeError::StrategyNotFound(
+                if task.layer == Layer::L3 {
+                    "layered"
+                } else {
+                    "direct"
+                }
+                .to_string(),
+            )
+        })?;
 
         // 4. Build reasoning input
         let reasoning_input = ReasoningInput {
@@ -141,7 +155,8 @@ impl AgentRuntime {
 
         // 5. Execute reasoning
         let run_id = Uuid::new_v4().to_string();
-        let reasoning_output = strategy.reason(&reasoning_input, &context, &run_id)
+        let reasoning_output = strategy
+            .reason(&reasoning_input, &context, &run_id)
             .await
             .map_err(AgentRuntimeError::Reasoning)?;
 
@@ -187,7 +202,9 @@ impl AgentRuntime {
             memory_retrieval_time_ms: 0,
         };
 
-        let context = self.context_assembler.assemble(&input)
+        let context = self
+            .context_assembler
+            .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
         Ok(AgentRuntimeOutput {
@@ -274,20 +291,22 @@ mod tests {
         let runtime = AgentRuntime::with_config(life_model, scheduler, config);
         let task = create_test_task();
 
-        let result = runtime.execute_task(
-            &task,
-            &create_test_life_model(),
-            "",
-            None,
-            vec![],
-            PrivacyEngine::new(),
-        ).await;
+        let result = runtime
+            .execute_task(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+            )
+            .await;
 
         // L3 task uses layered strategy, which will fail because no API key
         // But context assembly should succeed
         assert!(result.is_err());
         match result.unwrap_err() {
-            AgentRuntimeError::Reasoning(_) => {},
+            AgentRuntimeError::Reasoning(_) => {}
             other => panic!("Expected Reasoning error, got: {:?}", other),
         }
     }
@@ -309,14 +328,16 @@ mod tests {
         let runtime = AgentRuntime::with_config(life_model, scheduler, config);
         let task = create_test_task();
 
-        let result = runtime.generate_direct(
-            &task,
-            &create_test_life_model(),
-            "",
-            None,
-            vec![],
-            PrivacyEngine::new(),
-        ).await;
+        let result = runtime
+            .generate_direct(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+            )
+            .await;
 
         assert!(result.is_ok());
         let output = result.unwrap();
@@ -341,18 +362,20 @@ mod tests {
         );
         let config = AgentRuntimeConfig::default();
         let runtime = AgentRuntime::with_config(life_model, scheduler, config);
-        
+
         let mut task = create_test_task();
         task.layer = Layer::L1;
 
-        let result = runtime.execute_task(
-            &task,
-            &create_test_life_model(),
-            "",
-            None,
-            vec![],
-            PrivacyEngine::new(),
-        ).await;
+        let result = runtime
+            .execute_task(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+            )
+            .await;
 
         // L1 should use DirectReasoner which doesn't need API calls
         assert!(result.is_ok());

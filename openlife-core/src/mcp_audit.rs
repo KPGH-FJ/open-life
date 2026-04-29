@@ -14,8 +14,7 @@ use base64::{engine::general_purpose, Engine as _};
 use ring::digest::{Context as DigestContext, SHA256};
 
 /// Key management mode for MCP audit encryption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum KeyMode {
     /// Derive key from a fixed app secret (default, backward-compatible)
     #[default]
@@ -25,7 +24,6 @@ pub enum KeyMode {
     /// Environment variable sourced key
     Env,
 }
-
 
 /// Key management configuration for MCP audit logs.
 #[derive(Debug, Clone, Serialize, Deserialize)]

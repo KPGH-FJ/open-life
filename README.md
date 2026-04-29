@@ -15,7 +15,7 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 当前项目处于 **Agent Framework Alpha** 阶段：
 
 - 已经具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics 等核心材料。
-- 还没有完全完成统一的 Agent Runtime。
+- `AgentRun` 和 `Proposal/Review Center` 已成为主线骨架，Chat/Builder/Calibration 都能产生可追踪运行记录和待确认提案。
 - 接下来的开发重点不是继续堆页面，而是把 `AgentTask -> AgentRun -> Actions/Observations -> Proposals -> Confirmation -> Persistence` 这条架构主线打通。
 
 新的架构基准文档见：
@@ -27,10 +27,10 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 | 能力 | 当前状态 | 目标形态 |
 |---|---|---|
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
-| Builder | 已支持快速、渐进、苏格拉底式构建 | 通过 Proposal 机制安全写入 LifeModel |
-| Chat | 已支持流式对话和历史持久化 | 升级为 Agent 执行界面，展示上下文、模型路由和运行轨迹 |
-| **ModelRouter** | ✅ **已升级为任务/隐私感知的智能路由** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
-| Memory | 已有 SQLite 与向量记忆 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
+| Builder | 已支持快速、渐进、苏格拉底式构建；默认只创建 Proposal | 通过 Review Center 确认后安全写入 LifeModel |
+| Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal | 继续收敛共享执行核心，展示上下文、模型路由和运行轨迹 |
+| **ModelRouter** | ✅ **任务/隐私感知路由灰度中，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
+| Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
 | MCP/A2A | 已有工具和外部 Agent 接入基础 | 成为 AgentAction 执行层，并默认受权限和审计保护 |
 | Calibration/Evolution | 已有建议和校准雏形 | 统一进入 Proposal/Confirmation 机制 |
 | Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
@@ -153,8 +153,8 @@ cd frontend && npm run build
 
 在 Settings → 实验性功能中可开启：
 
-- **ContextAssembler V2**：使用模块化组装器构建对话上下文（默认关闭，可回滚）
-- **ModelRouter**：智能路由选择本地/云端模型（默认关闭，带健康检查）
+- **ContextAssembler V2**：使用模块化组装器构建对话上下文（灰度中，可回滚）
+- **ModelRouter**：智能路由选择本地/云端模型（灰度中，云端 Provider 需配置并通过轻量健康检查）
 
 ```text
 Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
@@ -181,6 +181,12 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Runs 页面增强（过滤、搜索、分页、批量操作、回收站）
 - ✅ 导航重构（Workspace 为默认首页）
 
+### Phase 7: Stabilization / Spine Consolidation
+- ✅ Builder 正常路径改为 Proposal-Only，legacy direct apply 仅保留给迁移/调试。
+- ✅ Proposal 应用器覆盖 LifeModel/Goal、MemoryWrite、MemoryArchive、ToolPermission MVP。
+- ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
+- ✅ `make ci` 覆盖 Rust tests、frontend tests、frontend production build/typecheck。
+
 ## 当前重要开发方向
 
 1. 灰度测试 ContextAssembler V2 和 ModelRouter，收集反馈。
@@ -195,7 +201,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - Ollama 连接失败：确认 Ollama 已启动，且模型名称存在。
 - Safe Mode：说明当前数据环境存在风险，先去 Settings 的恢复控制台导出备份并修复。
 - Chat 无响应或一直思考：先查看 Settings 诊断，再检查模型 Provider 测试结果。
-- Builder Review 应用后模型没有变化：检查 skipped 字段和版本快照，确认是否被安全策略阻止。
+- Builder Review 后模型没有变化：先确认 Proposal 是否仍在 Review Center 待处理；Builder 默认不会绕过确认直接写入。
 
 ## License
 

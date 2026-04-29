@@ -121,9 +121,7 @@ impl LayerRouter {
 
         // Default heuristic: long messages (>80 chars or multi-sentence) -> L3
         let len = message.chars().count();
-        let sentence_count = message
-            .split(['。', '?', '？', '!'])
-            .count();
+        let sentence_count = message.split(['。', '?', '？', '!']).count();
         if len > 80 || sentence_count > 2 {
             Layer::L3
         } else {

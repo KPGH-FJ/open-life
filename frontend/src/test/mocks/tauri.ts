@@ -350,6 +350,78 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "edit_proposal":
     case "postpone_proposal":
       return Promise.resolve(undefined as T);
+    case "list_tool_permissions":
+      return Promise.resolve([
+        {
+          id: "perm-1",
+          toolName: "builtin_echo",
+          source: "builtin",
+          riskLevel: "low",
+          actionType: "mcp_tool_call",
+          policy: "allow_until_revoked",
+          createdAt: new Date().toISOString(),
+        },
+      ] as T);
+    case "revoke_tool_permission":
+      return Promise.resolve(true as T);
+    case "check_tool_permission":
+      return Promise.resolve({
+        allowed: true,
+        requiresConfirmation: false,
+        decision: "allow",
+        reason: "mock allow",
+      } as T);
+    case "list_skills":
+      return Promise.resolve([
+        {
+          id: "weekly_review",
+          name: "Weekly Review",
+          description: "汇总近期 AgentRun、目标、状态和记忆。",
+          requiredContext: ["agent_runs", "goals", "state", "memory"],
+          allowedTools: [],
+          executionBudget: {
+            maxSteps: 5,
+            maxToolCalls: 3,
+            timeoutSeconds: 60,
+            allowCloud: true,
+            allowWrites: false,
+          },
+          outputSchema: {},
+          proposalPolicy: "review_required",
+        },
+      ] as T);
+    case "run_skill":
+      return Promise.resolve({
+        runId: "run-skill-1",
+        status: "completed",
+        summary: "Skill completed",
+        generatedProposals: ["proposal-skill-1"],
+      } as T);
+    case "get_skill_run_status":
+      return Promise.resolve(null as T);
+    case "list_plugins":
+    case "reload_plugins":
+      return Promise.resolve([
+        {
+          manifest: {
+            id: "local-demo",
+            name: "Local Demo",
+            version: "0.1.0",
+            description: "本地插件示例",
+            author: "OpenLife",
+            tools: [],
+            skills: [],
+            permissions: ["read"],
+            enabled: false,
+            trustLevel: "local",
+          },
+          path: "/tmp/openlife/plugins/local-demo/plugin.json",
+          enabled: false,
+        },
+      ] as T);
+    case "enable_plugin":
+    case "disable_plugin":
+      return Promise.resolve(undefined as T);
     case "diff_snapshots":
       return Promise.resolve(
         [
@@ -563,6 +635,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         created_count: 1,
         rejected_count: 0,
         proposal_ids: ["proposal-1"],
+        run_id: "run-1",
         warnings: [],
       } as T);
     case "add_daily_goal":

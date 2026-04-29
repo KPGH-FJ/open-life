@@ -17,7 +17,10 @@ pub struct OllamaChatResponse {
     pub done: bool,
 }
 
-use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{Duration, Instant};
 
 struct OllamaCache {

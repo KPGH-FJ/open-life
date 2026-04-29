@@ -54,10 +54,12 @@ const mockSummary: BuilderSummary = {
 
 describe("BuilderPatchReview", () => {
   const mockApply = vi.fn();
+  const mockCreateProposals = vi.fn();
   const mockReject = vi.fn();
 
   beforeEach(() => {
     mockApply.mockClear();
+    mockCreateProposals.mockClear();
     mockReject.mockClear();
   });
 
@@ -152,7 +154,7 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
     fireEvent.click(saveButton);
 
     // 低风险的已默认选中，高风险的未选中 → rejected
@@ -166,6 +168,26 @@ describe("BuilderPatchReview", () => {
     expect(accepted.map(d => d.id)).toContain("sig_name");
     expect(accepted.map(d => d.id)).toContain("sig_focus");
     expect(rejected.map(d => d.id)).toContain("sig_long_term");
+  });
+
+  it("uses Review Center as the default submission path when available", () => {
+    render(
+      <BuilderPatchReview
+        signals={mockSignals}
+        summary={mockSummary}
+        onApply={mockApply}
+        onCreateProposals={mockCreateProposals}
+        onReject={mockReject}
+      />
+    );
+
+    expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
+    expect(screen.queryByText("直接应用（legacy / 绕过 Review Center）")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("发送到 Review Center"));
+
+    expect(mockCreateProposals).toHaveBeenCalledTimes(1);
+    expect(mockApply).not.toHaveBeenCalled();
   });
 
   it("calls onReject when clicking reject button", () => {
@@ -207,7 +229,7 @@ describe("BuilderPatchReview", () => {
       />
     );
 
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
     expect(saveButton).toBeDisabled();
   });
 
@@ -273,7 +295,7 @@ describe("BuilderPatchReview", () => {
     fireEvent.click(saveEditButton);
 
     // Click main save button
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
@@ -348,7 +370,7 @@ describe("BuilderPatchReview", () => {
       },
     });
     fireEvent.click(screen.getByText("保存"));
-    fireEvent.click(screen.getByText("直接应用（快速写入）"));
+    fireEvent.click(screen.getByText("直接应用（legacy / 绕过 Review Center）"));
 
     // Confirm direct apply for high-risk signal
     await waitFor(() => {
@@ -403,7 +425,7 @@ describe("BuilderPatchReview", () => {
     const checkboxes = screen.getAllByRole("checkbox");
     fireEvent.click(checkboxes[0]); // uncheck sig_name (low risk)
 
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("直接应用（legacy / 绕过 Review Center）");
     fireEvent.click(saveButton);
 
     await waitFor(() => {

@@ -16,6 +16,8 @@ pub enum AgentTaskKind {
     Review,
     Writing,
     MemoryGovernance,
+    Skill,
+    Plugin,
 }
 
 impl std::fmt::Display for AgentTaskKind {
@@ -31,6 +33,30 @@ impl std::fmt::Display for AgentTaskKind {
             AgentTaskKind::Review => write!(f, "review"),
             AgentTaskKind::Writing => write!(f, "writing"),
             AgentTaskKind::MemoryGovernance => write!(f, "memory_governance"),
+            AgentTaskKind::Skill => write!(f, "skill"),
+            AgentTaskKind::Plugin => write!(f, "plugin"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentExecutionBudget {
+    pub max_steps: u32,
+    pub max_tool_calls: u32,
+    pub timeout_seconds: u64,
+    pub allow_cloud: bool,
+    pub allow_writes: bool,
+}
+
+impl Default for AgentExecutionBudget {
+    fn default() -> Self {
+        Self {
+            max_steps: 5,
+            max_tool_calls: 3,
+            timeout_seconds: 60,
+            allow_cloud: true,
+            allow_writes: false,
         }
     }
 }
@@ -142,9 +168,19 @@ pub struct ContextSummary {
 pub struct AgentAction {
     pub id: String,
     pub action_type: String,
+    #[serde(default)]
+    pub target: Option<String>,
     pub input: serde_json::Value,
     pub output: Option<serde_json::Value>,
     pub status: String,
+    #[serde(default)]
+    pub permission_decision: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub error: Option<String>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -152,8 +188,12 @@ pub struct AgentAction {
 #[serde(rename_all = "camelCase")]
 pub struct AgentObservation {
     pub id: String,
+    #[serde(default)]
+    pub action_id: Option<String>,
     pub content: String,
     pub source: String,
+    #[serde(default)]
+    pub structured_result: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -330,6 +370,11 @@ pub enum ProposalType {
     MemoryWrite,
     MemoryArchive,
     ToolPermission,
+    PluginPermission,
+    ScheduledTask,
+    ExternalWriteAction,
+    ModelPolicyChange,
+    DataExport,
     ScheduleCheckin,
     /// 兼容旧数据
     #[serde(alias = "life_model_update")]
@@ -346,6 +391,11 @@ impl std::fmt::Display for ProposalType {
             ProposalType::MemoryWrite => write!(f, "memory_write"),
             ProposalType::MemoryArchive => write!(f, "memory_archive"),
             ProposalType::ToolPermission => write!(f, "tool_permission"),
+            ProposalType::PluginPermission => write!(f, "plugin_permission"),
+            ProposalType::ScheduledTask => write!(f, "scheduled_task"),
+            ProposalType::ExternalWriteAction => write!(f, "external_write_action"),
+            ProposalType::ModelPolicyChange => write!(f, "model_policy_change"),
+            ProposalType::DataExport => write!(f, "data_export"),
             ProposalType::ScheduleCheckin => write!(f, "schedule_checkin"),
             ProposalType::LifeModelUpdate => write!(f, "life_model_update"),
         }
@@ -359,6 +409,8 @@ pub enum ProposalSource {
     CalibrationRun,
     FeedbackEvolution,
     MemoryGovernance,
+    SkillRuntime,
+    Plugin,
     Manual,
     /// 预留，暂未实现
     #[serde(skip)]
@@ -372,6 +424,8 @@ impl std::fmt::Display for ProposalSource {
             ProposalSource::CalibrationRun => write!(f, "calibration_run"),
             ProposalSource::FeedbackEvolution => write!(f, "feedback_evolution"),
             ProposalSource::MemoryGovernance => write!(f, "memory_governance"),
+            ProposalSource::SkillRuntime => write!(f, "skill_runtime"),
+            ProposalSource::Plugin => write!(f, "plugin"),
             ProposalSource::Manual => write!(f, "manual"),
             ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
         }
@@ -391,6 +445,8 @@ impl rusqlite::types::FromSql for ProposalSource {
             "calibration_run" => Ok(ProposalSource::CalibrationRun),
             "feedback_evolution" => Ok(ProposalSource::FeedbackEvolution),
             "memory_governance" => Ok(ProposalSource::MemoryGovernance),
+            "skill_runtime" => Ok(ProposalSource::SkillRuntime),
+            "plugin" => Ok(ProposalSource::Plugin),
             "manual" => Ok(ProposalSource::Manual),
             "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
@@ -475,6 +531,8 @@ impl AgentProposal {
             ProposalSource::CalibrationRun => chrono::Duration::days(14),
             ProposalSource::FeedbackEvolution => chrono::Duration::days(7),
             ProposalSource::MemoryGovernance => chrono::Duration::days(7),
+            ProposalSource::SkillRuntime => chrono::Duration::days(14),
+            ProposalSource::Plugin => chrono::Duration::days(14),
             ProposalSource::Manual => chrono::Duration::days(365),
             ProposalSource::ProactiveAgent => chrono::Duration::days(7),
         };

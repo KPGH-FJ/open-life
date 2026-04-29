@@ -11,7 +11,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { SystemDiagnostics } from "../tauri";
-import { getSystemDiagnostics, listProposals, listRuns } from "../tauri";
+import { getSystemDiagnostics, listProposals, listRuns, listSkills, runSkill } from "../tauri";
 import { isSafeMode } from "../utils/safeMode";
 
 interface WorkspaceStats {
@@ -31,6 +31,8 @@ export default function WorkspaceOverview() {
     lastActivity: "-",
   });
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [skills, setSkills] = useState<{ id: string; name: string; description: string }[]>([]);
+  const [skillMessage, setSkillMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -42,18 +44,20 @@ export default function WorkspaceOverview() {
   async function loadWorkspaceData() {
     try {
       setLoading(true);
-      const [diag, proposals, runs] = await Promise.all([
+      const [diag, proposals, runs, skillList] = await Promise.all([
         getSystemDiagnostics().catch(() => null),
         listProposals().catch(() => []),
         listRuns(100, 0).catch(() => []),
+        listSkills().catch(() => []),
       ]);
 
       setDiagnostics(diag);
+      setSkills(skillList.slice(0, 3));
 
       const pendingCount = proposals.filter((p: any) => p.status === "pending").length;
 
       const recentCount = runs.filter((r: any) => {
-        const runTime = new Date(r.created_at);
+        const runTime = new Date(r.startedAt);
         const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
         return runTime > dayAgo;
       }).length;
@@ -72,7 +76,7 @@ export default function WorkspaceOverview() {
         totalRuns: runs.length,
         recentRuns: recentCount,
         systemStatus: status,
-        lastActivity: runs.length > 0 ? new Date(runs[0].created_at).toLocaleString("zh-CN") : "-",
+        lastActivity: runs.length > 0 ? new Date(runs[0].startedAt).toLocaleString("zh-CN") : "-",
       });
     } catch (e) {
       console.error("Failed to load workspace data:", e);
@@ -185,6 +189,39 @@ export default function WorkspaceOverview() {
           </div>
           <div className="text-xs text-stone-500">开始对话</div>
         </Link>
+      </div>
+
+      {/* Built-in Skills */}
+      <div className="rounded-xl border border-stone-200 bg-white p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">内置 Skills</div>
+            <div className="text-xs text-stone-500">
+              运行后会创建 AgentRun，并把建议送入 Review Center。
+            </div>
+          </div>
+        </div>
+        <div className="grid gap-2 md:grid-cols-3">
+          {skills.map(skill => (
+            <button
+              key={skill.id}
+              onClick={async () => {
+                setSkillMessage(null);
+                const res = await runSkill(skill.id, { text: `Run ${skill.name} from Workspace` });
+                setSkillMessage(`${skill.name} 已完成：${res.summary}`);
+              }}
+              className="rounded-lg border border-stone-200 px-3 py-3 text-left hover:bg-stone-50"
+            >
+              <div className="text-sm font-medium text-stone-900">{skill.name}</div>
+              <div className="mt-1 line-clamp-2 text-xs text-stone-500">{skill.description}</div>
+            </button>
+          ))}
+        </div>
+        {skillMessage && (
+          <div className="mt-3 rounded-lg bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+            {skillMessage}
+          </div>
+        )}
       </div>
 
       {/* Quick Actions */}

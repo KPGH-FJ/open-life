@@ -225,9 +225,9 @@ impl Default for A2AClient {
 // A2A Server (in-process handlers, no HTTP server yet)
 // ========================================
 
-use crate::agent::{LayeredReasoner, ReasoningInput, ReasoningStrategy, ReasoningTrace};
 use crate::agent::context_assembler::AssembleOutput;
 use crate::agent::types::{AgentTaskKind, ContextSummary, RedactionLevel};
+use crate::agent::{LayeredReasoner, ReasoningInput, ReasoningStrategy, ReasoningTrace};
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
@@ -439,14 +439,17 @@ impl A2AServerHandler {
 
     fn reasoning_bridge(&self, req: &SendTaskRequest) -> String {
         let user_text = extract_text_from_message(&req.message);
-        let session_id = req.session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
+        let session_id = req
+            .session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         let reasoning_input = ReasoningInput {
             task_kind: AgentTaskKind::Conversation,
             user_text: user_text.clone(),
             session_id: session_id.clone(),
         };
-        
+
         let assemble_output = AssembleOutput {
             life_model: self.life_model.clone(),
             tools_prompt: String::new(),
@@ -467,16 +470,19 @@ impl A2AServerHandler {
             },
             embed_error: None,
         };
-        
+
         let run_id = uuid::Uuid::new_v4().to_string();
         let life_model_clone = self.life_model.clone();
-        
+
         let rt = tokio::runtime::Handle::try_current();
         let trace: ReasoningTrace = match rt {
             Ok(handle) => handle.block_on(async move {
                 let scheduler = crate::scheduler::InferenceScheduler::default();
                 let reasoner = LayeredReasoner::new(scheduler, life_model_clone);
-                match reasoner.reason(&reasoning_input, &assemble_output, &run_id).await {
+                match reasoner
+                    .reason(&reasoning_input, &assemble_output, &run_id)
+                    .await
+                {
                     Ok(output) => output.trace,
                     Err(e) => {
                         let mut trace = ReasoningTrace::default();
@@ -490,7 +496,10 @@ impl A2AServerHandler {
                 new_rt.block_on(async move {
                     let scheduler = crate::scheduler::InferenceScheduler::default();
                     let reasoner = LayeredReasoner::new(scheduler, life_model_clone);
-                    match reasoner.reason(&reasoning_input, &assemble_output, &run_id).await {
+                    match reasoner
+                        .reason(&reasoning_input, &assemble_output, &run_id)
+                        .await
+                    {
                         Ok(output) => output.trace,
                         Err(e) => {
                             let mut trace = ReasoningTrace::default();
@@ -545,7 +554,9 @@ pub fn reasoning_input_to_a2a_task(
     task
 }
 
-pub fn a2a_response_to_reasoning_result(resp: &SendTaskResponse) -> Result<serde_json::Value, String> {
+pub fn a2a_response_to_reasoning_result(
+    resp: &SendTaskResponse,
+) -> Result<serde_json::Value, String> {
     // Aggregate text from artifacts (primary) and status message (fallback)
     let artifact_text: String = resp
         .artifacts
@@ -602,7 +613,7 @@ pub fn a2a_response_to_reasoning_result(resp: &SendTaskResponse) -> Result<serde
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{ReasoningInput, AgentTaskKind};
+    use crate::agent::{AgentTaskKind, ReasoningInput};
 
     #[test]
     fn build_text_task_basic() {

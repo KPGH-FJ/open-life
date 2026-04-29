@@ -9,7 +9,6 @@ import {
   XCircle,
   AlertTriangle,
   Trash2,
-  RotateCcw,
   Download,
 } from "lucide-react";
 
@@ -241,10 +240,24 @@ export default function AgentRunDetail() {
               <div className="space-y-2">
                 {run.actions.map(action => (
                   <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm">
-                    <div className="font-medium text-stone-800">{action.actionType}</div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      Status: {action.status} · {new Date(action.timestamp).toLocaleString()}
+                    <div className="font-medium text-stone-800">
+                      {action.actionType}
+                      {action.target ? ` · ${action.target}` : ""}
                     </div>
+                    <div className="text-xs text-stone-500 mt-1">
+                      Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
+                      {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
+                    </div>
+                    {action.error && (
+                      <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                        {action.error}
+                      </div>
+                    )}
+                    {action.output && (
+                      <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                        {JSON.stringify(action.output, null, 2)}
+                      </pre>
+                    )}
                   </div>
                 ))}
               </div>
@@ -261,8 +274,15 @@ export default function AgentRunDetail() {
                   <div key={obs.id} className="bg-stone-50 rounded-lg p-3 text-sm">
                     <div className="text-stone-800">{obs.content}</div>
                     <div className="text-xs text-stone-500 mt-1">
-                      Source: {obs.source} · {new Date(obs.timestamp).toLocaleString()}
+                      Source: {obs.source}
+                      {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""} ·{" "}
+                      {new Date(obs.timestamp).toLocaleString()}
                     </div>
+                    {obs.structuredResult && (
+                      <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                        {JSON.stringify(obs.structuredResult, null, 2)}
+                      </pre>
+                    )}
                   </div>
                 ))}
               </div>

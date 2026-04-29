@@ -81,9 +81,9 @@ export default function RunsPage() {
   const filteredRuns = runs.filter(run => {
     // Trash filter
     if (showTrash) {
-      return run.deleted_at !== null;
+      return !!run.deletedAt;
     } else {
-      if (run.deleted_at !== null) return false;
+      if (run.deletedAt) return false;
     }
 
     // Status filter
@@ -95,7 +95,7 @@ export default function RunsPage() {
     // Search
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
-      const text = `${run.user_input} ${run.outputPreview} ${run.kind}`.toLowerCase();
+      const text = `${run.userInput ?? ""} ${run.outputPreview ?? ""} ${run.kind}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -352,9 +352,7 @@ export default function RunsPage() {
                           <div>
                             <div className="font-medium text-stone-900">{kindLabel(run.kind)}</div>
                             <div className="text-xs text-stone-500 mt-0.5">
-                              {run.user_input
-                                ? run.user_input.slice(0, 60) + "..."
-                                : "No user input"}
+                              {run.userInput ? run.userInput.slice(0, 60) + "..." : "No user input"}
                             </div>
                           </div>
                         </div>

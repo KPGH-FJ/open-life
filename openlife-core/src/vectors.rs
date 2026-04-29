@@ -448,6 +448,29 @@ impl VectorStore {
         Ok(restored as usize)
     }
 
+    /// Archive specific memories by id. Used by user-reviewed MemoryArchive proposals.
+    pub fn archive_chunks(&self, chunk_ids: &[i64]) -> Result<usize> {
+        if chunk_ids.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction()?;
+        let placeholders: Vec<String> = chunk_ids.iter().map(|_| "?".to_string()).collect();
+        let now = chrono::Utc::now().to_rfc3339();
+        let sql = format!(
+            "UPDATE vectors SET archived = 1, archived_at = ?1, summary = substr(content, 1, 200) WHERE archived = 0 AND id IN ({})",
+            placeholders.join(",")
+        );
+        let params = std::iter::once(&now as &dyn rusqlite::ToSql)
+            .chain(chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+        let archived = tx.execute(&sql, rusqlite::params_from_iter(params))?;
+        tx.commit()?;
+        Ok(archived as usize)
+    }
+
     /// List archived chunks with summary (no embedding to save memory).
     pub fn list_archived(&self, limit: usize) -> Result<Vec<ArchivedChunkSummary>> {
         let conn = self
@@ -644,20 +667,22 @@ impl EmbeddingCache {
                 self.access_order.remove(0);
             }
         }
-        self.entries.insert(key.clone(), EmbeddingCacheEntry {
-            embedding,
-            cached_at: std::time::Instant::now(),
-        });
+        self.entries.insert(
+            key.clone(),
+            EmbeddingCacheEntry {
+                embedding,
+                cached_at: std::time::Instant::now(),
+            },
+        );
         self.access_order.push(key);
     }
 }
 
-static EMBEDDING_CACHE: std::sync::OnceLock<std::sync::Mutex<EmbeddingCache>> = std::sync::OnceLock::new();
+static EMBEDDING_CACHE: std::sync::OnceLock<std::sync::Mutex<EmbeddingCache>> =
+    std::sync::OnceLock::new();
 
 fn get_embedding_cache() -> &'static std::sync::Mutex<EmbeddingCache> {
-    EMBEDDING_CACHE.get_or_init(|| {
-        std::sync::Mutex::new(EmbeddingCache::new(1000, 3600))
-    })
+    EMBEDDING_CACHE.get_or_init(|| std::sync::Mutex::new(EmbeddingCache::new(1000, 3600)))
 }
 
 /// Clear the embedding cache.
@@ -1049,13 +1074,13 @@ mod tests {
     fn embedding_cache_hit_and_miss() {
         super::clear_embedding_cache();
         let mut cache = super::get_embedding_cache().lock().unwrap();
-        
+
         // Cache miss
         assert!(cache.get("hello").is_none());
-        
+
         // Insert
         cache.put("hello".to_string(), vec![1.0, 2.0, 3.0]);
-        
+
         // Cache hit
         let result = cache.get("hello").unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
@@ -1064,11 +1089,11 @@ mod tests {
     #[test]
     fn embedding_cache_lru_eviction() {
         let mut cache = super::EmbeddingCache::new(2, 3600);
-        
+
         cache.put("a".to_string(), vec![1.0]);
         cache.put("b".to_string(), vec![2.0]);
         cache.put("c".to_string(), vec![3.0]);
-        
+
         // "a" should be evicted (oldest)
         assert!(cache.get("a").is_none());
         // "b" and "c" should exist
@@ -1079,9 +1104,9 @@ mod tests {
     #[test]
     fn embedding_cache_ttl_expiration() {
         let mut cache = super::EmbeddingCache::new(10, 0); // 0 second TTL
-        
+
         cache.put("test".to_string(), vec![1.0]);
-        
+
         // Should be expired immediately
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(cache.get("test").is_none());

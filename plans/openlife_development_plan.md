@@ -43,7 +43,7 @@ Does this make OpenLife more like a trustworthy personal Agent framework?
 - ~~No central `AgentRuntime`.~~ ✅ 已实现（LayeredReasoner + DirectReasoner 策略注册）
 - ~~No unified `AgentProposal`.~~ ✅ 已实现（ProposalEngine + ProposalStore）
 - ~~No consistent representation of tool actions, model actions, memory writes, and LifeModel patches.~~ ✅ 已实现（统一 Proposal 结构）
-- ~~Chat, Builder, Calibration, and Evolution still use separate pipelines.~~ ✅ 已完成（Chat 已接入 Proposal 流）
+- ~~Chat, Builder, Calibration, and Evolution still use separate pipelines.~~ ✅ 已完成（Builder/Calibration/Chat 已接入 Proposal 流；Chat Proposal 持久化和 AgentRun 关联已抽共享 helper）
 
 ### 3.2 Product Gaps
 
@@ -56,8 +56,8 @@ Does this make OpenLife more like a trustworthy personal Agent framework?
 ### 3.3 Engineering Gaps
 
 - Several large files are difficult to maintain, especially Builder and page components.
-- Tauri command contracts are still manually maintained.
-- ~~Provider configuration is better than before, but ModelRouter semantics are still incomplete.~~ ✅ 已补充（SystemConfig 配置化）
+- Tauri command contracts are still manually maintained;新增 command 必须同步 Rust、TS wrapper、mock、页面调用和测试。
+- ~~Provider configuration is better than before, but ModelRouter semantics are still incomplete.~~ ✅ 已补充（provider health 字段、云端 key/probe 检查、High/Critical privacy local-only）
 - ~~ReAct execution and tool permissioning are not yet represented by one action model.~~ ✅ 已补充（错误处理增强 + 安全模式）
 
 ### 3.4 Recently Completed (2026-04-29)
@@ -76,7 +76,12 @@ Does this make OpenLife more like a trustworthy personal Agent framework?
   - 余弦相似度 4-wide SIMD 向量化
 - **Phase 4: 集成测试**
   - Tauri 命令测试 +6（life_model 2 + chat 2 + state 2）
-  - 前端类型同步（HermesTrace → ReasoningTrace）
+  - 前端类型同步（旧 trace 类型 → ReasoningTrace）
+- **Phase 5: 稳定化与架构脊柱收敛**
+  - Builder 正常用户路径改为 Proposal-Only，`builder_apply_signals` 仅作为 legacy/migration/debug 命令保留
+  - Proposal 应用器覆盖 MemoryWrite、MemoryArchive、ToolPermission MVP，并对缺失 payload 明确失败
+  - ModelRouter 不再把云端 provider 无条件标记可用，隐私约束先于云端 fallback
+  - `make ci` 纳入 frontend production build/typecheck
 
 ## 4. Development Principles
 
@@ -285,7 +290,7 @@ Deliverables:
 
 - Split oversized Builder internals into smaller modules.
 - Split very large frontend pages where doing so reduces real complexity.
-- Add Tauri command contract tests or generated wrappers.
+- Add Tauri command contract tests or generated wrappers. 当前手动 checklist 见 [`docs/tauri_command_contract_checklist.md`](../docs/tauri_command_contract_checklist.md)。
 - Keep AGENTS.md, README.md, and this plan aligned.
 - Establish a fixed smoke sequence.
 

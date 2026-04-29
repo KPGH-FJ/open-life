@@ -268,6 +268,7 @@ impl McpRegistry {
     fn register_default_builtins(&mut self) {
         // Built-in: echo
         let echo_manifest = ToolManifest {
+            id: "builtin_echo".into(),
             name: "builtin_echo".into(),
             description: "返回传入的文本内容，用于测试工具链路。".into(),
             parameters: serde_json::json!({
@@ -278,8 +279,12 @@ impl McpRegistry {
                 "required": ["text"]
             }),
             permission_level: "low".into(),
+            risk_level: "low".into(),
             version: "1.0.0".into(),
             source: ToolSource::BuiltIn,
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
             tags: vec!["test".into(), "utility".into()],
         };
         self.register_builtin(
@@ -352,21 +357,35 @@ impl McpRegistry {
 
     /// Return unified manifests for both MCP tools and built-in tools.
     pub fn list_manifests(&self) -> Vec<ToolManifest> {
-        let mut out: Vec<ToolManifest> = self.builtin_manifests.clone();
+        let mut out: Vec<ToolManifest> = self
+            .builtin_manifests
+            .clone()
+            .into_iter()
+            .map(ToolManifest::normalized)
+            .collect();
         for (server_name, client) in &self.clients {
             if let Ok(tools) = client.list_tools() {
                 for tool in tools {
-                    out.push(ToolManifest {
-                        name: tool.name.clone(),
-                        description: tool.description.clone(),
-                        parameters: tool.parameters.clone(),
-                        permission_level: ToolManifest::infer_permission_level(&tool.name),
-                        version: "1.0.0".into(),
-                        source: ToolSource::Mcp {
-                            server_name: server_name.clone(),
-                        },
-                        tags: Vec::new(),
-                    });
+                    out.push(
+                        ToolManifest {
+                            id: format!("mcp:{}:{}", server_name, tool.name),
+                            name: tool.name.clone(),
+                            description: tool.description.clone(),
+                            parameters: tool.parameters.clone(),
+                            permission_level: ToolManifest::infer_permission_level(&tool.name),
+                            risk_level: ToolManifest::infer_permission_level(&tool.name),
+                            version: "1.0.0".into(),
+                            source: ToolSource::Mcp {
+                                server_name: server_name.clone(),
+                            },
+                            capabilities: ToolManifest::infer_capabilities(&tool.name),
+                            requires_confirmation: ToolManifest::infer_permission_level(&tool.name)
+                                == "high",
+                            enabled: true,
+                            tags: Vec::new(),
+                        }
+                        .normalized(),
+                    );
                 }
             }
         }
@@ -387,6 +406,12 @@ impl McpRegistry {
                 }
             }
             ToolSource::Mcp { .. } => self.call_tool(&manifest.name, arguments),
+            ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
+            ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
+                "plugin tool '{}' from '{}' has no local executor",
+                manifest.name,
+                plugin_id
+            )),
         }
     }
 

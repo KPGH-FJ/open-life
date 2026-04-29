@@ -270,14 +270,10 @@ impl ProposalStore {
             };
             format!(
                 "SELECT COUNT(*) FROM proposals WHERE status = '{}' AND {}",
-                status,
-                risk_order
+                status, risk_order
             )
         } else {
-            format!(
-                "SELECT COUNT(*) FROM proposals WHERE status = '{}'",
-                status
-            )
+            format!("SELECT COUNT(*) FROM proposals WHERE status = '{}'", status)
         };
 
         let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
@@ -368,6 +364,11 @@ impl ProposalStore {
             "memory_write" => ProposalType::MemoryWrite,
             "memory_archive" => ProposalType::MemoryArchive,
             "tool_permission" => ProposalType::ToolPermission,
+            "plugin_permission" => ProposalType::PluginPermission,
+            "scheduled_task" => ProposalType::ScheduledTask,
+            "external_write_action" => ProposalType::ExternalWriteAction,
+            "model_policy_change" => ProposalType::ModelPolicyChange,
+            "data_export" => ProposalType::DataExport,
             "schedule_checkin" => ProposalType::ScheduleCheckin,
             "life_model_update" => ProposalType::LifeModelUpdate,
             _ => ProposalType::LifeModelUpdate,

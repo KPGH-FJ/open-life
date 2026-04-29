@@ -83,7 +83,7 @@ pub struct ProviderHealth {
 impl Default for ProviderHealth {
     fn default() -> Self {
         Self {
-            available: true,
+            available: false,
             latency_ms: None,
             last_error: None,
             last_check_at: std::time::Instant::now(),
@@ -100,6 +100,8 @@ pub struct ProviderAvailability {
     pub latency_ms: Option<u64>,
     pub models: Vec<String>,
     pub last_checked: chrono::DateTime<chrono::Utc>,
+    pub last_error: Option<String>,
+    pub health_is_estimated: bool,
 }
 
 /// Intelligent model router with provider-agnostic, role-aware, privacy-aware routing.
@@ -201,6 +203,20 @@ impl ModelRouter {
         self
     }
 
+    fn provider_env_key(provider: &str) -> Option<String> {
+        let candidates: &[&str] = match provider {
+            "deepseek" => &["DEEPSEEK_API_KEY"],
+            "openrouter" => &["OPENROUTER_API_KEY"],
+            "openai" => &["OPENAI_API_KEY"],
+            _ => &[],
+        };
+        candidates.iter().find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+    }
+
     /// Check and update provider availability.
     pub async fn check_availability(&mut self) -> Result<()> {
         let now = chrono::Utc::now();
@@ -221,20 +237,42 @@ impl ModelRouter {
                 latency_ms: ollama_latency,
                 models: vec![], // Could populate with installed models
                 last_checked: now,
+                last_error: if ollama_available {
+                    None
+                } else {
+                    Some("ollama_unavailable".into())
+                },
+                health_is_estimated: false,
             },
         );
 
-        // Check cloud providers (basic connectivity check)
-        // In production, this would do actual health checks
+        // Cloud providers are only considered available when a key is configured and
+        // lightweight probing succeeds. Without a key, they are explicitly unavailable.
         for provider in &["deepseek", "openrouter", "openai"] {
+            let has_key = Self::provider_env_key(provider).is_some();
+            let (available, latency_ms, last_error, estimated) = if has_key {
+                match self.probe_provider_lightweight(provider).await {
+                    Ok(latency) => (true, Some(latency), None, false),
+                    Err(e) => (false, None, Some(e.to_string()), false),
+                }
+            } else {
+                (
+                    false,
+                    None,
+                    Some(format!("{}_api_key_missing", provider)),
+                    false,
+                )
+            };
             self.providers.insert(
                 provider.to_string(),
                 ProviderAvailability {
                     provider: provider.to_string(),
-                    available: true,       // Assume available unless proven otherwise
-                    latency_ms: Some(500), // Estimated 500ms for cloud
+                    available,
+                    latency_ms,
                     models: vec![],
                     last_checked: now,
+                    last_error,
+                    health_is_estimated: estimated,
                 },
             );
         }
@@ -291,6 +329,7 @@ impl ModelRouter {
         let url = match provider {
             "deepseek" => "https://api.deepseek.com/models",
             "openrouter" => "https://openrouter.ai/api/v1/models",
+            "openai" => "https://api.openai.com/v1/models",
             _ => return Err(anyhow::anyhow!("unknown provider: {}", provider)),
         };
 
@@ -441,6 +480,21 @@ impl ModelRouter {
             .or_else(|| self.privacy_policies.get(&task_type).copied())
             .unwrap_or(PrivacyRequirement::Low);
 
+        if matches!(
+            privacy_requirement,
+            PrivacyRequirement::High | PrivacyRequirement::Critical
+        ) {
+            let local_available =
+                self.score_provider("ollama", task_type, privacy_requirement, tools_needed);
+            if local_available.is_none() {
+                return Err(anyhow::anyhow!(
+                    "No local provider available for {:?} privacy task {:?}",
+                    privacy_requirement,
+                    task_type
+                ));
+            }
+        }
+
         let mut scores = Vec::new();
         for provider in self.providers.keys() {
             if let Some(score) =
@@ -528,6 +582,8 @@ mod tests {
                 latency_ms: Some(100),
                 models: vec!["qwen2.5:7b".into()],
                 last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
             },
         );
         router.providers.insert(
@@ -538,6 +594,8 @@ mod tests {
                 latency_ms: Some(500),
                 models: vec!["deepseek-chat".into()],
                 last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
             },
         );
         router.providers.insert(
@@ -548,6 +606,8 @@ mod tests {
                 latency_ms: Some(600),
                 models: vec!["openai/gpt-4o".into()],
                 last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
             },
         );
         router
@@ -636,5 +696,27 @@ mod tests {
         let decision = router.route_chat(None, true).unwrap();
         // Should not pick ollama even though providers map says available
         assert_ne!(decision.provider, "ollama");
+    }
+
+    #[test]
+    fn test_high_privacy_requires_local_provider() {
+        let mut router = create_test_router();
+        router.provider_health.insert(
+            "ollama".into(),
+            ProviderHealth {
+                available: false,
+                latency_ms: None,
+                last_error: Some("ollama not running".into()),
+                last_check_at: std::time::Instant::now(),
+                consecutive_failures: 3,
+            },
+        );
+
+        let result = router.route(TaskType::Extractor, false, Some(PrivacyRequirement::High));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No local provider"));
     }
 }

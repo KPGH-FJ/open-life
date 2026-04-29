@@ -57,9 +57,7 @@ impl ReasoningStrategy for LayeredReasoner {
         };
 
         // Phase 1: Meaning Analysis
-        let meaning = self
-            .run_meaning_phase(input, context, &mut trace)
-            .await?;
+        let meaning = self.run_meaning_phase(input, context, &mut trace).await?;
 
         // Phase 2: Strategy Planning
         let strategy = self
@@ -117,7 +115,7 @@ impl ReasoningStrategy for LayeredReasoner {
             .map(|s| s.to_string());
 
         let stable_steps = trace.stable_steps.clone();
-        
+
         Ok(ReasoningOutput {
             system_prompt,
             trace,
@@ -164,7 +162,12 @@ impl LayeredReasoner {
         let forbidden = self.detect_forbidden_topics(user_text);
         let risk_level = if forbidden.is_empty() { "low" } else { "high" };
 
-        let aligned_values = values.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+        let aligned_values = values
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
         let text = if forbidden.is_empty() {
             format!("本次回应应体现以下核心价值观: {}", aligned_values)
         } else {
@@ -544,10 +547,7 @@ impl SafetyChecker {
                 for kw in required {
                     if let Some(k) = kw.as_str() {
                         if !execution.contains(&k.to_lowercase()) {
-                            warnings.push(format!(
-                                "Execution missing required keyword: {}",
-                                k
-                            ));
+                            warnings.push(format!("Execution missing required keyword: {}", k));
                         }
                     }
                 }
@@ -556,8 +556,12 @@ impl SafetyChecker {
             // Check risk level support
             if let Some(ref meaning) = trace.meaning_result {
                 if let Some(risk) = meaning.get("risk_level").and_then(|v| v.as_str()) {
-                    if risk == "high" && !execution.contains("帮助") && !execution.contains("支持") {
-                        warnings.push("High-risk request response lacks support-oriented language".to_string());
+                    if risk == "high" && !execution.contains("帮助") && !execution.contains("支持")
+                    {
+                        warnings.push(
+                            "High-risk request response lacks support-oriented language"
+                                .to_string(),
+                        );
                     }
                 }
             }

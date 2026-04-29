@@ -417,7 +417,7 @@ describe("BuilderPage", () => {
     });
   });
 
-  it("sends edited decisions with proposed_value to builder_apply_signals", async () => {
+  it("sends edited decisions with proposed_value to builder_create_proposals", async () => {
     const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
       if (cmd === "builder_start") {
         return Promise.resolve({
@@ -448,14 +448,14 @@ describe("BuilderPage", () => {
           model: null,
         });
       }
-      if (cmd === "builder_apply_signals") {
+      if (cmd === "builder_create_proposals") {
         return Promise.resolve({
           success: true,
-          applied_fields: ["identity.name"],
-          skipped_fields: [],
-          edited_count: 1,
+          created_count: 1,
           rejected_count: 0,
-          model: null,
+          proposal_ids: ["proposal-edited"],
+          run_id: "run-edited",
+          warnings: [],
         });
       }
       return mockInvoke(cmd, args);
@@ -485,7 +485,8 @@ describe("BuilderPage", () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText("直接应用（快速写入）")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
+      expect(screen.queryByText("直接应用（legacy / 绕过 Review Center）")).not.toBeInTheDocument();
     });
 
     // Ensure the checkbox is checked so save is enabled
@@ -507,14 +508,15 @@ describe("BuilderPage", () => {
     fireEvent.click(saveEditButton);
 
     // Click main save
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("发送到 Review Center");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
       const calls = customMock.mock.calls;
-      const applyCall = calls.find(c => c[0] === "builder_apply_signals");
-      expect(applyCall).toBeDefined();
-      const decisions = (applyCall![1] as Record<string, any>).decisions;
+      const proposalCall = calls.find(c => c[0] === "builder_create_proposals");
+      expect(proposalCall).toBeDefined();
+      expect(calls.find(c => c[0] === "builder_apply_signals")).toBeUndefined();
+      const decisions = (proposalCall![1] as Record<string, any>).decisions;
       expect(decisions).toBeDefined();
       const edited = decisions.find((d: any) => d.id === "sig_name");
       expect(edited).toBeDefined();
@@ -523,7 +525,7 @@ describe("BuilderPage", () => {
     });
   });
 
-  it("sends builderApplySignals payload matching backend contract", async () => {
+  it("sends builderCreateProposals payload matching backend contract", async () => {
     const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
       if (cmd === "builder_start") {
         return Promise.resolve({
@@ -554,14 +556,14 @@ describe("BuilderPage", () => {
           model: null,
         });
       }
-      if (cmd === "builder_apply_signals") {
+      if (cmd === "builder_create_proposals") {
         return Promise.resolve({
           success: true,
-          applied_fields: ["identity.name"],
-          skipped_fields: [],
-          edited_count: 0,
+          created_count: 1,
           rejected_count: 0,
-          model: null,
+          proposal_ids: ["proposal-1"],
+          run_id: "run-1",
+          warnings: [],
         });
       }
       return mockInvoke(cmd, args);
@@ -592,7 +594,7 @@ describe("BuilderPage", () => {
 
     // Wait for review mode (BuilderPatchReview save button)
     await waitFor(() => {
-      expect(screen.getByText("直接应用（快速写入）")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
     });
 
     // Ensure checkboxes are checked so save is enabled
@@ -604,14 +606,15 @@ describe("BuilderPage", () => {
     });
 
     // Click save without editing — accepted by default
-    const saveButton = screen.getByText("直接应用（快速写入）");
+    const saveButton = screen.getByText("发送到 Review Center");
     fireEvent.click(saveButton);
 
     await waitFor(() => {
       const calls = customMock.mock.calls;
-      const applyCall = calls.find(c => c[0] === "builder_apply_signals");
-      expect(applyCall).toBeDefined();
-      const payload = applyCall![1] as Record<string, any>;
+      const proposalCall = calls.find(c => c[0] === "builder_create_proposals");
+      expect(proposalCall).toBeDefined();
+      expect(calls.find(c => c[0] === "builder_apply_signals")).toBeUndefined();
+      const payload = proposalCall![1] as Record<string, any>;
 
       // Backend contract: real Tauri expects camelCase, test mocks still accept snake_case.
       expect(payload).toHaveProperty("sessionId");
@@ -635,7 +638,7 @@ describe("BuilderPage", () => {
     });
   });
 
-  it("shows build outcome summary and productized next steps after apply succeeds", async () => {
+  it("shows Review Center notice after proposal creation succeeds", async () => {
     const customMock = vi.fn((cmd: string, args?: Record<string, any>): Promise<any> => {
       if (cmd === "builder_start") {
         return Promise.resolve({
@@ -666,15 +669,14 @@ describe("BuilderPage", () => {
           model: mockLifeModel,
         });
       }
-      if (cmd === "builder_apply_signals") {
+      if (cmd === "builder_create_proposals") {
         return Promise.resolve({
           success: true,
-          applied_fields: ["identity.name", "goals.short_term"],
-          merged_fields: ["identity.values"],
-          skipped_fields: [],
-          edited_count: 1,
+          created_count: 2,
           rejected_count: 2,
-          model: mockLifeModel,
+          proposal_ids: ["proposal-1", "proposal-2"],
+          run_id: "run-review-center",
+          warnings: [],
         });
       }
       return mockInvoke(cmd, args);
@@ -698,30 +700,22 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("下一步"));
 
     await waitFor(() => {
-      expect(screen.getByText("直接应用（快速写入）")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
     });
 
     const checkboxes = screen.getAllByRole("checkbox");
     checkboxes.forEach(cb => {
       if (!(cb as HTMLInputElement).checked) fireEvent.click(cb);
     });
-    fireEvent.click(screen.getByText("直接应用（快速写入）"));
+    fireEvent.click(screen.getByText("发送到 Review Center"));
 
     await waitFor(() => {
-      expect(screen.getByText("本轮沉淀")).toBeInTheDocument();
+      expect(screen.getByText(/已创建/)).toBeInTheDocument();
     });
 
-    expect(screen.getByText("本轮写入结果")).toBeInTheDocument();
-    expect(screen.getByText("已写入")).toBeInTheDocument();
-    expect(screen.getByText("已合并")).toBeInTheDocument();
-    expect(screen.getByText("已编辑")).toBeInTheDocument();
-    expect(screen.getByText("已拒绝")).toBeInTheDocument();
-    expect(screen.getByText("能力资产")).toBeInTheDocument();
-    expect(screen.getByText("开始第一次个性化对话")).toBeInTheDocument();
-    expect(screen.getByText("去仪表盘查看下一步")).toBeInTheDocument();
-    expect(
-      screen.getByText(/本轮已写入 2 项，合并 1 项，编辑 1 项，拒绝 2 项/)
-    ).toBeInTheDocument();
+    expect(screen.getByText(/条待确认 Proposal/)).toBeInTheDocument();
+    expect(screen.getByText("去 Review Center 确认 →")).toBeInTheDocument();
+    expect(screen.queryByText("本轮写入结果")).not.toBeInTheDocument();
   });
 
   it("returns review-only builds back to unfinished sessions when choosing not to save", async () => {
@@ -788,7 +782,7 @@ describe("BuilderPage", () => {
     fireEvent.click(screen.getByText("下一步"));
 
     await waitFor(() => {
-      expect(screen.getByText("直接应用（快速写入）")).toBeInTheDocument();
+      expect(screen.getByText("发送到 Review Center")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByText("暂不保存"));

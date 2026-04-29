@@ -29,6 +29,17 @@ else
     SHELL_RUN = bash
 endif
 
+PNPM := $(shell command -v pnpm 2>/dev/null)
+ifeq ($(PNPM),)
+    FRONTEND_PM = npm
+    FRONTEND_RUN = npm run
+    FRONTEND_INSTALL = npm install
+else
+    FRONTEND_PM = pnpm
+    FRONTEND_RUN = pnpm
+    FRONTEND_INSTALL = pnpm install
+endif
+
 # 默认目标
 .DEFAULT_GOAL := help
 
@@ -36,7 +47,7 @@ endif
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a format lint ci
+.PHONY: help setup dev build check test test-front test-rust clean a2a format lint ci build-front
 
 ## 显示帮助信息
 help:
@@ -51,7 +62,7 @@ help:
 	@echo "  make test-rust   - 运行 Rust 测试"
 	@echo "  make format      - 格式化所有代码（Rust + 前端）"
 	@echo "  make lint        - 运行所有 Lint 检查"
-	@echo "  make ci          - 完整 CI 检查（format + lint + test）"
+	@echo "  make ci          - 完整 CI 检查（format + lint + test + frontend build）"
 	@echo "  make clean       - 清理构建缓存"
 	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
@@ -92,7 +103,7 @@ test: test-front test-rust
 ## 运行前端测试
 test-front:
 	@echo "🧪 运行前端测试..."
-	cd frontend && pnpm test
+	cd frontend && $(FRONTEND_RUN) test
 
 ## 运行 Rust 测试
 test-rust:
@@ -125,17 +136,17 @@ clean-all: clean
 ## 安装前端依赖
 install-front:
 	@echo "📦 安装前端依赖..."
-	cd frontend && pnpm install
+	cd frontend && $(FRONTEND_INSTALL)
 
 ## 前端生产构建（不启动 Tauri）
 build-front:
 	@echo "🔨 前端生产构建..."
-	cd frontend && pnpm build
+	cd frontend && $(FRONTEND_RUN) build
 
 ## 前端开发服务器（不启动桌面窗口）
 dev-front:
 	@echo "🌐 启动前端开发服务器..."
-	cd frontend && pnpm dev
+	cd frontend && $(FRONTEND_RUN) dev
 
 # =============================================================================
 # Rust 独立命令
@@ -167,6 +178,6 @@ lint: lint-rust
 	cd frontend && npx tsc --noEmit
 	@echo "✅ Lint 检查完成"
 
-## 完整 CI 检查（格式化 + Lint + 测试）
-ci: format lint test
+## 完整 CI 检查（格式化 + Lint + 测试 + 前端生产构建）
+ci: format lint test build-front
 	@echo "✅ CI 检查全部通过"

@@ -18,9 +18,10 @@ import SuggestionContextPanel from "./SuggestionContextPanel";
 interface Props {
   signals: BuilderSignal[];
   summary: BuilderSummary;
-  onApply: (decisions: BuilderSignalDecision[]) => void;
+  onApply?: (decisions: BuilderSignalDecision[]) => void;
   onCreateProposals?: (decisions: BuilderSignalDecision[]) => void;
   onReject: () => void;
+  enableLegacyDirectApply?: boolean;
 }
 
 interface SignalEditState {
@@ -132,6 +133,7 @@ export default function BuilderPatchReview({
   onApply,
   onCreateProposals,
   onReject,
+  enableLegacyDirectApply = false,
 }: Props) {
   // Track which signals are selected (checked)
   const [selected, setSelected] = useState<Set<string>>(() => {
@@ -219,6 +221,7 @@ export default function BuilderPatchReview({
   };
 
   const handleApply = () => {
+    if (!onApply) return;
     // Check if any high risk signals are selected
     const hasHighRiskSelected = signals.some(s => selected.has(s.id) && s.risk_level === "high");
     if (hasHighRiskSelected && !showDirectApplyConfirm) {
@@ -239,6 +242,7 @@ export default function BuilderPatchReview({
   const rejectedCount = signals.length - acceptedCount - editedCount;
   // Merged count will be computed after backend returns actual merge results
   const mergedCount = 0;
+  const showLegacyDirectApply = enableLegacyDirectApply || !onCreateProposals;
 
   return (
     <div className="space-y-6">
@@ -555,18 +559,25 @@ export default function BuilderPatchReview({
               发送到 Review Center
             </button>
           )}
-          <button
-            onClick={handleApply}
-            disabled={acceptedCount === 0 && editedCount === 0}
-            className="px-4 py-2 border border-gray-300 bg-white text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            <Check size={18} />
-            直接应用（快速写入）
-          </button>
+          {showLegacyDirectApply && onApply && (
+            <details className="text-right">
+              <summary className="cursor-pointer text-xs text-stone-400 hover:text-stone-600">
+                Legacy direct apply
+              </summary>
+              <button
+                onClick={handleApply}
+                disabled={acceptedCount === 0 && editedCount === 0}
+                className="mt-2 px-4 py-2 border border-rose-200 bg-white text-rose-700 rounded-lg hover:bg-rose-50 disabled:opacity-50 disabled:cursor-not-allowed inline-flex items-center gap-2"
+              >
+                <Check size={18} />
+                直接应用（legacy / 绕过 Review Center）
+              </button>
+            </details>
+          )}
         </div>
         <div className="text-xs text-gray-500 text-right">
-          「发送到 Review Center」是推荐路径，你可以在 Review Center 逐条审阅后再确认写入。
-          「直接应用」会立即更新人生模型且不可撤销。
+          「发送到 Review Center」是推荐路径，你可以在 Review Center 逐条审阅后再确认写入。 Legacy
+          direct apply 仅用于迁移和调试。
         </div>
       </div>
 

@@ -1,9 +1,9 @@
 use futures::StreamExt;
 use openlife_core::agent::ContextAssembler;
+use openlife_core::agent::ReasoningTrace;
 use openlife_core::builder::{BuilderSession, BuilderSessionStore};
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
-use openlife_core::agent::ReasoningTrace;
 use openlife_core::layer_router::{Layer, LayerRouter};
 use openlife_core::life_model::{LifeModel, LifeModelManager};
 use openlife_core::llm::ChatMessage;
@@ -53,6 +53,11 @@ use commands::diagnostics::{
     check_ollama_status, get_router_status, get_scheduler_config, get_system_diagnostics,
     set_scheduler_config,
 };
+use commands::execution::{
+    check_tool_permission, disable_plugin, enable_plugin, get_skill_run_status,
+    grant_tool_permission, list_plugins, list_skills, list_tool_permissions, reload_plugins,
+    revoke_tool_permission, run_skill,
+};
 use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
@@ -68,9 +73,7 @@ use commands::memory::{
     index_memory_chunk, list_archived_chunks, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
-use commands::metrics::{
-    get_rollout_errors, get_rollout_metrics, get_rollout_summary,
-};
+use commands::metrics::{get_rollout_errors, get_rollout_metrics, get_rollout_summary};
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
     list_proposals, postpone_proposal, reject_proposal,
@@ -104,6 +107,8 @@ pub struct ToolCallResult {
     pub requires_confirmation: bool,
     pub pii_found: bool,
     pub privacy_warnings: Vec<String>,
+    pub action_id: Option<String>,
+    pub permission_decision: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -356,6 +361,9 @@ pub struct AppState {
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
+    pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
+    pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
+    pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
     pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
     pub startup_warnings: Vec<String>,
@@ -375,6 +383,59 @@ impl AppState {
         (reg, audit)
     }
 }
+
+async fn generate_and_persist_chat_proposals(
+    state: &Arc<AppState>,
+    agent_run: &openlife_core::agent::AgentRun,
+    reply: &str,
+    life_model: &LifeModel,
+) {
+    let Some(ref proposal_store_arc) = state.proposal_store else {
+        return;
+    };
+
+    let proposals = {
+        let engine = state.proposal_engine.lock().await;
+        match engine.generate_from_run(agent_run, reply, life_model) {
+            Ok(proposals) => proposals,
+            Err(e) => {
+                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
+                return;
+            }
+        }
+    };
+
+    if proposals.is_empty() {
+        return;
+    }
+
+    let mut created_proposal_ids = Vec::new();
+    {
+        let store = proposal_store_arc.lock().await;
+        for proposal in proposals {
+            let proposal_id = proposal.id.clone();
+            if let Err(e) = store.create_proposal(&proposal) {
+                eprintln!("[ChatProposal] Failed to save proposal: {}", e);
+            } else {
+                created_proposal_ids.push(proposal_id);
+            }
+        }
+    }
+
+    if created_proposal_ids.is_empty() {
+        return;
+    }
+
+    if let Some(ref run_store_arc) = state.agent_run_store {
+        let run_store = run_store_arc.lock().await;
+        for proposal_id in created_proposal_ids {
+            if let Err(e) = run_store.add_generated_proposal(&agent_run.id, &proposal_id) {
+                eprintln!("[AgentRun] 关联 Chat Proposal 失败: {}", e);
+            }
+        }
+    }
+}
+
 pub(crate) async fn persist_life_model(
     state: &Arc<AppState>,
     mut life_model: LifeModel,
@@ -467,6 +528,7 @@ fn execute_tool_call_internal(
     permission_level: String,
     registry: &McpRegistry,
     audit: &McpAuditStore,
+    permission_decision: Option<String>,
 ) -> ToolCallResult {
     let inspection = registry.inspect_call_arguments(name, &args);
     let pii_found = inspection.pii_found;
@@ -492,6 +554,8 @@ fn execute_tool_call_internal(
                 requires_confirmation: false,
                 pii_found,
                 privacy_warnings,
+                action_id: None,
+                permission_decision,
             }
         }
         Err(e) => {
@@ -510,19 +574,92 @@ fn execute_tool_call_internal(
                 requires_confirmation: false,
                 pii_found,
                 privacy_warnings,
+                action_id: None,
+                permission_decision,
             }
         }
     }
+}
+fn action_observation_from_tool_result(
+    result: &ToolCallResult,
+    input: serde_json::Value,
+) -> (
+    openlife_core::agent::AgentAction,
+    openlife_core::agent::AgentObservation,
+) {
+    let now = chrono::Utc::now();
+    let action_id = format!("action-{}", now.timestamp_nanos_opt().unwrap_or_default());
+    let status = if result.requires_confirmation {
+        "needs_confirmation"
+    } else if result.success {
+        "succeeded"
+    } else {
+        "failed"
+    };
+    let action = openlife_core::agent::AgentAction {
+        id: action_id.clone(),
+        action_type: "mcp_tool_call".into(),
+        target: Some(result.name.clone()),
+        input,
+        output: result
+            .output
+            .as_ref()
+            .map(|output| serde_json::json!({ "text": output })),
+        status: status.into(),
+        permission_decision: result.permission_decision.clone(),
+        started_at: Some(now),
+        finished_at: if result.requires_confirmation {
+            None
+        } else {
+            Some(now)
+        },
+        error: result.error.clone(),
+        timestamp: now,
+    };
+    let observation = openlife_core::agent::AgentObservation {
+        id: format!(
+            "observation-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ),
+        action_id: Some(action_id),
+        content: result
+            .output
+            .clone()
+            .or_else(|| result.error.clone())
+            .unwrap_or_else(|| {
+                if result.requires_confirmation {
+                    "Tool call requires permission confirmation".to_string()
+                } else {
+                    "Tool call produced no output".to_string()
+                }
+            }),
+        source: format!("tool:{}", result.name),
+        structured_result: Some(serde_json::json!({
+            "success": result.success,
+            "status": result.status,
+            "requires_confirmation": result.requires_confirmation,
+            "permission_decision": result.permission_decision,
+        })),
+        timestamp: now,
+    };
+    (action, observation)
 }
 fn try_prepare_tool_calls(
     reply: &str,
     registry: &McpRegistry,
     audit: &McpAuditStore,
-) -> Option<Vec<ToolCallResult>> {
+    permission_store: &openlife_core::tool_permissions::ToolPermissionStore,
+) -> Option<(
+    Vec<ToolCallResult>,
+    Vec<openlife_core::agent::AgentAction>,
+    Vec<openlife_core::agent::AgentObservation>,
+)> {
     let json_str = try_extract_json(reply)?;
     let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let calls = v.get("tool_calls")?.as_array()?;
     let mut results = Vec::new();
+    let mut actions = Vec::new();
+    let mut observations = Vec::new();
     for call in calls {
         let name = call.get("name")?.as_str()?;
         let args = call
@@ -530,39 +667,147 @@ fn try_prepare_tool_calls(
             .cloned()
             .unwrap_or(serde_json::json!({}));
         let inspection = registry.inspect_call_arguments(name, &args);
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|manifest| manifest.name == name || manifest.id == name);
         let privacy_warnings = inspection
             .findings
             .iter()
             .map(|f| format!("{} 命中 {}: {}", f.path, f.privacy_type, f.matched))
             .collect::<Vec<_>>();
-        if inspection.requires_confirmation {
-            results.push(ToolCallResult {
+        let Some(manifest) = manifest else {
+            let mut result = ToolCallResult {
                 name: name.to_string(),
                 arguments: args,
                 sanitized_arguments: Some(inspection.sanitized_arguments),
                 success: false,
                 output: None,
-                error: None,
+                error: Some("tool is not registered or disabled".into()),
                 permission_level: inspection.permission_level,
-                status: "pending".into(),
-                requires_confirmation: true,
+                status: "error".into(),
+                requires_confirmation: false,
                 pii_found: inspection.pii_found,
                 privacy_warnings,
+                action_id: None,
+                permission_decision: Some("deny".into()),
+            };
+            let (action, observation) = action_observation_from_tool_result(
+                &result,
+                serde_json::json!({ "arguments": result.arguments }),
+            );
+            result.action_id = Some(action.id.clone());
+            actions.push(action);
+            observations.push(observation);
+            results.push(result);
+            continue;
+        };
+        if !manifest.enabled {
+            let mut result = ToolCallResult {
+                name: name.to_string(),
+                arguments: args,
+                sanitized_arguments: Some(inspection.sanitized_arguments),
+                success: false,
+                output: None,
+                error: Some("tool is disabled".into()),
+                permission_level: manifest.risk_level.clone(),
+                status: "error".into(),
+                requires_confirmation: false,
+                pii_found: inspection.pii_found,
+                privacy_warnings,
+                action_id: None,
+                permission_decision: Some("deny".into()),
+            };
+            let (action, observation) = action_observation_from_tool_result(
+                &result,
+                serde_json::json!({ "arguments": result.arguments }),
+            );
+            result.action_id = Some(action.id.clone());
+            actions.push(action);
+            observations.push(observation);
+            results.push(result);
+            continue;
+        }
+        let source = match &manifest.source {
+            openlife_core::tool_manifest::ToolSource::BuiltIn => "builtin".to_string(),
+            openlife_core::tool_manifest::ToolSource::Mcp { .. } => "mcp".to_string(),
+            openlife_core::tool_manifest::ToolSource::A2A { .. } => "a2a".to_string(),
+            openlife_core::tool_manifest::ToolSource::Plugin { plugin_id } => {
+                format!("plugin:{}", plugin_id)
+            }
+        };
+        let decision = permission_store
+            .check(
+                &manifest.name,
+                &source,
+                &manifest.risk_level,
+                "mcp_tool_call",
+                &manifest.capabilities,
+            )
+            .unwrap_or(openlife_core::tool_permissions::ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: true,
+                decision: "ask_every_time".into(),
+                reason: "permission check failed".into(),
+                policy_id: None,
             });
+        if inspection.requires_confirmation || decision.requires_confirmation || !decision.allowed {
+            let status = if decision.requires_confirmation || inspection.requires_confirmation {
+                "pending"
+            } else {
+                "error"
+            };
+            let mut result = ToolCallResult {
+                name: name.to_string(),
+                arguments: args,
+                sanitized_arguments: Some(inspection.sanitized_arguments),
+                success: false,
+                output: None,
+                error: if decision.requires_confirmation || inspection.requires_confirmation {
+                    None
+                } else {
+                    Some(decision.reason.clone())
+                },
+                permission_level: manifest.risk_level.clone(),
+                status: status.into(),
+                requires_confirmation: decision.requires_confirmation
+                    || inspection.requires_confirmation,
+                pii_found: inspection.pii_found,
+                privacy_warnings,
+                action_id: None,
+                permission_decision: Some(decision.decision.clone()),
+            };
+            let (action, observation) = action_observation_from_tool_result(
+                &result,
+                serde_json::json!({ "arguments": result.arguments }),
+            );
+            result.action_id = Some(action.id.clone());
+            actions.push(action);
+            observations.push(observation);
+            results.push(result);
         } else {
-            results.push(execute_tool_call_internal(
+            let mut result = execute_tool_call_internal(
                 name,
                 args,
-                inspection.permission_level,
+                manifest.risk_level.clone(),
                 registry,
                 audit,
-            ));
+                Some(decision.decision.clone()),
+            );
+            let (action, observation) = action_observation_from_tool_result(
+                &result,
+                serde_json::json!({ "arguments": result.arguments }),
+            );
+            result.action_id = Some(action.id.clone());
+            actions.push(action);
+            observations.push(observation);
+            results.push(result);
         }
     }
     if results.is_empty() {
         None
     } else {
-        Some(results)
+        Some((results, actions, observations))
     }
 }
 fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Option<String> {
@@ -946,22 +1191,29 @@ async fn preprocess_chat_input_v2(
                     embedding_model: cfg.llm.embedding_model.clone(),
                 };
                 drop(cfg);
-                
+
                 let service = openlife_core::agent::MemoryService::new();
                 let memory_store = state.memory_store.lock().await;
                 let vector_store = state.vector_store.lock().await;
-                
-                match service.retrieve_context(
-                    session_id,
-                    &user_msg.content,
-                    &memory_store,
-                    &vector_store,
-                    &embedding_config,
-                    memory_top_k,
-                ).await {
+
+                match service
+                    .retrieve_context(
+                        session_id,
+                        &user_msg.content,
+                        &memory_store,
+                        &vector_store,
+                        &embedding_config,
+                        memory_top_k,
+                    )
+                    .await
+                {
                     Ok(ctx) => {
-                        eprintln!("[MemoryService] Retrieved {} hits in {}ms (embedding: {})",
-                            ctx.hits.len(), ctx.retrieval_time_ms, ctx.used_embedding);
+                        eprintln!(
+                            "[MemoryService] Retrieved {} hits in {}ms (embedding: {})",
+                            ctx.hits.len(),
+                            ctx.retrieval_time_ms,
+                            ctx.used_embedding
+                        );
                         (Some(ctx.context), ctx.hits, ctx.retrieval_time_ms)
                     }
                     Err(e) => {
@@ -1320,23 +1572,26 @@ async fn send_message(
     // Create AgentRun for tracking
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
         &session_id,
-        &user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+        &user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
     );
 
     // AgentRuntime: unified execution entry
     let scheduler_clone = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
-    let agent_runtime = openlife_core::agent::AgentRuntime::new(
-        life_model.clone(),
-        scheduler_clone.clone(),
-        &cfg,
-    );
+    let agent_runtime =
+        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler_clone.clone(), &cfg);
     drop(cfg);
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
         session_id: session_id.clone(),
-        user_text: user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+        user_text: user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer,
     };
@@ -1346,18 +1601,26 @@ async fn send_message(
 
     // Layer 3: use LayeredReasoner for deep reasoning; on failure fallback to L2
     let _actual_layer = if layer == Layer::L3 {
-        let runtime_output = agent_runtime.execute_task(
-            &task,
-            &life_model,
-            &tools_prompt,
-            None, // memory_context handled in preprocess
-            vec![], // memory_hits handled in preprocess
-            privacy_engine.clone(),
-        ).await;
+        let runtime_output = agent_runtime
+            .execute_task(
+                &task,
+                &life_model,
+                &tools_prompt,
+                None,   // memory_context handled in preprocess
+                vec![], // memory_hits handled in preprocess
+                privacy_engine.clone(),
+            )
+            .await;
 
         match runtime_output {
             Ok(output) => {
-                if !output.reasoning_trace.output.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                if !output
+                    .reasoning_trace
+                    .output
+                    .as_ref()
+                    .map(|s| s.is_empty())
+                    .unwrap_or(true)
+                {
                     // Use reasoning trace output directly if available
                     messages_with_reasoning = output.final_messages;
                 } else {
@@ -1392,10 +1655,13 @@ async fn send_message(
 
     let tool_results = {
         let (reg, audit) = state.get_mcp_state().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit)
+        let permission_store = state.tool_permission_store.lock().await;
+        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store)
     };
 
-    let (reply, tool_calls) = if let Some(results) = tool_results {
+    let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
+        agent_run.actions.extend(actions);
+        agent_run.observations.extend(observations);
         let executed_results: Vec<_> = results
             .iter()
             .filter(|r| !r.requires_confirmation)
@@ -1491,25 +1757,7 @@ async fn send_message(
         persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
     }
 
-    // Generate proposals from chat run
-    if let Some(ref proposal_store_arc) = state.proposal_store {
-        let engine = state.proposal_engine.lock().await;
-        match engine.generate_from_run(&agent_run, &reply, &life_model) {
-            Ok(proposals) => {
-                if !proposals.is_empty() {
-                    let store = proposal_store_arc.lock().await;
-                    for proposal in proposals {
-                        if let Err(e) = store.create_proposal(&proposal) {
-                            eprintln!("[ChatProposal] Failed to save proposal: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
-            }
-        }
-    }
+    generate_and_persist_chat_proposals(&state, &agent_run, &reply, &life_model).await;
 
     Ok(SendMessageResult {
         reply,
@@ -1779,17 +2027,17 @@ async fn start_stream_message(
         .preview_chat_route(Some(&tools_prompt))
         .await;
     let cfg = state.config.lock().await;
-    let agent_runtime = openlife_core::agent::AgentRuntime::new(
-        life_model.clone(),
-        scheduler_clone.clone(),
-        &cfg,
-    );
+    let agent_runtime =
+        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler_clone.clone(), &cfg);
     drop(cfg);
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
         session_id: session_id.clone(),
-        user_text: user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+        user_text: user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer,
     };
@@ -1798,14 +2046,16 @@ async fn start_stream_message(
     let mut messages_with_reasoning = desensitized_messages.clone();
 
     let _actual_layer = if layer == Layer::L3 {
-        let runtime_output = agent_runtime.execute_task(
-            &task,
-            &life_model,
-            &tools_prompt,
-            None,
-            vec![],
-            privacy_engine.clone(),
-        ).await;
+        let runtime_output = agent_runtime
+            .execute_task(
+                &task,
+                &life_model,
+                &tools_prompt,
+                None,
+                vec![],
+                privacy_engine.clone(),
+            )
+            .await;
 
         match runtime_output {
             Ok(output) => {
@@ -1926,8 +2176,8 @@ async fn start_stream_message(
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
                                     if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+                                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                                    }
                                 }
                                 return Err(message);
                             }
@@ -2003,8 +2253,8 @@ async fn start_stream_message(
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
                                     if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+                                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                                    }
                                 }
                                 return Err(message);
                             }
@@ -2051,8 +2301,8 @@ async fn start_stream_message(
                         if let Some(ref store_arc) = state.agent_run_store {
                             let store = store_arc.lock().await;
                             if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+                                eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                            }
                         }
                         return Err(message);
                     }
@@ -2098,8 +2348,8 @@ async fn start_stream_message(
                     if let Some(ref store_arc) = state.agent_run_store {
                         let store = store_arc.lock().await;
                         if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+                            eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                        }
                     }
                     return Err(message);
                 }
@@ -2116,9 +2366,12 @@ async fn start_stream_message(
 
     let tool_results = {
         let (reg, audit) = state.get_mcp_state().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit)
+        let permission_store = state.tool_permission_store.lock().await;
+        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store)
     };
-    let (reply, tool_calls) = if let Some(results) = tool_results {
+    let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
+        agent_run.actions.extend(actions);
+        agent_run.observations.extend(observations);
         let executed_results: Vec<_> = results
             .iter()
             .filter(|r| !r.requires_confirmation)
@@ -2184,8 +2437,8 @@ async fn start_stream_message(
                     if let Some(ref store_arc) = state.agent_run_store {
                         let store = store_arc.lock().await;
                         if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+                            eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                        }
                     }
                     return Err(e.to_string());
                 }
@@ -2237,25 +2490,7 @@ async fn start_stream_message(
         }
     }
 
-    // Generate proposals from chat run using ProposalEngine
-    if let Some(ref proposal_store_arc) = state.proposal_store {
-        let engine = state.proposal_engine.lock().await;
-        match engine.generate_from_run(&agent_run, &reply, &life_model) {
-            Ok(proposals) => {
-                if !proposals.is_empty() {
-                    let store = proposal_store_arc.lock().await;
-                    for proposal in proposals {
-                        if let Err(e) = store.create_proposal(&proposal) {
-                            eprintln!("[ChatProposal] Failed to save proposal: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
-            }
-        }
-    }
+    generate_and_persist_chat_proposals(&state, &agent_run, &reply, &life_model).await;
 
     let _ = app_handle.emit(
         "stream-message-done",
@@ -2278,12 +2513,38 @@ async fn execute_tool_call(
 ) -> Result<ToolCallResult, String> {
     let (reg, audit) = state.get_mcp_state().await;
     let permission_level = reg.tool_permission_level(&name);
+    let permission_store = state.tool_permission_store.lock().await;
+    let decision = permission_store
+        .check(&name, "mcp", &permission_level, "mcp_tool_call", &[])
+        .map_err(|e| e.to_string())?;
+    if !decision.allowed {
+        return Ok(ToolCallResult {
+            name,
+            arguments,
+            sanitized_arguments: None,
+            success: false,
+            output: None,
+            error: Some(decision.reason),
+            permission_level,
+            status: if decision.requires_confirmation {
+                "pending".into()
+            } else {
+                "error".into()
+            },
+            requires_confirmation: decision.requires_confirmation,
+            pii_found: false,
+            privacy_warnings: Vec::new(),
+            action_id: None,
+            permission_decision: Some(decision.decision),
+        });
+    }
     Ok(execute_tool_call_internal(
         &name,
         arguments,
         permission_level,
         &reg,
         &audit,
+        Some(decision.decision),
     ))
 }
 #[tauri::command]
@@ -2387,6 +2648,18 @@ pub fn run() {
     };
 
     let mcp_registry = McpRegistry::new();
+    let tool_permission_store = openlife_core::tool_permissions::ToolPermissionStore::new(
+        data_dir.join("tool_permissions.db"),
+    )
+    .unwrap_or_else(|e| {
+        startup_warnings.push(format!("tool_permissions.db 初始化失败: {}", e));
+        openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
+            .expect("致命错误：无法初始化 tool permission store，系统资源耗尽")
+    });
+    let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
+    if let Err(e) = plugin_registry.reload() {
+        startup_warnings.push(format!("plugins manifest reload failed: {}", e));
+    }
 
     let app_state = Arc::new(AppState {
         config: Arc::new(Mutex::new(config)),
@@ -2420,10 +2693,15 @@ pub fn run() {
                 }
             }
         },
+        tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
+        skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
+        plugin_registry: Arc::new(Mutex::new(plugin_registry)),
         hot_cache,
         proposal_engine: Arc::new(tokio::sync::Mutex::new({
             let mut engine = openlife_core::agent::ProposalEngine::new();
-            engine.register(Box::new(openlife_core::agent::ChatProposalGeneratorAdapter::new()));
+            engine.register(Box::new(
+                openlife_core::agent::ChatProposalGeneratorAdapter::new(),
+            ));
             engine.register(Box::new(openlife_core::agent::FeedbackProposalGenerator));
             engine.register(Box::new(openlife_core::agent::MemoryProposalGenerator));
             engine
@@ -2624,6 +2902,17 @@ pub fn run() {
             get_rollout_metrics,
             get_rollout_summary,
             get_rollout_errors,
+            list_tool_permissions,
+            grant_tool_permission,
+            revoke_tool_permission,
+            check_tool_permission,
+            list_skills,
+            run_skill,
+            get_skill_run_status,
+            list_plugins,
+            reload_plugins,
+            enable_plugin,
+            disable_plugin,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|e| eprintln!("Tauri runtime exited with error: {}", e));

@@ -1,19 +1,34 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 
 /// Unified manifest for all tools available in OpenLife.
 /// Covers both built-in tools and external MCP tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolManifest {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub description: String,
     pub parameters: Value,        // JSON Schema object
     pub permission_level: String, // "low" | "medium" | "high"
+    #[serde(default)]
+    pub risk_level: String,
     pub version: String,
     pub source: ToolSource,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     /// Optional tags for recommendation engine matching.
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +38,10 @@ pub enum ToolSource {
     BuiltIn,
     /// Tool provided by an MCP server.
     Mcp { server_name: String },
+    /// Tool exposed by an A2A agent or bridge.
+    A2A { agent_name: String },
+    /// Tool declared by a local plugin manifest.
+    Plugin { plugin_id: String },
 }
 
 impl ToolManifest {
@@ -34,15 +53,87 @@ impl ToolManifest {
         version: impl Into<String>,
         source: ToolSource,
     ) -> Self {
+        let name = name.into();
+        let permission_level = permission_level.into();
         Self {
-            name: name.into(),
+            id: name.clone(),
+            name,
             description: description.into(),
             parameters,
-            permission_level: permission_level.into(),
+            risk_level: permission_level.clone(),
+            permission_level,
             version: version.into(),
             source,
+            capabilities: Vec::new(),
+            requires_confirmation: false,
+            enabled: true,
             tags: Vec::new(),
         }
+    }
+
+    pub fn normalized(mut self) -> Self {
+        if self.id.is_empty() {
+            self.id = self.name.clone();
+        }
+        if self.risk_level.is_empty() {
+            self.risk_level = self.permission_level.clone();
+        }
+        if self.permission_level.is_empty() {
+            self.permission_level = self.risk_level.clone();
+        }
+        if self.capabilities.is_empty() {
+            self.capabilities = Self::infer_capabilities(&self.name);
+        }
+        self.requires_confirmation = self.requires_confirmation
+            || self.risk_level == "high"
+            || self.capabilities.iter().any(|c| {
+                matches!(
+                    c.as_str(),
+                    "write" | "filesystem" | "memory" | "lifemodel" | "external_side_effect"
+                )
+            });
+        self
+    }
+
+    pub fn infer_capabilities(name: &str) -> Vec<String> {
+        let lower = name.to_lowercase();
+        let mut caps = BTreeSet::new();
+        if lower.contains("write")
+            || lower.contains("create")
+            || lower.contains("delete")
+            || lower.contains("remove")
+            || lower.contains("update")
+        {
+            caps.insert("write".to_string());
+        } else {
+            caps.insert("read".to_string());
+        }
+        if lower.contains("search")
+            || lower.contains("fetch")
+            || lower.contains("request")
+            || lower.contains("web")
+            || lower.contains("http")
+        {
+            caps.insert("network".to_string());
+        }
+        if lower.contains("file") || lower.contains("path") || lower.contains("shell") {
+            caps.insert("filesystem".to_string());
+        }
+        if lower.contains("memory") {
+            caps.insert("memory".to_string());
+        }
+        if lower.contains("life") || lower.contains("goal") {
+            caps.insert("lifemodel".to_string());
+        }
+        if lower.contains("send") || lower.contains("post") || lower.contains("github") {
+            caps.insert("external_side_effect".to_string());
+        }
+        caps.into_iter().collect()
+    }
+
+    pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
+        self.capabilities = capabilities;
+        self.normalized()
     }
 
     /// Infer permission level from tool name when not explicitly provided.
