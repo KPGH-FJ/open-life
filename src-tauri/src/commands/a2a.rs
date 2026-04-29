@@ -58,7 +58,7 @@ pub async fn a2a_handle_task(
 #[tauri::command]
 pub async fn a2a_bridge_local(
     session_id: Option<String>,
-    method: String,
+    _method: String,
     text: String,
     skill: Option<String>,
     state: State<'_, Arc<AppState>>,

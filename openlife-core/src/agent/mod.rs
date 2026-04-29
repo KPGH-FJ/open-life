@@ -14,7 +14,7 @@ pub use context_assembler::{AssembleInput, AssembleOutput, CompositeAssembler, C
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability, ProviderHealth, TaskType};
-pub use proposal_engine::{BuilderProposalGenerator, CalibrationProposalGenerator, FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator};
+pub use proposal_engine::{BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter, FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator};
 pub use proposal_generators::ChatProposalGenerator;
 pub use proposal_store::ProposalStore;
 pub use reasoning::{

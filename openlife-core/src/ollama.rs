@@ -17,7 +17,7 @@ pub struct OllamaChatResponse {
     pub done: bool,
 }
 
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
 
 struct OllamaCache {
@@ -27,7 +27,16 @@ struct OllamaCache {
 }
 
 static OLLAMA_CACHE: Mutex<Option<OllamaCache>> = Mutex::new(None);
-const OLLAMA_CACHE_TTL: Duration = Duration::from_secs(10);
+static OLLAMA_CACHE_TTL_SECONDS: AtomicU64 = AtomicU64::new(10);
+
+/// Set the Ollama cache TTL in seconds.
+pub fn set_ollama_cache_ttl_seconds(seconds: u64) {
+    OLLAMA_CACHE_TTL_SECONDS.store(seconds, Ordering::Relaxed);
+}
+
+fn get_ollama_cache_ttl() -> Duration {
+    Duration::from_secs(OLLAMA_CACHE_TTL_SECONDS.load(Ordering::Relaxed))
+}
 
 /// Check if Ollama is reachable and the requested model is available.
 pub async fn is_ollama_available(model: &str) -> bool {
@@ -70,7 +79,7 @@ pub async fn resolve_ollama_model(model: &str) -> Option<String> {
     {
         let guard = OLLAMA_CACHE.lock().unwrap();
         if let Some(ref c) = *guard {
-            if c.model == model && c.checked_at.elapsed() < OLLAMA_CACHE_TTL {
+            if c.model == model && c.checked_at.elapsed() < get_ollama_cache_ttl() {
                 return c.resolved_model.clone();
             }
         }

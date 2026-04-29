@@ -24,7 +24,7 @@ pub struct ReasoningOutput {
 }
 
 /// Trace of a reasoning process (replaces HermesTrace).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReasoningTrace {
     pub input: Option<String>,
     pub meaning_result: Option<serde_json::Value>,

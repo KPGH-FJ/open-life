@@ -120,6 +120,31 @@ fn default_generation_timeout_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemConfig {
+    #[serde(default = "default_ollama_cache_ttl_seconds")]
+    pub ollama_cache_ttl_seconds: u64,
+    #[serde(default = "default_memory_search_top_k")]
+    pub memory_search_top_k: usize,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
+            memory_search_top_k: default_memory_search_top_k(),
+        }
+    }
+}
+
+fn default_ollama_cache_ttl_seconds() -> u64 {
+    10
+}
+
+fn default_memory_search_top_k() -> usize {
+    3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmConfig,
@@ -135,6 +160,8 @@ pub struct AppConfig {
     pub experimental_model_router: bool,
     #[serde(default)]
     pub reasoning: ReasoningConfig,
+    #[serde(default)]
+    pub system: SystemConfig,
 }
 
 impl Default for AppConfig {
@@ -147,6 +174,7 @@ impl Default for AppConfig {
             experimental_context_assembler: false,
             experimental_model_router: false,
             reasoning: ReasoningConfig::default(),
+            system: SystemConfig::default(),
         }
     }
 }
@@ -291,6 +319,7 @@ mod tests {
             experimental_context_assembler: false,
             experimental_model_router: false,
             reasoning: ReasoningConfig::default(),
+            system: SystemConfig::default(),
         };
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();

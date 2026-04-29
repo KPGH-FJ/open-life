@@ -1,8 +1,8 @@
 import { Lightbulb, Clock, AlertCircle, Terminal, Compass, Target } from "lucide-react";
-import type { HermesTrace } from "../tauri";
+import type { ReasoningTrace } from "../tauri";
 
 interface Props {
-  trace: HermesTrace;
+  trace: ReasoningTrace;
   show: boolean;
   onToggle: () => void;
 }
@@ -49,31 +49,31 @@ function LayerBlock({
   );
 }
 
-export default function HermesTracePanel({ trace, show, onToggle }: Props) {
+export default function ReasoningTracePanel({ trace, show, onToggle }: Props) {
   const meaningText =
     trace.meaning_result?.text ??
     (typeof trace.meaning_result === "string" ? trace.meaning_result : "");
   const strategyText =
     trace.strategy_result?.text ??
     (typeof trace.strategy_result === "string" ? trace.strategy_result : "");
-  const executionText =
-    trace.execution_result?.text ??
-    (typeof trace.execution_result === "string" ? trace.execution_result : "");
+  const generationText =
+    trace.generation_result?.text ??
+    (typeof trace.generation_result === "string" ? trace.generation_result : "");
   const alignedValues = trace.meaning_result?.aligned_values ?? [];
   const alignedGoals = trace.strategy_result?.aligned_goals ?? [];
   const planSteps = trace.strategy_result?.plan_steps ?? [];
   const stableSteps = trace.stable_steps ?? [];
   const needsTools = trace.strategy_result?.needs_tools;
   const toolPlan = trace.tool_plan ?? trace.strategy_result?.suggested_tools ?? [];
-  const arbitrationWarnings = trace.arbitration_result?.warnings ?? [];
+  const safetyCheckWarnings = trace.safety_check_result?.warnings ?? [];
   const hasContent =
     trace.input ||
     meaningText ||
     strategyText ||
-    executionText ||
+    generationText ||
     trace.output ||
     toolPlan.length > 0 ||
-    arbitrationWarnings.length > 0 ||
+    safetyCheckWarnings.length > 0 ||
     (trace.errors && trace.errors.length > 0);
 
   const totalMs = trace.layer_timings_ms
@@ -117,9 +117,9 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
             {item}
           </span>
         ))}
-        {arbitrationWarnings.length > 0 && (
+        {safetyCheckWarnings.length > 0 && (
           <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[10px] font-medium text-amber-700 border border-amber-100">
-            有 {arbitrationWarnings.length} 条不确定性提醒
+            有 {safetyCheckWarnings.length} 条不确定性提醒
           </span>
         )}
         {trace.errors && trace.errors.length > 0 && (
@@ -242,7 +242,7 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                 icon={Terminal}
                 label="组织回答"
                 color="border-emerald-200"
-                text={executionText}
+                text={generationText}
                 timingKey="Execution"
                 timings={trace.layer_timings_ms}
               />
@@ -257,14 +257,14 @@ export default function HermesTracePanel({ trace, show, onToggle }: Props) {
                   </div>
                 </div>
               )}
-              {Array.isArray(arbitrationWarnings) && arbitrationWarnings.length > 0 && (
+              {Array.isArray(safetyCheckWarnings) && safetyCheckWarnings.length > 0 && (
                 <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3">
                   <div className="flex items-center gap-2 font-semibold text-amber-700">
                     <AlertCircle size={14} />
                     仲裁提醒
                   </div>
                   <ul className="mt-2 list-disc pl-4 text-amber-700">
-                    {arbitrationWarnings.map((warning: string, i: number) => (
+                    {safetyCheckWarnings.map((warning: string, i: number) => (
                       <li key={i}>{warning}</li>
                     ))}
                   </ul>

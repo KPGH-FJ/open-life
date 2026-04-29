@@ -369,7 +369,7 @@ mod tests {
     use super::*;
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
-        agent::{AgentProposal, ProposalSource, ProposalStore, ProposalType, RiskLevel},
+        agent::{AgentProposal, ProposalEngine, ProposalSource, ProposalStore, ProposalType, RiskLevel},
         builder::BuilderSessionStore,
         config::AppConfig,
         feedback::FeedbackStore,
@@ -388,7 +388,7 @@ mod tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = AppConfig::default();
-        let hot_cache: SharedHotCache = Arc::new(std::sync::Mutex::new(HotMemoryCache::default()));
+        let hot_cache: SharedHotCache = Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
         Arc::new(AppState {
             config: Arc::new(Mutex::new(config.clone())),
             life_model_manager: Arc::new(Mutex::new(LifeModelManager::new(
@@ -432,6 +432,9 @@ mod tests {
             ))),
             rollout_metrics_store: None,
             hot_cache,
+            proposal_engine: Arc::new(tokio::sync::Mutex::new(
+                ProposalEngine::new(),
+            )),
             startup_warnings: vec![],
         })
     }

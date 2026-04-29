@@ -1,6 +1,7 @@
 use crate::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Hot Memory Cache: a lightweight, always-in-memory summary of the user's
 /// core identity, top values, current goals and recent state.
@@ -150,7 +151,7 @@ impl HotMemoryCache {
 }
 
 /// Thread-safe shared hot cache handle.
-pub type SharedHotCache = Arc<Mutex<HotMemoryCache>>;
+pub type SharedHotCache = Arc<RwLock<HotMemoryCache>>;
 
 #[cfg(test)]
 mod tests {

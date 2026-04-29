@@ -566,19 +566,106 @@ pub struct ExportedVectorChunk {
     pub summary: Option<String>,
 }
 
+/// Cosine similarity with manual 4-wide vectorization.
+/// Processes 4 f32 values per iteration for better cache and instruction throughput.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let len = a.len().min(b.len());
     let mut dot = 0.0f32;
     let mut norm_a = 0.0f32;
     let mut norm_b = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
+
+    // Process 4 elements at a time
+    let chunks = len / 4;
+    for i in 0..chunks {
+        let idx = i * 4;
+        let ax = [a[idx], a[idx + 1], a[idx + 2], a[idx + 3]];
+        let bx = [b[idx], b[idx + 1], b[idx + 2], b[idx + 3]];
+        dot += ax[0] * bx[0] + ax[1] * bx[1] + ax[2] * bx[2] + ax[3] * bx[3];
+        norm_a += ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2] + ax[3] * ax[3];
+        norm_b += bx[0] * bx[0] + bx[1] * bx[1] + bx[2] * bx[2] + bx[3] * bx[3];
+    }
+
+    // Process remaining elements
+    for i in chunks * 4..len {
+        let x = a[i];
+        let y = b[i];
         dot += x * y;
         norm_a += x * x;
         norm_b += y * y;
     }
+
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
     dot / (norm_a.sqrt() * norm_b.sqrt())
+}
+
+/// LRU cache for text embeddings to avoid recomputing the same embeddings.
+struct EmbeddingCacheEntry {
+    embedding: Vec<f32>,
+    cached_at: std::time::Instant,
+}
+
+struct EmbeddingCache {
+    entries: std::collections::HashMap<String, EmbeddingCacheEntry>,
+    max_size: usize,
+    ttl: std::time::Duration,
+    access_order: Vec<String>,
+}
+
+impl EmbeddingCache {
+    fn new(max_size: usize, ttl_seconds: u64) -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            max_size,
+            ttl: std::time::Duration::from_secs(ttl_seconds),
+            access_order: Vec::new(),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<Vec<f32>> {
+        if let Some(entry) = self.entries.get(key) {
+            if entry.cached_at.elapsed() < self.ttl {
+                self.access_order.retain(|k| k != key);
+                self.access_order.push(key.to_string());
+                return Some(entry.embedding.clone());
+            }
+            self.entries.remove(key);
+            self.access_order.retain(|k| k != key);
+        }
+        None
+    }
+
+    fn put(&mut self, key: String, embedding: Vec<f32>) {
+        self.access_order.retain(|k| k != &key);
+        while self.entries.len() >= self.max_size && !self.access_order.is_empty() {
+            if let Some(oldest) = self.access_order.first().cloned() {
+                self.entries.remove(&oldest);
+                self.access_order.remove(0);
+            }
+        }
+        self.entries.insert(key.clone(), EmbeddingCacheEntry {
+            embedding,
+            cached_at: std::time::Instant::now(),
+        });
+        self.access_order.push(key);
+    }
+}
+
+static EMBEDDING_CACHE: std::sync::OnceLock<std::sync::Mutex<EmbeddingCache>> = std::sync::OnceLock::new();
+
+fn get_embedding_cache() -> &'static std::sync::Mutex<EmbeddingCache> {
+    EMBEDDING_CACHE.get_or_init(|| {
+        std::sync::Mutex::new(EmbeddingCache::new(1000, 3600))
+    })
+}
+
+/// Clear the embedding cache.
+pub fn clear_embedding_cache() {
+    if let Ok(mut guard) = get_embedding_cache().lock() {
+        guard.entries.clear();
+        guard.access_order.clear();
+    }
 }
 
 /// Embedding with automatic fallback:
@@ -610,6 +697,15 @@ pub async fn embed_text_with_config(
     embedding_model: &str,
     embedding_enabled: bool,
 ) -> Result<Vec<f32>> {
+    // Check cache first
+    {
+        if let Ok(mut cache) = get_embedding_cache().lock() {
+            if let Some(cached) = cache.get(text) {
+                return Ok(cached);
+            }
+        }
+    }
+
     let api_key = crate::llm::effective_api_key(provider, openai_key);
     if embedding_enabled && !api_key.is_empty() {
         let client = reqwest::Client::new();
@@ -647,6 +743,9 @@ pub async fn embed_text_with_config(
                             .filter_map(|v| v.as_f64().map(|f| f as f32))
                             .collect::<Vec<f32>>();
                         if !embedding.is_empty() {
+                            if let Ok(mut cache) = get_embedding_cache().lock() {
+                                cache.put(text.to_string(), embedding.clone());
+                            }
                             return Ok(embedding);
                         }
                     }
@@ -659,13 +758,20 @@ pub async fn embed_text_with_config(
     if crate::ollama::is_ollama_available("nomic-embed-text").await {
         if let Ok(emb) = crate::ollama::ollama_embed(text, "nomic-embed-text").await {
             if !emb.is_empty() {
+                if let Ok(mut cache) = get_embedding_cache().lock() {
+                    cache.put(text.to_string(), emb.clone());
+                }
                 return Ok(emb);
             }
         }
     }
 
     // Fallback 2: deterministic hash-based embedding
-    Ok(crate::ollama::fallback_embed(text))
+    let embedding = crate::ollama::fallback_embed(text);
+    if let Ok(mut cache) = get_embedding_cache().lock() {
+        cache.put(text.to_string(), embedding.clone());
+    }
+    Ok(embedding)
 }
 
 #[cfg(test)]
@@ -937,5 +1043,47 @@ mod tests {
         let a = vec![0.0f32, 0.0, 0.0];
         let b = vec![1.0f32, 0.0, 0.0];
         assert_eq!(super::cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn embedding_cache_hit_and_miss() {
+        super::clear_embedding_cache();
+        let mut cache = super::get_embedding_cache().lock().unwrap();
+        
+        // Cache miss
+        assert!(cache.get("hello").is_none());
+        
+        // Insert
+        cache.put("hello".to_string(), vec![1.0, 2.0, 3.0]);
+        
+        // Cache hit
+        let result = cache.get("hello").unwrap();
+        assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn embedding_cache_lru_eviction() {
+        let mut cache = super::EmbeddingCache::new(2, 3600);
+        
+        cache.put("a".to_string(), vec![1.0]);
+        cache.put("b".to_string(), vec![2.0]);
+        cache.put("c".to_string(), vec![3.0]);
+        
+        // "a" should be evicted (oldest)
+        assert!(cache.get("a").is_none());
+        // "b" and "c" should exist
+        assert!(cache.get("b").is_some());
+        assert!(cache.get("c").is_some());
+    }
+
+    #[test]
+    fn embedding_cache_ttl_expiration() {
+        let mut cache = super::EmbeddingCache::new(10, 0); // 0 second TTL
+        
+        cache.put("test".to_string(), vec![1.0]);
+        
+        // Should be expired immediately
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        assert!(cache.get("test").is_none());
     }
 }

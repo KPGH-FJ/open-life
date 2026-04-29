@@ -732,7 +732,7 @@ mod tests {
         let config = AppConfig::default();
         let life_model_manager =
             LifeModelManager::new(temp_dir.path().join("life-model").join("current"));
-        let hot_cache: SharedHotCache = Arc::new(std::sync::Mutex::new(HotMemoryCache::default()));
+        let hot_cache: SharedHotCache = Arc::new(tokio::sync::RwLock::new(HotMemoryCache::default()));
 
         Arc::new(AppState {
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
@@ -785,6 +785,9 @@ mod tests {
             ))),
             rollout_metrics_store: None,
             hot_cache,
+            proposal_engine: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::ProposalEngine::new(),
+            )),
             startup_warnings: vec![],
         })
     }

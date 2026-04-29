@@ -1,8 +1,8 @@
 use crate::agent::context_assembler::{AssembleInput, CompositeAssembler, ContextAssembler};
-use crate::agent::reasoning::{
-    DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
-    ReasoningStrategy, ReasoningTrace,
-};
+    use crate::agent::reasoning::{
+        DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
+        ReasoningStrategy, ReasoningTrace,
+    };
 use crate::agent::types::AgentTask;
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -229,3 +229,148 @@ impl std::fmt::Display for AgentRuntimeError {
 }
 
 impl std::error::Error for AgentRuntimeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::{AgentTask, AgentTaskKind};
+    use crate::layer_router::Layer;
+    use crate::life_model::LifeModel;
+    use crate::llm::ChatMessage;
+    use crate::privacy::PrivacyEngine;
+    use crate::scheduler::InferenceScheduler;
+
+    fn create_test_life_model() -> LifeModel {
+        LifeModel::default()
+    }
+
+    fn create_test_task() -> AgentTask {
+        AgentTask {
+            kind: AgentTaskKind::Conversation,
+            user_text: "Hello".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            }],
+            session_id: "test-session".to_string(),
+            layer: Layer::L3,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_task_success() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let config = AgentRuntimeConfig::default();
+        let runtime = AgentRuntime::with_config(life_model, scheduler, config);
+        let task = create_test_task();
+
+        let result = runtime.execute_task(
+            &task,
+            &create_test_life_model(),
+            "",
+            None,
+            vec![],
+            PrivacyEngine::new(),
+        ).await;
+
+        // L3 task uses layered strategy, which will fail because no API key
+        // But context assembly should succeed
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AgentRuntimeError::Reasoning(_) => {},
+            other => panic!("Expected Reasoning error, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_direct_success() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let config = AgentRuntimeConfig::default();
+        let runtime = AgentRuntime::with_config(life_model, scheduler, config);
+        let task = create_test_task();
+
+        let result = runtime.generate_direct(
+            &task,
+            &create_test_life_model(),
+            "",
+            None,
+            vec![],
+            PrivacyEngine::new(),
+        ).await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(!output.final_messages.is_empty());
+        assert_eq!(output.reasoning_trace, ReasoningTrace::default());
+        assert!(output.suggested_tools.is_empty());
+        assert!(output.plan_steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_layer_selection_l1_uses_direct() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let config = AgentRuntimeConfig::default();
+        let runtime = AgentRuntime::with_config(life_model, scheduler, config);
+        
+        let mut task = create_test_task();
+        task.layer = Layer::L1;
+
+        let result = runtime.execute_task(
+            &task,
+            &create_test_life_model(),
+            "",
+            None,
+            vec![],
+            PrivacyEngine::new(),
+        ).await;
+
+        // L1 should use DirectReasoner which doesn't need API calls
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_error_display() {
+        let err = AgentRuntimeError::ContextAssembly("test error".to_string());
+        assert_eq!(format!("{}", err), "Context assembly failed: test error");
+
+        let err = AgentRuntimeError::StrategyNotFound("layered".to_string());
+        assert_eq!(format!("{}", err), "Strategy not found: layered");
+
+        let err = AgentRuntimeError::Reasoning(ReasoningError {
+            phase: "meaning".to_string(),
+            message: "timeout".to_string(),
+            recoverable: true,
+        });
+        assert!(format!("{}", err).contains("Reasoning failed"));
+    }
+}

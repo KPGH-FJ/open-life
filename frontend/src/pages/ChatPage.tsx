@@ -48,7 +48,7 @@ import {
 import type {
   AgentRun,
   ChatSession,
-  HermesTrace,
+  ReasoningTrace,
   StreamMessageDonePayload,
   StreamMessageStartPayload,
   SystemDiagnostics,
@@ -56,7 +56,7 @@ import type {
 } from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
-import HermesTracePanel from "../components/HermesTracePanel";
+import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 
@@ -232,7 +232,7 @@ export default function ChatPage() {
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
-  const [hermesTrace, setHermesTrace] = useState<HermesTrace | null>(null);
+  const [reasoningTrace, setReasoningTrace] = useState<ReasoningTrace | null>(null);
   const [showHermes, setShowHermes] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
   const [showToolCalls, setShowToolCalls] = useState(false);
@@ -428,7 +428,7 @@ export default function ChatPage() {
         "stream-message-start",
         async event => {
           if (event.payload.session_id === currentSessionId) {
-            setHermesTrace(event.payload.hermes_trace ?? null);
+            setReasoningTrace(event.payload.reasoning_trace ?? null);
             setToolCalls(event.payload.tool_calls ?? []);
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           }
@@ -449,7 +449,7 @@ export default function ChatPage() {
           setMessages(prev => [...prev, { role: "assistant", content: event.payload.reply }]);
           setStreamingReply("");
           setSending(false);
-          setHermesTrace(event.payload.hermes_trace ?? null);
+          setReasoningTrace(event.payload.reasoning_trace ?? null);
           setToolCalls(event.payload.tool_calls ?? []);
           setStreamInterrupted(false);
           await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
@@ -700,7 +700,7 @@ export default function ChatPage() {
     setStreamInterrupted(false);
     setStreamingReply("");
     streamingBufferRef.current = "";
-    setHermesTrace(null);
+    setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
 
@@ -740,7 +740,7 @@ export default function ChatPage() {
     streamErrorHandledRef.current = false;
     setStreamingReply("");
     streamingBufferRef.current = "";
-    setHermesTrace(null);
+    setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
     try {
@@ -1187,10 +1187,10 @@ export default function ChatPage() {
               </div>
             </div>
           )}
-          {hermesTrace && (
+          {reasoningTrace && (
             <div className="flex justify-start">
-              <HermesTracePanel
-                trace={hermesTrace}
+              <ReasoningTracePanel
+                trace={reasoningTrace}
                 show={showHermes}
                 onToggle={() => setShowHermes(s => !s)}
               />

@@ -6,9 +6,8 @@ use openlife_core::memory::StateHistoryEntry;
 use std::sync::Arc;
 use tauri::State;
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn record_state(
+pub(crate) async fn record_state_with_state(
     dimension_name: String,
     value: f64,
     unit: String,
@@ -16,7 +15,7 @@ pub async fn record_state(
     min_threshold: Option<f32>,
     max_threshold: Option<f32>,
     alert_days: Option<u32>,
-    state: State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<i64, String> {
     let store = state.memory_store.lock().await;
     let id = store
@@ -51,8 +50,23 @@ pub async fn record_state(
         });
     }
     drop(manager);
-    let _ = persist_life_model(&state.inner().clone(), model, true).await?;
+    let _ = persist_life_model(&state.clone(), model, true).await?;
     Ok(id)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn record_state(
+    dimension_name: String,
+    value: f64,
+    unit: String,
+    note: Option<String>,
+    min_threshold: Option<f32>,
+    max_threshold: Option<f32>,
+    alert_days: Option<u32>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<i64, String> {
+    record_state_with_state(dimension_name, value, unit, note, min_threshold, max_threshold, alert_days, &state.inner().clone()).await
 }
 
 #[tauri::command]
@@ -127,11 +141,15 @@ pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<Sta
     Ok(alerts)
 }
 
-#[tauri::command]
-pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, String> {
+pub(crate) async fn get_daily_goals_with_state(state: &Arc<AppState>) -> Result<Vec<DailyGoal>, String> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(|e| e.to_string())?;
     Ok(model.goals.daily)
+}
+
+#[tauri::command]
+pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, String> {
+    get_daily_goals_with_state(&state.inner().clone()).await
 }
 
 #[tauri::command]
@@ -192,10 +210,9 @@ pub async fn delete_daily_goal(
     }
 }
 
-#[tauri::command]
-pub async fn toggle_daily_goal(
+pub(crate) async fn toggle_daily_goal_with_state(
     index: usize,
-    state: State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<bool, String> {
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(|e| e.to_string())?;
@@ -205,6 +222,138 @@ pub async fn toggle_daily_goal(
     model.goals.daily[index].done = !model.goals.daily[index].done;
     let completed = model.goals.daily[index].done;
     drop(manager);
-    let _ = persist_life_model(&state.inner().clone(), model, true).await?;
+    let _ = persist_life_model(&state.clone(), model, true).await?;
     Ok(completed)
+}
+
+#[tauri::command]
+pub async fn toggle_daily_goal(
+    index: usize,
+    state: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    toggle_daily_goal_with_state(index, &state.inner().clone()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
+        let config = openlife_core::config::AppConfig::default();
+        let hot_cache: openlife_core::memory_cache::SharedHotCache = 
+            Arc::new(tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()));
+        Arc::new(AppState {
+            config: Arc::new(tokio::sync::Mutex::new(config.clone())),
+            life_model_manager: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::life_model::LifeModelManager::new(
+                    temp_dir.path().join("life-model").join("current"),
+                ),
+            )),
+            memory_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
+            )),
+            mcp_registry: Arc::new(tokio::sync::Mutex::new(openlife_core::mcp::McpRegistry::new())),
+            intent_router: Arc::new(tokio::sync::Mutex::new(openlife_core::router::IntentRouter::new())),
+            layer_router: Arc::new(tokio::sync::Mutex::new(openlife_core::layer_router::LayerRouter::new())),
+            scheduler: Arc::new(tokio::sync::Mutex::new(openlife_core::scheduler::InferenceScheduler::new(
+                config.local_model.clone(),
+                config.prefer_local_model,
+                config.llm.provider.clone(),
+                config.llm.openai_base.clone(),
+                config.llm.openai_key.clone(),
+                config.llm.chat_model.clone(),
+                config.llm.embedding_model.clone(),
+                config.llm.embedding_enabled,
+            ))),
+            privacy_engine: Arc::new(tokio::sync::Mutex::new(openlife_core::privacy::PrivacyEngine::new())),
+            version_manager: Arc::new(tokio::sync::Mutex::new(openlife_core::versioning::VersionManager::new(
+                temp_dir.path().join("life-model").join("versions"),
+            ))),
+            feedback_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::feedback::FeedbackStore::new_in_memory().unwrap(),
+            )),
+            vector_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
+            )),
+            builder_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            builder_session_store: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::builder::BuilderSessionStore::new(
+                    temp_dir.path().join("builder_sessions.json"),
+                ),
+            )),
+            a2a_sidecar: Arc::new(tokio::sync::Mutex::new(crate::a2a_sidecar::A2ASidecar::new(8765))),
+            last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
+            mcp_audit_store: Arc::new(tokio::sync::Mutex::new(openlife_core::mcp_audit::McpAuditStore::new(
+                temp_dir.path().join("mcp_audit.db"),
+            ))),
+            agent_run_store: None,
+            proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
+            ))),
+            patch_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
+            ))),
+            rollout_metrics_store: None,
+            hot_cache,
+            proposal_engine: Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::ProposalEngine::new(),
+            )),
+            startup_warnings: vec![],
+        })
+    }
+
+    #[tokio::test]
+    async fn add_and_get_daily_goal() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        
+        // Add a daily goal directly via LifeModel
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap_or_default();
+            model.goals.daily.push(DailyGoal {
+                name: "Exercise".to_string(),
+                done: false,
+                time_block: None,
+            });
+            manager.save(&model).unwrap();
+        }
+        
+        // Get daily goals
+        let goals = get_daily_goals_with_state(&state).await.unwrap();
+        assert_eq!(goals.len(), 1);
+        assert_eq!(goals[0].name, "Exercise");
+        assert!(!goals[0].done);
+    }
+
+    #[tokio::test]
+    async fn toggle_daily_goal_changes_state() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        
+        // Add a goal directly
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap_or_default();
+            model.goals.daily.push(DailyGoal {
+                name: "Read".to_string(),
+                done: false,
+                time_block: None,
+            });
+            manager.save(&model).unwrap();
+        }
+        
+        // Toggle it
+        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
+        assert!(completed);
+        
+        // Verify
+        let goals = get_daily_goals_with_state(&state).await.unwrap();
+        assert!(goals[0].done);
+        
+        // Toggle back
+        let completed = toggle_daily_goal_with_state(0, &state).await.unwrap();
+        assert!(!completed);
+    }
 }

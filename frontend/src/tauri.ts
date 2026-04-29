@@ -117,15 +117,15 @@ export interface ToolCallResult {
   privacy_warnings?: string[];
 }
 
-export interface HermesTrace {
+export interface ReasoningTrace {
   input?: string;
   meaning_result?: any;
   strategy_result?: any;
-  execution_result?: any;
+  generation_result?: any;
   output?: string;
   errors?: string[];
   tool_plan?: string[];
-  arbitration_result?: {
+  safety_check_result?: {
     passed?: boolean;
     warnings?: string[];
     strict_mode?: boolean;
@@ -136,14 +136,14 @@ export interface HermesTrace {
 
 export interface SendMessageResult {
   reply: string;
-  hermes_trace: HermesTrace;
+  reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
 }
 
 export interface StreamMessageStartPayload {
   session_id: string;
   run_id: string;
-  hermes_trace: HermesTrace;
+  reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
 }
 
@@ -151,7 +151,7 @@ export interface StreamMessageDonePayload {
   session_id: string;
   run_id: string;
   reply: string;
-  hermes_trace: HermesTrace;
+  reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
 }
 
@@ -170,17 +170,7 @@ export async function startStreamMessage(
   return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
 }
 
-export async function hermesDispatch(
-  sessionId: string,
-  method: string,
-  messages: ChatMessage[]
-): Promise<HermesTrace> {
-  return safeInvoke<HermesTrace>("hermes_dispatch", {
-    ...sessionArgs(sessionId),
-    method,
-    messages,
-  });
-}
+// Note: hermes_dispatch command has been removed. Use AgentRuntime instead.
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
   return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));

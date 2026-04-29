@@ -95,7 +95,7 @@ pub async fn search_memory(
 
 #[tauri::command]
 pub async fn get_hot_cache(state: State<'_, Arc<AppState>>) -> Result<HotMemoryCache, String> {
-    let cache = state.hot_cache.lock().unwrap();
+    let cache = state.hot_cache.read().await;
     Ok(cache.clone())
 }
 

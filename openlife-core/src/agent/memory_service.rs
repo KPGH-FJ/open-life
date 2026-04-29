@@ -45,12 +45,13 @@ impl MemoryService {
         memory_store: &MemoryStore,
         vector_store: &VectorStore,
         embedding_config: &EmbeddingConfig,
+        top_k: usize,
     ) -> Result<MemoryContext> {
         let start = std::time::Instant::now();
 
         // 1. Text search (always available)
         let text_hits = memory_store
-            .search_text_memories(Some(session_id), query, 3)
+            .search_text_memories(Some(session_id), query, top_k)
             .unwrap_or_default();
 
         // 2. Vector search (if embedding is enabled)

@@ -166,6 +166,46 @@ impl ProposalGenerator for MemoryProposalGenerator {
     }
 }
 
+/// Chat proposal generator adapter that wraps proposal_generators::ChatProposalGenerator.
+pub struct ChatProposalGeneratorAdapter {
+    inner: crate::agent::proposal_generators::ChatProposalGenerator,
+}
+
+impl Default for ChatProposalGeneratorAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChatProposalGeneratorAdapter {
+    pub fn new() -> Self {
+        Self {
+            inner: crate::agent::proposal_generators::ChatProposalGenerator::default(),
+        }
+    }
+}
+
+impl ProposalGenerator for ChatProposalGeneratorAdapter {
+    fn name(&self) -> &'static str {
+        "chat"
+    }
+
+    fn source(&self) -> ProposalSource {
+        ProposalSource::ProactiveAgent
+    }
+
+    fn generate(
+        &self,
+        run: &AgentRun,
+        _output: &str,
+        life_model: &LifeModel,
+    ) -> Result<Vec<AgentProposal>> {
+        let session_id = run.session_id.as_deref().unwrap_or("unknown");
+        let user_input = run.user_input.as_deref().unwrap_or("");
+        self.inner.generate_proposals(session_id, user_input, life_model)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,8 +215,9 @@ mod tests {
         let mut engine = ProposalEngine::new();
         engine.register(Box::new(BuilderProposalGenerator));
         engine.register(Box::new(CalibrationProposalGenerator));
+        engine.register(Box::new(ChatProposalGeneratorAdapter::new()));
 
-        assert_eq!(engine.generators.len(), 2);
+        assert_eq!(engine.generators.len(), 3);
     }
 
     #[test]
@@ -184,5 +225,12 @@ mod tests {
         let gen = BuilderProposalGenerator;
         assert_eq!(gen.name(), "builder");
         assert_eq!(gen.source(), ProposalSource::BuilderReview);
+    }
+
+    #[test]
+    fn test_chat_adapter_name() {
+        let gen = ChatProposalGeneratorAdapter::new();
+        assert_eq!(gen.name(), "chat");
+        assert_eq!(gen.source(), ProposalSource::ProactiveAgent);
     }
 }

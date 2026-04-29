@@ -357,6 +357,7 @@ pub struct AppState {
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub hot_cache: SharedHotCache,
+    pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
     pub startup_warnings: Vec<String>,
 }
 
@@ -713,7 +714,7 @@ async fn preprocess_chat_input(
 
     // Refresh hot cache if stale
     {
-        let mut cache = state.hot_cache.lock().unwrap();
+        let mut cache = state.hot_cache.write().await;
         if cache.is_stale(&life_model) {
             cache.refresh(&life_model);
         }
@@ -759,12 +760,16 @@ async fn preprocess_chat_input(
     let mut embed_err = None;
     let mut memory_sources: Vec<String> = Vec::new();
     let mut memory_hit_count = 0usize;
+    let memory_top_k = {
+        let cfg = state.config.lock().await;
+        cfg.system.memory_search_top_k
+    };
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
             let text_hits = {
                 let store = state.memory_store.lock().await;
                 store
-                    .search_text_memories(Some(session_id), &user_msg.content, 3)
+                    .search_text_memories(Some(session_id), &user_msg.content, memory_top_k)
                     .unwrap_or_default()
             };
 
@@ -824,7 +829,7 @@ async fn preprocess_chat_input(
 
     // Prepend hot memory cache as a system message (always injected)
     let hot_context = {
-        let cache = state.hot_cache.lock().unwrap();
+        let cache = state.hot_cache.read().await;
         cache.to_context_string()
     };
     if !hot_context.is_empty() {
@@ -912,7 +917,7 @@ async fn preprocess_chat_input_v2(
 
     // Step 3: Refresh hot cache
     {
-        let mut cache = state.hot_cache.lock().unwrap();
+        let mut cache = state.hot_cache.write().await;
         if cache.is_stale(&life_model) {
             cache.refresh(&life_model);
         }
@@ -925,6 +930,10 @@ async fn preprocess_chat_input_v2(
     };
 
     // Step 5: Prefetch memory using MemoryService
+    let memory_top_k = {
+        let cfg = state.config.lock().await;
+        cfg.system.memory_search_top_k
+    };
     let (memory_context_opt, memory_hits, memory_retrieval_time_ms) =
         if let Some(user_msg) = messages.last() {
             if user_msg.role == "user" {
@@ -948,6 +957,7 @@ async fn preprocess_chat_input_v2(
                     &memory_store,
                     &vector_store,
                     &embedding_config,
+                    memory_top_k,
                 ).await {
                     Ok(ctx) => {
                         eprintln!("[MemoryService] Retrieved {} hits in {}ms (embedding: {})",
@@ -992,7 +1002,7 @@ async fn preprocess_chat_input_v2(
     // Step 8: Apply hot cache (same as v1)
     let mut desensitized_messages = output.desensitized_messages;
     let hot_context = {
-        let cache = state.hot_cache.lock().unwrap();
+        let cache = state.hot_cache.read().await;
         cache.to_context_string()
     };
     if !hot_context.is_empty() {
@@ -1132,19 +1142,23 @@ async fn capture_conversation_signals(
 
     for value in &life_model.identity.values {
         if normalized.contains(&value.name.to_lowercase()) {
-            let _ = store.log_event(
+            if let Err(e) = store.log_event(
                 &format!("value_focus:{}", value.name),
                 Some(session_id),
                 Some("chat_match"),
-            );
-            let _ = store.save_conversation_inference(
+            ) {
+                eprintln!("[Memory] 记录价值观焦点事件失败: {}", e);
+            }
+            if let Err(e) = store.save_conversation_inference(
                 Some(session_id),
                 "identity.values",
                 &value.name,
                 base_delta,
                 confidence,
                 "用户在对话中主动提及或强化了该价值观",
-            );
+            ) {
+                eprintln!("[Memory] 保存价值观推断失败: {}", e);
+            }
         }
     }
 
@@ -1157,14 +1171,16 @@ async fn capture_conversation_signals(
         .chain(life_model.goals.life_goals.iter())
     {
         if normalized.contains(&goal.name.to_lowercase()) {
-            let _ = store.save_conversation_inference(
+            if let Err(e) = store.save_conversation_inference(
                 Some(session_id),
                 "goals",
                 &goal.name,
                 base_delta,
                 (confidence - 0.05).max(0.2),
                 "用户在对话中直接提到该目标，表明关注度发生变化",
-            );
+            ) {
+                eprintln!("[Memory] 保存目标推断失败: {}", e);
+            }
         }
     }
 
@@ -1178,14 +1194,16 @@ async fn capture_conversation_signals(
             } else {
                 base_delta
             };
-            let _ = store.save_conversation_inference(
+            if let Err(e) = store.save_conversation_inference(
                 Some(session_id),
                 "capabilities.skills",
                 &skill.name,
                 skill_delta,
                 0.55,
                 "用户在对话中主动提及技能投入或受阻情况",
-            );
+            ) {
+                eprintln!("[Memory] 保存技能推断失败: {}", e);
+            }
         }
     }
 }
@@ -1249,13 +1267,16 @@ async fn send_message(
         if let Some(ref i) = intent {
             if let Some(reply) = i.direct_response() {
                 let store = state.memory_store.lock().await;
-                let _ = store.save_message(
+                if let Err(e) = store.save_message(
                     &session_id,
                     &ChatMessage {
                         role: "assistant".into(),
                         content: reply.clone(),
                     },
-                );
+                ) {
+                    eprintln!("[Chat] 保存 L1 直接响应消息失败: {}", e);
+                    return Err(format!("消息保存失败: {}", e));
+                }
                 return Ok(SendMessageResult {
                     reply,
                     reasoning_trace: ReasoningTrace::default(),
@@ -1461,11 +1482,33 @@ async fn send_message(
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
+        if let Err(e) = store.create_run(&agent_run) {
+            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+        }
     }
 
     if inserted {
         persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
+    }
+
+    // Generate proposals from chat run
+    if let Some(ref proposal_store_arc) = state.proposal_store {
+        let engine = state.proposal_engine.lock().await;
+        match engine.generate_from_run(&agent_run, &reply, &life_model) {
+            Ok(proposals) => {
+                if !proposals.is_empty() {
+                    let store = proposal_store_arc.lock().await;
+                    for proposal in proposals {
+                        if let Err(e) = store.create_proposal(&proposal) {
+                            eprintln!("[ChatProposal] Failed to save proposal: {}", e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
+            }
+        }
     }
 
     Ok(SendMessageResult {
@@ -1563,7 +1606,9 @@ async fn start_stream_message(
     let _agent_run_id = agent_run.id.clone();
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
+        if let Err(e) = store.create_run(&agent_run) {
+            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+        }
     }
 
     let user_msg = messages.last().cloned();
@@ -1646,7 +1691,9 @@ async fn start_stream_message(
                 agent_run.complete(&preview, model_route, context_summary);
                 if let Some(ref store_arc) = state.agent_run_store {
                     let store = store_arc.lock().await;
-                    let _ = store.update_run(&agent_run);
+                    if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                 }
                 let _ = app_handle.emit(
                     "stream-message-done",
@@ -1692,7 +1739,9 @@ async fn start_stream_message(
             agent_run.fail(error);
             if let Some(ref store_arc) = state.agent_run_store {
                 let store = store_arc.lock().await;
-                let _ = store.update_run(&agent_run);
+                if let Err(e) = store.update_run(&agent_run) {
+                    eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                }
             }
             return Err(message);
         }
@@ -1713,7 +1762,9 @@ async fn start_stream_message(
                 agent_run.fail(error);
                 if let Some(ref store_arc) = state.agent_run_store {
                     let store = store_arc.lock().await;
-                    let _ = store.update_run(&agent_run);
+                    if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                 }
                 return Err(message);
             }
@@ -1874,7 +1925,9 @@ async fn start_stream_message(
                                 agent_run.fail(error);
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
-                                    let _ = store.update_run(&agent_run);
+                                    if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                                 }
                                 return Err(message);
                             }
@@ -1949,7 +2002,9 @@ async fn start_stream_message(
                                 agent_run.fail(error);
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
-                                    let _ = store.update_run(&agent_run);
+                                    if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                                 }
                                 return Err(message);
                             }
@@ -1995,7 +2050,9 @@ async fn start_stream_message(
                         agent_run.fail(error);
                         if let Some(ref store_arc) = state.agent_run_store {
                             let store = store_arc.lock().await;
-                            let _ = store.update_run(&agent_run);
+                            if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                         }
                         return Err(message);
                     }
@@ -2040,7 +2097,9 @@ async fn start_stream_message(
                     agent_run.fail(error);
                     if let Some(ref store_arc) = state.agent_run_store {
                         let store = store_arc.lock().await;
-                        let _ = store.update_run(&agent_run);
+                        if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                     }
                     return Err(message);
                 }
@@ -2124,7 +2183,9 @@ async fn start_stream_message(
                     agent_run.fail(error);
                     if let Some(ref store_arc) = state.agent_run_store {
                         let store = store_arc.lock().await;
-                        let _ = store.update_run(&agent_run);
+                        if let Err(e) = store.update_run(&agent_run) {
+                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
                     }
                     return Err(e.to_string());
                 }
@@ -2171,38 +2232,27 @@ async fn start_stream_message(
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        let _ = store.update_run(&agent_run);
+        if let Err(e) = store.update_run(&agent_run) {
+            eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+        }
     }
 
-    // Chat Proposal generation
-    if let Some(ref user_msg) = user_msg {
-        if user_msg.role == "user" {
-            let config = state.config.lock().await;
-            let enabled = config.chat_proposal.enabled;
-            let generator = openlife_core::agent::ChatProposalGenerator::new(
-                config.chat_proposal.min_message_length,
-                config.chat_proposal.confidence_threshold,
-                config.chat_proposal.cooldown_seconds,
-            );
-            drop(config);
-
-            if enabled {
-                match generator.generate_proposals(&session_id, &user_msg.content, &life_model) {
-                    Ok(proposals) if !proposals.is_empty() => {
-                        let proposal_store = openlife_core::agent::ProposalStore::new(
-                            crate::storage::app_data_dir().join("proposals.db"),
-                        );
-                        if let Ok(store) = proposal_store {
-                            for mut proposal in proposals {
-                                proposal.run_id = Some(agent_run.id.clone());
-                                if let Err(e) = store.create_proposal(&proposal) {
-                                    eprintln!("[ChatProposal] Failed to save proposal: {}", e);
-                                }
-                            }
+    // Generate proposals from chat run using ProposalEngine
+    if let Some(ref proposal_store_arc) = state.proposal_store {
+        let engine = state.proposal_engine.lock().await;
+        match engine.generate_from_run(&agent_run, &reply, &life_model) {
+            Ok(proposals) => {
+                if !proposals.is_empty() {
+                    let store = proposal_store_arc.lock().await;
+                    for proposal in proposals {
+                        if let Err(e) = store.create_proposal(&proposal) {
+                            eprintln!("[ChatProposal] Failed to save proposal: {}", e);
                         }
                     }
-                    _ => {}
                 }
+            }
+            Err(e) => {
+                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
             }
         }
     }
@@ -2261,6 +2311,8 @@ pub fn run() {
     if let Some(warning) = config_warning {
         startup_warnings.push(warning);
     }
+    // Apply system configuration
+    openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");
@@ -2331,7 +2383,7 @@ pub fn run() {
             Ok(model) => HotMemoryCache::from_life_model(&model),
             Err(_) => HotMemoryCache::default(),
         };
-        Arc::new(std::sync::Mutex::new(initial_cache))
+        Arc::new(tokio::sync::RwLock::new(initial_cache))
     };
 
     let mcp_registry = McpRegistry::new();
@@ -2369,6 +2421,13 @@ pub fn run() {
             }
         },
         hot_cache,
+        proposal_engine: Arc::new(tokio::sync::Mutex::new({
+            let mut engine = openlife_core::agent::ProposalEngine::new();
+            engine.register(Box::new(openlife_core::agent::ChatProposalGeneratorAdapter::new()));
+            engine.register(Box::new(openlife_core::agent::FeedbackProposalGenerator));
+            engine.register(Box::new(openlife_core::agent::MemoryProposalGenerator));
+            engine
+        })),
         startup_warnings,
     });
 
