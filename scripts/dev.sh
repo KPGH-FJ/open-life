@@ -7,11 +7,11 @@
 #   自动选择可用的 Tauri CLI 启动方式。
 #
 # 使用方法：
-#   chmod +x dev.sh && ./dev.sh
-#   或: ./startup.sh dev
+#   chmod +x scripts/dev.sh && ./scripts/dev.sh
+#   或: ./scripts/startup.sh dev
 #
 # 前提条件：
-#   - 已完成环境初始化 (./setup.sh)
+#   - 已完成环境初始化 (./scripts/setup.sh)
 #   - 已配置 API Key（可选但推荐）
 #
 # 常见问题：
@@ -19,10 +19,10 @@
 #   A: 首次需要编译 Rust 代码，耗时 1-3 分钟，请耐心等待
 #
 #   Q: 端口 5173 被占用
-#   A: 设置环境变量 PORT=5174 ./dev.sh
+#   A: 设置环境变量 PORT=5174 ./scripts/dev.sh
 #
 #   Q: 白屏或前端报错
-#   A: 检查 frontend/node_modules 是否存在，运行 ./setup.sh 重新安装
+#   A: 检查 frontend/node_modules 是否存在，运行 ./scripts/setup.sh 重新安装
 # =============================================================================
 
 set -euo pipefail
@@ -55,13 +55,13 @@ fi
 if lsof -Pi ":$VITE_PORT" -sTCP:LISTEN -t >/dev/null 2>&1 || \
    ss -tuln 2>/dev/null | grep -q ":$VITE_PORT "; then
     echo -e "${YELLOW}[WARN]${NC} 端口 $VITE_PORT 已被占用"
-    echo "       可设置环境变量: PORT=5174 ./dev.sh"
+    echo "       可设置环境变量: PORT=5174 ./scripts/dev.sh"
     exit 1
 fi
 
 # 检查 node_modules
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-    echo -e "${YELLOW}[WARN]${NC} 前端依赖未安装，请先运行 ./setup.sh"
+    echo -e "${YELLOW}[WARN]${NC} 前端依赖未安装，请先运行 ./scripts/setup.sh"
     exit 1
 fi
 

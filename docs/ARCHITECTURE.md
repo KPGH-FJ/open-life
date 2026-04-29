@@ -126,7 +126,7 @@ LifeModel
               │       ▼
               │   AgentRun 关联记录
               │
-              └── "直接应用"（兼容路径）
+              └── "直接应用"（legacy/migration/debug only）
                       │
                       ▼
                   LifeModel 直接更新
@@ -233,7 +233,7 @@ make build    # 构建生产版本
 cargo test -p openlife-core          # Rust 核心测试
 cargo test -p openlife-tauri         # Tauri 层测试
 cd frontend && npm test              # 前端测试
-./smoke.sh                           # 端到端验证
+./scripts/smoke.sh                   # 端到端验证
 ```
 
 ### 关键文件

@@ -58,7 +58,7 @@ make setup
 # 2. 启动开发模式（同时启动前端 Vite + Tauri dev）
 make dev
 # 或
-./dev.sh
+./scripts/dev.sh
 
 # 3. 运行测试
 make test          # 全部测试

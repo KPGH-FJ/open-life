@@ -467,17 +467,17 @@ VectorStore.search(query_embedding, top_k=5)
 # 一键初始化（新开发者首选）
 make setup
 # 或
-./setup.sh              # macOS/Linux
+./scripts/setup.sh      # macOS/Linux
 .\setup.ps1             # Windows
 
 # 快速开发启动
 make dev
 # 或
-./dev.sh                # macOS/Linux
+./scripts/dev.sh        # macOS/Linux
 .\dev.ps1               # Windows
 
 # 一体化脚本启动
-./startup.sh dev        # macOS/Linux
+./scripts/startup.sh dev # macOS/Linux
 .\startup.ps1 dev       # Windows
 ```
 
@@ -505,7 +505,7 @@ make test
 # macOS
 make build
 # 或
-./start.sh
+./scripts/start.sh
 # 或
 pnpm tauri build --target universal-apple-darwin
 
@@ -515,7 +515,7 @@ pnpm tauri build --target universal-apple-darwin
 pnpm tauri build --target x86_64-pc-windows-msvc
 
 # Linux
-./start.sh
+./scripts/start.sh
 # 或
 pnpm tauri build --target x86_64-unknown-linux-gnu
 ```

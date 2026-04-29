@@ -12,7 +12,7 @@
 #   - 验证安装完整性
 #
 # 使用方法：
-#   chmod +x setup.sh && ./setup.sh
+#   chmod +x scripts/setup.sh && ./scripts/setup.sh
 #
 # 预期时间：
 #   首次运行约 2-5 分钟（主要耗时在前端依赖下载和 Rust 编译缓存生成）
@@ -301,10 +301,10 @@ main() {
     echo ""
     echo "  1. 编辑 .env 文件，配置 API Key（可选但推荐）"
     echo "  2. 启动开发模式："
-    echo -e "     ${YELLOW}./dev.sh${NC}     或  ${YELLOW}./startup.sh dev${NC}"
+    echo -e "     ${YELLOW}./scripts/dev.sh${NC}     或  ${YELLOW}./scripts/startup.sh dev${NC}"
     echo ""
     echo "  或运行检查："
-    echo -e "     ${YELLOW}./startup.sh check${NC}"
+    echo -e "     ${YELLOW}./scripts/startup.sh check${NC}"
     echo ""
 }
 

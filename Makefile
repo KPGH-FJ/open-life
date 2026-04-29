@@ -70,27 +70,27 @@ help:
 ## 初始化开发环境
 setup:
 	@echo "🚀 正在初始化 OpenLife 开发环境..."
-	$(SHELL_RUN) setup.$(SHELL_EXT)
+	$(SHELL_RUN) scripts/setup.$(SHELL_EXT)
 
 ## 启动开发模式
 dev:
 	@echo "🔧 启动开发模式..."
-	$(SHELL_RUN) dev.$(SHELL_EXT)
+	$(SHELL_RUN) scripts/dev.$(SHELL_EXT)
 
 ## 生产构建
 build:
 	@echo "📦 开始生产构建..."
-	$(SHELL_RUN) start.$(SHELL_EXT)
+	$(SHELL_RUN) scripts/start.$(SHELL_EXT)
 
 ## 检查环境依赖
 check:
 	@echo "🔍 检查环境依赖..."
-	$(SHELL_RUN) startup.$(SHELL_EXT) check
+	$(SHELL_RUN) scripts/startup.$(SHELL_EXT) check
 
 ## 启动 A2A 独立服务器
 a2a:
 	@echo "🌐 启动 A2A 独立服务器..."
-	$(SHELL_RUN) startup.$(SHELL_EXT) a2a
+	$(SHELL_RUN) scripts/startup.$(SHELL_EXT) a2a
 
 # =============================================================================
 # 测试

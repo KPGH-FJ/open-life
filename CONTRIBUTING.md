@@ -43,7 +43,7 @@ make setup
 # 3. 启动开发服务器
 make dev
 # 或手动:
-# ./dev.sh
+# ./scripts/dev.sh
 ```
 
 开发服务器启动后：

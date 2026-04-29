@@ -127,7 +127,7 @@ export OPENAI_API_KEY="sk-..."
 ### 开发运行
 
 ```bash
-./dev.sh
+./scripts/dev.sh
 ```
 
 ### 测试

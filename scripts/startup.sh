@@ -3,13 +3,13 @@
 # OpenLife 启动脚本 (macOS / Linux)
 # =============================================================================
 # 使用方法:
-#   chmod +x startup.sh
-#   ./startup.sh [dev|a2a|check]
+#   chmod +x scripts/startup.sh
+#   ./scripts/startup.sh [dev|a2a|check]
 #
 # 命令说明:
-#   ./startup.sh dev    - 启动 Tauri 桌面应用开发模式（默认）
-#   ./startup.sh a2a    - 启动独立 A2A 服务器
-#   ./startup.sh check  - 仅检查环境依赖，不启动应用
+#   ./scripts/startup.sh dev    - 启动 Tauri 桌面应用开发模式（默认）
+#   ./scripts/startup.sh a2a    - 启动独立 A2A 服务器
+#   ./scripts/startup.sh check  - 仅检查环境依赖，不启动应用
 #
 # 前提条件:
 #   - Rust >= 1.75    (https://rustup.rs/)
@@ -352,7 +352,7 @@ start_a2a() {
     # 检查端口
     check_port "$A2A_PORT" || {
         log_error "A2A 端口 $A2A_PORT 被占用"
-        log_info "可设置环境变量: A2A_PORT=9999 ./startup.sh a2a"
+        log_info "可设置环境变量: A2A_PORT=9999 ./scripts/startup.sh a2a"
         exit 1
     }
 
@@ -388,7 +388,7 @@ main() {
             check_environment
             setup_env
             echo ""
-            log_success "环境检查完成！可以运行 ./startup.sh dev 启动应用"
+            log_success "环境检查完成！可以运行 ./scripts/startup.sh dev 启动应用"
             ;;
         dev)
             check_environment

@@ -7,12 +7,12 @@
 #   支持 macOS、Linux 平台构建。
 #
 # 使用方法：
-#   chmod +x start.sh && ./start.sh [target]
+#   chmod +x scripts/start.sh && ./scripts/start.sh [target]
 #
 # 可选参数 target：
-#   ./start.sh               - 自动检测当前平台并构建
-#   ./start.sh macos         - 构建 macOS universal 应用
-#   ./start.sh linux         - 构建 Linux 应用
+#   ./scripts/start.sh       - 自动检测当前平台并构建
+#   ./scripts/start.sh macos - 构建 macOS universal 应用
+#   ./scripts/start.sh linux - 构建 Linux 应用
 #
 # 构建产物：
 #   src-tauri/target/release/bundle/
