@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getAgentRun, deleteAgentRun, type AgentRun } from "../tauri";
+import {
+  getAgentRun,
+  deleteAgentRun,
+  replayAgentAction,
+  type AgentRun,
+} from "../tauri";
 import {
   ArrowLeft,
   Activity,
@@ -10,6 +15,7 @@ import {
   AlertTriangle,
   Trash2,
   Download,
+  Play,
 } from "lucide-react";
 
 function statusIcon(status: string) {
@@ -251,14 +257,46 @@ export default function AgentRunDetail() {
               <div className="space-y-2">
                 {run.actions.map(action => (
                   <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm">
-                    <div className="font-medium text-stone-800">
+                    <div className="font-medium text-stone-800 flex items-center gap-2">
                       {action.actionType}
                       {action.target ? ` · ${action.target}` : ""}
+                      {action.status === "needs_confirmation" && (
+                        <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
+                          <AlertTriangle size={12} /> 待确认
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-stone-500 mt-1">
                       Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
                       {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
                     </div>
+                    {action.toolScope && (
+                      <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                        <div className="font-medium mb-1">Tool Scope:</div>
+                        <div>Tool: {action.toolScope.toolName}</div>
+                        <div>Source: {action.toolScope.source}</div>
+                        <div>Risk: {action.toolScope.riskLevel}</div>
+                        <div>Capabilities: {action.toolScope.capabilities.join(", ") || "none"}</div>
+                      </div>
+                    )}
+                    {action.status === "needs_confirmation" && (
+                      <div className="mt-2">
+                        <button
+                          onClick={async () => {
+                            try {
+                              await replayAgentAction(run.id, action.id);
+                              await loadRun(run.id);
+                            } catch (e) {
+                              alert(`Replay failed: ${e}`);
+                            }
+                          }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
+                        >
+                          <Play size={12} />
+                          重新执行
+                        </button>
+                      </div>
+                    )}
                     {action.error && (
                       <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
                         {action.error}

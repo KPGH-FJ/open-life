@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod memory;
 pub mod metrics;
 pub mod proposal;
+pub mod router;
 pub mod settings;
 pub mod state;
 pub mod version;

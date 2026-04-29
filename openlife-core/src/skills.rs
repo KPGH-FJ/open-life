@@ -138,3 +138,67 @@ impl Default for SkillRegistry {
         Self::built_in()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_builtin_skills_registered() {
+        let registry = SkillRegistry::built_in();
+        let skills = registry.list();
+        assert_eq!(skills.len(), 3);
+        assert!(registry.get("weekly_review").is_some());
+        assert!(registry.get("goal_breakdown").is_some());
+        assert!(registry.get("memory_consolidation").is_some());
+    }
+
+    #[test]
+    fn test_run_builtin_weekly_review() {
+        let registry = SkillRegistry::built_in();
+        let input = serde_json::json!({ "text": "review my week" });
+        let result = registry.run_builtin("weekly_review", input).unwrap();
+        assert_eq!(result.skill_id, "weekly_review");
+        assert!(!result.summary.is_empty());
+        assert!(result.structured_output.get("summary").is_some());
+        assert_eq!(result.proposal_candidates.len(), 1);
+    }
+
+    #[test]
+    fn test_run_builtin_goal_breakdown() {
+        let registry = SkillRegistry::built_in();
+        let input = serde_json::json!({ "text": "break down my goals" });
+        let result = registry.run_builtin("goal_breakdown", input).unwrap();
+        assert_eq!(result.skill_id, "goal_breakdown");
+        assert!(!result.summary.is_empty());
+        assert!(result.structured_output.get("summary").is_some());
+    }
+
+    #[test]
+    fn test_run_builtin_memory_consolidation() {
+        let registry = SkillRegistry::built_in();
+        let input = serde_json::json!({ "text": "consolidate memories" });
+        let result = registry.run_builtin("memory_consolidation", input).unwrap();
+        assert_eq!(result.skill_id, "memory_consolidation");
+        assert!(!result.summary.is_empty());
+        assert!(result.structured_output.get("summary").is_some());
+    }
+
+    #[test]
+    fn test_run_builtin_unknown_skill() {
+        let registry = SkillRegistry::built_in();
+        let input = serde_json::json!({ "text": "test" });
+        let result = registry.run_builtin("unknown_skill", input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_skill_manifest_fields() {
+        let registry = SkillRegistry::built_in();
+        let weekly = registry.get("weekly_review").unwrap();
+        assert_eq!(weekly.id, "weekly_review");
+        assert_eq!(weekly.name, "Weekly Review");
+        assert!(!weekly.description.is_empty());
+        assert_eq!(weekly.proposal_policy, "review_required");
+    }
+}

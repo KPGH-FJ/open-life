@@ -402,6 +402,7 @@ mod tests {
             output: None,
             status: "needs_confirmation".into(),
             permission_decision: Some("ask_every_time".into()),
+            tool_scope: None,
             started_at: None,
             finished_at: None,
             error: None,

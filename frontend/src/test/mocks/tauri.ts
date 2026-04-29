@@ -485,6 +485,35 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         active_backend: "regex",
         latency_threshold_us: 50000,
       } as T);
+    case "get_model_router_status":
+      return Promise.resolve({
+        enabled: false,
+        providers: [
+          { name: "ollama", enabled: true, available: false, healthIsEstimated: true },
+          { name: "openai", enabled: true, available: true, healthIsEstimated: true },
+        ],
+        lastCheckAt: new Date().toISOString(),
+      } as T);
+    case "replay_agent_action":
+      return Promise.resolve({
+        id: "action-replay-1",
+        actionType: "mcp_tool_call",
+        target: "test_tool",
+        input: {},
+        status: "succeeded",
+        permissionDecision: "allow_once",
+        toolScope: {
+          toolId: "test_tool",
+          toolName: "test_tool",
+          source: "builtin",
+          riskLevel: "low",
+          capabilities: [],
+          actionType: "mcp_tool_call",
+        },
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        timestamp: new Date().toISOString(),
+      } as T);
     case "get_system_diagnostics":
       return Promise.resolve({
         router: {

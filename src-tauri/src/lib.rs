@@ -33,6 +33,7 @@ use commands::a2a::{
 };
 use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
+    replay_agent_action,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -78,6 +79,7 @@ use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
     list_proposals, postpone_proposal, reject_proposal,
 };
+use commands::router::get_model_router_status;
 use commands::settings::{
     cleanup_mcp_audit_logs, export_all_data, export_mcp_audit_logs, get_config,
     get_last_model_error, get_privacy_policy, has_completed_onboarding, import_all_data,
@@ -116,6 +118,7 @@ pub struct SendMessageResult {
     pub reply: String,
     pub reasoning_trace: openlife_core::agent::ReasoningTrace,
     pub tool_calls: Vec<ToolCallResult>,
+    pub run_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -522,7 +525,7 @@ fn try_extract_json(text: &str) -> Option<&str> {
     }
     None
 }
-fn execute_tool_call_internal(
+pub(crate) fn execute_tool_call_internal(
     name: &str,
     args: serde_json::Value,
     permission_level: String,
@@ -580,9 +583,10 @@ fn execute_tool_call_internal(
         }
     }
 }
-fn action_observation_from_tool_result(
+pub(crate) fn action_observation_from_tool_result(
     result: &ToolCallResult,
     input: serde_json::Value,
+    manifest: Option<&openlife_core::tool_manifest::ToolManifest>,
 ) -> (
     openlife_core::agent::AgentAction,
     openlife_core::agent::AgentObservation,
@@ -596,6 +600,16 @@ fn action_observation_from_tool_result(
     } else {
         "failed"
     };
+    let tool_scope = manifest.map(|m| openlife_core::agent::ToolActionScope {
+        tool_name: m.name.clone(),
+        tool_id: m.id.clone(),
+        source: m.source.to_string(),
+        risk_level: m.risk_level.clone(),
+        capabilities: m.capabilities.clone(),
+        action_type: "mcp_tool_call".into(),
+        requires_confirmation: result.requires_confirmation,
+        allowed: result.success && !result.requires_confirmation,
+    });
     let action = openlife_core::agent::AgentAction {
         id: action_id.clone(),
         action_type: "mcp_tool_call".into(),
@@ -607,6 +621,7 @@ fn action_observation_from_tool_result(
             .map(|output| serde_json::json!({ "text": output })),
         status: status.into(),
         permission_decision: result.permission_decision.clone(),
+        tool_scope,
         started_at: Some(now),
         finished_at: if result.requires_confirmation {
             None
@@ -695,6 +710,7 @@ fn try_prepare_tool_calls(
             let (action, observation) = action_observation_from_tool_result(
                 &result,
                 serde_json::json!({ "arguments": result.arguments }),
+                manifest.as_ref(),
             );
             result.action_id = Some(action.id.clone());
             actions.push(action);
@@ -721,6 +737,7 @@ fn try_prepare_tool_calls(
             let (action, observation) = action_observation_from_tool_result(
                 &result,
                 serde_json::json!({ "arguments": result.arguments }),
+                Some(&manifest),
             );
             result.action_id = Some(action.id.clone());
             actions.push(action);
@@ -780,6 +797,7 @@ fn try_prepare_tool_calls(
             let (action, observation) = action_observation_from_tool_result(
                 &result,
                 serde_json::json!({ "arguments": result.arguments }),
+                Some(&manifest),
             );
             result.action_id = Some(action.id.clone());
             actions.push(action);
@@ -797,6 +815,7 @@ fn try_prepare_tool_calls(
             let (action, observation) = action_observation_from_tool_result(
                 &result,
                 serde_json::json!({ "arguments": result.arguments }),
+                Some(&manifest),
             );
             result.action_id = Some(action.id.clone());
             actions.push(action);
@@ -1565,21 +1584,62 @@ async fn send_message(
     if layer == Layer::L1 {
         if let Some(ref i) = intent {
             if let Some(reply) = i.direct_response() {
-                let store = state.memory_store.lock().await;
-                if let Err(e) = store.save_message(
-                    &session_id,
-                    &ChatMessage {
-                        role: "assistant".into(),
-                        content: reply.clone(),
-                    },
-                ) {
-                    eprintln!("[Chat] 保存 L1 直接响应消息失败: {}", e);
-                    return Err(format!("消息保存失败: {}", e));
+                // Persist user message
+                if let Some(ref user) = user_msg {
+                    if user.role == "user" {
+                        let inserted = persist_chat_message_if_needed(&session_id, user, &state).await?;
+                        if inserted {
+                            persist_vector_memory_for_message(&session_id, user, &state).await;
+                        }
+                    }
                 }
+                // Persist assistant message
+                let assistant_msg = ChatMessage {
+                    role: "assistant".into(),
+                    content: reply.clone(),
+                };
+                let _ = persist_chat_message_if_needed(&session_id, &assistant_msg, &state).await?;
+
+                // Create and finalize AgentRun for L1
+                let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
+                    &session_id,
+                    &user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+                );
+                let model_route = openlife_core::agent::ModelRouteTrace {
+                    provider: "direct".to_string(),
+                    model: "L1_reflex".to_string(),
+                    route_type: "direct".to_string(),
+                    prefer_local: false,
+                    local_model: "".to_string(),
+                    reason: "layer_1_direct_response".to_string(),
+                    privacy_level: openlife_core::agent::types::RedactionLevel::None,
+                    latency_ms: None,
+                    retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
+                };
+                let context_summary = openlife_core::agent::ContextSummary {
+                    life_model_empty: false,
+                    included_life_model_sections: vec![],
+                    memory_hit_count: 0,
+                    memory_sources: vec![],
+                    used_tools_prompt: false,
+                    redaction_applied: false,
+                    redaction_level: openlife_core::agent::types::RedactionLevel::None,
+                };
+                agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
+                if let Some(ref store_arc) = state.agent_run_store {
+                    let store = store_arc.lock().await;
+                    if let Err(e) = store.create_run(&agent_run) {
+                        eprintln!("[AgentRun] 保存 L1 运行记录失败: {}", e);
+                    }
+                }
+
                 return Ok(SendMessageResult {
                     reply,
                     reasoning_trace: ReasoningTrace::default(),
                     tool_calls: vec![],
+                    run_id: Some(agent_run.id.clone()),
                 });
             }
         }
@@ -1800,6 +1860,7 @@ async fn send_message(
         reply,
         reasoning_trace,
         tool_calls,
+        run_id: Some(agent_run.id.clone()),
     })
 }
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -2838,6 +2899,7 @@ pub fn run() {
             list_agent_runs,
             list_agent_runs_for_session,
             delete_agent_run,
+            replay_agent_action,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,
@@ -2862,6 +2924,7 @@ pub fn run() {
             get_system_diagnostics,
             check_ollama_status,
             get_router_status,
+            get_model_router_status,
             get_scheduler_config,
             set_scheduler_config,
             create_snapshot,

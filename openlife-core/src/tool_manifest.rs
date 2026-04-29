@@ -44,6 +44,17 @@ pub enum ToolSource {
     Plugin { plugin_id: String },
 }
 
+impl std::fmt::Display for ToolSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ToolSource::BuiltIn => write!(f, "builtin"),
+            ToolSource::Mcp { server_name } => write!(f, "mcp:{}", server_name),
+            ToolSource::A2A { agent_name } => write!(f, "a2a:{}", agent_name),
+            ToolSource::Plugin { plugin_id } => write!(f, "plugin:{}", plugin_id),
+        }
+    }
+}
+
 impl ToolManifest {
     pub fn new(
         name: impl Into<String>,

@@ -169,6 +169,19 @@ pub struct ContextSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ToolActionScope {
+    pub tool_id: String,
+    pub tool_name: String,
+    pub source: String,
+    pub risk_level: String,
+    pub capabilities: Vec<String>,
+    pub action_type: String,
+    pub requires_confirmation: bool,
+    pub allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentAction {
     pub id: String,
     pub action_type: String,
@@ -186,6 +199,8 @@ pub struct AgentAction {
     #[serde(default)]
     pub error: Option<String>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub tool_scope: Option<ToolActionScope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -41,6 +41,7 @@ import {
   toggleDailyGoal,
   recordState,
   executeToolCall,
+  replayAgentAction,
   indexMemoryChunk,
   listAgentRunsForSession,
   getAgentRun,
@@ -236,6 +237,7 @@ export default function ChatPage() {
   const [showHermes, setShowHermes] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
   const [showToolCalls, setShowToolCalls] = useState(false);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [model, setModel] = useState<LifeModel | null>(null);
   const [showGuide, setShowGuide] = useState(true);
   const [chatMode, setChatMode] = useState<string | null>(null);
@@ -429,7 +431,13 @@ export default function ChatPage() {
         async event => {
           if (event.payload.session_id === currentSessionId) {
             setReasoningTrace(event.payload.reasoning_trace ?? null);
-            setToolCalls(event.payload.tool_calls ?? []);
+            setCurrentRunId(event.payload.run_id);
+            setToolCalls(
+              (event.payload.tool_calls ?? []).map(call => ({
+                ...call,
+                run_id: event.payload.run_id,
+              }))
+            );
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           }
         }
@@ -450,7 +458,13 @@ export default function ChatPage() {
           setStreamingReply("");
           setSending(false);
           setReasoningTrace(event.payload.reasoning_trace ?? null);
-          setToolCalls(event.payload.tool_calls ?? []);
+          setCurrentRunId(event.payload.run_id);
+          setToolCalls(
+            (event.payload.tool_calls ?? []).map(call => ({
+              ...call,
+              run_id: event.payload.run_id,
+            }))
+          );
           setStreamInterrupted(false);
           await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           refreshAgentRuns(event.payload.session_id);
@@ -548,9 +562,25 @@ export default function ChatPage() {
   const handleExecuteToolCall = async (index: number) => {
     const call = toolCalls[index];
     if (!call?.requires_confirmation) return;
+    if (!call.run_id || !call.action_id) {
+      console.error("Tool call missing run_id or action_id");
+      return;
+    }
     try {
-      const result = await executeToolCall(call.name, call.arguments);
-      setToolCalls(prev => prev.map((item, idx) => (idx === index ? result : item)));
+      const result = await replayAgentAction(call.run_id, call.action_id);
+      setToolCalls(prev =>
+        prev.map((item, idx) =>
+          idx === index
+            ? {
+                ...item,
+                success: result.status === "succeeded",
+                status: result.status as any,
+                requires_confirmation: false,
+                output: result.output?.text,
+              }
+            : item
+        )
+      );
     } catch (e) {
       setToolCalls(prev =>
         prev.map((item, idx) =>

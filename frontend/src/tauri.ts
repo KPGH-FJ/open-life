@@ -116,6 +116,7 @@ export interface ToolCallResult {
   pii_found?: boolean;
   privacy_warnings?: string[];
   action_id?: string;
+  run_id?: string;
   permission_decision?: string;
 }
 
@@ -140,6 +141,7 @@ export interface SendMessageResult {
   reply: string;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
+  run_id?: string;
 }
 
 export interface StreamMessageStartPayload {
@@ -195,6 +197,17 @@ export interface RouterStatus {
 
 export async function getRouterStatus(): Promise<RouterStatus> {
   return safeInvoke<RouterStatus>("get_router_status");
+}
+
+export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
+  return safeInvoke<ModelRouterStatus>("get_model_router_status");
+}
+
+export async function replayAgentAction(
+  runId: string,
+  actionId: string
+): Promise<AgentAction> {
+  return safeInvoke<AgentAction>("replay_agent_action", { runId, actionId });
 }
 
 export interface BuilderCompletion {
@@ -1153,6 +1166,30 @@ export interface ContextSummary {
   redactionLevel: string;
 }
 
+export interface ToolActionScope {
+  toolId: string;
+  toolName: string;
+  source: string;
+  riskLevel: string;
+  capabilities: string[];
+  actionType: string;
+}
+
+export interface ProviderStatus {
+  name: string;
+  enabled: boolean;
+  available: boolean;
+  healthIsEstimated: boolean;
+  lastError?: string;
+  latencyMs?: number;
+}
+
+export interface ModelRouterStatus {
+  enabled: boolean;
+  providers: ProviderStatus[];
+  lastCheckAt?: string;
+}
+
 export interface AgentAction {
   id: string;
   actionType: string;
@@ -1165,6 +1202,7 @@ export interface AgentAction {
   finishedAt?: string;
   error?: string;
   timestamp: string;
+  toolScope?: ToolActionScope;
 }
 
 export interface AgentObservation {

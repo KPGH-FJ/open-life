@@ -101,29 +101,84 @@ pub async fn run_skill(
     input: Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SkillRunResponse, String> {
-    let result = {
+    // 1. Execute built-in skill logic
+    let skill_result = {
         let registry = state.skill_registry.lock().await;
         registry
             .run_builtin(&skill_id, input.clone())
             .map_err(|e| e.to_string())?
     };
 
+    // 2. Build AgentRuntime for one-shot skill execution
+    let life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+    let scheduler = state.scheduler.lock().await.clone();
+    let cfg = state.config.lock().await;
+    let agent_runtime =
+        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
+    drop(cfg);
+
+    // 3. Create synthetic skill message
+    let skill_prompt = format!(
+        "[Skill: {}] {}\n\nInput: {}\n\nPlease generate a helpful response based on the skill output: {}",
+        skill_id,
+        skill_result.summary,
+        input.get("text").and_then(Value::as_str).unwrap_or(""),
+        skill_result.structured_output
+    );
+
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Skill,
+        session_id: format!("skill-{}", skill_id),
+        user_text: skill_prompt.clone(),
+        messages: vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: skill_prompt,
+        }],
+        layer: openlife_core::layer_router::Layer::L2,
+    };
+
+    // 4. Execute via AgentRuntime
+    let runtime_output = agent_runtime
+        .execute_task(
+            &task,
+            &life_model,
+            "",
+            None,
+            vec![],
+            openlife_core::privacy::PrivacyEngine::default(),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // 5. Extract final reply from runtime output
+    let final_reply = runtime_output
+        .final_messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_else(|| skill_result.summary.clone());
+
+    // 6. Create AgentRun
     let mut run = AgentRun::new_chat_run(
-        "skill",
+        &task.session_id,
         input.get("text").and_then(Value::as_str).unwrap_or(""),
     );
     run.kind = AgentTaskKind::Skill;
-    run.output_preview = Some(result.summary.clone());
+    run.output_preview = Some(crate::preview_text(&final_reply, 200));
     run.status = AgentRunStatus::Completed;
     run.finished_at = Some(chrono::Utc::now());
+    run.reasoning_trace = Some(runtime_output.reasoning_trace);
     run.actions.push(AgentAction {
         id: local_id("action"),
         action_type: "skill_run".into(),
         target: Some(skill_id.clone()),
         input: input.clone(),
-        output: Some(result.structured_output.clone()),
+        output: Some(skill_result.structured_output.clone()),
         status: "succeeded".into(),
         permission_decision: Some("allow".into()),
+        tool_scope: None,
         started_at: Some(run.started_at),
         finished_at: run.finished_at,
         error: None,
@@ -132,28 +187,29 @@ pub async fn run_skill(
     run.observations.push(AgentObservation {
         id: local_id("observation"),
         action_id: run.actions.first().map(|a| a.id.clone()),
-        content: result.summary.clone(),
+        content: final_reply.clone(),
         source: format!("skill:{}", skill_id),
-        structured_result: Some(result.structured_output.clone()),
+        structured_result: Some(skill_result.structured_output.clone()),
         timestamp: chrono::Utc::now(),
     });
 
+    // 7. Generate proposals
     let mut generated = Vec::new();
     if let Some(ref proposal_store_arc) = state.proposal_store {
         let store = proposal_store_arc.lock().await;
-        for candidate in result.proposal_candidates {
+        for candidate in skill_result.proposal_candidates {
             let proposal = AgentProposal::new(
                 ProposalType::MemoryWrite,
                 "memory.skill_output",
                 serde_json::json!({
-                    "content": candidate.get("content").cloned().unwrap_or(Value::String(result.summary.clone())),
+                    "content": candidate.get("content").cloned().unwrap_or(Value::String(final_reply.clone())),
                     "source": format!("skill:{}", skill_id),
                     "session_id": "skill"
                 }),
                 candidate
                     .get("content")
                     .and_then(Value::as_str)
-                    .unwrap_or(&result.summary),
+                    .unwrap_or(&final_reply),
                 0.7,
                 RiskLevel::Medium,
                 ProposalSource::SkillRuntime,
@@ -175,7 +231,7 @@ pub async fn run_skill(
     Ok(SkillRunResponse {
         run_id: run.id,
         status: "completed".into(),
-        summary: result.summary,
+        summary: final_reply,
         generated_proposals: generated,
     })
 }
