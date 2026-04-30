@@ -29,7 +29,7 @@ describe("A2APage", () => {
       expect(screen.getByText("A2A Server - OpenLife 本地服务")).toBeInTheDocument();
     });
 
-    expect(screen.getByText("Hermes ↔ A2A 桥接调试")).toBeInTheDocument();
+    expect(screen.getByText("OpenLife ↔ A2A 桥接调试")).toBeInTheDocument();
   });
 
   it("runs local bridge preview", async () => {

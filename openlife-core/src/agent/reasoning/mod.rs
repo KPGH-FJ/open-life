@@ -23,7 +23,7 @@ pub struct ReasoningOutput {
     pub plan_steps: Vec<String>,
 }
 
-/// Trace of a reasoning process (replaces HermesTrace).
+/// Trace of a reasoning process.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ReasoningTrace {
     pub input: Option<String>,

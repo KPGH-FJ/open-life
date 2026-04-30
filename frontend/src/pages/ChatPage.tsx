@@ -233,7 +233,7 @@ export default function ChatPage() {
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [reasoningTrace, setReasoningTrace] = useState<ReasoningTrace | null>(null);
-  const [showHermes, setShowHermes] = useState(false);
+  const [showReasoningTrace, setShowReasoningTrace] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
   const [showToolCalls, setShowToolCalls] = useState(false);
   const [, setCurrentRunId] = useState<string | null>(null);
@@ -1220,8 +1220,8 @@ export default function ChatPage() {
             <div className="flex justify-start">
               <ReasoningTracePanel
                 trace={reasoningTrace}
-                show={showHermes}
-                onToggle={() => setShowHermes(s => !s)}
+                show={showReasoningTrace}
+                onToggle={() => setShowReasoningTrace(s => !s)}
               />
             </div>
           )}

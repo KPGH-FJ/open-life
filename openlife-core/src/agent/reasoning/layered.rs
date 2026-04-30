@@ -10,7 +10,7 @@ use serde_json::json;
 // use tokio::time::{timeout, Duration};
 
 /// Layered reasoning strategy: three-phase sequential reasoning.
-/// Replaces HermesBus with clearer naming and integration into AgentRuntime.
+/// Layered reasoning strategy with meaning, strategy, and generation phases.
 pub struct LayeredReasoner {
     scheduler: InferenceScheduler,
     life_model: LifeModel,

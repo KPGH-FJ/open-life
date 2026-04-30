@@ -221,7 +221,7 @@ pub struct AgentObservation {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunError {
     pub message: String,
-    pub phase: String, // "preprocess" | "model" | "stream" | "fallback" | "hermes"
+    pub phase: String, // "preprocess" | "model" | "stream" | "fallback" | "reasoning"
     pub recoverable: bool,
 }
 

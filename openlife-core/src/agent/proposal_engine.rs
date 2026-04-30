@@ -215,7 +215,7 @@ impl ProposalGenerator for ToolProposalGenerator {
                 .tool_scope
                 .as_ref()
                 .map(|scope| scope.source.as_str())
-                .unwrap_or("mcp");
+                .unwrap_or("builtin");
             let risk_level = action
                 .tool_scope
                 .as_ref()

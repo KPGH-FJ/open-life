@@ -118,7 +118,7 @@ export default function A2APage() {
         bridgeMethod,
         localInput,
         "local-bridge-demo",
-        "openlife.hermes_bridge"
+        "openlife.reasoning_bridge"
       );
       setBridgeResult(JSON.stringify(result, null, 2));
     } catch (e) {
@@ -308,12 +308,12 @@ export default function A2APage() {
               </button>
               <button
                 onClick={() =>
-                  handleLocalService("openlife.hermes_bridge", localInput || "帮我做决策")
+                  handleLocalService("openlife.reasoning_bridge", localInput || "帮我做决策")
                 }
                 disabled={loadingLocal}
                 className="bg-white border px-3 py-2 rounded-lg text-sm hover:bg-gray-50 flex items-center gap-2"
               >
-                <Network size={16} /> Hermes 桥接
+                <Network size={16} /> 推理桥接
               </button>
             </div>
             {loadingLocal && activeLocalSkill && (
@@ -331,18 +331,18 @@ export default function A2APage() {
         </section>
 
         <section className="space-y-3">
-          <h3 className="text-sm font-semibold text-gray-700">Hermes ↔ A2A 桥接调试</h3>
+          <h3 className="text-sm font-semibold text-gray-700">OpenLife ↔ A2A 桥接调试</h3>
           <div className="flex gap-2">
             <input
               value={bridgeMethod}
               onChange={e => setBridgeMethod(e.target.value)}
-              placeholder="Hermes method"
+              placeholder="推理方法"
               className="w-40 border rounded-lg px-3 py-2 text-sm"
             />
             <input
               value={localInput}
               onChange={e => setLocalInput(e.target.value)}
-              placeholder="输入要送入 Hermes/A2A 桥接的文本"
+              placeholder="输入要送入 OpenLife/A2A 桥接的文本"
               className="flex-1 border rounded-lg px-3 py-2 text-sm"
             />
             <button
@@ -359,7 +359,7 @@ export default function A2APage() {
             </button>
           </div>
           <div className="text-xs text-gray-500">
-            这个区域会展示 Hermes 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 Hermes 结果。
+            这个区域会展示 OpenLife 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 OpenLife 结果。
           </div>
           {bridgeResult && (
             <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-80">

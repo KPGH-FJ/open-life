@@ -174,7 +174,7 @@ export async function startStreamMessage(
   return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
 }
 
-// Note: hermes_dispatch command has been removed. Use AgentRuntime instead.
+// Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
 
 export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
   return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));

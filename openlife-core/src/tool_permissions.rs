@@ -379,25 +379,92 @@ mod tests {
     }
 
     #[test]
-    fn allow_once_consumes_policy() {
+    fn allow_once_consumes_policy_and_second_check_asks() {
         let store = ToolPermissionStore::new_in_memory().unwrap();
         store
             .grant(
-                "builtin_echo",
+                "write_file",
                 "builtin",
-                "low",
+                "high",
                 "mcp_tool_call",
                 ToolPermissionPolicy::AllowOnce,
                 None,
             )
             .unwrap();
+        // First check: allowed, policy consumed
         let first = store
-            .check("builtin_echo", "builtin", "low", "mcp_tool_call", &[])
+            .check("write_file", "builtin", "high", "mcp_tool_call", &["write".to_string()])
             .unwrap();
         assert!(first.allowed);
+        assert_eq!(first.decision, "allow_once");
+        // Second check: no matching policy, falls back to default heuristic (high-risk + write capability requires confirmation)
         let second = store
-            .check("builtin_echo", "builtin", "low", "mcp_tool_call", &[])
+            .check("write_file", "builtin", "high", "mcp_tool_call", &["write".to_string()])
             .unwrap();
+        assert!(!second.allowed);
+        assert!(second.requires_confirmation);
         assert_eq!(second.policy_id, None);
+    }
+
+    #[test]
+    fn replay_uses_same_source_canonical_format_as_normal() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+        // Grant with canonical source format "mcp:filesystem"
+        store
+            .grant(
+                "write_file",
+                "mcp:filesystem",
+                "high",
+                "mcp_tool_call",
+                ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        // Normal execution check with canonical format
+        let normal = store
+            .check("write_file", "mcp:filesystem", "high", "mcp_tool_call", &["write".to_string()])
+            .unwrap();
+        assert!(normal.allowed);
+        assert_eq!(normal.decision, "allow_until_revoked");
+        // Replay uses the same source format from tool_scope
+        let replay = store
+            .check("write_file", "mcp:filesystem", "high", "mcp_tool_call", &["write".to_string()])
+            .unwrap();
+        assert!(replay.allowed);
+        assert_eq!(replay.decision, "allow_until_revoked");
+        // Mismatched source format should not match
+        let mismatched = store
+            .check("write_file", "mcp", "high", "mcp_tool_call", &["write".to_string()])
+            .unwrap();
+        assert!(!mismatched.allowed);
+        assert!(mismatched.requires_confirmation);
+    }
+
+    #[test]
+    fn source_canonical_format_builtin_vs_mcp() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+        // Grant builtin tool with canonical format (high risk to test mismatch blocking)
+        store
+            .grant(
+                "write_file",
+                "builtin",
+                "high",
+                "mcp_tool_call",
+                ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        // Builtin check passes
+        let builtin_check = store
+            .check("write_file", "builtin", "high", "mcp_tool_call", &["write".to_string()])
+            .unwrap();
+        assert!(builtin_check.allowed);
+        // MCP check with same tool name but different source does not match builtin grant
+        // Since no policy matches for mcp:memory, high-risk + write capability requires confirmation
+        let mcp_check = store
+            .check("write_file", "mcp:memory", "high", "mcp_tool_call", &["write".to_string()])
+            .unwrap();
+        assert!(!mcp_check.allowed);
+        assert!(mcp_check.requires_confirmation);
     }
 }

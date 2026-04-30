@@ -63,7 +63,7 @@ use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
 };
-// use commands::hermes::hermes_dispatch; // Removed: replaced by AgentRuntime
+// Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{get_life_model, save_life_model};
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
@@ -648,7 +648,7 @@ pub(crate) fn action_observation_from_tool_result(
                     "Tool call produced no output".to_string()
                 }
             }),
-        source: format!("tool:{}", result.name),
+        source: manifest.map(|m| m.source.to_string()).unwrap_or_else(|| "builtin".to_string()),
         structured_result: Some(serde_json::json!({
             "success": result.success,
             "status": result.status,
@@ -1372,7 +1372,7 @@ async fn preprocess_chat_input_v2(
 }
 
 #[allow(dead_code)]
-fn build_hermes_prompt(trace: &ReasoningTrace) -> String {
+fn build_reasoning_trace_prompt(trace: &ReasoningTrace) -> String {
     let mut prompt = String::new();
     if let Some(ref m) = trace.meaning_result {
         if let Some(text) = m.get("text").and_then(|t| t.as_str()) {

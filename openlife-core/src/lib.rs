@@ -4,7 +4,7 @@ pub mod builder;
 pub mod config;
 pub mod evolution;
 pub mod feedback;
-// pub mod hermes; // Removed: replaced by agent::reasoning module
+// Hermes module removed: replaced by agent::reasoning module
 pub mod layer_router;
 pub mod life_model;
 pub mod llm;

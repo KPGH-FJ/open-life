@@ -7,7 +7,7 @@ pub enum Layer {
     L1,
     /// Tactical layer: standard LLM with tools
     L2,
-    /// Strategic layer: deep reasoning via Hermes
+    /// Strategic layer: deep reasoning via LayeredReasoner
     L3,
 }
 

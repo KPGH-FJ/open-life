@@ -685,9 +685,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         version: "0.1.0",
         skills: [
           {
-            id: "openlife.hermes_bridge",
-            name: "Hermes Bridge",
-            description: "桥接 Hermes 和 A2A",
+            id: "openlife.reasoning_bridge",
+            name: "推理桥接",
+            description: "桥接 OpenLife 和 A2A",
           },
         ],
       } as T);
@@ -708,7 +708,7 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         request: { method: _args?.method, params: { text: _args?.text } },
         a2a_request: { message: { parts: [{ type: "text", text: _args?.text }] } },
         response: { status: { state: "completed" } },
-        hermes_result: { text: "桥接成功" },
+        reasoning_result: { text: "桥接成功" },
       } as T);
     case "a2a_restart_sidecar":
     case "a2a_stop_sidecar":
