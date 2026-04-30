@@ -300,6 +300,26 @@ impl InferenceScheduler {
     /// Preview the routing decision for a chat request without actually calling the LLM.
     /// Returns a ModelRouteTrace describing which backend would be chosen and why.
     pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
+        // Use ModelRouter if available for accurate preview
+        if let Some(ref router) = self.model_router {
+            match router.route_chat(tools_prompt, self.prefer_local) {
+                Ok(decision) => {
+                    return decision.to_trace();
+                }
+                Err(e) => {
+                    // Fallback to legacy logic with error noted
+                    let mut trace = self.preview_chat_route_legacy(tools_prompt).await;
+                    trace.reason = format!("model_router_error: {}; fallback to legacy", e);
+                    trace.provider_health_is_estimated = Some(true);
+                    return trace;
+                }
+            }
+        }
+
+        self.preview_chat_route_legacy(tools_prompt).await
+    }
+
+    async fn preview_chat_route_legacy(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
         let resolved_local_model = resolve_ollama_model(&self.local_model).await;
         let ollama_available = resolved_local_model.is_some();
         let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);

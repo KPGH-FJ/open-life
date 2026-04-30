@@ -4,13 +4,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::State;
 
-use crate::AppState;
+use crate::{AppState, ProviderHealthCache};
 
 #[derive(serde::Serialize, Clone)]
 pub struct ProviderStatus {
     pub name: String,
     pub enabled: bool,
     pub available: bool,
+    pub configured: bool,
     pub health_is_estimated: bool,
     pub last_error: Option<String>,
     pub latency_ms: Option<u64>,
@@ -25,11 +26,29 @@ pub struct ModelRouterStatus {
     pub message: Option<String>,
 }
 
+
+
 #[tauri::command]
 pub async fn get_model_router_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ModelRouterStatus, String> {
     let cfg = state.config.lock().await.clone();
+
+    // Check cache first
+    if let Some(cache) = state.provider_health_cache.lock().await.as_ref() {
+        if cache.is_fresh() {
+            return Ok(ModelRouterStatus {
+                enabled: cfg.experimental_model_router,
+                providers: cache.providers.clone(),
+                last_check_at: Some(cache.checked_at.clone()),
+                message: if cfg.experimental_model_router {
+                    Some("Provider health cached (within 30s).".into())
+                } else {
+                    Some("ModelRouter is disabled; provider health is shown for diagnostics only.".into())
+                },
+            });
+        }
+    }
 
     let mut providers = Vec::new();
     let checked_at = chrono::Utc::now().to_rfc3339();
@@ -42,6 +61,7 @@ pub async fn get_model_router_status(
         name: "ollama".to_string(),
         enabled: scheduler.prefer_local,
         available: ollama_available,
+        configured: true, // Ollama is always "configured" if installed
         health_is_estimated: false,
         last_error: if ollama_available {
             None
@@ -68,11 +88,19 @@ pub async fn get_model_router_status(
         name: provider_name,
         enabled: has_key,
         available: cloud_available,
+        configured: has_key,
         health_is_estimated: false,
         last_error: cloud_error,
         latency_ms: cloud_latency,
         last_checked: Some(checked_at.clone()),
     });
+
+    // Update cache
+    let cache = ProviderHealthCache {
+        providers: providers.clone(),
+        checked_at: checked_at.clone(),
+    };
+    *state.provider_health_cache.lock().await = Some(cache);
 
     Ok(ModelRouterStatus {
         enabled: cfg.experimental_model_router && scheduler.model_router.is_some(),

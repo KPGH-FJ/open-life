@@ -342,6 +342,24 @@ fn init_proposal_store(
     }
 }
 
+/// Cached provider health data to avoid probing on every Settings open.
+#[derive(Clone)]
+pub struct ProviderHealthCache {
+    pub providers: Vec<crate::commands::router::ProviderStatus>,
+    pub checked_at: String,
+}
+
+impl ProviderHealthCache {
+    pub fn is_fresh(&self) -> bool {
+        if let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&self.checked_at) {
+            let elapsed = chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
+            elapsed.num_seconds() < 30 // Cache for 30 seconds
+        } else {
+            false
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Mutex<AppConfig>>,
@@ -370,6 +388,7 @@ pub struct AppState {
     pub hot_cache: SharedHotCache,
     pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
     pub startup_warnings: Vec<String>,
+    pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
 }
 
 impl AppState {
@@ -2661,6 +2680,7 @@ pub fn run() {
             engine
         })),
         startup_warnings,
+        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
     });
 
     let app_state_for_setup = app_state.clone();
