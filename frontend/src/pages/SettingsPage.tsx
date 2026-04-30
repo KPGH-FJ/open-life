@@ -40,6 +40,8 @@ import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import { isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import ProviderConfigSection from "./settings/ProviderConfigSection";
+import PluginSection from "./settings/PluginSection";
 
 function defaultConfig(): AppConfig {
   return {
@@ -62,68 +64,6 @@ function defaultConfig(): AppConfig {
   };
 }
 
-const PROVIDER_PRESETS: Record<
-  string,
-  { label: string; base: string; model: string; embed: boolean; test_url: string }
-> = {
-  deepseek: {
-    label: "DeepSeek",
-    base: "https://api.deepseek.com",
-    model: "deepseek-chat",
-    embed: false,
-    test_url: "https://api.deepseek.com/chat/completions",
-  },
-  openai: {
-    label: "OpenAI",
-    base: "https://api.openai.com/v1",
-    model: "gpt-4o-mini",
-    embed: true,
-    test_url: "https://api.openai.com/v1/chat/completions",
-  },
-  openrouter: {
-    label: "OpenRouter",
-    base: "https://openrouter.ai/api/v1",
-    model: "openai/gpt-4o-mini",
-    embed: true,
-    test_url: "https://openrouter.ai/api/v1/chat/completions",
-  },
-  siliconflow: {
-    label: "SiliconFlow",
-    base: "https://api.siliconflow.cn/v1",
-    model: "Qwen/Qwen2.5-72B-Instruct",
-    embed: false,
-    test_url: "https://api.siliconflow.cn/v1/chat/completions",
-  },
-  moonshot: {
-    label: "Moonshot/Kimi",
-    base: "https://api.moonshot.cn/v1",
-    model: "moonshot-v1-8k",
-    embed: false,
-    test_url: "https://api.moonshot.cn/v1/chat/completions",
-  },
-  dashscope: {
-    label: "通义千问",
-    base: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    model: "qwen-plus",
-    embed: false,
-    test_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-  },
-  zhipu: {
-    label: "智谱 GLM",
-    base: "https://open.bigmodel.cn/api/paas/v4",
-    model: "glm-4-flash",
-    embed: false,
-    test_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-  },
-  custom: {
-    label: "自定义",
-    base: "",
-    model: "",
-    embed: false,
-    test_url: "",
-  },
-};
-
 function normalizeConfig(config?: Partial<AppConfig> | null): AppConfig {
   const fallback = defaultConfig();
   return {
@@ -137,17 +77,6 @@ function normalizeConfig(config?: Partial<AppConfig> | null): AppConfig {
     },
   };
 }
-
-const LOCAL_MODEL_OPTIONS = [
-  { value: "llama2", label: "llama2" },
-  { value: "llama3", label: "llama3" },
-  { value: "llama3.1", label: "llama3.1" },
-  { value: "llama3.2", label: "llama3.2" },
-  { value: "qwen2.5", label: "qwen2.5" },
-  { value: "mistral", label: "mistral" },
-  { value: "gemma2", label: "gemma2" },
-  { value: "nomic-embed-text", label: "nomic-embed-text (仅嵌入)" },
-];
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -164,10 +93,6 @@ export default function SettingsPage() {
   const [tierResult, setTierResult] = useState<string | null>(null);
   const [rebuildLoading, setRebuildLoading] = useState(false);
   const [rebuildResult, setRebuildResult] = useState<string | null>(null);
-
-  const [apiTestLoading, setApiTestLoading] = useState(false);
-  const [apiTestResult, setApiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
-  const [ollamaOnline, setOllamaOnline] = useState<boolean | null>(null);
   const [exportLoading, setExportLoading] = useState(false);
   const [importLoading, setImportLoading] = useState(false);
   const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null);
@@ -179,10 +104,6 @@ export default function SettingsPage() {
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
-
-  const isDeepSeekReasoner =
-    (config.llm.provider ?? "deepseek") === "deepseek" &&
-    config.llm.chat_model.toLowerCase().includes("reasoner");
 
   useEffect(() => {
     getConfig()
@@ -227,30 +148,6 @@ export default function SettingsPage() {
     return diag;
   };
 
-  const updateLlm = (field: keyof AppConfig["llm"], value: string) => {
-    setConfig(prev => ({
-      ...prev,
-      llm: { ...prev.llm, [field]: value },
-    }));
-    setApiTestResult(null);
-  };
-
-  const updateProvider = (provider: NonNullable<AppConfig["llm"]["provider"]>) => {
-    const preset = PROVIDER_PRESETS[provider];
-    setConfig(prev => ({
-      ...prev,
-      llm: {
-        ...prev.llm,
-        provider,
-        openai_base: provider === "custom" ? prev.llm.openai_base : preset.base,
-        chat_model: provider === "custom" ? prev.llm.chat_model : preset.model,
-        embedding_enabled: preset.embed,
-      },
-      prefer_local_model: provider === "deepseek" ? false : prev.prefer_local_model,
-    }));
-    setApiTestResult(null);
-  };
-
   const handleSave = async () => {
     setSaving(true);
     setMessage(null);
@@ -262,20 +159,6 @@ export default function SettingsPage() {
       setMessage("保存失败: " + readableError(e));
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleTestApiKey = async () => {
-    setApiTestLoading(true);
-    setApiTestResult(null);
-    try {
-      const result = await testLlmConnection(config);
-      setApiTestResult({ ok: result.ok, text: `${result.provider}: ${result.message}` });
-      await refreshAllDiagnostics();
-    } catch (e: any) {
-      setApiTestResult({ ok: false, text: readableError(e) });
-    } finally {
-      setApiTestLoading(false);
     }
   };
 
@@ -487,8 +370,6 @@ export default function SettingsPage() {
     },
   ];
 
-  const provider = config.llm.provider ?? "deepseek";
-  const preset = PROVIDER_PRESETS[provider];
   const safeMode = isSafeMode(diagnostics);
   const betaFlow = [
     {
@@ -940,210 +821,11 @@ export default function SettingsPage() {
         </section>
 
         {/* LLM Settings */}
-        <section id="llm-settings" className="space-y-4 border-t pt-4">
-          <h3 className="text-sm font-medium text-gray-700">LLM 配置</h3>
-          <div className="grid gap-4">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">云端模型 Provider</label>
-              <div className="flex flex-wrap gap-2">
-                {Object.entries(PROVIDER_PRESETS).map(([key, p]) => (
-                  <button
-                    key={key}
-                    onClick={() => updateProvider(key as NonNullable<AppConfig["llm"]["provider"]>)}
-                    className={classNames(
-                      "rounded-md px-3 py-1.5 text-xs font-medium border transition",
-                      provider === key
-                        ? "bg-stone-900 text-amber-50 border-stone-900"
-                        : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
-                    )}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">API Base URL</label>
-              <input
-                type="text"
-                value={config.llm.openai_base}
-                onChange={e => updateLlm("openai_base", e.target.value)}
-                className="w-full border rounded-md px-3 py-2 text-sm"
-                placeholder={preset.base || "https://api.example.com/v1"}
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">API Key</label>
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  value={config.llm.openai_key}
-                  onChange={e => updateLlm("openai_key", e.target.value)}
-                  className="flex-1 border rounded-md px-3 py-2 text-sm"
-                  placeholder="sk-..."
-                />
-                <button
-                  onClick={handleTestApiKey}
-                  disabled={apiTestLoading}
-                  className="px-3 py-2 bg-slate-600 text-white rounded-md text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
-                >
-                  {apiTestLoading ? "测试中..." : "测试连接"}
-                </button>
-              </div>
-              {apiTestResult && (
-                <div
-                  className={classNames(
-                    "mt-1 text-xs",
-                    apiTestResult.ok ? "text-emerald-600" : "text-red-600"
-                  )}
-                >
-                  {apiTestResult.text}
-                </div>
-              )}
-              {diagnostics?.config_source === "env_var" && (
-                <div className="mt-1 text-xs text-blue-600">
-                  检测到 API Key 来自环境变量，配置文件中无需填写
-                </div>
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Chat Model</label>
-                <input
-                  type="text"
-                  value={config.llm.chat_model}
-                  onChange={e => updateLlm("chat_model", e.target.value)}
-                  className="w-full border rounded-md px-3 py-2 text-sm"
-                  placeholder={preset.model || "model-name"}
-                />
-                {isDeepSeekReasoner && (
-                  <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                    <div className="font-medium">当前选择的是 DeepSeek 推理模型</div>
-                    <div className="mt-1">
-                      `deepseek-reasoner`
-                      更适合长推理，不适合作为桌面端主聊天模型。当前聊天流会自动兜底为
-                      `deepseek-chat`，但为了减少等待和排障成本，建议你直接改成 `deepseek-chat`。
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => updateLlm("chat_model", "deepseek-chat")}
-                      className="mt-2 rounded-md border border-amber-300 bg-white px-2 py-1 text-xs font-medium text-amber-900 hover:bg-amber-100"
-                    >
-                      一键改为 deepseek-chat
-                    </button>
-                  </div>
-                )}
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Embedding Model</label>
-                <input
-                  type="text"
-                  value={config.llm.embedding_model}
-                  onChange={e => updateLlm("embedding_model", e.target.value)}
-                  className="w-full border rounded-md px-3 py-2 text-sm"
-                  disabled={config.llm.embedding_enabled === false}
-                  placeholder="text-embedding-3-small"
-                />
-                <label className="mt-2 flex items-center gap-2 text-xs text-gray-600">
-                  <input
-                    type="checkbox"
-                    checked={config.llm.embedding_enabled !== false}
-                    onChange={e =>
-                      setConfig(prev => ({
-                        ...prev,
-                        llm: { ...prev.llm, embedding_enabled: e.target.checked },
-                      }))
-                    }
-                  />
-                  启用远端 embedding（DeepSeek 默认关闭）
-                </label>
-                {provider === "deepseek" && (
-                  <div className="mt-2 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                    DeepSeek 主要用于聊天，不建议把它当作长期记忆的远端 embedding 服务。 OpenLife
-                    会优先使用本地/Ollama 或哈希向量回退；如果历史聊天很多但记忆仍为空，
-                    请先保存当前设置，再去恢复控制台重建向量索引。
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* Local Model */}
-        <section id="local-model-settings" className="space-y-4 border-t pt-4">
-          <h3 className="text-sm font-medium text-gray-700">本地模型（Ollama）</h3>
-          <div className="flex items-center gap-3">
-            <input
-              id="prefer_local"
-              type="checkbox"
-              checked={config.prefer_local_model}
-              onChange={e => setConfig(prev => ({ ...prev, prefer_local_model: e.target.checked }))}
-              className="h-4 w-4"
-            />
-            <label htmlFor="prefer_local" className="text-sm text-gray-700">
-              优先使用本地模型（Ollama）
-            </label>
-          </div>
-          <div className="grid grid-cols-2 gap-4 items-end">
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">本地模型名称</label>
-              <select
-                value={config.local_model}
-                onChange={e => setConfig(prev => ({ ...prev, local_model: e.target.value }))}
-                className="w-full border rounded-md px-3 py-2 text-sm bg-white"
-              >
-                {LOCAL_MODEL_OPTIONS.map(opt => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="text-sm">
-              {ollamaOnline === null ? (
-                <span className="text-gray-400">正在检测 Ollama...</span>
-              ) : ollamaOnline ? (
-                <span className="text-emerald-600">● Ollama 在线</span>
-              ) : (
-                <span className="text-red-600">● Ollama 离线</span>
-              )}
-            </div>
-          </div>
-          {diagnostics && diagnostics.ollama_models && diagnostics.ollama_models.length > 0 && (
-            <div className="rounded-lg border border-emerald-200 bg-emerald-50/40 p-3">
-              <div className="text-xs font-medium text-emerald-800 mb-2">
-                检测到以下 Ollama 模型：
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {diagnostics.ollama_models.map(m => (
-                  <button
-                    key={m.name}
-                    onClick={() => setConfig(prev => ({ ...prev, local_model: m.name }))}
-                    className={classNames(
-                      "rounded-full px-2.5 py-1 text-xs border transition",
-                      config.local_model === m.name
-                        ? "bg-emerald-600 text-white border-emerald-600"
-                        : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
-                    )}
-                    title={`${m.size_mb} MB`}
-                  >
-                    {m.name}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {ollamaOnline === false && (
-            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 space-y-1">
-              <div className="font-medium">Ollama 未检测到，可能的原因：</div>
-              <ul className="list-disc pl-4 space-y-0.5">
-                <li>Ollama 尚未安装：访问 ollama.com 下载安装</li>
-                <li>Ollama 未启动：在终端运行 ollama serve</li>
-                <li>使用了非默认端口：当前只检测 localhost:11434</li>
-              </ul>
-            </div>
-          )}
-        </section>
+        <ProviderConfigSection
+          config={config}
+          onConfigChange={setConfig}
+          diagnostics={diagnostics}
+        />
 
         {/* Router */}
         <section className="space-y-4 border-t pt-4">
@@ -1664,71 +1346,12 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        {/* Local Plugins */}
-        <section className="space-y-4 border-t pt-4">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-medium text-gray-700">本地 Plugins</h3>
-              <p className="mt-1 text-xs text-gray-500">
-                当前只读取本地 manifest，不执行远程代码；禁用后相关 tool / skill 不会进入注册表。
-              </p>
-            </div>
-            <button
-              onClick={async () => {
-                const records = await reloadPlugins();
-                setPlugins(records);
-              }}
-              className="rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-            >
-              重新加载
-            </button>
-          </div>
-          <div className="space-y-2">
-            {plugins.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
-                暂未发现本地 plugin manifest。
-              </div>
-            ) : (
-              plugins.map(plugin => (
-                <div
-                  key={plugin.manifest.id}
-                  className="rounded-lg border border-gray-200 bg-white px-3 py-3"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-gray-900">
-                        {plugin.manifest.name}
-                      </div>
-                      <div className="mt-1 text-xs text-gray-500">
-                        {plugin.manifest.id} · v{plugin.manifest.version} ·{" "}
-                        {plugin.enabled ? "enabled" : "disabled"}
-                      </div>
-                    </div>
-                    <button
-                      onClick={async () => {
-                        if (plugin.enabled) {
-                          await disablePlugin(plugin.manifest.id);
-                        } else {
-                          await enablePlugin(plugin.manifest.id);
-                        }
-                        await refreshAllDiagnostics();
-                      }}
-                      disabled={Boolean(plugin.error)}
-                      className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                    >
-                      {plugin.enabled ? "禁用" : "启用"}
-                    </button>
-                  </div>
-                  {plugin.error && (
-                    <div className="mt-2 rounded-md bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
-                      {plugin.error}
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </section>
+        <PluginSection
+          plugins={plugins}
+          diagnostics={diagnostics}
+          onPluginsChange={setPlugins}
+          onRefreshDiagnostics={refreshAllDiagnostics}
+        />
 
         {/* Maintenance */}
         <section className="space-y-4 border-t pt-4">

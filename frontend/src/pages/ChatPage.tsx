@@ -1,16 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
-  Send,
   Loader2,
   ThumbsUp,
   ThumbsDown,
   Hammer,
   ArrowRight,
   X,
-  Plus,
-  Trash2,
-  Edit2,
   MessageSquare,
   Target,
   Activity,
@@ -59,6 +55,8 @@ import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
+import ChatSidebar from "./chat/ChatSidebar";
+import ChatInputArea from "./chat/ChatInputArea";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -977,80 +975,22 @@ export default function ChatPage() {
 
   return (
     <div className="h-full flex bg-white">
-      {/* Sidebar */}
-      <div className="w-64 border-r bg-gray-50 flex flex-col">
-        <div className="px-4 py-3 border-b flex items-center justify-between">
-          <span className="text-sm font-semibold text-gray-700">会话</span>
-          <button
-            onClick={handleNewSession}
-            className="p-1.5 rounded-md hover:bg-gray-200 text-gray-600"
-            title="新建会话"
-          >
-            <Plus size={16} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-auto py-2 space-y-1">
-          {sessions.map(s => (
-            <div
-              key={s.session_id}
-              className={`mx-2 px-3 py-2 rounded-md flex items-center gap-2 cursor-pointer group ${
-                s.session_id === currentSessionId
-                  ? "bg-indigo-100 text-indigo-900"
-                  : "hover:bg-gray-200 text-gray-700"
-              }`}
-              onClick={() => setCurrentSessionId(s.session_id)}
-            >
-              <MessageSquare size={16} className="shrink-0" />
-              {editingId === s.session_id ? (
-                <input
-                  autoFocus
-                  className="flex-1 min-w-0 text-sm bg-white border rounded px-1"
-                  value={editingTitle}
-                  onChange={e => setEditingTitle(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") commitEditTitle();
-                    if (e.key === "Escape") {
-                      setEditingId(null);
-                      setEditingTitle("");
-                    }
-                  }}
-                  onBlur={commitEditTitle}
-                  onClick={e => e.stopPropagation()}
-                />
-              ) : (
-                <span className="flex-1 min-w-0 truncate text-sm">{s.title}</span>
-              )}
-              {editingId !== s.session_id && (
-                <div className="hidden group-hover:flex items-center gap-1">
-                  <button
-                    onClick={e => {
-                      e.stopPropagation();
-                      startEditTitle(s);
-                    }}
-                    className="p-1 rounded hover:bg-gray-300 text-gray-500"
-                    title="重命名"
-                  >
-                    <Edit2 size={12} />
-                  </button>
-                  <button
-                    onClick={e => {
-                      e.stopPropagation();
-                      handleDeleteSession(s.session_id);
-                    }}
-                    className="p-1 rounded hover:bg-red-100 text-gray-500 hover:text-red-600"
-                    title="删除"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-          {sessions.length === 0 && (
-            <EmptyState title="暂无会话" description="点击 + 新建一个会话" className="py-6" />
-          )}
-        </div>
-      </div>
+      <ChatSidebar
+        sessions={sessions}
+        currentSessionId={currentSessionId}
+        editingId={editingId}
+        editingTitle={editingTitle}
+        onSelectSession={setCurrentSessionId}
+        onNewSession={handleNewSession}
+        onStartEditTitle={startEditTitle}
+        onCommitEditTitle={commitEditTitle}
+        onCancelEditTitle={() => {
+          setEditingId(null);
+          setEditingTitle("");
+        }}
+        onEditTitleChange={setEditingTitle}
+        onDeleteSession={handleDeleteSession}
+      />
 
       {/* Chat area */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -1448,93 +1388,17 @@ export default function ChatPage() {
           )}
           <div ref={bottomRef} />
         </div>
-        <div className="border-t px-6 py-4 bg-white">
-          <div className="max-w-3xl mx-auto space-y-2">
-            {diagnostics && !diagnostics.chat_ready && diagnostics.readiness_issues.length > 0 && (
-              <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                <div className="font-medium mb-1">普通对话暂不可用，快捷指令仍可使用：</div>
-                <ul className="list-disc pl-4 space-y-1">
-                  {diagnostics.readiness_issues.map(issue => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {(() => {
-              const fix = getFixSuggestion(diagnostics);
-              if (!fix) return null;
-              return (
-                <div className="rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800 flex items-center justify-between">
-                  <span>{fix.text}</span>
-                  <Link
-                    to={fix.link}
-                    className="ml-3 px-2 py-1 rounded-md bg-blue-600 text-white text-[10px] font-medium hover:bg-blue-700"
-                  >
-                    {fix.action}
-                  </Link>
-                </div>
-              );
-            })()}
-            {streamInterrupted && (
-              <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800 flex items-center justify-between">
-                <span>对话被中断。你可以点击继续，或重新输入。</span>
-                <button
-                  onClick={handleContinueStream}
-                  className="ml-3 px-2 py-1 rounded-md bg-amber-600 text-white text-[10px] font-medium hover:bg-amber-700"
-                >
-                  继续生成
-                </button>
-              </div>
-            )}
-            <div className="flex items-center gap-2 text-xs text-gray-500">
-              <span className="font-medium text-gray-600">快捷指令:</span>
-              <button
-                onClick={() => setInput("/goal ")}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700"
-                title="查看今日目标"
-              >
-                <Target size={12} /> /goal
-              </button>
-              <button
-                onClick={() => setInput("/state ")}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700"
-                title="记录状态"
-              >
-                <Activity size={12} /> /state
-              </button>
-              <button
-                onClick={retryLastUserMessage}
-                disabled={sending || !lastUserMessageRef.current}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-gray-100 hover:bg-gray-200 text-gray-700 disabled:opacity-40"
-                title="重新填入上一条用户消息"
-              >
-                重试上一条
-              </button>
-            </div>
-            <div className="flex gap-3">
-              <textarea
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                rows={2}
-                placeholder="输入消息，按 Enter 发送..."
-                className="flex-1 resize-none border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              />
-              <button
-                onClick={handleSend}
-                disabled={sending || !input.trim()}
-                className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-              >
-                <Send size={18} />
-              </button>
-            </div>
-          </div>
-        </div>
+        <ChatInputArea
+          input={input}
+          sending={sending}
+          streamInterrupted={streamInterrupted}
+          diagnostics={diagnostics}
+          onInputChange={setInput}
+          onSend={handleSend}
+          onContinueStream={handleContinueStream}
+          onRetryLastMessage={retryLastUserMessage}
+          getFixSuggestion={getFixSuggestion}
+        />
       </div>
     </div>
   );
