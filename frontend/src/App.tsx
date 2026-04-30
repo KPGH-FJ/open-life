@@ -126,7 +126,7 @@ function App() {
             <LayoutDashboard size={16} /> Workspace
           </NavLink>
           <NavLink to="/agent" className={navClass}>
-            <MessageSquare size={16} /> Agent
+            <MessageSquare size={16} /> Chat
           </NavLink>
           <NavLink to="/builder" className={navClass}>
             <Hammer size={16} /> LifeModel
@@ -162,6 +162,9 @@ function App() {
               </NavLink>
               <NavLink to="/metrics" className={navClass}>
                 <Activity size={16} /> 监控
+              </NavLink>
+              <NavLink to="/calibration" className={navClass}>
+                <Settings size={16} /> 校准
               </NavLink>
             </div>
           </details>

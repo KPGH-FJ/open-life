@@ -249,91 +249,105 @@ export default function AgentRunDetail() {
             </div>
           )}
 
-          {run.actions.length > 0 && (
+          {(run.actions.length > 0 || run.observations.length > 0) && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                动作 ({run.actions.length})
+                执行时间线 ({run.actions.length + run.observations.length})
               </h3>
               <div className="space-y-2">
-                {run.actions.map(action => (
-                  <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm">
-                    <div className="font-medium text-stone-800 flex items-center gap-2">
-                      {action.actionType}
-                      {action.target ? ` · ${action.target}` : ""}
-                      {action.status === "needs_confirmation" && (
-                        <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
-                          <AlertTriangle size={12} /> 待确认
-                        </span>
-                      )}
-                    </div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
-                      {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
-                    </div>
-                    {action.toolScope && (
-                      <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
-                        <div className="font-medium mb-1">Tool Scope:</div>
-                        <div>Tool: {action.toolScope.toolName}</div>
-                        <div>Source: {action.toolScope.source}</div>
-                        <div>Risk: {action.toolScope.riskLevel}</div>
-                        <div>Capabilities: {action.toolScope.capabilities.join(", ") || "none"}</div>
-                      </div>
-                    )}
-                    {action.status === "needs_confirmation" && (
-                      <div className="mt-2">
-                        <button
-                          onClick={async () => {
-                            try {
-                              await replayAgentAction(run.id, action.id);
-                              await loadRun(run.id);
-                            } catch (e) {
-                              alert(`Replay failed: ${e}`);
-                            }
-                          }}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
-                        >
-                          <Play size={12} />
-                          重新执行
-                        </button>
-                      </div>
-                    )}
-                    {action.error && (
-                      <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                        {action.error}
-                      </div>
-                    )}
-                    {action.output && (
-                      <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                        {JSON.stringify(action.output, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {run.observations.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                观察 ({run.observations.length})
-              </h3>
-              <div className="space-y-2">
-                {run.observations.map(obs => (
-                  <div key={obs.id} className="bg-stone-50 rounded-lg p-3 text-sm">
-                    <div className="text-stone-800">{obs.content}</div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      Source: {obs.source}
-                      {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""} ·{" "}
-                      {new Date(obs.timestamp).toLocaleString()}
-                    </div>
-                    {obs.structuredResult && (
-                      <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                        {JSON.stringify(obs.structuredResult, null, 2)}
-                      </pre>
-                    )}
-                  </div>
-                ))}
+                {(() => {
+                  const timeline = [
+                    ...run.actions.map(a => ({ type: 'action' as const, item: a })),
+                    ...run.observations.map(o => ({ type: 'observation' as const, item: o })),
+                  ];
+                  timeline.sort((a, b) => {
+                    const timeA = new Date(a.item.timestamp).getTime();
+                    const timeB = new Date(b.item.timestamp).getTime();
+                    return timeA - timeB;
+                  });
+                  return timeline.map((entry, idx) => {
+                    if (entry.type === 'action') {
+                      const action = entry.item;
+                      return (
+                        <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400">
+                          <div className="font-medium text-stone-800 flex items-center gap-2">
+                            <span className="text-blue-600 text-xs font-bold">ACTION</span>
+                            {action.actionType}
+                            {action.target ? ` · ${action.target}` : ""}
+                            {action.status === "needs_confirmation" && (
+                              <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
+                                <AlertTriangle size={12} /> 待确认
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-stone-500 mt-1">
+                            Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
+                            {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
+                          </div>
+                          {action.toolScope && (
+                            <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                              <div className="font-medium mb-1">Tool Scope:</div>
+                              <div>Tool: {action.toolScope.toolName}</div>
+                              <div>Source: {action.toolScope.source}</div>
+                              <div>Risk: {action.toolScope.riskLevel}</div>
+                              <div>Capabilities: {action.toolScope.capabilities.join(", ") || "none"}</div>
+                            </div>
+                          )}
+                          {action.status === "needs_confirmation" && (
+                            <div className="mt-2">
+                              <button
+                                onClick={async () => {
+                                  try {
+                                    await replayAgentAction(run.id, action.id);
+                                    await loadRun(run.id);
+                                  } catch (e) {
+                                    alert(`Replay failed: ${e}`);
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
+                              >
+                                <Play size={12} />
+                                重新执行
+                              </button>
+                            </div>
+                          )}
+                          {action.error && (
+                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                              {action.error}
+                            </div>
+                          )}
+                          {action.output && (
+                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                              {JSON.stringify(action.output, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      );
+                    } else {
+                      const obs = entry.item;
+                      return (
+                        <div key={obs.id} className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
+                            <span className="text-xs text-stone-500">
+                              {new Date(obs.timestamp).toLocaleString()}
+                            </span>
+                          </div>
+                          <div className="text-stone-800">{obs.content}</div>
+                          <div className="text-xs text-stone-500 mt-1">
+                            Source: {obs.source}
+                            {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
+                          </div>
+                          {obs.structuredResult && (
+                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                              {JSON.stringify(obs.structuredResult, null, 2)}
+                            </pre>
+                          )}
+                        </div>
+                      );
+                    }
+                  });
+                })()}
               </div>
             </div>
           )}

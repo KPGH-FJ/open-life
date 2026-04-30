@@ -49,7 +49,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
       {call.requires_confirmation && (
         <div className="rounded-md bg-orange-50 border border-orange-100 p-3 space-y-2">
           <p className="text-xs text-orange-800">
-            该工具调用涉及高风险操作或敏感参数。确认后才会真正执行。
+            该工具调用涉及高风险操作或敏感参数。你可以在 Review Center 查看和授权，或在此直接确认。
           </p>
           {call.privacy_warnings && call.privacy_warnings.length > 0 && (
             <div className="text-xs text-orange-900 bg-white/80 rounded p-2">
