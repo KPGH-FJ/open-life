@@ -1,19 +1,6 @@
 import { Component, ReactNode, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import {
-  Map,
-  MessageSquare,
-  GitBranch,
-  Brain,
-  Network,
-  Hammer,
-  LayoutDashboard,
-  Settings,
-  Wrench,
-  Sparkles,
-  Activity,
-  ShieldCheck,
-} from "lucide-react";
+import { Brain, Hammer, LayoutDashboard, Settings, Sparkles, ShieldCheck, Bot } from "lucide-react";
 import LifeMapPage from "./pages/LifeMapPage";
 import ChatPage from "./pages/ChatPage";
 import VersionControl from "./pages/VersionControl";
@@ -126,48 +113,20 @@ function App() {
             <LayoutDashboard size={16} /> Workspace
           </NavLink>
           <NavLink to="/agent" className={navClass}>
-            <MessageSquare size={16} /> Chat
+            <Bot size={16} /> Agent
           </NavLink>
-          <NavLink to="/builder" className={navClass}>
-            <Hammer size={16} /> LifeModel
+          <NavLink to="/life" className={navClass}>
+            <Hammer size={16} /> Life
           </NavLink>
           <NavLink to="/memory" className={navClass}>
             <Brain size={16} /> Memory
-          </NavLink>
-          <NavLink to="/runs" className={navClass}>
-            <Activity size={16} /> Runs
           </NavLink>
           <NavLink to="/review" className={navClass}>
             <ShieldCheck size={16} /> Review
           </NavLink>
           <NavLink to="/settings" className={navClass}>
-            <Settings size={16} /> 设置
+            <Settings size={16} /> Settings
           </NavLink>
-          <details className="relative group">
-            <summary className="list-none flex items-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium text-stone-600 hover:bg-stone-100 cursor-pointer">
-              <Wrench size={16} /> 高级
-            </summary>
-            <div className="absolute right-0 z-20 mt-2 w-44 rounded-xl border border-stone-200 bg-white p-2 shadow-lg">
-              <NavLink to="/map" className={navClass}>
-                <Map size={16} /> 人生地图
-              </NavLink>
-              <NavLink to="/versions" className={navClass}>
-                <GitBranch size={16} /> 版本控制
-              </NavLink>
-              <NavLink to="/mcp" className={navClass}>
-                <Wrench size={16} /> MCP
-              </NavLink>
-              <NavLink to="/a2a" className={navClass}>
-                <Network size={16} /> A2A
-              </NavLink>
-              <NavLink to="/metrics" className={navClass}>
-                <Activity size={16} /> 监控
-              </NavLink>
-              <NavLink to="/calibration" className={navClass}>
-                <Settings size={16} /> 校准
-              </NavLink>
-            </div>
-          </details>
         </nav>
       </header>
       {safeMode && diagnostics && (
@@ -219,22 +178,28 @@ function App() {
       <main className="flex-1 overflow-hidden">
         <ErrorBoundary>
           <Routes>
-            <Route path="/workspace" element={<DashboardPage />} />
             <Route path="/" element={<DashboardPage />} />
-            <Route path="/map" element={<LifeMapPage />} />
+            <Route path="/workspace" element={<DashboardPage />} />
+            {/* Agent: Chat + Runs */}
             <Route path="/agent" element={<ChatPage />} />
             <Route path="/chat" element={<ChatPage />} />
-            <Route path="/versions" element={<VersionControl />} />
-            <Route path="/memory" element={<MemorySearch />} />
-            <Route path="/a2a" element={<A2APage />} />
-            <Route path="/mcp" element={<McpPage />} />
-            <Route path="/builder" element={<BuilderPage />} />
-            <Route path="/calibration" element={<CalibrationPage />} />
             <Route path="/runs" element={<RunsPage />} />
             <Route path="/runs/:runId" element={<AgentRunDetail />} />
+            {/* Life: Builder + LifeModel */}
+            <Route path="/life" element={<BuilderPage />} />
+            <Route path="/builder" element={<BuilderPage />} />
+            <Route path="/map" element={<LifeMapPage />} />
+            {/* Memory */}
+            <Route path="/memory" element={<MemorySearch />} />
+            {/* Review */}
             <Route path="/review" element={<ProposalReviewPage />} />
-            <Route path="/metrics" element={<MetricsPage />} />
+            {/* Settings + Experimental */}
             <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/versions" element={<VersionControl />} />
+            <Route path="/mcp" element={<McpPage />} />
+            <Route path="/a2a" element={<A2APage />} />
+            <Route path="/calibration" element={<CalibrationPage />} />
+            <Route path="/metrics" element={<MetricsPage />} />
           </Routes>
         </ErrorBoundary>
       </main>

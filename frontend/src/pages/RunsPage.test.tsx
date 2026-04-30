@@ -66,7 +66,7 @@ describe("RunsPage contract", () => {
     });
     expect(screen.getByText(/camel case user input/)).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("回收站"));
+    fireEvent.click(screen.getByText("已删除"));
     await waitFor(() => {
       expect(screen.getByText("hidden by default")).toBeInTheDocument();
     });

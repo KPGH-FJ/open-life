@@ -101,7 +101,29 @@ pub async fn run_skill(
     input: Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SkillRunResponse, String> {
-    // 1. Get manifest and build prompts
+    // 1. Build enhanced SkillContext and load LifeModel
+    let (life_model, skill_context) = {
+        let manager = state.life_model_manager.lock().await;
+        let lm = manager.load().map_err(|e| e.to_string())?;
+
+        // Build enhanced SkillContext
+        let mut ctx = openlife_core::skills::SkillContext {
+            life_model_json: Some(serde_json::to_string(&lm).unwrap_or_default()),
+            ..Default::default()
+        };
+
+        // Load recent runs
+        if let Some(ref store_arc) = state.agent_run_store {
+            let store = store_arc.lock().await;
+            if let Ok(runs) = store.list_runs(10, 0) {
+                ctx.recent_runs_json = Some(serde_json::to_string(&runs).unwrap_or_default());
+            }
+        }
+
+        (lm, ctx)
+    };
+
+    // 2. Get manifest and build prompts
     let (system_prompt, skill_prompt) = {
         let registry = state.skill_registry.lock().await;
         let _manifest = registry
@@ -111,20 +133,11 @@ pub async fn run_skill(
             .build_system_prompt(&skill_id)
             .map_err(|e| e.to_string())?;
         let prompt = registry
-            .build_skill_prompt(
-                &skill_id,
-                &input,
-                &openlife_core::skills::SkillContext::default(),
-            )
+            .build_skill_prompt(&skill_id, &input, &skill_context)
             .map_err(|e| e.to_string())?;
         (system, prompt)
     };
 
-    // 2. Build AgentRuntime
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
-    };
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
     let agent_runtime =
@@ -177,8 +190,8 @@ pub async fn run_skill(
                 openlife_core::skills::SkillJsonEnvelope {
                     summary: "JSON 解析失败".to_string(),
                     structured_output: serde_json::json!({
-                        "raw_output": model_output,
-                        "parse_error": e
+                        "raw_output": model_output.clone(),
+                        "parse_error": e.clone()
                     }),
                     proposal_candidates: vec![],
                     warnings: vec![format!("解析错误: {}", e)],
@@ -187,6 +200,17 @@ pub async fn run_skill(
             )
         }
     };
+
+    // 6.5. Validate envelope with fail-soft strategy
+    if parse_error.is_none() {
+        let (validated, validation_warnings) =
+            openlife_core::skills::validate_skill_envelope(envelope, &model_output);
+        envelope = validated;
+        // Log validation warnings
+        for warning in &validation_warnings {
+            eprintln!("[Skill Validation] {}", warning);
+        }
+    }
 
     let mut validated_candidates = Vec::new();
     if parse_error.is_none() {
@@ -226,7 +250,8 @@ pub async fn run_skill(
     );
     run.reasoning_trace = Some(runtime_output.reasoning_trace);
 
-    // Set status based on parse result
+    // Set status based on parse/validation result
+    let has_warnings = parse_error.is_some() || !envelope.warnings.is_empty();
     if parse_error.is_some() {
         run.status = openlife_core::agent::AgentRunStatus::Completed;
         run.error = Some(openlife_core::agent::AgentRunError {
@@ -242,7 +267,7 @@ pub async fn run_skill(
         target: Some(skill_id.clone()),
         input: input.clone(),
         output: Some(serde_json::to_value(&envelope).unwrap_or_default()),
-        status: if parse_error.is_some() {
+        status: if has_warnings {
             "completed_with_warnings".into()
         } else {
             "succeeded".into()
@@ -254,10 +279,21 @@ pub async fn run_skill(
         error: parse_error.clone(),
         timestamp: chrono::Utc::now(),
     });
+    // Build observation content including warnings
+    let observation_content = if envelope.warnings.is_empty() {
+        envelope.summary.clone()
+    } else {
+        format!(
+            "{}\n\n[Warnings]\n{}",
+            envelope.summary,
+            envelope.warnings.join("\n")
+        )
+    };
+
     run.observations.push(AgentObservation {
         id: local_id("observation"),
         action_id: run.actions.first().map(|a| a.id.clone()),
-        content: envelope.summary.clone(),
+        content: observation_content,
         source: format!("skill:{}", skill_id),
         structured_result: Some(serde_json::to_value(&envelope).unwrap_or_default()),
         timestamp: chrono::Utc::now(),
@@ -295,7 +331,7 @@ pub async fn run_skill(
 
     Ok(SkillRunResponse {
         run_id: run.id,
-        status: if parse_error.is_some() {
+        status: if has_warnings {
             "completed_with_warnings".into()
         } else {
             "completed".into()
@@ -333,7 +369,8 @@ pub async fn reload_plugins(
     let mut registry = state.plugin_registry.lock().await;
     let records = registry.reload().map_err(|e| e.to_string())?;
 
-    // Sync plugin tools to McpRegistry
+    // Plugin tools are declarative-only in Beta; do not register them to McpRegistry.
+    // They remain visible in PluginRegistry for manifest inspection only.
     {
         let mut mcp = state.mcp_registry.lock().await;
         mcp.remove_builtins_by_source(|source| {
@@ -342,24 +379,6 @@ pub async fn reload_plugins(
                 openlife_core::tool_manifest::ToolSource::Plugin { .. }
             )
         });
-        for record in &records {
-            if record.enabled && record.error.is_none() {
-                for tool in &record.manifest.tools {
-                    let mut tool_clone = tool.clone();
-                    tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
-                        plugin_id: record.manifest.id.clone(),
-                    };
-                    mcp.register_builtin(
-                        tool_clone,
-                        Box::new(|_args| {
-                            Err(anyhow::anyhow!(
-                                "Plugin tool execution is not yet implemented"
-                            ))
-                        }),
-                    );
-                }
-            }
-        }
     }
 
     // Sync plugin skills to SkillRegistry
@@ -401,24 +420,8 @@ pub async fn enable_plugin(
             .find(|r| r.manifest.id == plugin_id)
         {
             if record.enabled && record.error.is_none() {
-                // Register tools
-                let mut mcp = state.mcp_registry.lock().await;
-                for tool in &record.manifest.tools {
-                    let mut tool_clone = tool.clone();
-                    tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
-                        plugin_id: plugin_id.clone(),
-                    };
-                    mcp.register_builtin(
-                        tool_clone,
-                        Box::new(|_args| {
-                            Err(anyhow::anyhow!(
-                                "Plugin tool execution is not yet implemented"
-                            ))
-                        }),
-                    );
-                }
-
-                // Register skills
+                // Plugin tools are declarative-only in Beta; do not register to McpRegistry.
+                // Register skills only
                 let mut skill_reg = state.skill_registry.lock().await;
                 for skill in &record.manifest.skills {
                     let mut skill_clone = skill.clone();

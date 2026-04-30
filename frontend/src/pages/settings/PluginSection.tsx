@@ -44,7 +44,7 @@ export default function PluginSection({
         <div>
           <h3 className="text-sm font-medium text-gray-700">本地 Plugins</h3>
           <p className="mt-1 text-xs text-gray-500">
-            当前只读取本地 manifest，不执行远程代码；禁用后相关 tool / skill 不会进入注册表。
+            Beta 阶段 Plugin 仅做声明展示，tools 不可执行，skills 仅注册声明。不执行远程代码。
           </p>
         </div>
         <button
@@ -85,6 +85,23 @@ export default function PluginSection({
               {plugin.error && (
                 <div className="mt-2 rounded-md bg-rose-50 px-2 py-1.5 text-xs text-rose-700">
                   {plugin.error}
+                </div>
+              )}
+              {plugin.enabled && !plugin.error && (
+                <div className="mt-2 space-y-1">
+                  {plugin.manifest.tools.length > 0 && (
+                    <div className="text-xs text-gray-500">
+                      <span className="font-medium">Tools (声明):</span>{" "}
+                      {plugin.manifest.tools.map(t => t.name).join(", ")}
+                      <span className="ml-1 text-amber-600">[暂不可执行]</span>
+                    </div>
+                  )}
+                  {plugin.manifest.skills.length > 0 && (
+                    <div className="text-xs text-gray-500">
+                      <span className="font-medium">Skills:</span>{" "}
+                      {plugin.manifest.skills.map(s => s.name).join(", ")}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

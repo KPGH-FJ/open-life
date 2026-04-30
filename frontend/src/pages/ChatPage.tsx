@@ -578,13 +578,21 @@ export default function ChatPage() {
         )
       );
     } catch (e) {
+      const errMsg = String(e);
+      // 如果是因为未授权，保持 pending 状态，不改为 error
+      if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
+        // 保持 requires_confirmation: true，让用户去 Review Center 授权
+        console.warn("Tool call still needs authorization:", errMsg);
+        throw e; // 抛出错误让 ToolCallCard 显示提示
+      }
+      // 其他错误才标记为失败
       setToolCalls(prev =>
         prev.map((item, idx) =>
           idx === index
             ? {
                 ...item,
                 success: false,
-                error: String(e),
+                error: errMsg,
                 status: "error",
                 requires_confirmation: false,
               }

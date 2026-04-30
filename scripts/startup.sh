@@ -14,13 +14,13 @@
 # 前提条件:
 #   - Rust >= 1.75    (https://rustup.rs/)
 #   - Node.js >= 18   (https://nodejs.org/)
-#   - pnpm >= 8（推荐）或 npm（已内置 fallback）
+#   - pnpm >= 9（通过 Corepack 启用）
 #   - Tauri CLI       (pnpm add -g @tauri-apps/cli)
 #   - Ollama (可选)   (https://ollama.com/)
 #
 # 常见问题:
 #   Q: 提示 "command not found: pnpm"
-#   A: 可以直接使用 npm fallback 继续启动；如需 pnpm 可运行 "npm install -g pnpm"
+#   A: 运行 "corepack enable && corepack prepare pnpm@9.1.0 --activate"
 #
 #   Q: 提示 "Rust compiler not found"
 #   A: 访问 https://rustup.rs/ 安装 Rust
@@ -49,9 +49,10 @@ NC='\033[0m' # No Color
 
 # 配置
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
-TAURI_DIR="$SCRIPT_DIR/src-tauri"
-ENV_FILE="$SCRIPT_DIR/.env"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRONTEND_DIR="$REPO_ROOT/frontend"
+TAURI_DIR="$REPO_ROOT/src-tauri"
+ENV_FILE="$REPO_ROOT/.env"
 A2A_PORT="${A2A_PORT:-8765}"
 VITE_PORT="${PORT:-5173}"
 
@@ -158,12 +159,12 @@ check_environment() {
 
     # 检查核心依赖
     check_command "node" || has_errors=1
-    if check_command "pnpm"; then
-        :
-    elif check_command "npm"; then
-        log_warn "pnpm 未安装，将使用 npm fallback 启动前端 Tauri CLI"
-    else
+    if ! check_command "corepack" || ! corepack pnpm --version &>/dev/null; then
+        log_warn "pnpm 不可用"
+        log_info "请运行: corepack prepare pnpm@9.1.0 --activate"
         has_errors=1
+    else
+        log_success "pnpm 可用 ($(corepack pnpm --version))"
     fi
     check_command "rustc" || has_errors=1
     check_command "cargo" || has_errors=1
@@ -176,7 +177,7 @@ check_environment() {
     # 检查 Tauri CLI
     if ! check_command "tauri"; then
         if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
-            log_success "Tauri CLI 存在于 node_modules (可使用 pnpm 或 npm exec tauri)"
+            log_success "Tauri CLI 存在于 node_modules (使用 pnpm exec tauri)"
         else
             log_warn "Tauri CLI 未全局安装，将在首次运行时通过 pnpm 安装"
         fi
@@ -206,7 +207,7 @@ check_environment() {
         echo "快速安装指南:"
         echo "  Rust:    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
         echo "  Node.js: https://nodejs.org/"
-        echo "  pnpm:    npm install -g pnpm   (推荐，可选)"
+        echo "  pnpm:    corepack enable && corepack prepare pnpm@9.1.0 --activate"
         echo "  Tauri:   pnpm add -g @tauri-apps/cli  或使用项目内 CLI"
         exit 1
     fi
@@ -223,8 +224,8 @@ setup_env() {
 
     # 创建 .env 文件（如果不存在）
     if [ ! -f "$ENV_FILE" ]; then
-        if [ -f "$SCRIPT_DIR/.env.template" ]; then
-            cp "$SCRIPT_DIR/.env.template" "$ENV_FILE"
+        if [ -f "$REPO_ROOT/.env.template" ]; then
+            cp "$REPO_ROOT/.env.template" "$ENV_FILE"
             log_success "从模板创建 .env 文件"
             log_info "请编辑 .env 文件配置你的 API Key"
         else
@@ -269,14 +270,14 @@ install_dependencies() {
 
     if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
         log_info "首次安装，运行 pnpm install..."
-        (cd "$FRONTEND_DIR" && pnpm install)
+        (cd "$FRONTEND_DIR" && corepack pnpm install)
         log_success "前端依赖安装完成"
     else
         log_success "前端依赖已安装"
     fi
 
     log_step "检查 Rust 依赖"
-    if [ ! -d "$SCRIPT_DIR/target" ]; then
+    if [ ! -d "$REPO_ROOT/target" ]; then
         log_info "首次构建，Rust 依赖将在启动时自动编译..."
     else
         log_success "Rust 构建缓存已存在"
@@ -331,18 +332,25 @@ start_dev() {
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
-    cd "$SCRIPT_DIR"
+    cd "$REPO_ROOT"
+
+    # 检查 pnpm
+    if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
+        log_error "pnpm 不可用"
+        log_info "请运行: corepack prepare pnpm@9.1.0 --activate"
+        exit 1
+    fi
 
     # 检查使用哪种方式启动 Tauri
     if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
         log_info "使用本地 Tauri CLI 启动..."
-        pnpm --dir "$FRONTEND_DIR" tauri dev
+        corepack pnpm --dir "$FRONTEND_DIR" tauri dev
     elif command -v tauri &>/dev/null; then
         log_info "使用全局 Tauri CLI 启动..."
         tauri dev
     else
-        log_info "使用 npx 启动 Tauri..."
-        cd "$FRONTEND_DIR" && npx tauri dev
+        log_info "使用 pnpm 启动 Tauri..."
+        cd "$FRONTEND_DIR" && corepack pnpm exec tauri dev
     fi
 }
 

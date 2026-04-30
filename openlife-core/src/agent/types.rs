@@ -239,8 +239,11 @@ pub struct AgentRun {
     pub model_route: Option<ModelRouteTrace>,
     pub output_preview: Option<String>,
     pub error: Option<AgentRunError>,
+    #[serde(default)]
     pub generated_proposals: Vec<String>,
+    #[serde(default)]
     pub actions: Vec<AgentAction>,
+    #[serde(default)]
     pub observations: Vec<AgentObservation>,
     /// Reasoning strategy used (e.g., "layered", "direct")
     pub reasoning_strategy: Option<String>,
@@ -395,6 +398,8 @@ pub enum ProposalType {
     ModelPolicyChange,
     DataExport,
     ScheduleCheckin,
+    /// Unknown or future proposal type that this build cannot safely apply.
+    Unsupported,
     /// 兼容旧数据
     #[serde(alias = "life_model_update")]
     LifeModelUpdate,
@@ -416,6 +421,7 @@ impl std::fmt::Display for ProposalType {
             ProposalType::ModelPolicyChange => write!(f, "model_policy_change"),
             ProposalType::DataExport => write!(f, "data_export"),
             ProposalType::ScheduleCheckin => write!(f, "schedule_checkin"),
+            ProposalType::Unsupported => write!(f, "unsupported"),
             ProposalType::LifeModelUpdate => write!(f, "life_model_update"),
         }
     }

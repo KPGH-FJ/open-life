@@ -20,8 +20,8 @@ describe("ToolCallCard", () => {
       />
     );
 
-    expect(screen.getByText("待确认")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "确认执行" }));
+    expect(screen.getByText("需要授权")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "重新执行" }));
 
     await waitFor(() => {
       expect(onExecute).toHaveBeenCalledTimes(1);

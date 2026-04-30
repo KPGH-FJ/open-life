@@ -25,8 +25,9 @@
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$FrontendDir = Join-Path $ScriptDir "frontend"
-$TauriDir = Join-Path $ScriptDir "src-tauri"
+$RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$TauriDir = Join-Path $RepoRoot "src-tauri"
 
 function Write-Info($msg)    { Write-Host "[INFO]  $msg" -ForegroundColor Blue }
 function Write-Success($msg) { Write-Host "[OK]    $msg" -ForegroundColor Green }
@@ -49,9 +50,9 @@ if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
 
 $nodeModules = Join-Path $FrontendDir "node_modules"
 if (-not (Test-Path $nodeModules)) {
-    Write-Warn "前端依赖未安装，尝试安装..."
-    Push-Location $FrontendDir
-    try { pnpm install } finally { Pop-Location }
+    Write-Warn "前端依赖未安装"
+    Write-Info "请先运行 .\scripts\setup.ps1 安装依赖"
+    exit 1
 }
 
 Write-Success "环境检查通过"
@@ -77,6 +78,20 @@ Write-Host "║  产物将输出到 src-tauri\target\release\bundle\            
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
+# 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm shim）
+$corepack = Get-Command "corepack" -ErrorAction SilentlyContinue
+if (-not $corepack) {
+    Write-Error "corepack 未安装"
+    Write-Info "请安装 Node.js 18+ 并启用 Corepack"
+    exit 1
+}
+corepack pnpm --version *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "pnpm 不可用"
+    Write-Info "请运行: corepack prepare pnpm@9.1.0 --activate"
+    exit 1
+}
+
 Push-Location $FrontendDir
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
 $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
@@ -84,13 +99,13 @@ $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 try {
     if (Test-Path $localTauri) {
         Write-Info "使用本地 Tauri CLI 构建..."
-        pnpm tauri build
+        corepack pnpm tauri build
     } elseif ($globalTauri) {
         Write-Info "使用全局 Tauri CLI 构建..."
         tauri build
     } else {
-        Write-Info "使用 npx 构建 Tauri..."
-        npx tauri build
+        Write-Info "使用 pnpm 构建 Tauri..."
+        corepack pnpm exec tauri build
     }
 } finally {
     Pop-Location

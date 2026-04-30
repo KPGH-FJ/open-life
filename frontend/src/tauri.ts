@@ -1416,6 +1416,7 @@ export type ProposalType =
   | "model_policy_change"
   | "data_export"
   | "schedule_checkin"
+  | "unsupported"
   | "life_model_update";
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type ProposalSource =

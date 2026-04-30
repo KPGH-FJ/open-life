@@ -206,7 +206,8 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
         | ProposalType::ExternalWriteAction
         | ProposalType::ModelPolicyChange
         | ProposalType::DataExport
-        | ProposalType::ScheduleCheckin => {
+        | ProposalType::ScheduleCheckin
+        | ProposalType::Unsupported => {
             // These types are not yet implemented; validation passes but apply will fail
             Ok(())
         }
@@ -470,7 +471,8 @@ async fn apply_proposal_to_state(
         | ProposalType::ExternalWriteAction
         | ProposalType::ModelPolicyChange
         | ProposalType::DataExport
-        | ProposalType::ScheduleCheckin => Err(format!(
+        | ProposalType::ScheduleCheckin
+        | ProposalType::Unsupported => Err(format!(
             "{} Proposal 尚未接入应用器，已保持 pending。",
             proposal.proposal_type
         )),
@@ -623,6 +625,7 @@ pub async fn list_proposals(
         "model_policy_change" => Some(ProposalType::ModelPolicyChange),
         "data_export" => Some(ProposalType::DataExport),
         "schedule_checkin" => Some(ProposalType::ScheduleCheckin),
+        "unsupported" => Some(ProposalType::Unsupported),
         _ => None,
     });
 

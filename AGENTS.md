@@ -8,9 +8,9 @@
 
 - **项目类型**：本地优先的个人 Agent 框架 / 个人 AI 操作系统（Tauri 桌面壳 + React 前端 + Rust 核心引擎）
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
-- **核心范式**：`LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop`
+- **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：Agent Framework Alpha。`AgentRun` 基线已完成（Chat/Builder/Calibration 链路插桩、SQLite 存储、模型路由 trace、前端 Trace UI）。**Proposal/Confirmation 统一层已收敛完成**：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路，AgentRun 与 Proposal 已双向关联溯源。当前具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics、Proposal/Review Center 等完整模块。
+- **当前阶段**：Agent Framework Alpha+ / Beta Foundation。`AgentRun`、Proposal/Review Center、Action/Observation、ToolPermission、Skill/Plugin Manifest、ModelRouter/ContextAssembler 灰度能力已经形成骨架。项目尚未诚实达到 Beta：Beta 的标准是 ReAct 执行闭环可信，即模型能通过 governed tools/skills 执行任务、观察结果、请求权限、在用户确认后 replay/apply，并在 Runs 中完整审计。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -18,18 +18,23 @@
 后续 Agent 进入项目时，优先阅读：
 
 1. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：新的架构基准，优先级最高。
-2. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
-3. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
-4. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-5. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+2. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate。
+3. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
+4. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+5. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+6. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
+- ReAct 是执行架构基准：后续核心能力必须收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`。
+- Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
+- Beta 的 Execution Tools 至少要覆盖 MCP、A2A、file、web、calendar、email、task proposal 等类别；未实现真实 executor 的工具必须 disabled/declarative-only，不能伪装成可执行。
 - 新功能必须能挂到 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal`、`LifeModel`、`Memory`、`ModelRouter` 或 `Workspace` 中。
 - Chat、Builder、Calibration、Dashboard 都只是 Agent Framework 的不同表面，不是彼此孤立的产品中心。
 - 高风险 LifeModel 更新、外部工具写操作、敏感数据上云必须可解释、可确认、可回滚。
+- 插件在 Beta 阶段默认是本地 Manifest / declarative-only；除非存在真实安全 executor，否则 plugin-declared tool 不能显示为可执行能力。
 
 ---
 
@@ -497,6 +502,38 @@ cargo test -p openlife-tauri
 
 # 全部测试
 make test
+```
+
+### 包管理器策略
+
+- **统一使用 pnpm**：项目通过 `packageManager` 字段锁定 `pnpm@9.1.0`
+- **启用 corepack**：`corepack enable && corepack prepare pnpm@9.1.0 --activate`
+- **禁止 npm**：所有脚本已移除 npm fallback，不会生成 `package-lock.json`
+- **CI 保护**：`make check-lockfile` 会检查是否误生成 `package-lock.json`
+
+### 启动命令
+
+```bash
+# 一键初始化（新开发者首选）
+make setup
+# 或
+./scripts/setup.sh      # macOS/Linux
+.\setup.ps1             # Windows
+
+# 快速开发启动
+make dev
+# 或
+./scripts/dev.sh        # macOS/Linux
+.\dev.ps1               # Windows
+
+# 一体化脚本启动
+./scripts/startup.sh dev # macOS/Linux
+.\startup.ps1 dev       # Windows
+
+# 检查环境
+make check
+# 或
+./scripts/startup.sh check
 ```
 
 #### 构建生产版本

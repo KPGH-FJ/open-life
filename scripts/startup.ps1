@@ -14,7 +14,7 @@
 # 前提条件:
 #   - Rust >= 1.75    (https://rustup.rs/)
 #   - Node.js >= 18   (https://nodejs.org/)
-#   - pnpm >= 8       (https://pnpm.io/installation)
+#   - pnpm >= 9       (recommended via Corepack)
 #   - Tauri CLI       (pnpm add -g @tauri-apps/cli)
 #   - Ollama (可选)   (https://ollama.com/)
 #
@@ -23,7 +23,7 @@
 #   A: 以管理员身份运行: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 #
 #   Q: 提示 "pnpm : 无法将""识别为 cmdlet"
-#   A: 运行 "npm install -g pnpm" 安装 pnpm，然后重启 PowerShell
+#   A: 运行 "corepack enable" 和 "corepack prepare pnpm@9.1.0 --activate"
 #
 #   Q: Tauri 构建失败
 #   A: 确保安装 Visual Studio Build Tools + WebView2 Runtime
@@ -46,9 +46,10 @@ $ErrorActionPreference = "Stop"
 
 # 配置
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$FrontendDir = Join-Path $ScriptDir "frontend"
-$TauriDir = Join-Path $ScriptDir "src-tauri"
-$EnvFile = Join-Path $ScriptDir ".env"
+$RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$TauriDir = Join-Path $RepoRoot "src-tauri"
+$EnvFile = Join-Path $RepoRoot ".env"
 $A2aPort = if ($env:A2A_PORT) { $env:A2A_PORT } else { "8765" }
 $VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
 
@@ -160,7 +161,17 @@ function Test-Environment {
 
     # 检查核心依赖
     if (-not (Test-Command "node")) { $hasErrors = $true }
-    if (-not (Test-Command "pnpm")) { $hasErrors = $true }
+    if (-not (Test-Command "corepack")) {
+        $hasErrors = $true
+    }
+    else {
+        corepack pnpm --version *> $null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "pnpm 不可用"
+            Write-Info "请运行: corepack prepare pnpm@9.1.0 --activate"
+            $hasErrors = $true
+        }
+    }
     if (-not (Test-Command "rustc")) { $hasErrors = $true }
     if (-not (Test-Command "cargo")) { $hasErrors = $true }
 
@@ -209,7 +220,7 @@ function Test-Environment {
         Write-Host "快速安装指南:" -ForegroundColor Yellow
         Write-Host "  Rust:    https://rustup.rs/"
         Write-Host "  Node.js: https://nodejs.org/"
-        Write-Host "  pnpm:    npm install -g pnpm"
+        Write-Host "  pnpm:    corepack enable; corepack prepare pnpm@9.1.0 --activate"
         Write-Host "  Tauri:   pnpm add -g @tauri-apps/cli"
         Write-Host ""
         exit 1
@@ -227,7 +238,7 @@ function Set-Environment {
 
     # 创建 .env 文件（如果不存在）
     if (-not (Test-Path $EnvFile)) {
-        $templateFile = Join-Path $ScriptDir ".env.template"
+        $templateFile = Join-Path $RepoRoot ".env.template"
         if (Test-Path $templateFile) {
             Copy-Item $templateFile $EnvFile
             Write-Success "从模板创建 .env 文件"
@@ -281,7 +292,7 @@ function Install-Dependencies {
         Write-Info "首次安装，运行 pnpm install..."
         Push-Location $FrontendDir
         try {
-            pnpm install
+            corepack pnpm install
         }
         finally {
             Pop-Location
@@ -293,7 +304,7 @@ function Install-Dependencies {
     }
 
     Write-Step "检查 Rust 依赖"
-    $targetDir = Join-Path $ScriptDir "target"
+    $targetDir = Join-Path $RepoRoot "target"
     if (-not (Test-Path $targetDir)) {
         Write-Info "首次构建，Rust 依赖将在启动时自动编译..."
     }
@@ -343,17 +354,31 @@ function Start-Dev {
     Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
     Write-Host ""
 
+    # 检查 pnpm
+    $corepack = Get-Command "corepack" -ErrorAction SilentlyContinue
+    if (-not $corepack) {
+        Write-Error "corepack 未安装"
+        Write-Info "请安装 Node.js 18+ 并启用 Corepack"
+        exit 1
+    }
+    corepack pnpm --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "pnpm 不可用"
+        Write-Info "请运行: corepack prepare pnpm@9.1.0 --activate"
+        exit 1
+    }
+
     # 检查使用哪种方式启动 Tauri
     $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
     $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 
-    Push-Location $ScriptDir
+    Push-Location $RepoRoot
     try {
         if (Test-Path $localTauri) {
             Write-Info "使用本地 Tauri CLI 启动..."
             Push-Location $FrontendDir
             try {
-                pnpm tauri dev
+                corepack pnpm tauri dev
             }
             finally {
                 Pop-Location
@@ -364,10 +389,10 @@ function Start-Dev {
             tauri dev
         }
         else {
-            Write-Info "使用 npx 启动 Tauri..."
+            Write-Info "使用 pnpm 启动 Tauri..."
             Push-Location $FrontendDir
             try {
-                npx tauri dev
+                corepack pnpm exec tauri dev
             }
             finally {
                 Pop-Location

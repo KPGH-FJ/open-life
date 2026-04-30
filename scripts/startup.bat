@@ -51,7 +51,7 @@ if %errorlevel% neq 0 (
     echo   2. 如果提示缺少依赖，请安装:
     echo      - Rust: https://rustup.rs/
     echo      - Node.js: https://nodejs.org/
-    echo      - pnpm: npm install -g pnpm
+    echo      - pnpm: corepack enable ^&^& corepack prepare pnpm@9.1.0 --activate
     echo.
     pause
     exit /b %errorlevel%

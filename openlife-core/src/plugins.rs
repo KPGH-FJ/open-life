@@ -43,16 +43,21 @@ pub struct PluginRecord {
 
 pub struct PluginRegistry {
     root: PathBuf,
+    overrides_path: PathBuf,
     records: HashMap<String, PluginRecord>,
     enabled_overrides: BTreeMap<String, bool>,
 }
 
 impl PluginRegistry {
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let root = root.into();
+        let overrides_path = root.join("enabled_overrides.json");
+        let enabled_overrides = Self::load_enabled_overrides(&overrides_path).unwrap_or_default();
         Self {
-            root: root.into(),
+            root,
+            overrides_path,
             records: HashMap::new(),
-            enabled_overrides: BTreeMap::new(),
+            enabled_overrides,
         }
     }
 
@@ -65,6 +70,9 @@ impl PluginRegistry {
             let manifest_path = if path.is_dir() {
                 path.join("plugin.json")
             } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if path.file_name().and_then(|s| s.to_str()) == Some("enabled_overrides.json") {
+                    continue;
+                }
                 path
             } else {
                 continue;
@@ -82,15 +90,34 @@ impl PluginRegistry {
     }
 
     pub fn enable(&mut self, plugin_id: &str, enabled: bool) -> Result<()> {
-        self.enabled_overrides
-            .insert(plugin_id.to_string(), enabled);
         if let Some(record) = self.records.get_mut(plugin_id) {
             record.enabled = enabled && record.error.is_none();
             record.manifest.enabled = record.enabled;
+            self.enabled_overrides
+                .insert(plugin_id.to_string(), enabled);
+            self.save_enabled_overrides()?;
             Ok(())
         } else {
             Err(anyhow::anyhow!("plugin not found: {}", plugin_id))
         }
+    }
+
+    fn load_enabled_overrides(path: &Path) -> Result<BTreeMap<String, bool>> {
+        if !path.exists() {
+            return Ok(BTreeMap::new());
+        }
+        let text = std::fs::read_to_string(path)?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("invalid plugin enabled overrides file {}", path.display()))
+    }
+
+    fn save_enabled_overrides(&self) -> Result<()> {
+        if let Some(parent) = self.overrides_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = serde_json::to_string_pretty(&self.enabled_overrides)?;
+        std::fs::write(&self.overrides_path, text)?;
+        Ok(())
     }
 
     pub fn enabled_tools(&self) -> Vec<ToolManifest> {
@@ -157,5 +184,62 @@ impl PluginRegistry {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_plugin(root: &Path, enabled: bool) {
+        let plugin_dir = root.join("demo");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let manifest = serde_json::json!({
+            "id": "demo",
+            "name": "Demo",
+            "version": "0.1.0",
+            "description": "Demo plugin",
+            "author": "test",
+            "enabled": enabled,
+            "tools": [],
+            "skills": [],
+            "permissions": [],
+            "settingsSchema": {},
+            "trustLevel": "local"
+        });
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn enable_override_persists_across_registry_restarts() {
+        let dir = tempfile::tempdir().unwrap();
+        write_plugin(dir.path(), false);
+
+        let mut registry = PluginRegistry::new(dir.path());
+        registry.reload().unwrap();
+        assert!(!registry.list()[0].enabled);
+
+        registry.enable("demo", true).unwrap();
+        assert!(registry.list()[0].enabled);
+
+        let mut restarted = PluginRegistry::new(dir.path());
+        restarted.reload().unwrap();
+        let records = restarted.list();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].enabled);
+        assert!(records[0].manifest.enabled);
+    }
+
+    #[test]
+    fn enable_unknown_plugin_does_not_write_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = PluginRegistry::new(dir.path());
+
+        assert!(registry.enable("missing", true).is_err());
+        assert!(!dir.path().join("enabled_overrides.json").exists());
     }
 }

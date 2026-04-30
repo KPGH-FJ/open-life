@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Wrench, CheckCircle2, XCircle, AlertTriangle } from "lucide-react";
+import { Wrench, CheckCircle2, XCircle, AlertTriangle, ExternalLink } from "lucide-react";
 import type { ToolCallResult } from "../tauri";
 
 interface Props {
@@ -10,15 +10,29 @@ interface Props {
 export default function ToolCallCard({ call, onExecute }: Props) {
   const isHighRisk = call.permission_level === "high" || call.requires_confirmation;
   const [executing, setExecuting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleExecute = async () => {
     if (!onExecute || executing) return;
     setExecuting(true);
+    setError(null);
     try {
       await onExecute();
+    } catch (e) {
+      const errMsg = String(e);
+      // 如果是因为未授权，保持 pending 状态
+      if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
+        setError("请在 Review Center 授权后重新执行");
+      } else {
+        setError(errMsg);
+      }
     } finally {
       setExecuting(false);
     }
+  };
+
+  const openReviewCenter = () => {
+    window.location.hash = "/review";
   };
 
   return (
@@ -28,7 +42,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
         <span>{call.name}</span>
         {call.requires_confirmation ? (
           <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
-            <AlertTriangle size={12} /> 待确认
+            <AlertTriangle size={12} /> 需要授权
           </span>
         ) : call.success ? (
           <span className="inline-flex items-center gap-1 text-green-600 text-xs">
@@ -49,7 +63,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
       {call.requires_confirmation && (
         <div className="rounded-md bg-orange-50 border border-orange-100 p-3 space-y-2">
           <p className="text-xs text-orange-800">
-            该工具调用涉及高风险操作或敏感参数。你可以在 Review Center 查看和授权，或在此直接确认。
+            该工具调用已被权限策略阻断。请在 Review Center 中授权后，返回此处重新执行。
           </p>
           {call.privacy_warnings && call.privacy_warnings.length > 0 && (
             <div className="text-xs text-orange-900 bg-white/80 rounded p-2">
@@ -69,13 +83,20 @@ export default function ToolCallCard({ call, onExecute }: Props) {
               </pre>
             </div>
           )}
+          {error && <div className="text-xs text-red-600 bg-red-50 rounded p-2">{error}</div>}
           <div className="flex gap-2">
             <button
               onClick={handleExecute}
               disabled={executing}
               className="px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700 disabled:opacity-50"
             >
-              {executing ? "执行中..." : "确认执行"}
+              {executing ? "执行中..." : "重新执行"}
+            </button>
+            <button
+              onClick={openReviewCenter}
+              className="px-3 py-1.5 rounded border border-orange-300 text-orange-700 text-xs hover:bg-orange-100 inline-flex items-center gap-1"
+            >
+              <ExternalLink size={12} />去 Review Center 授权
             </button>
           </div>
         </div>

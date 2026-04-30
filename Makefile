@@ -29,16 +29,8 @@ else
     SHELL_RUN = bash
 endif
 
-PNPM := $(shell command -v pnpm 2>/dev/null)
-ifeq ($(PNPM),)
-    FRONTEND_PM = npm
-    FRONTEND_RUN = npm run
-    FRONTEND_INSTALL = npm install
-else
-    FRONTEND_PM = pnpm
-    FRONTEND_RUN = pnpm
-    FRONTEND_INSTALL = pnpm install
-endif
+FRONTEND_RUN = corepack pnpm
+FRONTEND_INSTALL = corepack pnpm install
 
 # 默认目标
 .DEFAULT_GOAL := help
@@ -47,7 +39,7 @@ endif
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front
+.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front check-pnpm check-lockfile
 
 ## 显示帮助信息
 help:
@@ -102,7 +94,7 @@ test: test-front test-rust
 	@echo "✅ 所有测试完成"
 
 ## 运行前端测试
-test-front:
+test-front: check-pnpm
 	@echo "🧪 运行前端测试..."
 	cd frontend && $(FRONTEND_RUN) test
 
@@ -135,17 +127,17 @@ clean-all: clean
 # =============================================================================
 
 ## 安装前端依赖
-install-front:
+install-front: check-pnpm
 	@echo "📦 安装前端依赖..."
 	cd frontend && $(FRONTEND_INSTALL)
 
 ## 前端生产构建（不启动 Tauri）
-build-front:
+build-front: check-pnpm
 	@echo "🔨 前端生产构建..."
 	cd frontend && $(FRONTEND_RUN) build
 
 ## 前端开发服务器（不启动桌面窗口）
-dev-front:
+dev-front: check-pnpm
 	@echo "🌐 启动前端开发服务器..."
 	cd frontend && $(FRONTEND_RUN) dev
 
@@ -167,7 +159,7 @@ fmt-rust:
 ## 格式化前端代码
 fmt-front:
 	@echo "✨ 格式化前端代码..."
-	cd frontend && npx prettier --write "src/**/*.{ts,tsx,css}"
+	cd frontend && corepack pnpm exec prettier --write "src/**/*.{ts,tsx,css}"
 
 ## 格式化所有代码（Rust + 前端）
 format: fmt-rust fmt-front
@@ -181,7 +173,7 @@ fmt-check-rust:
 ## 检查前端代码格式
 fmt-check-front:
 	@echo "✨ 检查前端代码格式..."
-	cd frontend && npx prettier --check "src/**/*.{ts,tsx,css}"
+	cd frontend && corepack pnpm exec prettier --check "src/**/*.{ts,tsx,css}"
 
 ## 检查所有代码格式（不改写工作区）
 format-check: fmt-check-rust fmt-check-front
@@ -190,9 +182,20 @@ format-check: fmt-check-rust fmt-check-front
 ## 运行所有 Lint 检查（Rust clippy + 前端 typecheck）
 lint: lint-rust
 	@echo "🔍 运行前端类型检查..."
-	cd frontend && npx tsc --noEmit
+	cd frontend && corepack pnpm exec tsc --noEmit
 	@echo "✅ Lint 检查完成"
 
-## 完整 CI 检查（格式检查 + Lint + 测试 + 前端生产构建）
-ci: format-check lint test build-front
+## 检查 pnpm
+check-pnpm:
+	@command -v corepack >/dev/null 2>&1 || (echo "❌ 错误：corepack 未安装。请安装 Node.js 18+ 并启用 Corepack" && exit 1)
+	@corepack pnpm --version >/dev/null 2>&1 || (echo "❌ 错误：pnpm 不可用。请运行：corepack prepare pnpm@9.1.0 --activate" && exit 1)
+	@echo "✅ pnpm 检查通过"
+
+## 检查锁文件（禁止 package-lock.json）
+check-lockfile: check-pnpm
+	@test ! -f frontend/package-lock.json || (echo "❌ 错误：发现 package-lock.json，项目使用 pnpm" && exit 1)
+	@echo "✅ 锁文件检查通过"
+
+## 完整 CI 检查（锁文件 + 格式检查 + Lint + 测试 + 前端生产构建）
+ci: check-lockfile format-check lint test build-front
 	@echo "✅ CI 检查全部通过"

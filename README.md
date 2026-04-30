@@ -5,22 +5,24 @@ OpenLife 是一个**本地优先的个人 Agent 框架**。它不是单纯的聊
 OpenLife 的核心范式是：
 
 ```text
-LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
+LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop
 ```
 
 用户先构建自己的 LifeModel，包括身份、目标、能力、状态、偏好和关系等私人上下文。之后，OpenLife 会让本地模型或云端模型在这个人生模型的约束下完成对话、规划、写作、复盘、工具调用、状态更新和长期反馈。系统不只是回答问题，还应该逐步理解用户，并在用户确认下持续更新 LifeModel。
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Alpha** 阶段：
+当前项目处于 **Agent Framework Alpha+ / Beta Foundation** 阶段：
 
 - 已经具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics 等核心材料。
 - `AgentRun` 和 `Proposal/Review Center` 已成为主线骨架，Chat/Builder/Calibration 都能产生可追踪运行记录和待确认提案。
-- 接下来的开发重点不是继续堆页面，而是把 `AgentTask -> AgentRun -> Actions/Observations -> Proposals -> Confirmation -> Persistence` 这条架构主线打通。
+- 接下来的开发重点不是继续堆页面，而是把 ReAct 执行主线打通：`AgentTask -> ContextAssembler -> ModelRouter -> AgentLoop -> Tool/Skill Action -> Observation -> Proposal/Permission -> Apply/Replay -> AgentRun Trace`。
+- Beta 的标准不是“模块存在”，而是 OpenClaw-like 的工具执行能力在 OpenLife 的个人数据治理约束下可信闭环：能调用 tools/skills、能观察结果、能请求权限、能在 Review 后 replay/apply、能完整审计。
 
 新的架构基准文档见：
 
 - [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+- [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
 ## 核心能力
 
@@ -32,6 +34,7 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 | **ModelRouter** | ✅ **任务/隐私感知路由灰度中，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
 | MCP/A2A | 已有工具和外部 Agent 接入基础 | 成为 AgentAction 执行层，并默认受权限和审计保护 |
+| Tools/Skills | 已有 ToolManifest、MCP/A2A、内置 Skill MVP | 成为 ReAct Agent 的执行能力层，覆盖 Core OS tools、Execution tools、Governance tools、Skill tools |
 | Calibration/Evolution | 已有建议和校准雏形 | 统一进入 Proposal/Confirmation 机制 |
 | Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
 | **Chat Proposal** | ✅ **自动从对话中提取目标/状态/能力** | 自动感知用户意图并生成 LifeModel 更新提案 |
@@ -84,10 +87,11 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 ## 推荐阅读顺序
 
 1. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
-2. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
-3. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
-4. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
-5. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
+2. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
+3. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
+4. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+5. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
+6. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
 
 ## 快速开始
 
@@ -95,17 +99,19 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 
 - Rust >= 1.75
 - Node.js 18+
-- pnpm 或 npm
+- pnpm 9.x（推荐通过 Corepack 启用）
 - 可选：Ollama，本地模型服务
 
 ### 安装依赖
 
 ```bash
+corepack enable
+corepack prepare pnpm@9.1.0 --activate
 cd frontend && pnpm install
 cd ..
 ```
 
-如果本机没有 `pnpm`，项目脚本会尝试 fallback 到 npm。
+项目统一使用 pnpm；请不要使用 npm 安装依赖或提交 `package-lock.json`。
 
 ### 配置模型
 
@@ -127,15 +133,29 @@ export OPENAI_API_KEY="sk-..."
 ### 开发运行
 
 ```bash
+# 首次使用：初始化环境
+make setup
+
+# 启动开发模式
+make dev
+# 或
 ./scripts/dev.sh
 ```
 
 ### 测试
 
 ```bash
+# Rust 测试
 cargo test -q
-cd frontend && npm test -- --run
-cd frontend && npm run build
+
+# 前端测试
+cd frontend && pnpm test
+
+# 前端生产构建
+cd frontend && pnpm run build
+
+# 完整 CI 检查
+make ci
 ```
 
 ## 当前推荐试用路径

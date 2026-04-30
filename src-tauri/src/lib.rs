@@ -110,6 +110,7 @@ pub struct ToolCallResult {
     pub pii_found: bool,
     pub privacy_warnings: Vec<String>,
     pub action_id: Option<String>,
+    pub run_id: Option<String>,
     pub permission_decision: Option<String>,
 }
 
@@ -553,6 +554,7 @@ fn try_prepare_tool_calls(
     permission_store: &openlife_core::tool_permissions::ToolPermissionStore,
     privacy_engine: &PrivacyEngine,
     step_index: u32,
+    run_id: Option<String>,
 ) -> Option<(
     Vec<ToolCallResult>,
     Vec<openlife_core::agent::AgentAction>,
@@ -596,7 +598,8 @@ fn try_prepare_tool_calls(
 
         match executor.execute(request, &ctx) {
             Ok(result) => {
-                let tool_result = action_execution_result_to_tool_call(&result, name, &args);
+                let tool_result =
+                    action_execution_result_to_tool_call(&result, name, &args, run_id.clone());
                 results.push(tool_result);
                 actions.push(result.action);
                 observations.push(result.observation);
@@ -650,6 +653,7 @@ fn try_prepare_tool_calls(
                     pii_found: false,
                     privacy_warnings: vec![],
                     action_id: Some(action.id.clone()),
+                    run_id: run_id.clone(),
                     permission_decision: None,
                 });
                 actions.push(action);
@@ -669,6 +673,7 @@ fn action_execution_result_to_tool_call(
     result: &openlife_core::agent::ActionExecutionResult,
     name: &str,
     args: &serde_json::Value,
+    run_id: Option<String>,
 ) -> ToolCallResult {
     let sanitized = args.clone(); // Simplified; in practice use privacy engine
     ToolCallResult {
@@ -700,6 +705,7 @@ fn action_execution_result_to_tool_call(
         pii_found: false, // Simplified
         privacy_warnings: vec![],
         action_id: Some(result.action.id.clone()),
+        run_id,
         permission_decision: result.action.permission_decision.clone(),
     }
 }
@@ -1658,6 +1664,7 @@ async fn send_message(
             &permission_store,
             &privacy_engine,
             agent_run.actions.len() as u32,
+            Some(agent_run.id.clone()),
         )
     };
 
@@ -1885,12 +1892,18 @@ async fn start_stream_message(
                         }
                     }
                 }
-                // 保存助手回复
+
+                // 加载 LifeModel 用于 finalizer
+                let life_model = {
+                    let manager = state.life_model_manager.lock().await;
+                    manager.load().map_err(|e| e.to_string())?
+                };
+
                 let assistant_msg = ChatMessage {
                     role: "assistant".into(),
                     content: reply.clone(),
                 };
-                let _ = persist_chat_message_if_needed(&session_id, &assistant_msg, &state).await?;
+
                 let _ = app_handle.emit(
                     "stream-message-start",
                     serde_json::json!({
@@ -1908,6 +1921,9 @@ async fn start_stream_message(
                         "chunk": reply.clone(),
                     }),
                 );
+
+                // 使用统一的 finalizer，避免重复保存和手动更新 AgentRun
+                let mut reasoning_trace = ReasoningTrace::default();
                 let model_route = openlife_core::agent::ModelRouteTrace {
                     provider: "direct".to_string(),
                     model: "L1_reflex".to_string(),
@@ -1932,12 +1948,30 @@ async fn start_stream_message(
                 };
                 let preview = preview_text(&reply, 200);
                 agent_run.complete(&preview, model_route, context_summary);
-                if let Some(ref store_arc) = state.agent_run_store {
-                    let store = store_arc.lock().await;
-                    if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
+
+                if let Err(e) = finalize_chat_agent_run(
+                    &session_id,
+                    &assistant_msg,
+                    &reply,
+                    &mut reasoning_trace,
+                    &mut agent_run,
+                    &life_model,
+                    &state,
+                )
+                .await
+                {
+                    eprintln!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
+                    let _ = app_handle.emit(
+                        "stream-message-error",
+                        serde_json::json!({
+                            "session_id": &session_id,
+                            "run_id": agent_run.id,
+                            "error": format!("AgentRun 持久化失败: {}", e),
+                        }),
+                    );
+                    return Err(e);
                 }
+
                 let _ = app_handle.emit(
                     "stream-message-done",
                     serde_json::json!({
@@ -2370,6 +2404,7 @@ async fn start_stream_message(
             &permission_store,
             &privacy_engine,
             agent_run.actions.len() as u32,
+            Some(agent_run.id.clone()),
         )
     };
     let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
@@ -2561,6 +2596,7 @@ async fn execute_tool_call(
         pii_found: false,
         privacy_warnings: vec![],
         action_id: Some(result.action.id),
+        run_id: None,
         permission_decision: result.action.permission_decision,
     };
 

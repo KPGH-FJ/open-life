@@ -322,6 +322,47 @@ pub fn parse_skill_json(text: &str) -> Result<SkillJsonEnvelope, String> {
     Err("无法解析技能输出为有效的 JSON envelope。模型输出格式不符合要求。".to_string())
 }
 
+/// Validate and sanitize skill envelope with fail-soft strategy.
+/// Returns the sanitized envelope and a list of warnings.
+/// Never fails - always returns a usable envelope.
+pub fn validate_skill_envelope(
+    mut envelope: SkillJsonEnvelope,
+    raw_output: &str,
+) -> (SkillJsonEnvelope, Vec<String>) {
+    let mut warnings = envelope.warnings.clone();
+
+    // Validate summary
+    if envelope.summary.is_empty() {
+        // Use raw output preview as fallback
+        let preview = if raw_output.len() > 200 {
+            format!("{}...", &raw_output[..200])
+        } else {
+            raw_output.to_string()
+        };
+        envelope.summary = preview;
+        warnings.push("summary 缺失或为空，使用原始输出预览兜底".to_string());
+    }
+
+    // Validate structured_output
+    if !envelope.structured_output.is_object() {
+        envelope.structured_output = serde_json::json!({});
+        warnings.push("structured_output 不是 object 类型，已替换为空对象".to_string());
+    }
+
+    envelope.warnings = warnings.clone();
+    (envelope, warnings)
+}
+
+/// Valid proposal types from skills.
+pub const VALID_SKILL_PROPOSAL_TYPES: &[&str] = &[
+    "goal_update",
+    "state_update",
+    "memory_write",
+    "memory_archive",
+    "preference_update",
+    "capability_update",
+];
+
 fn extract_json_from_fenced_block(text: &str) -> Option<&str> {
     let start = text.find("```json")? + 7;
     let end = text[start..].find("```")?;

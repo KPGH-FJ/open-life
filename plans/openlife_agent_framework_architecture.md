@@ -1,6 +1,6 @@
 # OpenLife Agent Framework Architecture
 
-> Version: 2026-04-24
+> Version: 2026-05-01
 > Status: Architecture baseline for the next development cycle
 > Scope: Product definition, system architecture, migration route, and engineering boundaries
 
@@ -121,7 +121,7 @@ This is the difference between "the app replied" and "the agent executed a trace
 
 ### 3.4 ReAct With Guardrails
 
-OpenLife should support a ReAct-style loop:
+OpenLife should support a ReAct-style loop comparable in execution seriousness to OpenClaw-like agent systems, while remaining local-first and user-governed:
 
 ```text
 Reason -> Act -> Observe -> Reflect -> Propose -> Confirm -> Persist
@@ -133,6 +133,16 @@ But tool execution and model mutation must be governed by policy:
 - Medium-risk writes require review or scoped permission.
 - High-risk actions require explicit confirmation.
 - Critical actions require stronger confirmation or are disallowed.
+
+In this architecture, tools are not optional UI features. Tools are the agent's execution surface. OpenLife Beta requires:
+
+- Core OS tools for LifeModel, goals, memory, proposals, snapshots, and AgentRun lookup.
+- External tools through MCP/A2A or other manifest-backed integrations.
+- Governance tools for permission checks, permission requests, privacy inspection, replay, risk classification, and audit.
+- Skill tools for high-level built-in capabilities such as weekly review, goal breakdown, and memory consolidation.
+- Plugin-declared tools to remain disabled/declarative-only unless a real local executor exists.
+
+The detailed Beta gates are defined in `plans/openlife_react_beta_roadmap.md`.
 
 ### 3.5 Model-Agnostic Routing
 

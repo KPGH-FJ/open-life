@@ -39,8 +39,9 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
-TAURI_DIR="$SCRIPT_DIR/src-tauri"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRONTEND_DIR="$REPO_ROOT/frontend"
+TAURI_DIR="$REPO_ROOT/src-tauri"
 TARGET="${1:-auto}"
 
 # 颜色输出
@@ -100,7 +101,7 @@ fi
 
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
     log_warn "前端依赖未安装，尝试安装..."
-    (cd "$FRONTEND_DIR" && pnpm install)
+    (cd "$FRONTEND_DIR" && corepack pnpm install)
 fi
 
 log_success "环境检查通过"
@@ -140,16 +141,23 @@ echo ""
 
 cd "$FRONTEND_DIR"
 
+# 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm symlink）
+if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
+    log_error "pnpm 不可用"
+    log_info "请运行: corepack prepare pnpm@9.1.0 --activate"
+    exit 1
+fi
+
 # 检查使用哪种方式调用 Tauri
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     log_info "使用本地 Tauri CLI 构建..."
-    pnpm tauri build --target "$BUILD_TARGET"
+    corepack pnpm tauri build --target "$BUILD_TARGET"
 elif command -v tauri &>/dev/null; then
     log_info "使用全局 Tauri CLI 构建..."
     tauri build --target "$BUILD_TARGET"
 else
-    log_info "使用 npx 构建 Tauri..."
-    npx tauri build --target "$BUILD_TARGET"
+    log_info "使用 pnpm 构建 Tauri..."
+    corepack pnpm exec tauri build --target "$BUILD_TARGET"
 fi
 
 # 检查构建结果

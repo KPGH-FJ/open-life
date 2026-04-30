@@ -35,11 +35,12 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRONTEND_DIR="$REPO_ROOT/frontend"
 VITE_PORT="${PORT:-5173}"
 
 # 加载 .env
-ENV_FILE="$SCRIPT_DIR/.env"
+ENV_FILE="$REPO_ROOT/.env"
 if [ -f "$ENV_FILE" ]; then
     set -a
     while IFS='=' read -r key value; do
@@ -83,20 +84,24 @@ echo -e "${GREEN}║  请耐心等待...                                        
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-cd "$SCRIPT_DIR"
+cd "$REPO_ROOT"
+
+# 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm symlink）
+if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
+    echo -e "${YELLOW}[ERROR]${NC} pnpm 不可用"
+    echo "       请准备 pnpm:"
+    echo "       corepack prepare pnpm@9.1.0 --activate"
+    exit 1
+fi
 
 # 自动检测 Tauri CLI 启动方式
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     echo -e "${BLUE}[INFO]${NC} 使用本地 Tauri CLI 启动..."
-    if command -v pnpm &>/dev/null; then
-        pnpm --dir "$FRONTEND_DIR" tauri dev
-    else
-        npm --prefix "$FRONTEND_DIR" exec tauri dev
-    fi
+    corepack pnpm --dir "$FRONTEND_DIR" tauri dev
 elif command -v tauri &>/dev/null; then
     echo -e "${BLUE}[INFO]${NC} 使用全局 Tauri CLI 启动..."
     tauri dev
 else
-    echo -e "${BLUE}[INFO]${NC} 使用 npx 启动 Tauri..."
-    cd "$FRONTEND_DIR" && npx tauri dev
+    echo -e "${BLUE}[INFO]${NC} 使用 pnpm 启动 Tauri..."
+    cd "$FRONTEND_DIR" && corepack pnpm exec tauri dev
 fi

@@ -136,12 +136,6 @@ export default function RunsPage() {
     }
   }
 
-  async function handleBatchRestore() {
-    if (!showTrash) return;
-    // TODO: Implement restoreAgentRun backend command
-    alert("恢复功能即将上线");
-  }
-
   const statusOptions = [
     { value: "all", label: "全部状态" },
     { value: "running", label: "运行中" },
@@ -179,10 +173,10 @@ export default function RunsPage() {
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-stone-900">{showTrash ? "回收站" : "Runs"}</h1>
+            <h1 className="text-2xl font-bold text-stone-900">{showTrash ? "已删除" : "Runs"}</h1>
             <div className="text-sm text-stone-500">
               共 {filteredRuns.length} 条记录
-              {showTrash && " (已删除)"}
+              {showTrash && " (当前版本不可恢复)"}
             </div>
           </div>
           <div className="flex gap-2">
@@ -199,7 +193,7 @@ export default function RunsPage() {
               }`}
             >
               {showTrash ? <RotateCcw size={16} /> : <Trash2 size={16} />}
-              {showTrash ? "返回列表" : "回收站"}
+              {showTrash ? "返回列表" : "已删除"}
             </button>
             <button
               onClick={loadRuns}
@@ -275,13 +269,7 @@ export default function RunsPage() {
             <div className="flex items-center gap-3 pt-3 border-t border-stone-100">
               <span className="text-sm text-stone-600">已选择 {selectedRuns.size} 条</span>
               {showTrash ? (
-                <button
-                  onClick={handleBatchRestore}
-                  className="flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-sm hover:bg-emerald-700 transition"
-                >
-                  <RotateCcw size={14} />
-                  恢复
-                </button>
+                <span className="text-xs text-stone-400">已删除记录不可恢复</span>
               ) : (
                 <button
                   onClick={handleBatchDelete}
@@ -305,9 +293,11 @@ export default function RunsPage() {
         {paginatedRuns.length === 0 ? (
           <div className="text-center py-12 text-stone-400">
             <Activity size={48} className="mx-auto mb-4 opacity-30" />
-            <p>{showTrash ? "回收站为空" : "暂无运行记录"}</p>
+            <p>{showTrash ? "暂无已删除记录" : "暂无运行记录"}</p>
             <p className="text-sm mt-1">
-              {showTrash ? "删除的 Run 将显示在这里" : "开始对话或构建 LifeModel 后将在此显示"}
+              {showTrash
+                ? "已删除的 Run 在当前版本中不可恢复"
+                : "开始对话或构建 LifeModel 后将在此显示"}
             </p>
           </div>
         ) : (

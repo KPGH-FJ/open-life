@@ -1,24 +1,29 @@
 # OpenLife Development Plan
 
-> Version: 2026-04-24
-> Current direction: From feature-rich Alpha to Agent Framework baseline
+> Version: 2026-05-01
+> Current direction: From Alpha+ framework skeleton to ReAct Beta execution kernel
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+> Beta roadmap: [`openlife_react_beta_roadmap.md`](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
 ## 1. Current Strategic Reset
 
-OpenLife is now defined as a **local-first personal Agent framework**, not a conventional desktop app.
+OpenLife is now defined as a **local-first, ReAct-driven personal Agent framework**, not a conventional desktop app.
 
 The existing project already contains many working or partially working modules: LifeModel, Builder, Chat, Memory, MCP, A2A, Calibration, VersionControl, Diagnostics, and model scheduling. The next stage should not add more isolated features. The next stage should introduce the missing architectural spine:
 
 ```text
-AgentTask -> AgentRun -> Actions/Observations -> Output -> Proposals -> Confirmation -> Persistence
+AgentTask -> ContextAssembler -> ModelRouter -> AgentLoop -> Tool/Skill Action -> Observation -> Proposal/Permission -> Apply/Replay -> AgentRun Trace
 ```
 
 All future development should be judged by one question:
 
 ```text
-Does this make OpenLife more like a trustworthy personal Agent framework?
+Does this make OpenLife more like a trustworthy ReAct personal Agent OS?
 ```
+
+Beta must not be declared because one blocker is fixed. Beta requires the Beta Gates in `openlife_react_beta_roadmap.md` to pass, especially ReAct execution, tool registry/action execution, permission replay, LifeModel/Memory governance, skill runtime, ModelRouter privacy, and Runs traceability.
+
+Execution tools are part of the Beta definition. OpenLife must support OpenClaw-like execution seriousness through governed tools such as `mcp.call_tool`, `a2a.call_agent`, `file.read`, `file.write_proposal`, `web.search`, `web.fetch`, `calendar.read`, `calendar.propose_event`, `email.read`, `email.propose_draft`, and `task.create_proposal`. Connectors that cannot truly execute must be registered as disabled/declarative-only and may only create proposals.
 
 ## 2. What Is Already Implemented
 
@@ -30,6 +35,7 @@ Does this make OpenLife more like a trustworthy personal Agent framework?
 | Model scheduling | Ollama + cloud provider routing exists | Needs provider-agnostic ModelRouter and per-run route trace |
 | Memory | SQLite messages, semantic vectors, memory search and recovery exist | Needs governance, source tracking, and AgentRun linkage |
 | MCP/A2A | Tool and external Agent integration foundations exist | Needs ActionExecutor, deny-by-default policy, and consistent audit |
+| Execution tools | MCP/A2A exist; file/web/calendar/email/task tools are not yet a complete governed set | Needs Beta tool contracts, capability/risk metadata, disabled/declarative-only handling, and proposal paths for writes |
 | Calibration/Evolution | Feedback and model improvement suggestions exist | Needs unified Proposal/Confirmation layer |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
 | Frontend | Many pages exist and can support trial flow | Needs information architecture reset around Workspace / Agent / LifeModel / Memory / Runs / Settings |

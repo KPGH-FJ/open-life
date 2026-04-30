@@ -21,7 +21,7 @@
 #   A: 以管理员身份运行: Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 #
 #   Q: 提示 "pnpm not found"
-#   A: npm install -g pnpm
+#   A: corepack enable; corepack prepare pnpm@9.1.0 --activate
 #
 #   Q: Tauri 构建报错
 #   A: 确保安装 Visual Studio Build Tools + WebView2 Runtime
@@ -32,9 +32,10 @@ $ErrorActionPreference = "Stop"
 
 # 路径配置
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$FrontendDir = Join-Path $ScriptDir "frontend"
-$EnvFile = Join-Path $ScriptDir ".env"
-$EnvTemplate = Join-Path $ScriptDir ".env.template"
+$RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
+$FrontendDir = Join-Path $RepoRoot "frontend"
+$EnvFile = Join-Path $RepoRoot ".env"
+$EnvTemplate = Join-Path $RepoRoot ".env.template"
 
 # 工具函数
 function Write-Info($msg)    { Write-Host "[INFO]  $msg" -ForegroundColor Blue }
@@ -77,12 +78,18 @@ Write-Step "Step 1/5: 检查必要工具"
 $failed = $false
 
 Test-Command "node"   || $failed = $true
-Test-Command "npm"    || $failed = $true
 
-if (-not (Test-Command "pnpm")) {
-    Write-Warn "pnpm 未安装，尝试通过 npm 安装..."
-    npm install -g pnpm
-    Test-Command "pnpm" || $failed = $true
+if (-not (Test-Command "corepack")) {
+    $failed = $true
+}
+else {
+    corepack pnpm --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "pnpm 不可用"
+        Write-Info "建议准备 pnpm:"
+        Write-Info "  corepack prepare pnpm@9.1.0 --activate"
+        $failed = $true
+    }
 }
 
 Test-Command "rustc"  || $failed = $true
@@ -99,7 +106,7 @@ if ($failed) {
     Write-Host ""
     Write-Host "  Rust (>= 1.75):  https://rustup.rs/"
     Write-Host "  Node.js (>= 18): https://nodejs.org/"
-    Write-Host "  pnpm:            npm install -g pnpm"
+    Write-Host "  pnpm:            corepack enable; corepack prepare pnpm@9.1.0 --activate"
     Write-Host ""
     Write-Host "Windows 额外依赖:"
     Write-Host "  Visual Studio Build Tools + WebView2 Runtime"
@@ -118,7 +125,7 @@ if (Test-Path $nodeModules) {
 } else {
     Write-Info "运行 pnpm install..."
     Push-Location $FrontendDir
-    try { pnpm install } finally { Pop-Location }
+    try { corepack pnpm install } finally { Pop-Location }
     Write-Success "前端依赖安装完成"
 }
 
@@ -131,7 +138,7 @@ if (Test-Path $localTauri) {
 } elseif (Get-Command "tauri" -ErrorAction SilentlyContinue) {
     Write-Success "Tauri CLI 已全局安装"
 } else {
-    Write-Warn "Tauri CLI 未找到，将在首次启动时通过 npx/pnpm 自动安装"
+    Write-Warn "Tauri CLI 未找到，将在首次启动时通过 pnpm 自动安装"
 }
 Write-Info "Rust 依赖将在首次构建时自动下载（由 cargo 管理）"
 Write-Success "Rust 工具链验证完成"
@@ -168,7 +175,7 @@ Write-Step "验证安装完整性"
 $verifyFailed = $false
 if (-not (Test-Path $nodeModules))     { Write-Error "node_modules 缺失"; $verifyFailed = $true }
 if (-not (Test-Path $EnvFile))          { Write-Error ".env 文件缺失"; $verifyFailed = $true }
-if (-not (Test-Path "$ScriptDir\Cargo.toml")) { Write-Error "Cargo.toml 缺失"; $verifyFailed = $true }
+if (-not (Test-Path "$RepoRoot\Cargo.toml")) { Write-Error "Cargo.toml 缺失"; $verifyFailed = $true }
 
 if ($verifyFailed) {
     Write-Error "验证未通过，请检查项目完整性"

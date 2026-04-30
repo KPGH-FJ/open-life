@@ -23,11 +23,12 @@
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$FrontendDir = Join-Path $ScriptDir "frontend"
+$RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
+$FrontendDir = Join-Path $RepoRoot "frontend"
 $VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
 
 # 加载 .env
-$EnvFile = Join-Path $ScriptDir ".env"
+$EnvFile = Join-Path $RepoRoot ".env"
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | ForEach-Object {
         $line = $_.Trim()
@@ -79,7 +80,21 @@ Write-Host "║  请耐心等待...                                             
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
-Push-Location $ScriptDir
+# 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm shim）
+$corepack = Get-Command "corepack" -ErrorAction SilentlyContinue
+if (-not $corepack) {
+    Write-Host "[ERROR] corepack 未安装" -ForegroundColor Red
+    Write-Host "       请安装 Node.js 18+ 并启用 Corepack"
+    exit 1
+}
+corepack pnpm --version *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[ERROR] pnpm 不可用" -ForegroundColor Red
+    Write-Host "       请运行: corepack prepare pnpm@9.1.0 --activate"
+    exit 1
+}
+
+Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
 $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 
@@ -87,14 +102,14 @@ try {
     if (Test-Path $localTauri) {
         Write-Host "[INFO] 使用本地 Tauri CLI 启动..." -ForegroundColor Blue
         Push-Location $FrontendDir
-        try { pnpm tauri dev } finally { Pop-Location }
+        try { corepack pnpm tauri dev } finally { Pop-Location }
     } elseif ($globalTauri) {
         Write-Host "[INFO] 使用全局 Tauri CLI 启动..." -ForegroundColor Blue
         tauri dev
     } else {
-        Write-Host "[INFO] 使用 npx 启动 Tauri..." -ForegroundColor Blue
+        Write-Host "[INFO] 使用 pnpm 启动 Tauri..." -ForegroundColor Blue
         Push-Location $FrontendDir
-        try { npx tauri dev } finally { Pop-Location }
+        try { corepack pnpm exec tauri dev } finally { Pop-Location }
     }
 } finally {
     Pop-Location

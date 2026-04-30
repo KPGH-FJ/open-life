@@ -370,8 +370,9 @@ impl ProposalStore {
             "model_policy_change" => ProposalType::ModelPolicyChange,
             "data_export" => ProposalType::DataExport,
             "schedule_checkin" => ProposalType::ScheduleCheckin,
+            "unsupported" => ProposalType::Unsupported,
             "life_model_update" => ProposalType::LifeModelUpdate,
-            _ => ProposalType::LifeModelUpdate,
+            _ => ProposalType::Unsupported,
         };
 
         let risk_level = match risk_str.as_str() {
@@ -525,5 +526,75 @@ mod tests {
         let fetched = store.get_proposal(&proposal.id).unwrap().unwrap();
         assert_eq!(fetched.status, ProposalStatus::Pending); // Status is still pending in DB, but is_expired() returns true
         assert!(fetched.is_expired());
+    }
+
+    #[test]
+    fn test_unknown_proposal_type_maps_to_unsupported() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        // Insert a proposal with unknown type directly via SQL
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proposals (id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                "unknown-type-test",
+                Option::<String>::None,
+                "unknown_future_type",
+                "manual",
+                Option::<String>::None,
+                "test.path",
+                Option::<String>::None,
+                "\"value\"",
+                "Test unknown type",
+                0.5,
+                "low",
+                "pending",
+                chrono::Utc::now().to_rfc3339(),
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        ).unwrap();
+        drop(conn);
+
+        // Should not panic or masquerade as a LifeModel update.
+        let fetched = store.get_proposal("unknown-type-test").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.proposal_type, ProposalType::Unsupported);
+        assert_eq!(fetched.status, ProposalStatus::Pending);
+        assert_eq!(fetched.risk_level, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_unknown_risk_level_fallback() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO proposals (id, run_id, proposal_type, source, source_detail, affected_path, before_json, after_json, reason, confidence, risk_level, status, created_at, resolved_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                "unknown-risk-test",
+                Option::<String>::None,
+                "goal_update",
+                "manual",
+                Option::<String>::None,
+                "test.path",
+                Option::<String>::None,
+                "\"value\"",
+                "Test unknown risk",
+                0.5,
+                "ultra_high",
+                "pending",
+                chrono::Utc::now().to_rfc3339(),
+                Option::<String>::None,
+                Option::<String>::None,
+            ],
+        ).unwrap();
+        drop(conn);
+
+        let fetched = store.get_proposal("unknown-risk-test").unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.risk_level, RiskLevel::Medium); // Fallback
     }
 }

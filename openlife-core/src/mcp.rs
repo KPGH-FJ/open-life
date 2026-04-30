@@ -422,7 +422,7 @@ impl McpRegistry {
             ToolSource::Mcp { .. } => self.call_tool(&manifest.name, arguments),
             ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
-                "plugin tool '{}' from '{}' has no local executor",
+                "Plugin tool '{}' from '{}' is declarative-only and not executable in this Beta",
                 manifest.name,
                 plugin_id
             )),

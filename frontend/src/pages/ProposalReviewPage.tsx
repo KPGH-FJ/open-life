@@ -124,10 +124,32 @@ export default function ProposalReviewPage() {
     load();
   }, [filterType, filterRisk]);
 
+  const isUnsupportedType = (type: string): boolean => {
+    return [
+      "plugin_permission",
+      "scheduled_task",
+      "external_write_action",
+      "model_policy_change",
+      "data_export",
+      "schedule_checkin",
+      "unsupported",
+    ].includes(type);
+  };
+
   const runAction = async (proposal: AgentProposal, action: "accept" | "reject" | "postpone") => {
     setActingId(proposal.id);
     setError(null);
     setNotice(null);
+
+    // Prevent accepting unsupported proposal types
+    if (action === "accept" && isUnsupportedType(proposal.proposalType)) {
+      setError(
+        `「${proposal.proposalType}」类型的 Proposal 在当前版本中尚未接入应用器，无法应用。该 Proposal 将保持 pending 状态，等待后续版本支持。`
+      );
+      setActingId(null);
+      return;
+    }
+
     try {
       if (action === "accept") {
         await acceptProposal(proposal.id);
@@ -146,6 +168,8 @@ export default function ProposalReviewPage() {
         setError(`应用失败：字段路径 "${proposal.affectedPath}" 不存在于当前 LifeModel。`);
       } else if (msg.includes("无法转换")) {
         setError(`应用失败：值类型与字段 "${proposal.affectedPath}" 不匹配。`);
+      } else if (msg.includes("尚未接入应用器") || msg.includes("not supported")) {
+        setError(`应用失败：该 Proposal 类型在当前版本中尚未支持。Proposal 将保持 pending 状态。`);
       } else {
         setError(`处理 Proposal 失败：${msg}`);
       }
@@ -394,18 +418,31 @@ export default function ProposalReviewPage() {
                           <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
                             {proposal.proposalType}
                           </span>
+                          {isUnsupportedType(proposal.proposalType) && (
+                            <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] text-amber-700">
+                              暂不支持
+                            </span>
+                          )}
                         </div>
                         <p className="mt-2 text-sm leading-6 text-stone-600">{proposal.reason}</p>
                         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-stone-400">
                           <span>来源：{proposal.source}</span>
                           <span>置信度：{Math.round(proposal.confidence * 100)}%</span>
+                          {proposal.sourceDetail && (
+                            <span className="text-stone-500" title={proposal.sourceDetail}>
+                              详情：{proposal.sourceDetail.slice(0, 30)}
+                              {proposal.sourceDetail.length > 30 ? "..." : ""}
+                            </span>
+                          )}
                           {proposal.source && (
                             <span className="inline-flex items-center gap-1 rounded-full bg-stone-100 px-2 py-0.5 text-[10px]">
                               {proposal.source === "builder_review"
                                 ? "Builder"
                                 : proposal.source === "calibration_run"
                                   ? "Calibration"
-                                  : proposal.source}
+                                  : proposal.source === "skill_runtime"
+                                    ? "Skill"
+                                    : proposal.source}
                               {proposal.runId && (
                                 <a
                                   href={`#/runs/${proposal.runId}`}
@@ -474,11 +511,20 @@ export default function ProposalReviewPage() {
                       </button>
                       <button
                         onClick={() => runAction(proposal, "accept")}
-                        disabled={safeMode || actingId === proposal.id}
+                        disabled={
+                          safeMode ||
+                          actingId === proposal.id ||
+                          isUnsupportedType(proposal.proposalType)
+                        }
+                        title={
+                          isUnsupportedType(proposal.proposalType)
+                            ? "该类型 Proposal 在当前版本中尚未支持"
+                            : undefined
+                        }
                         className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-3 py-1.5 text-xs text-amber-50 hover:bg-stone-800 disabled:opacity-50"
                       >
                         <Check size={13} />
-                        应用
+                        {isUnsupportedType(proposal.proposalType) ? "暂不支持" : "应用"}
                       </button>
                     </div>
                   </div>

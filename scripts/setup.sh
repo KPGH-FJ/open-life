@@ -19,7 +19,7 @@
 #
 # 常见问题：
 #   Q: 提示 "pnpm not found"
-#   A: npm install -g pnpm
+#   A: corepack enable && corepack prepare pnpm@9.1.0 --activate
 #
 #   Q: 提示 "rustc not found"
 #   A: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -43,9 +43,10 @@ NC='\033[0m'
 
 # 路径配置
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/frontend"
-ENV_FILE="$SCRIPT_DIR/.env"
-ENV_TEMPLATE="$SCRIPT_DIR/.env.template"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+FRONTEND_DIR="$REPO_ROOT/frontend"
+ENV_FILE="$REPO_ROOT/.env"
+ENV_TEMPLATE="$REPO_ROOT/.env.template"
 
 # =============================================================================
 # 工具函数
@@ -104,8 +105,13 @@ step_check_tools() {
     local failed=0
 
     check_command "node"   || failed=1
-    check_command "npm"    || failed=1
-    check_command "pnpm"   || { log_warn "pnpm 未安装，尝试通过 npm 安装..."; npm install -g pnpm; check_command "pnpm" || failed=1; }
+    check_command "corepack" || failed=1
+    corepack pnpm --version &>/dev/null || {
+        log_warn "pnpm 不可用"
+        log_info "建议准备 pnpm:"
+        log_info "  corepack prepare pnpm@9.1.0 --activate"
+        failed=1
+    }
     check_command "rustc"  || failed=1
     check_command "cargo"  || failed=1
     check_command "git"    || failed=1
@@ -121,7 +127,7 @@ step_check_tools() {
         echo ""
         echo "  Rust (>= 1.75):  https://rustup.rs/"
         echo "  Node.js (>= 18): https://nodejs.org/"
-        echo "  pnpm:            npm install -g pnpm"
+        echo "  pnpm:            corepack enable && corepack prepare pnpm@9.1.0 --activate"
         echo ""
         echo "macOS 额外依赖:"
         echo "  xcode-select --install"
@@ -149,7 +155,7 @@ step_install_frontend_deps() {
     fi
 
     log_info "运行 pnpm install (位于 $FRONTEND_DIR)..."
-    (cd "$FRONTEND_DIR" && pnpm install)
+    (cd "$FRONTEND_DIR" && corepack pnpm install)
     log_success "前端依赖安装完成"
 }
 
@@ -176,7 +182,7 @@ step_install_rust_deps() {
         if [ -f "$local_tauri" ]; then
             log_success "Tauri CLI 在 node_modules 中可用"
         else
-            log_warn "Tauri CLI 未找到，将在首次启动时通过 npx/pnpm 自动安装"
+            log_warn "Tauri CLI 未找到，将在首次启动时通过 pnpm 自动安装"
         fi
     else
         log_success "Tauri CLI 已全局安装"
@@ -232,7 +238,7 @@ step_init_data_dir() {
             fi
             ;;
         *)
-            data_dir="${SCRIPT_DIR}/.openlife"
+            data_dir="${REPO_ROOT}/.openlife"
             ;;
     esac
 
@@ -257,9 +263,9 @@ verify_installation() {
 
     [ -d "$FRONTEND_DIR/node_modules" ] || { log_error "node_modules 缺失"; failed=1; }
     [ -f "$ENV_FILE" ]                   || { log_error ".env 文件缺失"; failed=1; }
-    [ -f "$SCRIPT_DIR/Cargo.toml" ]      || { log_error "Cargo.toml 缺失"; failed=1; }
-    [ -d "$SCRIPT_DIR/openlife-core" ]   || { log_error "openlife-core 目录缺失"; failed=1; }
-    [ -d "$SCRIPT_DIR/src-tauri" ]       || { log_error "src-tauri 目录缺失"; failed=1; }
+    [ -f "$REPO_ROOT/Cargo.toml" ]      || { log_error "Cargo.toml 缺失"; failed=1; }
+    [ -d "$REPO_ROOT/openlife-core" ]   || { log_error "openlife-core 目录缺失"; failed=1; }
+    [ -d "$REPO_ROOT/src-tauri" ]       || { log_error "src-tauri 目录缺失"; failed=1; }
 
     if [ $failed -ne 0 ]; then
         log_error "验证未通过，请检查项目完整性"
