@@ -1182,12 +1182,14 @@ export interface ProviderStatus {
   healthIsEstimated: boolean;
   lastError?: string;
   latencyMs?: number;
+  lastChecked?: string;
 }
 
 export interface ModelRouterStatus {
   enabled: boolean;
   providers: ProviderStatus[];
   lastCheckAt?: string;
+  message?: string;
 }
 
 export interface AgentAction {

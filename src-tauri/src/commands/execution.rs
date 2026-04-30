@@ -1,7 +1,7 @@
 use crate::AppState;
 use openlife_core::agent::{
-    AgentAction, AgentObservation, AgentProposal, AgentRun, AgentRunStatus, AgentTaskKind,
-    ProposalSource, ProposalType, RiskLevel,
+    AgentAction, AgentObservation, AgentProposal, AgentRun, AgentTaskKind, ProposalSource,
+    ProposalType, RiskLevel,
 };
 use openlife_core::tool_permissions::{
     ToolPermissionDecision, ToolPermissionPolicy, ToolPermissionRecord,
@@ -153,12 +153,11 @@ pub async fn run_skill(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 5. Extract final reply from runtime output
-    let final_reply = runtime_output
-        .final_messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_else(|| skill_result.summary.clone());
+    // 5. Generate the actual skill response from the runtime-assembled messages.
+    let final_reply = scheduler
+        .generate(runtime_output.final_messages.clone(), &life_model, None)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // 6. Create AgentRun
     let mut run = AgentRun::new_chat_run(
@@ -166,9 +165,12 @@ pub async fn run_skill(
         input.get("text").and_then(Value::as_str).unwrap_or(""),
     );
     run.kind = AgentTaskKind::Skill;
-    run.output_preview = Some(crate::preview_text(&final_reply, 200));
-    run.status = AgentRunStatus::Completed;
-    run.finished_at = Some(chrono::Utc::now());
+    let model_route = scheduler.preview_chat_route(None).await;
+    run.complete(
+        &crate::preview_text(&final_reply, 200),
+        model_route,
+        runtime_output.context_summary,
+    );
     run.reasoning_trace = Some(runtime_output.reasoning_trace);
     run.actions.push(AgentAction {
         id: local_id("action"),

@@ -12,6 +12,7 @@ import {
   testLlmConnection,
   checkOllamaStatus,
   getRouterStatus,
+  getModelRouterStatus,
   getSystemDiagnostics,
   getHotCache,
   exportMcpAuditLogs,
@@ -23,6 +24,7 @@ import {
   type HotMemoryCache,
   type PrivacyPolicy,
   type RouterStatus,
+  type ModelRouterStatus,
   type SystemDiagnostics,
   listToolPermissions,
   revokeToolPermission,
@@ -169,6 +171,7 @@ export default function SettingsPage() {
   const [exportLoading, setExportLoading] = useState(false);
   const [importLoading, setImportLoading] = useState(false);
   const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null);
+  const [modelRouterStatus, setModelRouterStatus] = useState<ModelRouterStatus | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [hotCache, setHotCache] = useState<HotMemoryCache | null>(null);
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
@@ -205,8 +208,9 @@ export default function SettingsPage() {
   }, []);
 
   const refreshAllDiagnostics = async () => {
-    const [router, diag, cache, policy, permissions, pluginRecords] = await Promise.all([
+    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords] = await Promise.all([
       getRouterStatus().catch(() => null),
+      getModelRouterStatus().catch(() => null),
       getSystemDiagnostics().catch(() => null),
       getHotCache().catch(() => null),
       getPrivacyPolicy().catch(() => null),
@@ -214,6 +218,7 @@ export default function SettingsPage() {
       listPlugins().catch(() => []),
     ]);
     setRouterStatus(router);
+    setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
     setHotCache(cache);
     setPrivacyPolicyState(policy);
@@ -1167,6 +1172,55 @@ export default function SettingsPage() {
               <span>
                 {routerStatus ? `${Math.round(routerStatus.latency_threshold_us / 1000)}ms` : "-"}
               </span>
+            </div>
+          </div>
+        </section>
+
+        {/* Model Router Provider Health */}
+        <section className="space-y-4 border-t pt-4">
+          <h3 className="text-sm font-medium text-gray-700">ModelRouter Provider Health</h3>
+          <div className="rounded-lg border border-slate-200 bg-white">
+            <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3 text-sm">
+              <span className="font-medium text-slate-700">
+                状态：{modelRouterStatus?.enabled ? "已启用" : "灰度未启用"}
+              </span>
+              <span className="text-xs text-slate-500">
+                {modelRouterStatus?.lastCheckAt
+                  ? new Date(modelRouterStatus.lastCheckAt).toLocaleString()
+                  : "未检查"}
+              </span>
+            </div>
+            {modelRouterStatus?.message && (
+              <div className="border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">
+                {modelRouterStatus.message}
+              </div>
+            )}
+            <div className="divide-y divide-slate-100">
+              {(modelRouterStatus?.providers ?? []).map(provider => (
+                <div key={provider.name} className="grid gap-2 px-4 py-3 text-sm md:grid-cols-5">
+                  <div className="font-medium text-slate-800">{provider.name}</div>
+                  <div className={provider.available ? "text-emerald-700" : "text-rose-700"}>
+                    {provider.available ? "available" : "unavailable"}
+                  </div>
+                  <div className="text-slate-600">
+                    {provider.enabled ? "enabled" : "disabled"}
+                  </div>
+                  <div className="text-slate-600">
+                    {provider.latencyMs != null ? `${provider.latencyMs}ms` : "latency n/a"}
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {provider.healthIsEstimated ? "estimated" : "probed"}
+                  </div>
+                  {provider.lastError && (
+                    <div className="md:col-span-5 rounded bg-rose-50 px-2 py-1 text-xs text-rose-700">
+                      {provider.lastError}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {(!modelRouterStatus || modelRouterStatus.providers.length === 0) && (
+                <div className="px-4 py-3 text-sm text-slate-500">暂无 provider health 数据。</div>
+              )}
             </div>
           </div>
         </section>

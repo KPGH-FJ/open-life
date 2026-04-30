@@ -205,17 +205,34 @@ impl ProposalGenerator for ToolProposalGenerator {
             if !needs_permission || !action.action_type.contains("tool") {
                 continue;
             }
-            let tool_name = action.target.as_deref().unwrap_or("unknown_tool");
+            let tool_name = action
+                .tool_scope
+                .as_ref()
+                .map(|scope| scope.tool_name.as_str())
+                .or(action.target.as_deref())
+                .unwrap_or("unknown_tool");
+            let source = action
+                .tool_scope
+                .as_ref()
+                .map(|scope| scope.source.as_str())
+                .unwrap_or("mcp");
+            let risk_level = action
+                .tool_scope
+                .as_ref()
+                .map(|scope| scope.risk_level.as_str())
+                .or_else(|| action.input.get("risk_level").and_then(Value::as_str))
+                .unwrap_or("high");
+            let action_type = action
+                .tool_scope
+                .as_ref()
+                .map(|scope| scope.action_type.as_str())
+                .unwrap_or(&action.action_type);
             let after = serde_json::json!({
                 "tool_name": tool_name,
                 "permission": "allow_until_revoked",
-                "source": "mcp",
-                "risk_level": action
-                    .input
-                    .get("risk_level")
-                    .and_then(Value::as_str)
-                    .unwrap_or("high"),
-                "action_type": action.action_type,
+                "source": source,
+                "risk_level": risk_level,
+                "action_type": action_type,
             });
             let mut proposal = AgentProposal::new(
                 ProposalType::ToolPermission,

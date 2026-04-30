@@ -99,43 +99,56 @@ pub async fn replay_agent_action(
         .as_ref()
         .ok_or_else(|| "Action has no tool_scope".to_string())?;
 
-    // 5. Grant AllowOnce permission
-    {
+    let decision = {
         let permission_store = state.tool_permission_store.lock().await;
         permission_store
-            .grant(
+            .check(
                 &tool_scope.tool_name,
                 &tool_scope.source,
                 &tool_scope.risk_level,
                 &action.action_type,
-                openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                None,
+                &tool_scope.capabilities,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+    };
+    if !decision.allowed {
+        return Err(format!(
+            "Action is not authorized yet. Please accept the ToolPermission proposal in Review Center first. Decision: {} ({})",
+            decision.decision, decision.reason
+        ));
     }
 
-    // 6. Re-execute the tool call
+    // 5. Re-execute the tool call with the original tool arguments.
     let (reg, audit) = state.get_mcp_state().await;
-    let args = action.input.clone();
+    let args = action
+        .input
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| action.input.clone());
     let result = crate::execute_tool_call_internal(
         &tool_scope.tool_name,
-        args,
+        args.clone(),
         tool_scope.risk_level.clone(),
         &reg,
         &audit,
-        Some("allow_once".into()),
+        Some(decision.decision),
     );
 
-    // 7. Update action and observation
-    let (new_action, new_observation) = crate::action_observation_from_tool_result(
+    // 6. Update action and observation, preserving the original action id.
+    let manifest = reg.list_manifests().into_iter().find(|manifest| {
+        manifest.id == tool_scope.tool_id || manifest.name == tool_scope.tool_name
+    });
+    let (mut new_action, mut new_observation) = crate::action_observation_from_tool_result(
         &result,
-        action.input.clone(),
-        None,
+        serde_json::json!({ "arguments": args }),
+        manifest.as_ref(),
     );
+    new_action.id = action_id.clone();
+    new_observation.action_id = Some(action_id.clone());
 
     run.actions[action_idx] = new_action.clone();
 
-    // 8. Update observation
+    // 7. Update observation
     if let Some(obs_idx) = run
         .observations
         .iter()
@@ -146,7 +159,7 @@ pub async fn replay_agent_action(
         run.observations.push(new_observation);
     }
 
-    // 9. Update run in store
+    // 8. Update run in store
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store.update_run(&run).map_err(|e| e.to_string())?;

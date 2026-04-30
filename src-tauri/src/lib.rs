@@ -1587,23 +1587,25 @@ async fn send_message(
                 // Persist user message
                 if let Some(ref user) = user_msg {
                     if user.role == "user" {
-                        let inserted = persist_chat_message_if_needed(&session_id, user, &state).await?;
+                        let inserted =
+                            persist_chat_message_if_needed(&session_id, user, &state).await?;
                         if inserted {
                             persist_vector_memory_for_message(&session_id, user, &state).await;
                         }
                     }
                 }
-                // Persist assistant message
                 let assistant_msg = ChatMessage {
                     role: "assistant".into(),
                     content: reply.clone(),
                 };
-                let _ = persist_chat_message_if_needed(&session_id, &assistant_msg, &state).await?;
 
                 // Create and finalize AgentRun for L1
                 let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
                     &session_id,
-                    &user_msg.as_ref().map(|m| m.content.clone()).unwrap_or_default(),
+                    &user_msg
+                        .as_ref()
+                        .map(|m| m.content.clone())
+                        .unwrap_or_default(),
                 );
                 let model_route = openlife_core::agent::ModelRouteTrace {
                     provider: "direct".to_string(),
@@ -1628,16 +1630,27 @@ async fn send_message(
                     redaction_level: openlife_core::agent::types::RedactionLevel::None,
                 };
                 agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
-                if let Some(ref store_arc) = state.agent_run_store {
-                    let store = store_arc.lock().await;
-                    if let Err(e) = store.create_run(&agent_run) {
-                        eprintln!("[AgentRun] 保存 L1 运行记录失败: {}", e);
-                    }
-                }
+                let life_model = {
+                    let manager = state.life_model_manager.lock().await;
+                    manager
+                        .load()
+                        .map_err(|e| format!("人生模型加载失败: {}", e))?
+                };
+                let mut reasoning_trace = ReasoningTrace::default();
+                finalize_chat_agent_run(
+                    &session_id,
+                    &assistant_msg,
+                    &reply,
+                    &mut reasoning_trace,
+                    &mut agent_run,
+                    &life_model,
+                    &state,
+                )
+                .await?;
 
                 return Ok(SendMessageResult {
                     reply,
-                    reasoning_trace: ReasoningTrace::default(),
+                    reasoning_trace,
                     tool_calls: vec![],
                     run_id: Some(agent_run.id.clone()),
                 });

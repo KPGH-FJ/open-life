@@ -40,7 +40,6 @@ import {
   addDailyGoal,
   toggleDailyGoal,
   recordState,
-  executeToolCall,
   replayAgentAction,
   indexMemoryChunk,
   listAgentRunsForSession,
@@ -237,7 +236,7 @@ export default function ChatPage() {
   const [showHermes, setShowHermes] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
   const [showToolCalls, setShowToolCalls] = useState(false);
-  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
+  const [, setCurrentRunId] = useState<string | null>(null);
   const [model, setModel] = useState<LifeModel | null>(null);
   const [showGuide, setShowGuide] = useState(true);
   const [chatMode, setChatMode] = useState<string | null>(null);
