@@ -172,7 +172,7 @@ export default function ProposalReviewPage() {
     setBatchAccepting(true);
     setError(null);
     try {
-      const count = await batchAcceptLowRiskProposals();
+      const count = await batchAcceptLowRiskProposals(Array.from(selectedIds));
       setNotice(`批量接受完成：${count} 个 Proposal 已应用`);
       await load();
     } catch (e) {
@@ -407,16 +407,37 @@ export default function ProposalReviewPage() {
                                   ? "Calibration"
                                   : proposal.source}
                               {proposal.runId && (
-                                <span
-                                  className="text-stone-300"
-                                  title={`Run ID: ${proposal.runId}`}
+                                <a
+                                  href={`#/runs/${proposal.runId}`}
+                                  className="text-stone-500 hover:text-stone-700 hover:underline"
+                                  title={`查看来源 Run: ${proposal.runId}`}
                                 >
                                   #{proposal.runId.slice(0, 8)}
-                                </span>
+                                </a>
                               )}
                             </span>
                           )}
                         </div>
+                        {proposal.proposalType === "tool_permission" && proposal.after && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-stone-500">
+                            <span className="rounded bg-stone-100 px-1.5 py-0.5">
+                              工具：{proposal.after.tool_name || proposal.after.toolName || proposal.after.name || "unknown"}
+                            </span>
+                            <span className="rounded bg-stone-100 px-1.5 py-0.5">
+                              权限：{proposal.after.permission || proposal.after.level || "allow_until_revoked"}
+                            </span>
+                            {proposal.after.source && (
+                              <span className="rounded bg-stone-100 px-1.5 py-0.5">
+                                来源：{proposal.after.source}
+                              </span>
+                            )}
+                            {proposal.after.risk_level && (
+                              <span className="rounded bg-stone-100 px-1.5 py-0.5">
+                                风险：{proposal.after.risk_level}
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">

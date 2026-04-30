@@ -131,11 +131,93 @@ fn apply_life_model_value(
     serde_json::from_value(value).map_err(|e| format!("Proposal 值无法转换为 LifeModel：{}", e))
 }
 
+fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Result<(), String> {
+    match proposal_type {
+        ProposalType::LifeModelUpdate
+        | ProposalType::GoalUpdate
+        | ProposalType::StateUpdate
+        | ProposalType::PreferenceUpdate
+        | ProposalType::CapabilityUpdate => {
+            // LifeModel proposals require after to be a non-null value
+            if after.is_null() {
+                return Err("LifeModel Proposal 的 after 值不能为 null。".to_string());
+            }
+            Ok(())
+        }
+        ProposalType::MemoryWrite => {
+            let content = after
+                .get("content")
+                .and_then(Value::as_str)
+                .or_else(|| after.as_str());
+            match content {
+                Some(c) if !c.trim().is_empty() => Ok(()),
+                _ => Err("MemoryWrite Proposal 缺少 after.content（非空字符串）。".to_string()),
+            }
+        }
+        ProposalType::MemoryArchive => {
+            let has_ids = after.get("chunk_ids").is_some()
+                || after.get("chunkIds").is_some()
+                || after.get("ids").is_some()
+                || after.as_i64().is_some()
+                || after.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+            if !has_ids {
+                return Err("MemoryArchive Proposal 缺少 after.chunk_ids（整数或整数数组）。".to_string());
+            }
+            Ok(())
+        }
+        ProposalType::ToolPermission => {
+            let tool_name = after
+                .get("tool_name")
+                .or_else(|| after.get("toolName"))
+                .or_else(|| after.get("name"))
+                .and_then(Value::as_str);
+            match tool_name {
+                Some(name) if !name.is_empty() => {
+                    let permission = after
+                        .get("permission")
+                        .or_else(|| after.get("level"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("allow_until_revoked");
+                    let valid_permissions = ["allow", "allowed", "deny", "ask_every_time", "allow_once", "allow_until_revoked"];
+                    if !valid_permissions.contains(&permission) {
+                        return Err(format!(
+                            "ToolPermission Proposal 的 permission 值 '{}' 无效。有效值: allow, deny, ask_every_time, allow_once, allow_until_revoked",
+                            permission
+                        ));
+                    }
+                    Ok(())
+                }
+                _ => Err("ToolPermission Proposal 缺少 after.tool_name（非空字符串）。".to_string()),
+            }
+        }
+        ProposalType::PluginPermission
+        | ProposalType::ScheduledTask
+        | ProposalType::ExternalWriteAction
+        | ProposalType::ModelPolicyChange
+        | ProposalType::DataExport
+        | ProposalType::ScheduleCheckin => {
+            // These types are not yet implemented; validation passes but apply will fail
+            Ok(())
+        }
+    }
+}
+
 async fn apply_proposal_to_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     after: Value,
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    // Validate payload schema before applying
+    if let Err(e) = validate_proposal_payload(proposal.proposal_type, &after) {
+        return Ok(openlife_core::life_model::patch::PatchApplyResult {
+            patch_id: proposal.id.clone(),
+            success: false,
+            path: proposal.affected_path.clone(),
+            operation: "validation_failed".to_string(),
+            error: Some(e),
+        });
+    }
+
     match proposal.proposal_type {
         ProposalType::LifeModelUpdate
         | ProposalType::GoalUpdate
@@ -205,6 +287,26 @@ async fn apply_proposal_to_state(
                 let content = memory_content(&after)?;
                 let session_id = memory_session_id(&after);
                 let source = memory_source(&after);
+
+                // Check for duplicate content in memory store
+                {
+                    let store = state.memory_store.lock().await;
+                    let hits = store
+                        .search_text_memories(Some(&session_id), &content, 10)
+                        .map_err(|e| e.to_string())?;
+                    let is_duplicate = hits.iter().any(|hit| {
+                        hit.chunk.content.trim() == content.trim()
+                    });
+                    if is_duplicate {
+                        return Ok(patch_result_for_proposal(
+                            proposal,
+                            false,
+                            "memory_write",
+                            Some("检测到重复内容，该记忆已存在。".to_string()),
+                        ));
+                    }
+                }
+
                 let embedding_id = {
                     let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
                         let cfg = state.config.lock().await;
@@ -533,6 +635,7 @@ pub async fn list_proposals(
 
 #[tauri::command]
 pub async fn batch_accept_low_risk_proposals(
+    proposal_ids: Option<Vec<String>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<i64, String> {
     check_safe_mode(state.inner())?;
@@ -542,15 +645,27 @@ pub async fn batch_accept_low_risk_proposals(
         .ok_or_else(proposal_store_missing)?;
     let store = store.lock().await;
 
-    // Get all low risk pending proposals
-    let proposals = store
-        .list_proposals_filtered(
-            Some(ProposalStatus::Pending),
-            None,
-            Some(RiskLevel::Low),
-            200,
-        )
-        .map_err(|e| e.to_string())?;
+    // If specific IDs provided, use those; otherwise fall back to all low-risk pending
+    let proposals = if let Some(ids) = proposal_ids {
+        let mut proposals = Vec::new();
+        for id in ids {
+            if let Ok(Some(p)) = store.get_proposal(&id) {
+                if p.status == ProposalStatus::Pending && p.risk_level == RiskLevel::Low {
+                    proposals.push(p);
+                }
+            }
+        }
+        proposals
+    } else {
+        store
+            .list_proposals_filtered(
+                Some(ProposalStatus::Pending),
+                None,
+                Some(RiskLevel::Low),
+                200,
+            )
+            .map_err(|e| e.to_string())?
+    };
 
     let mut accepted_count = 0i64;
     for proposal in proposals {

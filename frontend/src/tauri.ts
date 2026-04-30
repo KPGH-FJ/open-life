@@ -1393,8 +1393,8 @@ export async function listProposals(
   return safeInvoke<AgentProposal[]>("list_proposals", { status, proposalType, riskLevel, limit });
 }
 
-export async function batchAcceptLowRiskProposals(): Promise<number> {
-  return safeInvoke<number>("batch_accept_low_risk_proposals");
+export async function batchAcceptLowRiskProposals(proposalIds?: string[]): Promise<number> {
+  return safeInvoke<number>("batch_accept_low_risk_proposals", { proposalIds });
 }
 
 // ── Proposal ──
