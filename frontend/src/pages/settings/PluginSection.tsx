@@ -1,17 +1,15 @@
 import { useState } from "react";
 import { reloadPlugins, enablePlugin, disablePlugin } from "../../tauri";
-import type { PluginRecord, SystemDiagnostics } from "../../tauri";
+import type { PluginRecord } from "../../tauri";
 
 interface PluginSectionProps {
   plugins: PluginRecord[];
-  diagnostics: SystemDiagnostics | null;
   onPluginsChange: (plugins: PluginRecord[]) => void;
   onRefreshDiagnostics: () => void;
 }
 
 export default function PluginSection({
   plugins,
-  diagnostics,
   onPluginsChange,
   onRefreshDiagnostics,
 }: PluginSectionProps) {
@@ -70,9 +68,7 @@ export default function PluginSection({
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-sm font-medium text-gray-900">
-                    {plugin.manifest.name}
-                  </div>
+                  <div className="text-sm font-medium text-gray-900">{plugin.manifest.name}</div>
                   <div className="mt-1 text-xs text-gray-500">
                     {plugin.manifest.id} · v{plugin.manifest.version} ·{" "}
                     {plugin.enabled ? "enabled" : "disabled"}

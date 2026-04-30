@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
-import EmptyState from "../components/EmptyState";
 import {
   startStreamMessage,
   getChatHistory,

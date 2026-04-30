@@ -1,9 +1,8 @@
 use crate::agent::action_executor::{
-    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
-    ActionExecutorConfig, AgentActionRequest,
+    ActionExecutionContext, ActionExecutionStatus, ActionExecutor, AgentActionRequest,
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
-use crate::agent::types::{AgentAction, AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask, ContextSummary};
+use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -54,7 +53,7 @@ pub struct AgentLoopResult {
 pub struct AgentLoop {
     runtime: AgentRuntime,
     action_executor: ActionExecutor,
-    scheduler: InferenceScheduler,
+    _scheduler: InferenceScheduler,
     config: AgentLoopConfig,
 }
 
@@ -68,7 +67,7 @@ impl AgentLoop {
         Self {
             runtime,
             action_executor,
-            scheduler,
+            _scheduler: scheduler,
             config,
         }
     }
@@ -84,29 +83,31 @@ impl AgentLoop {
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
-        let mut run = AgentRun::new_chat_run(
-            &task.session_id,
-            &task.user_text,
-        );
+        let mut run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
         run.user_input = Some(task.user_text.clone());
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
-        let mut final_response = String::new();
-        let mut stop_reason = String::new();
+        let mut _final_response = String::new();
+        let mut _stop_reason = String::new();
 
         // Step 1: Generate initial model response
         let runtime_output = self
-            .generate_response(task, life_model, tools_prompt, memory_context.clone(), privacy_engine.clone())
+            .generate_response(
+                task,
+                life_model,
+                tools_prompt,
+                memory_context.clone(),
+                privacy_engine.clone(),
+            )
             .await
-            .map_err(|e| {
+            .inspect_err(|e| {
                 run.status = AgentRunStatus::Failed;
                 run.error = Some(AgentRunError {
                     message: e.to_string(),
                     phase: "model".into(),
                     recoverable: false,
                 });
-                e
             })?;
 
         step_count += 1;
@@ -126,7 +127,8 @@ impl AgentLoop {
             .unwrap_or_default();
 
         // Check for tool calls in the reply
-        let tool_actions = self.parse_tool_calls(&first_reply, action_ctx, &mut run, &mut tool_call_count)?;
+        let tool_actions =
+            self.parse_tool_calls(&first_reply, action_ctx, &mut run, &mut tool_call_count)?;
 
         let has_tool_calls = !tool_actions.is_empty();
 
@@ -147,16 +149,9 @@ impl AgentLoop {
                 let exec_result = self.action_executor.execute(action_request, action_ctx)?;
                 run.actions.push(exec_result.action.clone());
 
-                if exec_result.status == ActionExecutionStatus::Succeeded {
-                    observations.push(exec_result.observation.clone());
-                    run.observations.push(exec_result.observation);
-                } else if exec_result.status == ActionExecutionStatus::NeedsConfirmation {
-                    observations.push(exec_result.observation.clone());
-                    run.observations.push(exec_result.observation);
-                    all_succeeded = false;
-                } else {
-                    observations.push(exec_result.observation.clone());
-                    run.observations.push(exec_result.observation);
+                observations.push(exec_result.observation.clone());
+                run.observations.push(exec_result.observation);
+                if exec_result.status != ActionExecutionStatus::Succeeded {
                     all_succeeded = false;
                 }
 
@@ -171,64 +166,88 @@ impl AgentLoop {
                     phase: "execution".into(),
                     recoverable: false,
                 });
-                stop_reason = "timeout".into();
-                final_response = "执行超时，请稍后重试。".into();
-                return Ok(self.build_result(run, final_response, stop_reason, tool_call_count, step_count));
+                _stop_reason = "timeout".into();
+                _final_response = "执行超时，请稍后重试。".into();
+                return Ok(self.build_result(
+                    run,
+                    _final_response,
+                    _stop_reason,
+                    tool_call_count,
+                    step_count,
+                ));
             }
 
             // Step 2: Follow-up response with tool results
             if all_succeeded && !observations.is_empty() {
-                let follow_up_messages = self.build_follow_up_messages(task, &first_reply, &observations);
+                let follow_up_messages =
+                    self.build_follow_up_messages(task, &first_reply, &observations);
                 let follow_up_task = AgentTask {
                     messages: follow_up_messages,
                     ..task.clone()
                 };
 
                 let follow_up_output = self
-                    .generate_response(&follow_up_task, life_model, "", memory_context, privacy_engine)
+                    .generate_response(
+                        &follow_up_task,
+                        life_model,
+                        "",
+                        memory_context,
+                        privacy_engine,
+                    )
                     .await
-                    .map_err(|e| {
+                    .inspect_err(|e| {
                         run.status = AgentRunStatus::Failed;
                         run.error = Some(AgentRunError {
                             message: e.to_string(),
                             phase: "follow_up".into(),
                             recoverable: false,
                         });
-                        e
                     })?;
 
                 step_count += 1;
-                final_response = follow_up_output
+                _final_response = follow_up_output
                     .final_messages
                     .last()
                     .map(|m| m.content.clone())
                     .unwrap_or_else(|| first_reply.clone());
-                stop_reason = "completed_with_follow_up".into();
+                _stop_reason = "completed_with_follow_up".into();
             } else if !all_succeeded {
                 // Some tools failed or need confirmation
-                let pending_count = run.actions.iter().filter(|a| a.status == "needs_confirmation").count();
+                let pending_count = run
+                    .actions
+                    .iter()
+                    .filter(|a| a.status == "needs_confirmation")
+                    .count();
                 if pending_count > 0 {
-                    final_response = "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。".into();
-                    stop_reason = "needs_confirmation".into();
+                    _final_response =
+                        "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
+                            .into();
+                    _stop_reason = "needs_confirmation".into();
                 } else {
-                    final_response = "工具执行过程中出现错误，请检查配置或稍后重试。".into();
-                    stop_reason = "tool_execution_failed".into();
+                    _final_response = "工具执行过程中出现错误，请检查配置或稍后重试。".into();
+                    _stop_reason = "tool_execution_failed".into();
                 }
             } else {
-                final_response = first_reply.clone();
-                stop_reason = "no_observations".into();
+                _final_response = first_reply.clone();
+                _stop_reason = "no_observations".into();
             }
         } else {
             // No tool calls, use first reply directly
-            final_response = first_reply;
-            stop_reason = "no_tools".into();
+            _final_response = first_reply;
+            _stop_reason = "no_tools".into();
         }
 
         run.status = AgentRunStatus::Completed;
-        run.output_preview = Some(preview_text(&final_response, 200));
+        run.output_preview = Some(preview_text(&_final_response, 200));
         run.finished_at = Some(chrono::Utc::now());
 
-        Ok(self.build_result(run, final_response, stop_reason, tool_call_count, step_count))
+        Ok(self.build_result(
+            run,
+            _final_response,
+            _stop_reason,
+            tool_call_count,
+            step_count,
+        ))
     }
 
     async fn generate_response(
@@ -241,9 +260,16 @@ impl AgentLoop {
     ) -> Result<AgentRuntimeOutput> {
         let memory_hits = Vec::new(); // Simplified for Beta MVP
         self.runtime
-            .execute_task(task, life_model, tools_prompt, memory_context, memory_hits, privacy_engine)
+            .execute_task(
+                task,
+                life_model,
+                tools_prompt,
+                memory_context,
+                memory_hits,
+                privacy_engine,
+            )
             .await
-                    .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))
+            .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))
     }
 
     fn parse_tool_calls(
@@ -258,7 +284,8 @@ impl AgentLoop {
             return Ok(Vec::new());
         };
 
-        let v: Value = serde_json::from_str(json_str).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
+        let v: Value =
+            serde_json::from_str(json_str).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
         let calls = match v.get("tool_calls").and_then(|c| c.as_array()) {
             Some(calls) if !calls.is_empty() => calls,
             _ => return Ok(Vec::new()),
@@ -270,7 +297,10 @@ impl AgentLoop {
                 .get("name")
                 .and_then(|n| n.as_str())
                 .context("tool call missing name")?;
-            let args = call.get("arguments").cloned().unwrap_or_else(|| serde_json::json!({}));
+            let args = call
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
 
             requests.push(AgentActionRequest {
                 action_type: "mcp_tool".to_string(),
@@ -317,7 +347,10 @@ impl AgentLoop {
     ) -> AgentObservation {
         let now = chrono::Utc::now();
         AgentObservation {
-            id: format!("observation-budget-{}", now.timestamp_nanos_opt().unwrap_or_default()),
+            id: format!(
+                "observation-budget-{}",
+                now.timestamp_nanos_opt().unwrap_or_default()
+            ),
             action_id: None,
             content: format!(
                 "工具调用预算已耗尽 (max_tool_calls={})",

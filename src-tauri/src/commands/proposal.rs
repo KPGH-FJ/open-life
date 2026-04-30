@@ -161,7 +161,9 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
                 || after.as_i64().is_some()
                 || after.as_array().map(|a| !a.is_empty()).unwrap_or(false);
             if !has_ids {
-                return Err("MemoryArchive Proposal 缺少 after.chunk_ids（整数或整数数组）。".to_string());
+                return Err(
+                    "MemoryArchive Proposal 缺少 after.chunk_ids（整数或整数数组）。".to_string(),
+                );
             }
             Ok(())
         }
@@ -178,7 +180,14 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
                         .or_else(|| after.get("level"))
                         .and_then(Value::as_str)
                         .unwrap_or("allow_until_revoked");
-                    let valid_permissions = ["allow", "allowed", "deny", "ask_every_time", "allow_once", "allow_until_revoked"];
+                    let valid_permissions = [
+                        "allow",
+                        "allowed",
+                        "deny",
+                        "ask_every_time",
+                        "allow_once",
+                        "allow_until_revoked",
+                    ];
                     if !valid_permissions.contains(&permission) {
                         return Err(format!(
                             "ToolPermission Proposal 的 permission 值 '{}' 无效。有效值: allow, deny, ask_every_time, allow_once, allow_until_revoked",
@@ -187,7 +196,9 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
                     }
                     Ok(())
                 }
-                _ => Err("ToolPermission Proposal 缺少 after.tool_name（非空字符串）。".to_string()),
+                _ => {
+                    Err("ToolPermission Proposal 缺少 after.tool_name（非空字符串）。".to_string())
+                }
             }
         }
         ProposalType::PluginPermission
@@ -294,9 +305,9 @@ async fn apply_proposal_to_state(
                     let hits = store
                         .search_text_memories(Some(&session_id), &content, 10)
                         .map_err(|e| e.to_string())?;
-                    let is_duplicate = hits.iter().any(|hit| {
-                        hit.chunk.content.trim() == content.trim()
-                    });
+                    let is_duplicate = hits
+                        .iter()
+                        .any(|hit| hit.chunk.content.trim() == content.trim());
                     if is_duplicate {
                         return Ok(patch_result_for_proposal(
                             proposal,
@@ -791,6 +802,7 @@ mod tests {
             hot_cache,
             proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
             startup_warnings: vec![],
+            provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 

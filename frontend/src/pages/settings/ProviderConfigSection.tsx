@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { testLlmConnection, checkOllamaStatus } from "../../tauri";
 import type { AppConfig, SystemDiagnostics } from "../../tauri";
 
@@ -73,6 +73,12 @@ export default function ProviderConfigSection({
   const [apiTestResult, setApiTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [ollamaOnline, setOllamaOnline] = useState<boolean | null>(null);
 
+  useEffect(() => {
+    checkOllamaStatus()
+      .then(setOllamaOnline)
+      .catch(() => setOllamaOnline(false));
+  }, []);
+
   const provider = config.llm.provider ?? "deepseek";
   const preset = PROVIDER_PRESETS[provider];
   const isDeepSeekReasoner = config.llm.chat_model === "deepseek-reasoner";
@@ -107,15 +113,6 @@ export default function ProviderConfigSection({
       setApiTestResult({ ok: false, text: e.message || "测试失败" });
     } finally {
       setApiTestLoading(false);
-    }
-  };
-
-  const checkOllama = async () => {
-    try {
-      const online = await checkOllamaStatus();
-      setOllamaOnline(online);
-    } catch {
-      setOllamaOnline(false);
     }
   };
 

@@ -359,7 +359,8 @@ export default function A2APage() {
             </button>
           </div>
           <div className="text-xs text-gray-500">
-            这个区域会展示 OpenLife 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 OpenLife 结果。
+            这个区域会展示 OpenLife 请求如何映射成 A2A Task，以及 A2A 响应如何重新转换回 OpenLife
+            结果。
           </div>
           {bridgeResult && (
             <pre className="bg-gray-50 border rounded-lg p-4 text-xs overflow-auto max-h-80">

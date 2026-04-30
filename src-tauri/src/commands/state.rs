@@ -336,6 +336,7 @@ mod tests {
                 openlife_core::agent::ProposalEngine::new(),
             )),
             startup_warnings: vec![],
+            provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
 

@@ -83,8 +83,7 @@ impl SkillRegistry {
     }
 
     pub fn remove_by_source_prefix(&mut self, prefix: &str) {
-        self.manifests
-            .retain(|id, _| !id.starts_with(prefix));
+        self.manifests.retain(|id, _| !id.starts_with(prefix));
     }
 
     /// Build the system prompt for a skill.
@@ -100,36 +99,34 @@ impl SkillRegistry {
             manifest.name, manifest.description
         );
 
-        let output_instruction = format!(
-            r#"
+        let output_instruction = r#"
 你必须严格输出以下 JSON envelope 格式（不要包含 markdown 代码块标记）：
 
-{{
+{
   "summary": "简短摘要（1-2 句话）",
-  "structured_output": {{
+  "structured_output": {
     // 技能特定的结构化输出
-  }},
+  },
   "proposal_candidates": [
-    {{
+    {
       "proposal_type": "goal_update|state_update|memory_write|memory_archive",
       "affected_path": "具体路径",
-      "after": {{
+      "after": {
         // 新值
-      }},
+      },
       "reason": "为什么建议这个变更",
       "confidence": 0.8
-    }}
+    }
   ],
   "warnings": []
-}}
+}
 
 重要规则：
 - 只输出纯 JSON，不要添加 ```json 标记
 - proposal_candidates 可以为空数组 []
 - 如果没有任何建议变更，proposal_candidates 应为 []
 - confidence 范围 0.0-1.0
-"#
-        );
+"#;
 
         Ok(format!("{}\n{}", base_prompt, output_instruction))
     }
@@ -155,7 +152,11 @@ impl SkillRegistry {
         let prompt = format!(
             "[Skill: {}]\n用户输入: {}\n\n请基于你的技能能力生成回复。",
             manifest.name,
-            if user_input.is_empty() { "（无具体输入）" } else { user_input }
+            if user_input.is_empty() {
+                "（无具体输入）"
+            } else {
+                user_input
+            }
         );
 
         Ok(prompt)
@@ -294,7 +295,7 @@ pub struct SkillContext {
 }
 
 /// Parse skill JSON output with fallback strategies.
-/// 
+///
 /// Strategy 1: Strict JSON parsing
 /// Strategy 2: Extract JSON from fenced code block
 /// Strategy 3: Return error
@@ -332,7 +333,7 @@ fn extract_first_json_object(text: &str) -> Option<&str> {
     let mut depth = 0;
     let mut in_string = false;
     let mut escape = false;
-    
+
     for (idx, b) in text[start..].bytes().enumerate() {
         if escape {
             escape = false;
@@ -408,7 +409,8 @@ mod tests {
 
     #[test]
     fn test_parse_skill_json_direct() {
-        let json = r#"{"summary":"test","structured_output":{},"proposal_candidates":[],"warnings":[]}"#;
+        let json =
+            r#"{"summary":"test","structured_output":{},"proposal_candidates":[],"warnings":[]}"#;
         let result = parse_skill_json(json).unwrap();
         assert_eq!(result.summary, "test");
         assert!(result.proposal_candidates.is_empty());
@@ -459,7 +461,10 @@ mod tests {
         let envelope: SkillJsonEnvelope = serde_json::from_str(json).unwrap();
         assert_eq!(envelope.summary, "Weekly review completed");
         assert_eq!(envelope.proposal_candidates.len(), 1);
-        assert_eq!(envelope.proposal_candidates[0].proposal_type, "state_update");
+        assert_eq!(
+            envelope.proposal_candidates[0].proposal_type,
+            "state_update"
+        );
         assert_eq!(envelope.warnings.len(), 1);
     }
 }

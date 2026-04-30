@@ -352,7 +352,8 @@ pub struct ProviderHealthCache {
 impl ProviderHealthCache {
     pub fn is_fresh(&self) -> bool {
         if let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&self.checked_at) {
-            let elapsed = chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
+            let elapsed =
+                chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
             elapsed.num_seconds() < 30 // Cache for 30 seconds
         } else {
             false
@@ -603,7 +604,11 @@ fn try_prepare_tool_calls(
             Err(e) => {
                 // Build a failed result for executor errors
                 let now = chrono::Utc::now();
-                let action_id = format!("action-{}-{}", step_index + idx as u32, now.timestamp_nanos_opt().unwrap_or_default());
+                let action_id = format!(
+                    "action-{}-{}",
+                    step_index + idx as u32,
+                    now.timestamp_nanos_opt().unwrap_or_default()
+                );
                 let action = openlife_core::agent::AgentAction {
                     id: action_id.clone(),
                     action_type: "mcp_tool".into(),
@@ -619,11 +624,17 @@ fn try_prepare_tool_calls(
                     timestamp: now,
                 };
                 let observation = openlife_core::agent::AgentObservation {
-                    id: format!("observation-{}-{}", step_index + idx as u32, now.timestamp_nanos_opt().unwrap_or_default()),
+                    id: format!(
+                        "observation-{}-{}",
+                        step_index + idx as u32,
+                        now.timestamp_nanos_opt().unwrap_or_default()
+                    ),
                     action_id: Some(action_id),
                     content: e.to_string(),
                     source: "builtin".to_string(),
-                    structured_result: Some(serde_json::json!({ "success": false, "error": e.to_string() })),
+                    structured_result: Some(
+                        serde_json::json!({ "success": false, "error": e.to_string() }),
+                    ),
                     timestamp: now,
                 };
                 results.push(ToolCallResult {
@@ -665,16 +676,27 @@ fn action_execution_result_to_tool_call(
         arguments: args.clone(),
         sanitized_arguments: Some(sanitized),
         success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
-        output: result.action.output.as_ref().and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        output: result
+            .action
+            .output
+            .as_ref()
+            .and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
         error: result.action.error.clone(),
-        permission_level: result.action.tool_scope.as_ref().map(|s| s.risk_level.clone()).unwrap_or_else(|| "medium".into()),
+        permission_level: result
+            .action
+            .tool_scope
+            .as_ref()
+            .map(|s| s.risk_level.clone())
+            .unwrap_or_else(|| "medium".into()),
         status: match result.status {
             openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
             openlife_core::agent::ActionExecutionStatus::Failed => "error",
             openlife_core::agent::ActionExecutionStatus::Blocked => "error",
             openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
-        }.into(),
-        requires_confirmation: result.status == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
+        }
+        .into(),
+        requires_confirmation: result.status
+            == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
         pii_found: false, // Simplified
         privacy_warnings: vec![],
         action_id: Some(result.action.id.clone()),
@@ -1629,7 +1651,14 @@ async fn send_message(
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
         let privacy_engine = state.privacy_engine.lock().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store, &privacy_engine, agent_run.actions.len() as u32)
+        try_prepare_tool_calls(
+            &first_reply,
+            &reg,
+            &audit,
+            &permission_store,
+            &privacy_engine,
+            agent_run.actions.len() as u32,
+        )
     };
 
     let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
@@ -2334,7 +2363,14 @@ async fn start_stream_message(
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
         let privacy_engine = state.privacy_engine.lock().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store, &privacy_engine, agent_run.actions.len() as u32)
+        try_prepare_tool_calls(
+            &first_reply,
+            &reg,
+            &audit,
+            &permission_store,
+            &privacy_engine,
+            agent_run.actions.len() as u32,
+        )
     };
     let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
         agent_run.actions.extend(actions);
@@ -2501,16 +2537,27 @@ async fn execute_tool_call(
         arguments: arguments.clone(),
         sanitized_arguments: Some(arguments),
         success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
-        output: result.action.output.as_ref().and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        output: result
+            .action
+            .output
+            .as_ref()
+            .and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
         error: result.action.error.clone(),
-        permission_level: result.action.tool_scope.as_ref().map(|s| s.risk_level.clone()).unwrap_or_else(|| "medium".into()),
+        permission_level: result
+            .action
+            .tool_scope
+            .as_ref()
+            .map(|s| s.risk_level.clone())
+            .unwrap_or_else(|| "medium".into()),
         status: match result.status {
             openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
             openlife_core::agent::ActionExecutionStatus::Failed => "error",
             openlife_core::agent::ActionExecutionStatus::Blocked => "error",
             openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
-        }.into(),
-        requires_confirmation: result.status == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
+        }
+        .into(),
+        requires_confirmation: result.status
+            == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
         pii_found: false,
         privacy_warnings: vec![],
         action_id: Some(result.action.id),

@@ -421,10 +421,17 @@ export default function ProposalReviewPage() {
                         {proposal.proposalType === "tool_permission" && proposal.after && (
                           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-stone-500">
                             <span className="rounded bg-stone-100 px-1.5 py-0.5">
-                              工具：{proposal.after.tool_name || proposal.after.toolName || proposal.after.name || "unknown"}
+                              工具：
+                              {proposal.after.tool_name ||
+                                proposal.after.toolName ||
+                                proposal.after.name ||
+                                "unknown"}
                             </span>
                             <span className="rounded bg-stone-100 px-1.5 py-0.5">
-                              权限：{proposal.after.permission || proposal.after.level || "allow_until_revoked"}
+                              权限：
+                              {proposal.after.permission ||
+                                proposal.after.level ||
+                                "allow_until_revoked"}
                             </span>
                             {proposal.after.source && (
                               <span className="rounded bg-stone-100 px-1.5 py-0.5">

@@ -9,8 +9,6 @@ import {
   rebuildMemoryIndex,
   exportAllData,
   importAllData,
-  testLlmConnection,
-  checkOllamaStatus,
   getRouterStatus,
   getModelRouterStatus,
   getSystemDiagnostics,
@@ -29,9 +27,6 @@ import {
   listToolPermissions,
   revokeToolPermission,
   listPlugins,
-  reloadPlugins,
-  enablePlugin,
-  disablePlugin,
   type ToolPermissionRecord,
   type PluginRecord,
 } from "../tauri";
@@ -118,26 +113,20 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    if (!config.prefer_local_model) return;
-    checkOllamaStatus()
-      .then(setOllamaOnline)
-      .catch(() => setOllamaOnline(false));
-  }, [config.local_model, config.prefer_local_model]);
-
-  useEffect(() => {
     refreshAllDiagnostics();
   }, []);
 
   const refreshAllDiagnostics = async () => {
-    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords] = await Promise.all([
-      getRouterStatus().catch(() => null),
-      getModelRouterStatus().catch(() => null),
-      getSystemDiagnostics().catch(() => null),
-      getHotCache().catch(() => null),
-      getPrivacyPolicy().catch(() => null),
-      listToolPermissions().catch(() => []),
-      listPlugins().catch(() => []),
-    ]);
+    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords] =
+      await Promise.all([
+        getRouterStatus().catch(() => null),
+        getModelRouterStatus().catch(() => null),
+        getSystemDiagnostics().catch(() => null),
+        getHotCache().catch(() => null),
+        getPrivacyPolicy().catch(() => null),
+        listToolPermissions().catch(() => []),
+        listPlugins().catch(() => []),
+      ]);
     setRouterStatus(router);
     setModelRouterStatus(modelRouter);
     setDiagnostics(diag);
@@ -884,9 +873,7 @@ export default function SettingsPage() {
                   <div className={provider.available ? "text-emerald-700" : "text-rose-700"}>
                     {provider.available ? "available" : "unavailable"}
                   </div>
-                  <div className="text-slate-600">
-                    {provider.enabled ? "enabled" : "disabled"}
-                  </div>
+                  <div className="text-slate-600">{provider.enabled ? "enabled" : "disabled"}</div>
                   <div className="text-slate-600">
                     {provider.latencyMs != null ? `${provider.latencyMs}ms` : "latency n/a"}
                   </div>
@@ -1348,7 +1335,6 @@ export default function SettingsPage() {
 
         <PluginSection
           plugins={plugins}
-          diagnostics={diagnostics}
           onPluginsChange={setPlugins}
           onRefreshDiagnostics={refreshAllDiagnostics}
         />

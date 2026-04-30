@@ -26,8 +26,6 @@ pub struct ModelRouterStatus {
     pub message: Option<String>,
 }
 
-
-
 #[tauri::command]
 pub async fn get_model_router_status(
     state: State<'_, Arc<AppState>>,
@@ -44,7 +42,10 @@ pub async fn get_model_router_status(
                 message: if cfg.experimental_model_router {
                     Some("Provider health cached (within 30s).".into())
                 } else {
-                    Some("ModelRouter is disabled; provider health is shown for diagnostics only.".into())
+                    Some(
+                        "ModelRouter is disabled; provider health is shown for diagnostics only."
+                            .into(),
+                    )
                 },
             });
         }

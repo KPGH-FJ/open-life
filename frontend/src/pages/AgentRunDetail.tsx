@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import {
-  getAgentRun,
-  deleteAgentRun,
-  replayAgentAction,
-  type AgentRun,
-} from "../tauri";
+import { getAgentRun, deleteAgentRun, replayAgentAction, type AgentRun } from "../tauri";
 import {
   ArrowLeft,
   Activity,
@@ -257,19 +252,22 @@ export default function AgentRunDetail() {
               <div className="space-y-2">
                 {(() => {
                   const timeline = [
-                    ...run.actions.map(a => ({ type: 'action' as const, item: a })),
-                    ...run.observations.map(o => ({ type: 'observation' as const, item: o })),
+                    ...run.actions.map(a => ({ type: "action" as const, item: a })),
+                    ...run.observations.map(o => ({ type: "observation" as const, item: o })),
                   ];
                   timeline.sort((a, b) => {
                     const timeA = new Date(a.item.timestamp).getTime();
                     const timeB = new Date(b.item.timestamp).getTime();
                     return timeA - timeB;
                   });
-                  return timeline.map((entry, idx) => {
-                    if (entry.type === 'action') {
+                  return timeline.map(entry => {
+                    if (entry.type === "action") {
                       const action = entry.item;
                       return (
-                        <div key={action.id} className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400">
+                        <div
+                          key={action.id}
+                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400"
+                        >
                           <div className="font-medium text-stone-800 flex items-center gap-2">
                             <span className="text-blue-600 text-xs font-bold">ACTION</span>
                             {action.actionType}
@@ -281,7 +279,8 @@ export default function AgentRunDetail() {
                             )}
                           </div>
                           <div className="text-xs text-stone-500 mt-1">
-                            Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
+                            Status: {action.status} · Permission:{" "}
+                            {action.permissionDecision ?? "n/a"} ·{" "}
                             {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
                           </div>
                           {action.toolScope && (
@@ -290,7 +289,9 @@ export default function AgentRunDetail() {
                               <div>Tool: {action.toolScope.toolName}</div>
                               <div>Source: {action.toolScope.source}</div>
                               <div>Risk: {action.toolScope.riskLevel}</div>
-                              <div>Capabilities: {action.toolScope.capabilities.join(", ") || "none"}</div>
+                              <div>
+                                Capabilities: {action.toolScope.capabilities.join(", ") || "none"}
+                              </div>
                             </div>
                           )}
                           {action.status === "needs_confirmation" && (
@@ -326,7 +327,10 @@ export default function AgentRunDetail() {
                     } else {
                       const obs = entry.item;
                       return (
-                        <div key={obs.id} className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400">
+                        <div
+                          key={obs.id}
+                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400"
+                        >
                           <div className="flex items-center gap-2 mb-1">
                             <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
                             <span className="text-xs text-stone-500">

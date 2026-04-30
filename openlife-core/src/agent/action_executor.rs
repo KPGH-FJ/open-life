@@ -4,7 +4,7 @@ use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
 use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::{ToolPermissionDecision, ToolPermissionStore};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde_json::Value;
 
 /// Configuration for action execution.
@@ -67,12 +67,12 @@ pub struct ActionExecutionContext<'a> {
 /// and life model patches. It handles permission checks, PII inspection,
 /// audit logging, and building the action/observation pair.
 pub struct ActionExecutor {
-    config: ActionExecutorConfig,
+    _config: ActionExecutorConfig,
 }
 
 impl ActionExecutor {
     pub fn new(config: ActionExecutorConfig) -> Self {
-        Self { config }
+        Self { _config: config }
     }
 
     /// Execute a single action request.
@@ -82,18 +82,10 @@ impl ActionExecutor {
         ctx: &ActionExecutionContext<'_>,
     ) -> Result<ActionExecutionResult> {
         match request.action_type.as_str() {
-            "mcp_tool" | "builtin_tool" | "plugin_tool" => {
-                self.execute_tool(request, ctx)
-            }
-            "memory_write" => {
-                self.execute_memory_write(request)
-            }
-            "memory_archive" => {
-                self.execute_memory_archive(request)
-            }
-            "life_model_patch" => {
-                self.execute_life_model_patch(request)
-            }
+            "mcp_tool" | "builtin_tool" | "plugin_tool" => self.execute_tool(request, ctx),
+            "memory_write" => self.execute_memory_write(request),
+            "memory_archive" => self.execute_memory_archive(request),
+            "life_model_patch" => self.execute_life_model_patch(request),
             _ => Err(anyhow::anyhow!(
                 "unsupported action type: {}",
                 request.action_type
@@ -170,18 +162,10 @@ impl ActionExecutor {
         };
 
         // 4. Determine if blocked
-        let blocked = if manifest.is_none() {
-            true
-        } else if !manifest.as_ref().unwrap().enabled {
-            true
-        } else if inspection.requires_confirmation
+        let blocked = manifest.as_ref().is_none_or(|m| !m.enabled)
+            || inspection.requires_confirmation
             || decision.requires_confirmation
-            || !decision.allowed
-        {
-            true
-        } else {
-            false
-        };
+            || !decision.allowed;
 
         if blocked {
             let (action, observation) = self.build_blocked_action_observation(
@@ -206,7 +190,8 @@ impl ActionExecutor {
         }
 
         // 5. Execute
-        let result = self.call_tool_internal(tool_name, args.clone(), ctx.registry, ctx.audit_store);
+        let result =
+            self.call_tool_internal(tool_name, args.clone(), ctx.registry, ctx.audit_store);
 
         let (action, observation) = self.build_success_action_observation(
             tool_name,
@@ -247,12 +232,12 @@ impl ActionExecutor {
                     success: true,
                     output: Some(r),
                     error: None,
-                    pii_found,
                 }
             }
             Err(e) => {
                 let pii_found = registry.inspect_call_arguments(name, &args).pii_found;
-                if let Err(log_err) = audit.insert_log(name, &args, &e.to_string(), false, pii_found)
+                if let Err(log_err) =
+                    audit.insert_log(name, &args, &e.to_string(), false, pii_found)
                 {
                     eprintln!("[warn] audit log write failed: {}", log_err);
                 }
@@ -260,7 +245,6 @@ impl ActionExecutor {
                     success: false,
                     output: None,
                     error: Some(e.to_string()),
-                    pii_found,
                 }
             }
         }
@@ -295,7 +279,8 @@ impl ActionExecutor {
             risk_level: m.risk_level.clone(),
             capabilities: m.capabilities.clone(),
             action_type: "mcp_tool_call".into(),
-            requires_confirmation: decision.requires_confirmation || inspection.requires_confirmation,
+            requires_confirmation: decision.requires_confirmation
+                || inspection.requires_confirmation,
             allowed: false,
         });
 
@@ -360,7 +345,11 @@ impl ActionExecutor {
             now.timestamp_nanos_opt().unwrap_or_default()
         );
 
-        let status = if result.success { "succeeded" } else { "failed" };
+        let status = if result.success {
+            "succeeded"
+        } else {
+            "failed"
+        };
 
         let tool_scope = manifest.map(|m| ToolActionScope {
             tool_name: m.name.clone(),
@@ -418,10 +407,7 @@ impl ActionExecutor {
         (action, observation)
     }
 
-    fn execute_memory_write(
-        &self,
-        _request: AgentActionRequest,
-    ) -> Result<ActionExecutionResult> {
+    fn execute_memory_write(&self, _request: AgentActionRequest) -> Result<ActionExecutionResult> {
         Err(anyhow::anyhow!(
             "memory_write action not yet implemented in ActionExecutor"
         ))
@@ -451,5 +437,4 @@ struct ToolCallInternalResult {
     success: bool,
     output: Option<String>,
     error: Option<String>,
-    pii_found: bool,
 }

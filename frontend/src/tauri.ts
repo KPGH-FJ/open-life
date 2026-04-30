@@ -203,10 +203,7 @@ export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
   return safeInvoke<ModelRouterStatus>("get_model_router_status");
 }
 
-export async function replayAgentAction(
-  runId: string,
-  actionId: string
-): Promise<AgentAction> {
+export async function replayAgentAction(runId: string, actionId: string): Promise<AgentAction> {
   return safeInvoke<AgentAction>("replay_agent_action", { runId, actionId });
 }
 

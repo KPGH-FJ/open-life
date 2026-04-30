@@ -111,7 +111,11 @@ pub async fn run_skill(
             .build_system_prompt(&skill_id)
             .map_err(|e| e.to_string())?;
         let prompt = registry
-            .build_skill_prompt(&skill_id, &input, &openlife_core::skills::SkillContext::default())
+            .build_skill_prompt(
+                &skill_id,
+                &input,
+                &openlife_core::skills::SkillContext::default(),
+            )
             .map_err(|e| e.to_string())?;
         (system, prompt)
     };
@@ -318,7 +322,12 @@ pub async fn reload_plugins(
     // Sync plugin tools to McpRegistry
     {
         let mut mcp = state.mcp_registry.lock().await;
-        mcp.remove_builtins_by_source(|source| matches!(source, openlife_core::tool_manifest::ToolSource::Plugin { .. }));
+        mcp.remove_builtins_by_source(|source| {
+            matches!(
+                source,
+                openlife_core::tool_manifest::ToolSource::Plugin { .. }
+            )
+        });
         for record in &records {
             if record.enabled && record.error.is_none() {
                 for tool in &record.manifest.tools {
@@ -326,9 +335,14 @@ pub async fn reload_plugins(
                     tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
                         plugin_id: record.manifest.id.clone(),
                     };
-                    mcp.register_builtin(tool_clone, Box::new(|_args| {
-                        Err(anyhow::anyhow!("Plugin tool execution is not yet implemented"))
-                    }));
+                    mcp.register_builtin(
+                        tool_clone,
+                        Box::new(|_args| {
+                            Err(anyhow::anyhow!(
+                                "Plugin tool execution is not yet implemented"
+                            ))
+                        }),
+                    );
                 }
             }
         }
@@ -359,13 +373,19 @@ pub async fn enable_plugin(
 ) -> Result<(), String> {
     {
         let mut registry = state.plugin_registry.lock().await;
-        registry.enable(&plugin_id, true).map_err(|e| e.to_string())?;
+        registry
+            .enable(&plugin_id, true)
+            .map_err(|e| e.to_string())?;
     }
 
     // Sync to registries
     {
         let registry = state.plugin_registry.lock().await;
-        if let Some(record) = registry.list().into_iter().find(|r| r.manifest.id == plugin_id) {
+        if let Some(record) = registry
+            .list()
+            .into_iter()
+            .find(|r| r.manifest.id == plugin_id)
+        {
             if record.enabled && record.error.is_none() {
                 // Register tools
                 let mut mcp = state.mcp_registry.lock().await;
@@ -374,9 +394,14 @@ pub async fn enable_plugin(
                     tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
                         plugin_id: plugin_id.clone(),
                     };
-                    mcp.register_builtin(tool_clone, Box::new(|_args| {
-                        Err(anyhow::anyhow!("Plugin tool execution is not yet implemented"))
-                    }));
+                    mcp.register_builtin(
+                        tool_clone,
+                        Box::new(|_args| {
+                            Err(anyhow::anyhow!(
+                                "Plugin tool execution is not yet implemented"
+                            ))
+                        }),
+                    );
                 }
 
                 // Register skills

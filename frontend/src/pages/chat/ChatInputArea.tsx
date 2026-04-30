@@ -11,7 +11,9 @@ interface ChatInputAreaProps {
   onSend: () => void;
   onContinueStream: () => void;
   onRetryLastMessage: () => void;
-  getFixSuggestion: (diagnostics: SystemDiagnostics | null) => { text: string; action: string; link: string } | null;
+  getFixSuggestion: (
+    diagnostics: SystemDiagnostics | null
+  ) => { text: string; action: string; link: string } | null;
 }
 
 export default function ChatInputArea({

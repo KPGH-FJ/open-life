@@ -114,4 +114,3 @@ mod tests {
         assert_eq!(list[0].pending_signals.len(), 1);
     }
 }
-

@@ -313,8 +313,7 @@ impl McpRegistry {
         for name in &names_to_remove {
             self.builtins.remove(name);
         }
-        self.builtin_manifests
-            .retain(|m| !source_filter(&m.source));
+        self.builtin_manifests.retain(|m| !source_filter(&m.source));
     }
 
     /// Register and start an MCP server
