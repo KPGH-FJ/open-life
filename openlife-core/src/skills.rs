@@ -78,6 +78,15 @@ impl SkillRegistry {
         self.manifests.get(id).cloned()
     }
 
+    pub fn remove(&mut self, id: &str) {
+        self.manifests.remove(id);
+    }
+
+    pub fn remove_by_source_prefix(&mut self, prefix: &str) {
+        self.manifests
+            .retain(|id, _| !id.starts_with(prefix));
+    }
+
     /// Build the system prompt for a skill.
     /// This is the prompt that tells the model how to act as this skill.
     pub fn build_system_prompt(&self, id: &str) -> anyhow::Result<String> {

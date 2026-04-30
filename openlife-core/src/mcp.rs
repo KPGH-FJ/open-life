@@ -302,6 +302,21 @@ impl McpRegistry {
         self.builtin_manifests.push(manifest);
     }
 
+    /// Remove built-in tools by source (e.g., remove all plugin tools).
+    pub fn remove_builtins_by_source(&mut self, source_filter: impl Fn(&ToolSource) -> bool) {
+        let names_to_remove: Vec<String> = self
+            .builtin_manifests
+            .iter()
+            .filter(|m| source_filter(&m.source))
+            .map(|m| m.name.clone())
+            .collect();
+        for name in &names_to_remove {
+            self.builtins.remove(name);
+        }
+        self.builtin_manifests
+            .retain(|m| !source_filter(&m.source));
+    }
+
     /// Register and start an MCP server
     pub fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
         self.register_with_env(name, command, args, &HashMap::new())

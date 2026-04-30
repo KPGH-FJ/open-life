@@ -313,7 +313,43 @@ pub async fn reload_plugins(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<openlife_core::plugins::PluginRecord>, String> {
     let mut registry = state.plugin_registry.lock().await;
-    registry.reload().map_err(|e| e.to_string())
+    let records = registry.reload().map_err(|e| e.to_string())?;
+
+    // Sync plugin tools to McpRegistry
+    {
+        let mut mcp = state.mcp_registry.lock().await;
+        mcp.remove_builtins_by_source(|source| matches!(source, openlife_core::tool_manifest::ToolSource::Plugin { .. }));
+        for record in &records {
+            if record.enabled && record.error.is_none() {
+                for tool in &record.manifest.tools {
+                    let mut tool_clone = tool.clone();
+                    tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
+                        plugin_id: record.manifest.id.clone(),
+                    };
+                    mcp.register_builtin(tool_clone, Box::new(|_args| {
+                        Err(anyhow::anyhow!("Plugin tool execution is not yet implemented"))
+                    }));
+                }
+            }
+        }
+    }
+
+    // Sync plugin skills to SkillRegistry
+    {
+        let mut skill_reg = state.skill_registry.lock().await;
+        skill_reg.remove_by_source_prefix("plugin:");
+        for record in &records {
+            if record.enabled && record.error.is_none() {
+                for skill in &record.manifest.skills {
+                    let mut skill_clone = skill.clone();
+                    skill_clone.id = format!("plugin:{}:{}", record.manifest.id, skill.id);
+                    skill_reg.register(skill_clone);
+                }
+            }
+        }
+    }
+
+    Ok(records)
 }
 
 #[tauri::command]
@@ -321,8 +357,40 @@ pub async fn enable_plugin(
     plugin_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut registry = state.plugin_registry.lock().await;
-    registry.enable(&plugin_id, true).map_err(|e| e.to_string())
+    {
+        let mut registry = state.plugin_registry.lock().await;
+        registry.enable(&plugin_id, true).map_err(|e| e.to_string())?;
+    }
+
+    // Sync to registries
+    {
+        let registry = state.plugin_registry.lock().await;
+        if let Some(record) = registry.list().into_iter().find(|r| r.manifest.id == plugin_id) {
+            if record.enabled && record.error.is_none() {
+                // Register tools
+                let mut mcp = state.mcp_registry.lock().await;
+                for tool in &record.manifest.tools {
+                    let mut tool_clone = tool.clone();
+                    tool_clone.source = openlife_core::tool_manifest::ToolSource::Plugin {
+                        plugin_id: plugin_id.clone(),
+                    };
+                    mcp.register_builtin(tool_clone, Box::new(|_args| {
+                        Err(anyhow::anyhow!("Plugin tool execution is not yet implemented"))
+                    }));
+                }
+
+                // Register skills
+                let mut skill_reg = state.skill_registry.lock().await;
+                for skill in &record.manifest.skills {
+                    let mut skill_clone = skill.clone();
+                    skill_clone.id = format!("plugin:{}:{}", plugin_id, skill.id);
+                    skill_reg.register(skill_clone);
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -330,8 +398,23 @@ pub async fn disable_plugin(
     plugin_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let mut registry = state.plugin_registry.lock().await;
-    registry
-        .enable(&plugin_id, false)
-        .map_err(|e| e.to_string())
+    {
+        let mut registry = state.plugin_registry.lock().await;
+        registry
+            .enable(&plugin_id, false)
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Remove from registries
+    {
+        let mut mcp = state.mcp_registry.lock().await;
+        mcp.remove_builtins_by_source(|source| {
+            matches!(source, openlife_core::tool_manifest::ToolSource::Plugin { plugin_id: ref pid } if pid == &plugin_id)
+        });
+
+        let mut skill_reg = state.skill_registry.lock().await;
+        skill_reg.remove_by_source_prefix(&format!("plugin:{}:", plugin_id));
+    }
+
+    Ok(())
 }
