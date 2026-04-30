@@ -2,7 +2,7 @@ use crate::agent::types::{AgentAction, AgentObservation, ToolActionScope};
 use crate::mcp::{McpArgumentInspection, McpRegistry};
 use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
-use crate::tool_manifest::{ToolManifest, ToolSource};
+use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::{ToolPermissionDecision, ToolPermissionStore};
 use anyhow::Result;
 use serde_json::Value;
@@ -67,12 +67,12 @@ pub struct ActionExecutionContext<'a> {
 /// and life model patches. It handles permission checks, PII inspection,
 /// audit logging, and building the action/observation pair.
 pub struct ActionExecutor {
-    _config: ActionExecutorConfig,
+    config: ActionExecutorConfig,
 }
 
 impl ActionExecutor {
     pub fn new(config: ActionExecutorConfig) -> Self {
-        Self { _config: config }
+        Self { config }
     }
 
     /// Execute a single action request.
@@ -127,12 +127,7 @@ impl ActionExecutor {
                     policy_id: None,
                 }
             } else {
-                let source = match &manifest.source {
-                    ToolSource::BuiltIn => "builtin".to_string(),
-                    ToolSource::Mcp { .. } => "mcp".to_string(),
-                    ToolSource::A2A { .. } => "a2a".to_string(),
-                    ToolSource::Plugin { plugin_id } => format!("plugin:{}", plugin_id),
-                };
+                let source = canonical_tool_source(manifest);
 
                 ctx.permission_store
                     .check(
@@ -154,7 +149,7 @@ impl ActionExecutor {
             // No manifest found
             ToolPermissionDecision {
                 allowed: false,
-                requires_confirmation: true,
+                requires_confirmation: false,
                 decision: "deny".into(),
                 reason: "tool is not registered or disabled".into(),
                 policy_id: None,
@@ -162,12 +157,14 @@ impl ActionExecutor {
         };
 
         // 4. Determine if blocked
+        let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
         let blocked = manifest.as_ref().is_none_or(|m| !m.enabled)
-            || inspection.requires_confirmation
+            || inspection_blocks
             || decision.requires_confirmation
             || !decision.allowed;
 
         if blocked {
+            let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
             let (action, observation) = self.build_blocked_action_observation(
                 tool_name,
                 &args,
@@ -176,7 +173,7 @@ impl ActionExecutor {
                 manifest.as_ref(),
                 &request,
             );
-            let status = if decision.requires_confirmation || inspection.requires_confirmation {
+            let status = if needs_confirmation {
                 ActionExecutionStatus::NeedsConfirmation
             } else {
                 ActionExecutionStatus::Blocked
@@ -190,8 +187,11 @@ impl ActionExecutor {
         }
 
         // 5. Execute
+        let manifest_ref = manifest
+            .as_ref()
+            .expect("manifest exists when execution is not blocked");
         let result =
-            self.call_tool_internal(tool_name, args.clone(), ctx.registry, ctx.audit_store);
+            self.call_tool_internal(manifest_ref, args.clone(), ctx.registry, ctx.audit_store);
 
         let (action, observation) = self.build_success_action_observation(
             tool_name,
@@ -217,15 +217,17 @@ impl ActionExecutor {
 
     fn call_tool_internal(
         &self,
-        name: &str,
+        manifest: &ToolManifest,
         args: Value,
         registry: &McpRegistry,
         audit: &McpAuditStore,
     ) -> ToolCallInternalResult {
-        match registry.call_tool(name, args.clone()) {
+        match registry.execute_manifest(manifest, args.clone()) {
             Ok(r) => {
-                let pii_found = registry.inspect_call_arguments(name, &args).pii_found;
-                if let Err(e) = audit.insert_log(name, &args, &r, true, pii_found) {
+                let pii_found = registry
+                    .inspect_call_arguments(&manifest.name, &args)
+                    .pii_found;
+                if let Err(e) = audit.insert_log(&manifest.name, &args, &r, true, pii_found) {
                     eprintln!("[warn] audit log write failed: {}", e);
                 }
                 ToolCallInternalResult {
@@ -235,9 +237,11 @@ impl ActionExecutor {
                 }
             }
             Err(e) => {
-                let pii_found = registry.inspect_call_arguments(name, &args).pii_found;
+                let pii_found = registry
+                    .inspect_call_arguments(&manifest.name, &args)
+                    .pii_found;
                 if let Err(log_err) =
-                    audit.insert_log(name, &args, &e.to_string(), false, pii_found)
+                    audit.insert_log(&manifest.name, &args, &e.to_string(), false, pii_found)
                 {
                     eprintln!("[warn] audit log write failed: {}", log_err);
                 }
@@ -260,27 +264,27 @@ impl ActionExecutor {
         request: &AgentActionRequest,
     ) -> (AgentAction, AgentObservation) {
         let now = chrono::Utc::now();
+        let needs_confirmation = should_mark_needs_confirmation(decision, inspection);
         let action_id = format!(
             "action-{}-{}",
             request.step_index,
             now.timestamp_nanos_opt().unwrap_or_default()
         );
 
-        let status = if decision.requires_confirmation || inspection.requires_confirmation {
+        let status = if needs_confirmation {
             "needs_confirmation"
         } else {
-            "failed"
+            "blocked"
         };
 
         let tool_scope = manifest.map(|m| ToolActionScope {
             tool_name: m.name.clone(),
             tool_id: m.id.clone(),
-            source: m.source.to_string(),
+            source: canonical_tool_source(m),
             risk_level: m.risk_level.clone(),
             capabilities: m.capabilities.clone(),
             action_type: "mcp_tool_call".into(),
-            requires_confirmation: decision.requires_confirmation
-                || inspection.requires_confirmation,
+            requires_confirmation: needs_confirmation,
             allowed: false,
         });
 
@@ -295,7 +299,7 @@ impl ActionExecutor {
             tool_scope,
             started_at: Some(now),
             finished_at: Some(now),
-            error: if decision.requires_confirmation || inspection.requires_confirmation {
+            error: if needs_confirmation {
                 None
             } else {
                 Some(decision.reason.clone())
@@ -310,18 +314,18 @@ impl ActionExecutor {
                 now.timestamp_nanos_opt().unwrap_or_default()
             ),
             action_id: Some(action_id),
-            content: if decision.requires_confirmation || inspection.requires_confirmation {
+            content: if needs_confirmation {
                 "Tool call requires permission confirmation".to_string()
             } else {
                 decision.reason.clone()
             },
             source: manifest
-                .map(|m| m.source.to_string())
+                .map(canonical_tool_source)
                 .unwrap_or_else(|| "builtin".to_string()),
             structured_result: Some(serde_json::json!({
                 "success": false,
                 "status": status,
-                "requires_confirmation": decision.requires_confirmation || inspection.requires_confirmation,
+                "requires_confirmation": needs_confirmation,
                 "permission_decision": decision.decision,
             })),
             timestamp: now,
@@ -354,7 +358,7 @@ impl ActionExecutor {
         let tool_scope = manifest.map(|m| ToolActionScope {
             tool_name: m.name.clone(),
             tool_id: m.id.clone(),
-            source: m.source.to_string(),
+            source: canonical_tool_source(m),
             risk_level: m.risk_level.clone(),
             capabilities: m.capabilities.clone(),
             action_type: "mcp_tool_call".into(),
@@ -393,7 +397,7 @@ impl ActionExecutor {
                 .or_else(|| result.error.clone())
                 .unwrap_or_else(|| "Tool call produced no output".to_string()),
             source: manifest
-                .map(|m| m.source.to_string())
+                .map(canonical_tool_source)
                 .unwrap_or_else(|| "builtin".to_string()),
             structured_result: Some(serde_json::json!({
                 "success": result.success,
@@ -407,29 +411,100 @@ impl ActionExecutor {
         (action, observation)
     }
 
-    fn execute_memory_write(&self, _request: AgentActionRequest) -> Result<ActionExecutionResult> {
-        Err(anyhow::anyhow!(
-            "memory_write action not yet implemented in ActionExecutor"
+    fn execute_memory_write(&self, request: AgentActionRequest) -> Result<ActionExecutionResult> {
+        Ok(self.build_proposal_required_action(
+            request,
+            "memory_write must be submitted as a MemoryWrite proposal before persistence",
         ))
     }
 
-    fn execute_memory_archive(
-        &self,
-        _request: AgentActionRequest,
-    ) -> Result<ActionExecutionResult> {
-        Err(anyhow::anyhow!(
-            "memory_archive action not yet implemented in ActionExecutor"
+    fn execute_memory_archive(&self, request: AgentActionRequest) -> Result<ActionExecutionResult> {
+        Ok(self.build_proposal_required_action(
+            request,
+            "memory_archive must be submitted as a MemoryArchive proposal before persistence",
         ))
     }
 
     fn execute_life_model_patch(
         &self,
-        _request: AgentActionRequest,
+        request: AgentActionRequest,
     ) -> Result<ActionExecutionResult> {
-        Err(anyhow::anyhow!(
-            "life_model_patch action not yet implemented in ActionExecutor"
+        Ok(self.build_proposal_required_action(
+            request,
+            "life_model_patch must be submitted as a LifeModel proposal before persistence",
         ))
     }
+
+    fn build_proposal_required_action(
+        &self,
+        request: AgentActionRequest,
+        reason: &str,
+    ) -> ActionExecutionResult {
+        let now = chrono::Utc::now();
+        let action_id = format!(
+            "action-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let status = if self.config.allow_writes {
+            "needs_confirmation"
+        } else {
+            "blocked"
+        };
+        let action = AgentAction {
+            id: action_id.clone(),
+            action_type: request.action_type.clone(),
+            target: Some(request.target.clone()),
+            input: request.input.clone(),
+            output: None,
+            status: status.into(),
+            permission_decision: Some("proposal_required".into()),
+            tool_scope: None,
+            started_at: Some(now),
+            finished_at: Some(now),
+            error: Some(reason.to_string()),
+            timestamp: now,
+        };
+        let observation = AgentObservation {
+            id: format!(
+                "observation-{}-{}",
+                request.step_index,
+                now.timestamp_nanos_opt().unwrap_or_default()
+            ),
+            action_id: Some(action_id),
+            content: reason.to_string(),
+            source: "action_executor".into(),
+            structured_result: Some(serde_json::json!({
+                "success": false,
+                "status": status,
+                "requires_confirmation": self.config.allow_writes,
+                "permission_decision": "proposal_required",
+                "proposal_required": true,
+            })),
+            timestamp: now,
+        };
+        ActionExecutionResult {
+            action,
+            observation,
+            status: if self.config.allow_writes {
+                ActionExecutionStatus::NeedsConfirmation
+            } else {
+                ActionExecutionStatus::Blocked
+            },
+            stop_reason: Some("proposal_required".into()),
+        }
+    }
+}
+
+fn canonical_tool_source(manifest: &ToolManifest) -> String {
+    manifest.source.to_string()
+}
+
+fn should_mark_needs_confirmation(
+    decision: &ToolPermissionDecision,
+    inspection: &McpArgumentInspection,
+) -> bool {
+    decision.requires_confirmation || (inspection.requires_confirmation && inspection.pii_found)
 }
 
 #[derive(Debug)]
@@ -437,4 +512,285 @@ struct ToolCallInternalResult {
     success: bool,
     output: Option<String>,
     error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::McpRegistry;
+    use crate::mcp_audit::McpAuditStore;
+    use crate::privacy::PrivacyEngine;
+    use crate::tool_manifest::ToolSource;
+    use crate::tool_permissions::{ToolPermissionPolicy, ToolPermissionStore};
+
+    fn test_context<'a>(
+        registry: &'a McpRegistry,
+        permission_store: &'a ToolPermissionStore,
+        audit_store: &'a McpAuditStore,
+        privacy_engine: &'a PrivacyEngine,
+    ) -> ActionExecutionContext<'a> {
+        ActionExecutionContext {
+            registry,
+            permission_store,
+            audit_store,
+            privacy_engine,
+        }
+    }
+
+    #[test]
+    fn builtin_tool_executes_through_manifest_registry_path() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "builtin_echo".into(),
+                    input: serde_json::json!({"arguments": {"text": "hello beta"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+        assert_eq!(result.action.status, "succeeded");
+        assert_eq!(result.observation.content, "hello beta");
+        assert_eq!(result.action.tool_scope.as_ref().unwrap().source, "builtin");
+    }
+
+    #[test]
+    fn tool_permission_check_uses_canonical_manifest_source() {
+        let mut registry = McpRegistry::new();
+        registry.register_builtin(
+            ToolManifest {
+                id: "write_file".into(),
+                name: "write_file".into(),
+                description: "test write".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::Mcp {
+                    server_name: "filesystem".into(),
+                },
+                capabilities: vec!["write".into(), "filesystem".into()],
+                requires_confirmation: true,
+                enabled: true,
+                tags: vec![],
+            },
+            Box::new(|_| Ok("written".into())),
+        );
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "write_file",
+                "mcp:filesystem",
+                "high",
+                "mcp_tool_call",
+                ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "write_file".into(),
+                    input: serde_json::json!({"arguments": {"path": "a.txt"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert_eq!(result.action.status, "failed");
+        assert_eq!(result.stop_reason, None);
+        assert_eq!(result.action.permission_decision, None);
+        assert_eq!(
+            result.action.tool_scope.as_ref().unwrap().source,
+            "mcp:filesystem"
+        );
+    }
+
+    #[test]
+    fn explicit_deny_is_blocked_not_confirmation() {
+        let mut registry = McpRegistry::new();
+        registry.register_builtin(
+            ToolManifest {
+                id: "dangerous_write".into(),
+                name: "dangerous_write".into(),
+                description: "test deny".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::Mcp {
+                    server_name: "filesystem".into(),
+                },
+                capabilities: vec!["write".into(), "filesystem".into()],
+                requires_confirmation: true,
+                enabled: true,
+                tags: vec![],
+            },
+            Box::new(|_| Ok("should not run".into())),
+        );
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "mcp_tool_call",
+                ToolPermissionPolicy::Deny,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "dangerous_write".into(),
+                    input: serde_json::json!({"arguments": {"path": "a.txt"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(result.action.status, "blocked");
+        assert_eq!(result.action.permission_decision.as_deref(), Some("deny"));
+        assert_eq!(
+            result
+                .observation
+                .structured_result
+                .as_ref()
+                .and_then(|v| v.get("requires_confirmation"))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn unknown_tool_is_blocked_not_confirmation() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "missing_tool".into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(result.action.status, "blocked");
+        assert_eq!(result.action.permission_decision.as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn disabled_tool_is_blocked_not_confirmation() {
+        let mut registry = McpRegistry::new();
+        registry.register_builtin(
+            ToolManifest {
+                id: "disabled_write".into(),
+                name: "disabled_write".into(),
+                description: "disabled".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::Mcp {
+                    server_name: "filesystem".into(),
+                },
+                capabilities: vec!["write".into()],
+                requires_confirmation: true,
+                enabled: false,
+                tags: vec![],
+            },
+            Box::new(|_| Ok("should not run".into())),
+        );
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "disabled_write".into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(result.action.status, "blocked");
+        assert_eq!(result.action.permission_decision.as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn internal_write_actions_return_proposal_required_observation() {
+        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let result = executor
+            .execute_memory_write(AgentActionRequest {
+                action_type: "memory_write".into(),
+                target: "memory".into(),
+                input: serde_json::json!({"content": "remember this"}),
+                source_run_id: Some("run-1".into()),
+                step_index: 1,
+            })
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::NeedsConfirmation);
+        assert_eq!(result.stop_reason.as_deref(), Some("proposal_required"));
+        assert_eq!(
+            result.action.permission_decision.as_deref(),
+            Some("proposal_required")
+        );
+        assert_eq!(
+            result
+                .observation
+                .structured_result
+                .as_ref()
+                .and_then(|v| v.get("proposal_required"))
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
 }

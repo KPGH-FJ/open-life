@@ -53,7 +53,7 @@ pub struct AgentLoopResult {
 pub struct AgentLoop {
     runtime: AgentRuntime,
     action_executor: ActionExecutor,
-    _scheduler: InferenceScheduler,
+    scheduler: InferenceScheduler,
     config: AgentLoopConfig,
 }
 
@@ -67,7 +67,7 @@ impl AgentLoop {
         Self {
             runtime,
             action_executor,
-            _scheduler: scheduler,
+            scheduler,
             config,
         }
     }
@@ -92,7 +92,7 @@ impl AgentLoop {
         let mut _stop_reason = String::new();
 
         // Step 1: Generate initial model response
-        let runtime_output = self
+        let generated = self
             .generate_response(
                 task,
                 life_model,
@@ -111,6 +111,7 @@ impl AgentLoop {
             })?;
 
         step_count += 1;
+        let runtime_output = generated.runtime_output;
         run.context_summary = Some(runtime_output.context_summary.clone());
         run.reasoning_trace = Some(runtime_output.reasoning_trace.clone());
         run.reasoning_strategy = Some(if task.layer == Layer::L3 {
@@ -119,12 +120,7 @@ impl AgentLoop {
             "direct".into()
         });
 
-        // Extract the assistant's reply text
-        let first_reply = runtime_output
-            .final_messages
-            .last()
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
+        let first_reply = generated.reply;
 
         // Check for tool calls in the reply
         let tool_actions =
@@ -186,7 +182,7 @@ impl AgentLoop {
                     ..task.clone()
                 };
 
-                let follow_up_output = self
+                let follow_up_generated = self
                     .generate_response(
                         &follow_up_task,
                         life_model,
@@ -205,11 +201,7 @@ impl AgentLoop {
                     })?;
 
                 step_count += 1;
-                _final_response = follow_up_output
-                    .final_messages
-                    .last()
-                    .map(|m| m.content.clone())
-                    .unwrap_or_else(|| first_reply.clone());
+                _final_response = follow_up_generated.reply;
                 _stop_reason = "completed_with_follow_up".into();
             } else if !all_succeeded {
                 // Some tools failed or need confirmation
@@ -257,9 +249,10 @@ impl AgentLoop {
         tools_prompt: &str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
-    ) -> Result<AgentRuntimeOutput> {
+    ) -> Result<GeneratedAgentResponse> {
         let memory_hits = Vec::new(); // Simplified for Beta MVP
-        self.runtime
+        let runtime_output = self
+            .runtime
             .execute_task(
                 task,
                 life_model,
@@ -269,7 +262,27 @@ impl AgentLoop {
                 privacy_engine,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))
+            .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
+
+        let tools_prompt = if tools_prompt.trim().is_empty() {
+            None
+        } else {
+            Some(tools_prompt)
+        };
+        let reply = self
+            .scheduler
+            .generate(
+                runtime_output.final_messages.clone(),
+                life_model,
+                tools_prompt,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
+
+        Ok(GeneratedAgentResponse {
+            runtime_output,
+            reply,
+        })
     }
 
     fn parse_tool_calls(
@@ -382,6 +395,11 @@ impl AgentLoop {
             step_count,
         }
     }
+}
+
+struct GeneratedAgentResponse {
+    runtime_output: AgentRuntimeOutput,
+    reply: String,
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {

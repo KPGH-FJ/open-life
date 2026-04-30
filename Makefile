@@ -47,7 +47,7 @@ endif
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a format lint ci build-front
+.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front
 
 ## 显示帮助信息
 help:
@@ -61,8 +61,9 @@ help:
 	@echo "  make test-front  - 运行前端测试"
 	@echo "  make test-rust   - 运行 Rust 测试"
 	@echo "  make format      - 格式化所有代码（Rust + 前端）"
+	@echo "  make format-check - 检查格式但不改写文件"
 	@echo "  make lint        - 运行所有 Lint 检查"
-	@echo "  make ci          - 完整 CI 检查（format + lint + test + frontend build）"
+	@echo "  make ci          - 完整 CI 检查（format-check + lint + test + frontend build）"
 	@echo "  make clean       - 清理构建缓存"
 	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
@@ -172,12 +173,26 @@ fmt-front:
 format: fmt-rust fmt-front
 	@echo "✅ 所有代码格式化完成"
 
+## 检查 Rust 代码格式
+fmt-check-rust:
+	@echo "✨ 检查 Rust 代码格式..."
+	cargo fmt --check
+
+## 检查前端代码格式
+fmt-check-front:
+	@echo "✨ 检查前端代码格式..."
+	cd frontend && npx prettier --check "src/**/*.{ts,tsx,css}"
+
+## 检查所有代码格式（不改写工作区）
+format-check: fmt-check-rust fmt-check-front
+	@echo "✅ 所有代码格式检查完成"
+
 ## 运行所有 Lint 检查（Rust clippy + 前端 typecheck）
 lint: lint-rust
 	@echo "🔍 运行前端类型检查..."
 	cd frontend && npx tsc --noEmit
 	@echo "✅ Lint 检查完成"
 
-## 完整 CI 检查（格式化 + Lint + 测试 + 前端生产构建）
-ci: format lint test build-front
+## 完整 CI 检查（格式检查 + Lint + 测试 + 前端生产构建）
+ci: format-check lint test build-front
 	@echo "✅ CI 检查全部通过"

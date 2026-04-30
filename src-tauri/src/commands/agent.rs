@@ -106,7 +106,7 @@ pub async fn replay_agent_action(
                 &tool_scope.tool_name,
                 &tool_scope.source,
                 &tool_scope.risk_level,
-                &action.action_type,
+                &tool_scope.action_type,
                 &tool_scope.capabilities,
             )
             .map_err(|e| e.to_string())?

@@ -62,8 +62,8 @@ LifeModel + Local/Cloud Model Router + Agent Runtime + Memory/Feedback Loop
 ├── openlife-core/                # Rust 核心业务库
 │   └── src/
 │       ├── life_model.rs         # LifeModel
-│       ├── builder.rs            # LifeModel 构建与 Review
-│       ├── hermes.rs             # 早期 Meaning/Strategy/Execution 决策总线
+│       ├── builder/              # LifeModel 构建与 Review
+│       ├── agent/                # AgentRuntime、AgentLoop、Proposal、ModelRouter
 │       ├── scheduler.rs          # 当前模型调度器
 │       ├── llm.rs / ollama.rs    # 云端与本地模型调用
 │       ├── memory.rs             # 消息、会话、状态等 SQLite 存储
@@ -185,7 +185,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Builder 正常路径改为 Proposal-Only，legacy direct apply 仅保留给迁移/调试。
 - ✅ Proposal 应用器覆盖 LifeModel/Goal、MemoryWrite、MemoryArchive、ToolPermission MVP。
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
-- ✅ `make ci` 覆盖 Rust tests、frontend tests、frontend production build/typecheck。
+- ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
 ## 当前重要开发方向
 

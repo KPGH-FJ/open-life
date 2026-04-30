@@ -15,7 +15,7 @@
 ### 仍留在 `lib.rs` 的主要职责
 
 - `AppState` 和 Tauri app 初始化。
-- Chat 主链路：消息预处理、Hermes、stream、工具调用。
+- Chat 主链路：消息预处理、AgentRuntime/ReasoningStrategy、stream、工具调用。
 - LifeModel/Version/Dashboard 基础命令。
 - Builder、Calibration、Evolution、A2A/MCP 注册等领域命令。
 
@@ -41,7 +41,7 @@
 - `preprocess_chat_input`
 - `capture_conversation_signals`
 
-注意：Chat 当前耦合 `persist_life_model`、vector search、MCP audit、Hermes、feedback signals。拆分时不要一次移动所有 helper，先把 command 外壳移走，再移动 pipeline。
+注意：Chat 当前耦合 `persist_life_model`、vector search、MCP audit、AgentRuntime、feedback signals。拆分时不要一次移动所有 helper，先把 command 外壳移走，再移动 pipeline。
 
 ### 2. 再拆 Builder / Calibration
 

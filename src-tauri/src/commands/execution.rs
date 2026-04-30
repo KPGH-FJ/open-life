@@ -169,7 +169,7 @@ pub async fn run_skill(
         .map_err(|e| e.to_string())?;
 
     // 6. Parse JSON envelope
-    let (envelope, parse_error) = match openlife_core::skills::parse_skill_json(&model_output) {
+    let (mut envelope, parse_error) = match openlife_core::skills::parse_skill_json(&model_output) {
         Ok(env) => (env, None),
         Err(e) => {
             // Return a default envelope with parse error
@@ -187,6 +187,30 @@ pub async fn run_skill(
             )
         }
     };
+
+    let mut validated_candidates = Vec::new();
+    if parse_error.is_none() {
+        for candidate in &envelope.proposal_candidates {
+            let proposal_type = match candidate.proposal_type.as_str() {
+                "goal_update" => Some(ProposalType::GoalUpdate),
+                "state_update" => Some(ProposalType::StateUpdate),
+                "memory_write" => Some(ProposalType::MemoryWrite),
+                "memory_archive" => Some(ProposalType::MemoryArchive),
+                "preference_update" => Some(ProposalType::PreferenceUpdate),
+                "capability_update" => Some(ProposalType::CapabilityUpdate),
+                other => {
+                    envelope.warnings.push(format!(
+                        "跳过不支持的 proposal_type: {} (affected_path={})",
+                        other, candidate.affected_path
+                    ));
+                    None
+                }
+            };
+            if let Some(proposal_type) = proposal_type {
+                validated_candidates.push((proposal_type, candidate.clone()));
+            }
+        }
+    }
 
     // 7. Create AgentRun
     let mut run = AgentRun::new_chat_run(
@@ -244,19 +268,9 @@ pub async fn run_skill(
     if parse_error.is_none() {
         if let Some(ref proposal_store_arc) = state.proposal_store {
             let store = proposal_store_arc.lock().await;
-            for candidate in &envelope.proposal_candidates {
-                let proposal_type = match candidate.proposal_type.as_str() {
-                    "goal_update" => ProposalType::GoalUpdate,
-                    "state_update" => ProposalType::StateUpdate,
-                    "memory_write" => ProposalType::MemoryWrite,
-                    "memory_archive" => ProposalType::MemoryArchive,
-                    "preference_update" => ProposalType::PreferenceUpdate,
-                    "capability_update" => ProposalType::CapabilityUpdate,
-                    _ => ProposalType::MemoryWrite, // fallback
-                };
-
+            for (proposal_type, candidate) in &validated_candidates {
                 let proposal = AgentProposal::new(
-                    proposal_type,
+                    *proposal_type,
                     &candidate.affected_path,
                     candidate.after.clone(),
                     &candidate.reason,
