@@ -118,31 +118,39 @@ pub async fn replay_agent_action(
         ));
     }
 
-    // 5. Re-execute the tool call with the original tool arguments.
+    // 5. Re-execute the tool call via ActionExecutor.
     let (reg, audit) = state.get_mcp_state().await;
+    let permission_store = state.tool_permission_store.lock().await;
+    let privacy_engine = state.privacy_engine.lock().await;
     let args = action
         .input
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| action.input.clone());
-    let result = crate::execute_tool_call_internal(
-        &tool_scope.tool_name,
-        args.clone(),
-        tool_scope.risk_level.clone(),
-        &reg,
-        &audit,
-        Some(decision.decision),
+
+    let executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
     );
+    let ctx = openlife_core::agent::ActionExecutionContext {
+        registry: &reg,
+        permission_store: &permission_store,
+        audit_store: &audit,
+        privacy_engine: &privacy_engine,
+    };
+
+    let request = openlife_core::agent::AgentActionRequest {
+        action_type: action.action_type.clone(),
+        target: tool_scope.tool_name.clone(),
+        input: serde_json::json!({ "arguments": args }),
+        source_run_id: Some(run_id.clone()),
+        step_index: action_idx as u32,
+    };
+
+    let exec_result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
 
     // 6. Update action and observation, preserving the original action id.
-    let manifest = reg.list_manifests().into_iter().find(|manifest| {
-        manifest.id == tool_scope.tool_id || manifest.name == tool_scope.tool_name
-    });
-    let (mut new_action, mut new_observation) = crate::action_observation_from_tool_result(
-        &result,
-        serde_json::json!({ "arguments": args }),
-        manifest.as_ref(),
-    );
+    let mut new_action = exec_result.action;
+    let mut new_observation = exec_result.observation;
     new_action.id = action_id.clone();
     new_observation.action_id = Some(action_id.clone());
 

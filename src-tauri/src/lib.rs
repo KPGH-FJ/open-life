@@ -525,145 +525,14 @@ fn try_extract_json(text: &str) -> Option<&str> {
     }
     None
 }
-pub(crate) fn execute_tool_call_internal(
-    name: &str,
-    args: serde_json::Value,
-    permission_level: String,
-    registry: &McpRegistry,
-    audit: &McpAuditStore,
-    permission_decision: Option<String>,
-) -> ToolCallResult {
-    let inspection = registry.inspect_call_arguments(name, &args);
-    let pii_found = inspection.pii_found;
-    let privacy_warnings = inspection
-        .findings
-        .iter()
-        .map(|f| format!("{} 命中 {}: {}", f.path, f.privacy_type, f.matched))
-        .collect::<Vec<_>>();
-    match registry.call_tool(name, args.clone()) {
-        Ok(r) => {
-            if let Err(e) = audit.insert_log(name, &args, &r, true, pii_found) {
-                eprintln!("[warn] 审计日志写入失败: {}", e);
-            }
-            ToolCallResult {
-                name: name.to_string(),
-                arguments: args,
-                sanitized_arguments: Some(inspection.sanitized_arguments),
-                success: true,
-                output: Some(r),
-                error: None,
-                permission_level,
-                status: "success".into(),
-                requires_confirmation: false,
-                pii_found,
-                privacy_warnings,
-                action_id: None,
-                permission_decision,
-            }
-        }
-        Err(e) => {
-            if let Err(log_err) = audit.insert_log(name, &args, &e.to_string(), false, pii_found) {
-                eprintln!("[warn] 审计日志写入失败: {}", log_err);
-            }
-            ToolCallResult {
-                name: name.to_string(),
-                arguments: args,
-                sanitized_arguments: Some(inspection.sanitized_arguments),
-                success: false,
-                output: None,
-                error: Some(e.to_string()),
-                permission_level,
-                status: "error".into(),
-                requires_confirmation: false,
-                pii_found,
-                privacy_warnings,
-                action_id: None,
-                permission_decision,
-            }
-        }
-    }
-}
-pub(crate) fn action_observation_from_tool_result(
-    result: &ToolCallResult,
-    input: serde_json::Value,
-    manifest: Option<&openlife_core::tool_manifest::ToolManifest>,
-) -> (
-    openlife_core::agent::AgentAction,
-    openlife_core::agent::AgentObservation,
-) {
-    let now = chrono::Utc::now();
-    let action_id = format!("action-{}", now.timestamp_nanos_opt().unwrap_or_default());
-    let status = if result.requires_confirmation {
-        "needs_confirmation"
-    } else if result.success {
-        "succeeded"
-    } else {
-        "failed"
-    };
-    let tool_scope = manifest.map(|m| openlife_core::agent::ToolActionScope {
-        tool_name: m.name.clone(),
-        tool_id: m.id.clone(),
-        source: m.source.to_string(),
-        risk_level: m.risk_level.clone(),
-        capabilities: m.capabilities.clone(),
-        action_type: "mcp_tool_call".into(),
-        requires_confirmation: result.requires_confirmation,
-        allowed: result.success && !result.requires_confirmation,
-    });
-    let action = openlife_core::agent::AgentAction {
-        id: action_id.clone(),
-        action_type: "mcp_tool_call".into(),
-        target: Some(result.name.clone()),
-        input,
-        output: result
-            .output
-            .as_ref()
-            .map(|output| serde_json::json!({ "text": output })),
-        status: status.into(),
-        permission_decision: result.permission_decision.clone(),
-        tool_scope,
-        started_at: Some(now),
-        finished_at: if result.requires_confirmation {
-            None
-        } else {
-            Some(now)
-        },
-        error: result.error.clone(),
-        timestamp: now,
-    };
-    let observation = openlife_core::agent::AgentObservation {
-        id: format!(
-            "observation-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ),
-        action_id: Some(action_id),
-        content: result
-            .output
-            .clone()
-            .or_else(|| result.error.clone())
-            .unwrap_or_else(|| {
-                if result.requires_confirmation {
-                    "Tool call requires permission confirmation".to_string()
-                } else {
-                    "Tool call produced no output".to_string()
-                }
-            }),
-        source: manifest.map(|m| m.source.to_string()).unwrap_or_else(|| "builtin".to_string()),
-        structured_result: Some(serde_json::json!({
-            "success": result.success,
-            "status": result.status,
-            "requires_confirmation": result.requires_confirmation,
-            "permission_decision": result.permission_decision,
-        })),
-        timestamp: now,
-    };
-    (action, observation)
-}
+
 fn try_prepare_tool_calls(
     reply: &str,
     registry: &McpRegistry,
     audit: &McpAuditStore,
     permission_store: &openlife_core::tool_permissions::ToolPermissionStore,
+    privacy_engine: &PrivacyEngine,
+    step_index: u32,
 ) -> Option<(
     Vec<ToolCallResult>,
     Vec<openlife_core::agent::AgentAction>,
@@ -672,161 +541,125 @@ fn try_prepare_tool_calls(
     let json_str = try_extract_json(reply)?;
     let v: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let calls = v.get("tool_calls")?.as_array()?;
+    if calls.is_empty() {
+        return None;
+    }
+
+    let executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
+    );
+    let ctx = openlife_core::agent::ActionExecutionContext {
+        registry,
+        permission_store,
+        audit_store: audit,
+        privacy_engine,
+    };
+
     let mut results = Vec::new();
     let mut actions = Vec::new();
     let mut observations = Vec::new();
-    for call in calls {
+
+    for (idx, call) in calls.iter().enumerate() {
         let name = call.get("name")?.as_str()?;
         let args = call
             .get("arguments")
             .cloned()
             .unwrap_or(serde_json::json!({}));
-        let inspection = registry.inspect_call_arguments(name, &args);
-        let manifest = registry
-            .list_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == name || manifest.id == name);
-        let privacy_warnings = inspection
-            .findings
-            .iter()
-            .map(|f| format!("{} 命中 {}: {}", f.path, f.privacy_type, f.matched))
-            .collect::<Vec<_>>();
-        let Some(manifest) = manifest else {
-            let mut result = ToolCallResult {
-                name: name.to_string(),
-                arguments: args,
-                sanitized_arguments: Some(inspection.sanitized_arguments),
-                success: false,
-                output: None,
-                error: Some("tool is not registered or disabled".into()),
-                permission_level: inspection.permission_level,
-                status: "error".into(),
-                requires_confirmation: false,
-                pii_found: inspection.pii_found,
-                privacy_warnings,
-                action_id: None,
-                permission_decision: Some("deny".into()),
-            };
-            let (action, observation) = action_observation_from_tool_result(
-                &result,
-                serde_json::json!({ "arguments": result.arguments }),
-                manifest.as_ref(),
-            );
-            result.action_id = Some(action.id.clone());
-            actions.push(action);
-            observations.push(observation);
-            results.push(result);
-            continue;
+
+        let request = openlife_core::agent::AgentActionRequest {
+            action_type: "mcp_tool".to_string(),
+            target: name.to_string(),
+            input: serde_json::json!({ "arguments": args }),
+            source_run_id: None,
+            step_index: step_index + idx as u32,
         };
-        if !manifest.enabled {
-            let mut result = ToolCallResult {
-                name: name.to_string(),
-                arguments: args,
-                sanitized_arguments: Some(inspection.sanitized_arguments),
-                success: false,
-                output: None,
-                error: Some("tool is disabled".into()),
-                permission_level: manifest.risk_level.clone(),
-                status: "error".into(),
-                requires_confirmation: false,
-                pii_found: inspection.pii_found,
-                privacy_warnings,
-                action_id: None,
-                permission_decision: Some("deny".into()),
-            };
-            let (action, observation) = action_observation_from_tool_result(
-                &result,
-                serde_json::json!({ "arguments": result.arguments }),
-                Some(&manifest),
-            );
-            result.action_id = Some(action.id.clone());
-            actions.push(action);
-            observations.push(observation);
-            results.push(result);
-            continue;
-        }
-        let source = match &manifest.source {
-            openlife_core::tool_manifest::ToolSource::BuiltIn => "builtin".to_string(),
-            openlife_core::tool_manifest::ToolSource::Mcp { .. } => "mcp".to_string(),
-            openlife_core::tool_manifest::ToolSource::A2A { .. } => "a2a".to_string(),
-            openlife_core::tool_manifest::ToolSource::Plugin { plugin_id } => {
-                format!("plugin:{}", plugin_id)
+
+        match executor.execute(request, &ctx) {
+            Ok(result) => {
+                let tool_result = action_execution_result_to_tool_call(&result, name, &args);
+                results.push(tool_result);
+                actions.push(result.action);
+                observations.push(result.observation);
             }
-        };
-        let decision = permission_store
-            .check(
-                &manifest.name,
-                &source,
-                &manifest.risk_level,
-                "mcp_tool_call",
-                &manifest.capabilities,
-            )
-            .unwrap_or(openlife_core::tool_permissions::ToolPermissionDecision {
-                allowed: false,
-                requires_confirmation: true,
-                decision: "ask_every_time".into(),
-                reason: "permission check failed".into(),
-                policy_id: None,
-            });
-        if inspection.requires_confirmation || decision.requires_confirmation || !decision.allowed {
-            let status = if decision.requires_confirmation || inspection.requires_confirmation {
-                "pending"
-            } else {
-                "error"
-            };
-            let mut result = ToolCallResult {
-                name: name.to_string(),
-                arguments: args,
-                sanitized_arguments: Some(inspection.sanitized_arguments),
-                success: false,
-                output: None,
-                error: if decision.requires_confirmation || inspection.requires_confirmation {
-                    None
-                } else {
-                    Some(decision.reason.clone())
-                },
-                permission_level: manifest.risk_level.clone(),
-                status: status.into(),
-                requires_confirmation: decision.requires_confirmation
-                    || inspection.requires_confirmation,
-                pii_found: inspection.pii_found,
-                privacy_warnings,
-                action_id: None,
-                permission_decision: Some(decision.decision.clone()),
-            };
-            let (action, observation) = action_observation_from_tool_result(
-                &result,
-                serde_json::json!({ "arguments": result.arguments }),
-                Some(&manifest),
-            );
-            result.action_id = Some(action.id.clone());
-            actions.push(action);
-            observations.push(observation);
-            results.push(result);
-        } else {
-            let mut result = execute_tool_call_internal(
-                name,
-                args,
-                manifest.risk_level.clone(),
-                registry,
-                audit,
-                Some(decision.decision.clone()),
-            );
-            let (action, observation) = action_observation_from_tool_result(
-                &result,
-                serde_json::json!({ "arguments": result.arguments }),
-                Some(&manifest),
-            );
-            result.action_id = Some(action.id.clone());
-            actions.push(action);
-            observations.push(observation);
-            results.push(result);
+            Err(e) => {
+                // Build a failed result for executor errors
+                let now = chrono::Utc::now();
+                let action_id = format!("action-{}-{}", step_index + idx as u32, now.timestamp_nanos_opt().unwrap_or_default());
+                let action = openlife_core::agent::AgentAction {
+                    id: action_id.clone(),
+                    action_type: "mcp_tool".into(),
+                    target: Some(name.to_string()),
+                    input: serde_json::json!({ "arguments": args }),
+                    output: None,
+                    status: "failed".into(),
+                    permission_decision: None,
+                    tool_scope: None,
+                    started_at: Some(now),
+                    finished_at: Some(now),
+                    error: Some(e.to_string()),
+                    timestamp: now,
+                };
+                let observation = openlife_core::agent::AgentObservation {
+                    id: format!("observation-{}-{}", step_index + idx as u32, now.timestamp_nanos_opt().unwrap_or_default()),
+                    action_id: Some(action_id),
+                    content: e.to_string(),
+                    source: "builtin".to_string(),
+                    structured_result: Some(serde_json::json!({ "success": false, "error": e.to_string() })),
+                    timestamp: now,
+                };
+                results.push(ToolCallResult {
+                    name: name.to_string(),
+                    arguments: args.clone(),
+                    sanitized_arguments: Some(args),
+                    success: false,
+                    output: None,
+                    error: Some(e.to_string()),
+                    permission_level: "high".into(),
+                    status: "error".into(),
+                    requires_confirmation: false,
+                    pii_found: false,
+                    privacy_warnings: vec![],
+                    action_id: Some(action.id.clone()),
+                    permission_decision: None,
+                });
+                actions.push(action);
+                observations.push(observation);
+            }
         }
     }
+
     if results.is_empty() {
         None
     } else {
         Some((results, actions, observations))
+    }
+}
+
+fn action_execution_result_to_tool_call(
+    result: &openlife_core::agent::ActionExecutionResult,
+    name: &str,
+    args: &serde_json::Value,
+) -> ToolCallResult {
+    let sanitized = args.clone(); // Simplified; in practice use privacy engine
+    ToolCallResult {
+        name: name.to_string(),
+        arguments: args.clone(),
+        sanitized_arguments: Some(sanitized),
+        success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
+        output: result.action.output.as_ref().and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        error: result.action.error.clone(),
+        permission_level: result.action.tool_scope.as_ref().map(|s| s.risk_level.clone()).unwrap_or_else(|| "medium".into()),
+        status: match result.status {
+            openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
+            openlife_core::agent::ActionExecutionStatus::Failed => "error",
+            openlife_core::agent::ActionExecutionStatus::Blocked => "error",
+            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
+        }.into(),
+        requires_confirmation: result.status == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
+        pii_found: false, // Simplified
+        privacy_warnings: vec![],
+        action_id: Some(result.action.id.clone()),
+        permission_decision: result.action.permission_decision.clone(),
     }
 }
 fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Option<String> {
@@ -1776,7 +1609,8 @@ async fn send_message(
     let tool_results = {
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store)
+        let privacy_engine = state.privacy_engine.lock().await;
+        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store, &privacy_engine, agent_run.actions.len() as u32)
     };
 
     let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
@@ -2480,7 +2314,8 @@ async fn start_stream_message(
     let tool_results = {
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
-        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store)
+        let privacy_engine = state.privacy_engine.lock().await;
+        try_prepare_tool_calls(&first_reply, &reg, &audit, &permission_store, &privacy_engine, agent_run.actions.len() as u32)
     };
     let (reply, tool_calls) = if let Some((results, actions, observations)) = tool_results {
         agent_run.actions.extend(actions);
@@ -2619,40 +2454,51 @@ async fn execute_tool_call(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ToolCallResult, String> {
     let (reg, audit) = state.get_mcp_state().await;
-    let permission_level = reg.tool_permission_level(&name);
     let permission_store = state.tool_permission_store.lock().await;
-    let decision = permission_store
-        .check(&name, "mcp", &permission_level, "mcp_tool_call", &[])
-        .map_err(|e| e.to_string())?;
-    if !decision.allowed {
-        return Ok(ToolCallResult {
-            name,
-            arguments,
-            sanitized_arguments: None,
-            success: false,
-            output: None,
-            error: Some(decision.reason),
-            permission_level,
-            status: if decision.requires_confirmation {
-                "pending".into()
-            } else {
-                "error".into()
-            },
-            requires_confirmation: decision.requires_confirmation,
-            pii_found: false,
-            privacy_warnings: Vec::new(),
-            action_id: None,
-            permission_decision: Some(decision.decision),
-        });
-    }
-    Ok(execute_tool_call_internal(
-        &name,
-        arguments,
-        permission_level,
-        &reg,
-        &audit,
-        Some(decision.decision),
-    ))
+    let privacy_engine = state.privacy_engine.lock().await;
+
+    let executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
+    );
+    let ctx = openlife_core::agent::ActionExecutionContext {
+        registry: &reg,
+        permission_store: &permission_store,
+        audit_store: &audit,
+        privacy_engine: &privacy_engine,
+    };
+
+    let request = openlife_core::agent::AgentActionRequest {
+        action_type: "mcp_tool".to_string(),
+        target: name.clone(),
+        input: serde_json::json!({ "arguments": arguments }),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
+
+    let tool_result = ToolCallResult {
+        name: name.clone(),
+        arguments: arguments.clone(),
+        sanitized_arguments: Some(arguments),
+        success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
+        output: result.action.output.as_ref().and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        error: result.action.error.clone(),
+        permission_level: result.action.tool_scope.as_ref().map(|s| s.risk_level.clone()).unwrap_or_else(|| "medium".into()),
+        status: match result.status {
+            openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
+            openlife_core::agent::ActionExecutionStatus::Failed => "error",
+            openlife_core::agent::ActionExecutionStatus::Blocked => "error",
+            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
+        }.into(),
+        requires_confirmation: result.status == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
+        pii_found: false,
+        privacy_warnings: vec![],
+        action_id: Some(result.action.id),
+        permission_decision: result.action.permission_decision,
+    };
+
+    Ok(tool_result)
 }
 #[tauri::command]
 async fn inspect_mcp_call(

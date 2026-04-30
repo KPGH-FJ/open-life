@@ -1,3 +1,5 @@
+pub mod action_executor;
+pub mod agent_loop;
 pub mod context_assembler;
 pub mod memory_service;
 pub mod metrics;
@@ -10,6 +12,11 @@ pub mod runtime;
 pub mod store;
 pub mod types;
 
+pub use action_executor::{
+    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
+    ActionExecutorConfig, AgentActionRequest,
+};
+pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,
