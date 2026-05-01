@@ -129,6 +129,8 @@ fn test_action_parser_final_envelope() {
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -156,6 +158,8 @@ fn test_action_parser_actions_envelope() {
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -185,6 +189,8 @@ fn test_action_parser_legacy_tool_calls() {
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -212,6 +218,8 @@ fn test_action_parser_malformed_json_fail_soft() {
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let reply = "{broken json";
@@ -240,6 +248,8 @@ fn test_action_parser_no_json() {
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let reply = "This is just a plain text response without any JSON.";

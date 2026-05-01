@@ -604,6 +604,8 @@ fn try_prepare_tool_calls(
         safe_paths: &[],
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let mut results = Vec::new();
@@ -1601,7 +1603,7 @@ async fn send_message(
     // Dual-track: use AgentLoop if feature flag is enabled
     let use_agent_loop = {
         let cfg = state.config.lock().await;
-        cfg.use_agent_loop
+        chat_should_use_agent_loop(&cfg)
     };
 
     if use_agent_loop {
@@ -1869,30 +1871,44 @@ async fn send_message_with_agent_loop(
         layer,
     };
 
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let memory_store = state.memory_store.lock().await;
-    let action_ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        life_model: Some(&life_model),
-        memory_store: Some(&memory_store),
-    };
+    let loop_result = {
+        let (reg, audit) = state.get_mcp_state().await;
+        let permission_store = state.tool_permission_store.lock().await;
+        let memory_store = state.memory_store.lock().await;
+        let proposal_store_guard = if let Some(ref store) = state.proposal_store {
+            Some(store.lock().await)
+        } else {
+            None
+        };
+        let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
+            Some(store.lock().await)
+        } else {
+            None
+        };
+        let action_ctx = openlife_core::agent::ActionExecutionContext {
+            registry: &reg,
+            permission_store: &permission_store,
+            audit_store: &audit,
+            privacy_engine: &privacy_engine,
+            safe_paths: &safe_paths,
+            life_model: Some(&life_model),
+            memory_store: Some(&memory_store),
+            proposal_store: proposal_store_guard.as_deref(),
+            agent_run_store: agent_run_store_guard.as_deref(),
+        };
 
-    let loop_result = agent_loop
-        .run(
-            &task,
-            &life_model,
-            &tools_prompt,
-            None,
-            privacy_engine.clone(),
-            &action_ctx,
-        )
-        .await
-        .map_err(|e| format!("AgentLoop execution failed: {}", e))?;
+        agent_loop
+            .run(
+                &task,
+                &life_model,
+                &tools_prompt,
+                None,
+                privacy_engine.clone(),
+                &action_ctx,
+            )
+            .await
+    }
+    .map_err(|e| format!("AgentLoop execution failed: {}", e))?;
 
     let mut reply = loop_result.final_response;
     let mut agent_run = loop_result.run;
@@ -1928,35 +1944,7 @@ async fn send_message_with_agent_loop(
     )
     .await?;
 
-    // Convert AgentLoop actions to ToolCallResult for frontend compatibility
-    let tool_calls: Vec<ToolCallResult> = agent_run
-        .actions
-        .iter()
-        .map(|action| ToolCallResult {
-            name: action.target.clone().unwrap_or_default(),
-            arguments: action.input.clone(),
-            sanitized_arguments: None,
-            success: action.status == "succeeded" || action.status == "completed",
-            output: action
-                .output
-                .as_ref()
-                .and_then(|o| o.as_str().map(|s| s.to_string())),
-            error: action.error.clone(),
-            permission_level: action
-                .tool_scope
-                .as_ref()
-                .map(|s| s.risk_level.clone())
-                .unwrap_or_else(|| "low".to_string()),
-            status: action.status.clone(),
-            requires_confirmation: action.permission_decision.as_deref()
-                == Some("needs_confirmation"),
-            pii_found: false,
-            privacy_warnings: Vec::new(),
-            action_id: Some(action.id.clone()),
-            run_id: Some(agent_run.id.clone()),
-            permission_decision: action.permission_decision.clone(),
-        })
-        .collect();
+    let tool_calls = agent_actions_to_tool_call_results(&agent_run.actions, &agent_run.id);
 
     Ok(SendMessageResult {
         reply,
@@ -2029,6 +2017,51 @@ fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     }
 }
 
+fn agent_actions_to_tool_call_results(
+    actions: &[openlife_core::agent::AgentAction],
+    run_id: &str,
+) -> Vec<ToolCallResult> {
+    actions
+        .iter()
+        .map(|action| {
+            let output = action.output.as_ref().and_then(|value| {
+                value
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(ToString::to_string)
+                    .or_else(|| value.as_str().map(ToString::to_string))
+            });
+            ToolCallResult {
+                name: action.target.clone().unwrap_or_default(),
+                arguments: action.input.clone(),
+                sanitized_arguments: None,
+                success: matches!(
+                    action.status.as_str(),
+                    "succeeded" | "completed" | "success"
+                ),
+                output,
+                error: action.error.clone(),
+                permission_level: action
+                    .tool_scope
+                    .as_ref()
+                    .map(|scope| scope.risk_level.clone())
+                    .unwrap_or_else(|| "low".to_string()),
+                status: action.status.clone(),
+                requires_confirmation: action.status == "needs_confirmation",
+                pii_found: false,
+                privacy_warnings: Vec::new(),
+                action_id: Some(action.id.clone()),
+                run_id: Some(run_id.to_string()),
+                permission_decision: action.permission_decision.clone(),
+            }
+        })
+        .collect()
+}
+
+fn chat_should_use_agent_loop(cfg: &openlife_core::config::AppConfig) -> bool {
+    cfg.use_agent_loop || cfg.system.use_agent_loop.unwrap_or(false)
+}
+
 /// Stream-mode AgentLoop execution: runs AgentLoop and emits stream events.
 /// This provides consistency when use_agent_loop=true in stream mode.
 async fn start_stream_message_with_agent_loop(
@@ -2039,18 +2072,14 @@ async fn start_stream_message_with_agent_loop(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    // AgentRun tracking
+    // Non-persisted placeholder id for pre-run errors. The stream start/done
+    // events use the authoritative AgentLoop run id after execution.
     let user_input_text = user_msg
         .as_ref()
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.create_run(&agent_run) {
-            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
-        }
-    }
+    let placeholder_run_id =
+        openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text).id;
 
     // Preprocess
     let (
@@ -2063,19 +2092,7 @@ async fn start_stream_message_with_agent_loop(
         _context_summary,
     ) = match preprocess_chat_input_v2(&session_id, &messages, &state).await {
         Ok(result) => result,
-        Err(message) => {
-            let error = openlife_core::agent::AgentRunError {
-                message: message.clone(),
-                phase: "preprocess".to_string(),
-                recoverable: true,
-            };
-            agent_run.fail(error);
-            if let Some(ref store_arc) = state.agent_run_store {
-                let store = store_arc.lock().await;
-                let _ = store.update_run(&agent_run);
-            }
-            return Err(message);
-        }
+        Err(message) => return Err(message),
     };
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {
@@ -2087,17 +2104,6 @@ async fn start_stream_message_with_agent_loop(
     } else {
         None
     };
-
-    // Emit stream start
-    let _ = app_handle.emit(
-        "stream-message-start",
-        serde_json::json!({
-            "session_id": &session_id,
-            "run_id": agent_run.id,
-            "reasoning_trace": ReasoningTrace::default(),
-            "tool_calls": Vec::<ToolCallResult>::new(),
-        }),
-    );
 
     // Run AgentLoop
     let scheduler = state.scheduler.lock().await.clone();
@@ -2133,30 +2139,45 @@ async fn start_stream_message_with_agent_loop(
         layer: _layer,
     };
 
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let memory_store = state.memory_store.lock().await;
-    let action_ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        life_model: Some(&life_model),
-        memory_store: Some(&memory_store),
+    let loop_result = {
+        let (reg, audit) = state.get_mcp_state().await;
+        let permission_store = state.tool_permission_store.lock().await;
+        let memory_store = state.memory_store.lock().await;
+        let proposal_store_guard = if let Some(ref store) = state.proposal_store {
+            Some(store.lock().await)
+        } else {
+            None
+        };
+        let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
+            Some(store.lock().await)
+        } else {
+            None
+        };
+        let action_ctx = openlife_core::agent::ActionExecutionContext {
+            registry: &reg,
+            permission_store: &permission_store,
+            audit_store: &audit,
+            privacy_engine: &privacy_engine,
+            safe_paths: &safe_paths,
+            life_model: Some(&life_model),
+            memory_store: Some(&memory_store),
+            proposal_store: proposal_store_guard.as_deref(),
+            agent_run_store: agent_run_store_guard.as_deref(),
+        };
+
+        agent_loop
+            .run(
+                &task,
+                &life_model,
+                &tools_prompt,
+                None,
+                privacy_engine.clone(),
+                &action_ctx,
+            )
+            .await
     };
 
-    let loop_result = match agent_loop
-        .run(
-            &task,
-            &life_model,
-            &tools_prompt,
-            None,
-            privacy_engine.clone(),
-            &action_ctx,
-        )
-        .await
-    {
+    let loop_result = match loop_result {
         Ok(result) => result,
         Err(e) => {
             let error_msg = format!("AgentLoop execution failed: {}", e);
@@ -2164,20 +2185,10 @@ async fn start_stream_message_with_agent_loop(
                 "stream-message-error",
                 serde_json::json!({
                     "session_id": &session_id,
-                    "run_id": agent_run.id,
+                    "run_id": placeholder_run_id,
                     "error": error_msg.clone(),
                 }),
             );
-            let error = openlife_core::agent::AgentRunError {
-                message: error_msg.clone(),
-                phase: "agent_loop".to_string(),
-                recoverable: false,
-            };
-            agent_run.fail(error);
-            if let Some(ref store_arc) = state.agent_run_store {
-                let store = store_arc.lock().await;
-                let _ = store.update_run(&agent_run);
-            }
             return Err(error_msg);
         }
     };
@@ -2194,6 +2205,16 @@ async fn start_stream_message_with_agent_loop(
             reply = format!("{}\n\n[系统] {}", reply, msg);
         }
     }
+
+    let _ = app_handle.emit(
+        "stream-message-start",
+        serde_json::json!({
+            "session_id": &session_id,
+            "run_id": agent_run.id,
+            "reasoning_trace": ReasoningTrace::default(),
+            "tool_calls": Vec::<ToolCallResult>::new(),
+        }),
+    );
 
     // Emit the result as a single chunk (simulating streaming)
     let _ = app_handle.emit(
@@ -2215,10 +2236,6 @@ async fn start_stream_message_with_agent_loop(
         reasoning_trace.errors.push(err);
     }
 
-    // Save assistant message
-    let _ = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await;
-    let _ = persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
-
     // Finalize AgentRun
     let result = finalize_chat_agent_run(
         &session_id,
@@ -2233,6 +2250,7 @@ async fn start_stream_message_with_agent_loop(
 
     match result {
         Ok(_) => {
+            let tool_calls = agent_actions_to_tool_call_results(&agent_run.actions, &agent_run.id);
             let _ = app_handle.emit(
                 "stream-message-done",
                 serde_json::json!({
@@ -2240,7 +2258,7 @@ async fn start_stream_message_with_agent_loop(
                     "run_id": agent_run.id,
                     "reply": reply,
                     "reasoning_trace": reasoning_trace,
-                    "tool_calls": Vec::<ToolCallResult>::new(),
+                    "tool_calls": tool_calls,
                 }),
             );
             Ok(())
@@ -2276,20 +2294,6 @@ async fn start_stream_message(
         )
     };
 
-    // AgentRun tracking
-    let user_input_text = messages
-        .last()
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
-    let _agent_run_id = agent_run.id.clone();
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.create_run(&agent_run) {
-            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
-        }
-    }
-
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
         if m.role == "user" {
@@ -2312,7 +2316,7 @@ async fn start_stream_message(
     // AgentLoop stream integration: when use_agent_loop is enabled,
     // delegate to AgentLoop and simulate streaming by emitting the result
     let cfg = state.config.lock().await;
-    let use_agent_loop = cfg.system.use_agent_loop.unwrap_or(false);
+    let use_agent_loop = chat_should_use_agent_loop(&cfg);
     drop(cfg);
 
     if use_agent_loop && layer != Layer::L1 {
@@ -2320,6 +2324,21 @@ async fn start_stream_message(
             session_id, messages, user_msg, layer, app_handle, state,
         )
         .await;
+    }
+
+    // AgentRun tracking for legacy/L1 paths only. AgentLoop creates its own
+    // authoritative run inside start_stream_message_with_agent_loop.
+    let user_input_text = messages
+        .last()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
+    let _agent_run_id = agent_run.id.clone();
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(e) = store.create_run(&agent_run) {
+            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+        }
     }
 
     // Layer 1: direct reflex response (non-streaming, emit as single chunk)
@@ -3016,6 +3035,8 @@ async fn execute_tool_call(
         safe_paths: &safe_paths,
         life_model: None,
         memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {

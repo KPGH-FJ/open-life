@@ -147,6 +147,24 @@ pub async fn replay_agent_action(
     let (reg, audit) = state.get_mcp_state().await;
     let permission_store = state.tool_permission_store.lock().await;
     let privacy_engine = state.privacy_engine.lock().await;
+    let cfg = state.config.lock().await;
+    let safe_paths = cfg.system.safe_paths.clone();
+    drop(cfg);
+    let life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+    let memory_store = state.memory_store.lock().await;
+    let proposal_store_guard = if let Some(ref store) = state.proposal_store {
+        Some(store.lock().await)
+    } else {
+        None
+    };
+    let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
+        Some(store.lock().await)
+    } else {
+        None
+    };
     let args = action
         .input
         .get("arguments")
@@ -161,9 +179,11 @@ pub async fn replay_agent_action(
         permission_store: &permission_store,
         audit_store: &audit,
         privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        life_model: None,
-        memory_store: None,
+        safe_paths: &safe_paths,
+        life_model: Some(&life_model),
+        memory_store: Some(&memory_store),
+        proposal_store: proposal_store_guard.as_deref(),
+        agent_run_store: agent_run_store_guard.as_deref(),
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -175,6 +195,8 @@ pub async fn replay_agent_action(
     };
 
     let exec_result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
+    drop(proposal_store_guard);
+    drop(agent_run_store_guard);
 
     // 6. Update action and observation, preserving the original action id.
     let mut new_action = exec_result.action;
@@ -193,6 +215,25 @@ pub async fn replay_agent_action(
         run.observations[obs_idx] = new_observation;
     } else {
         run.observations.push(new_observation);
+    }
+
+    if let Some(ref proposal_store_arc) = state.proposal_store {
+        let proposals = {
+            let engine = state.proposal_engine.lock().await;
+            engine
+                .generate_from_run(&run, "", &life_model)
+                .map_err(|e| e.to_string())?
+        };
+        if !proposals.is_empty() {
+            let proposal_store = proposal_store_arc.lock().await;
+            for proposal in proposals {
+                let proposal_id = proposal.id.clone();
+                proposal_store
+                    .create_proposal(&proposal)
+                    .map_err(|e| e.to_string())?;
+                run.add_generated_proposal(&proposal_id);
+            }
+        }
     }
 
     // 8. Update run in store

@@ -63,7 +63,6 @@ struct StepContext<'a> {
     pub privacy_engine: PrivacyEngine,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
-    pub step_count: u32,
     pub tool_call_count: u32,
 }
 
@@ -177,7 +176,6 @@ impl AgentLoop {
                     privacy_engine: current_privacy_engine.clone(),
                     action_ctx,
                     run: &mut run,
-                    step_count,
                     tool_call_count,
                 })
                 .await?;
@@ -242,18 +240,20 @@ impl AgentLoop {
                 let reply = gen.reply;
 
                 // Check for tool calls in the reply
-                let tool_actions = self.parse_tool_calls(
+                let parsed = self.parse_agent_reply(
                     &reply,
                     ctx.action_ctx,
                     ctx.run,
                     &mut ctx.tool_call_count,
                 )?;
+                let final_text = parsed.final_text;
+                let tool_actions = parsed.actions;
 
                 if tool_actions.is_empty() {
                     // No tool calls - this is the final answer
                     return Ok(StepResult {
                         stop_reason: "no_tools".into(),
-                        final_response: reply,
+                        final_response: final_text,
                         should_continue: false,
                         tool_call_count_delta: 0,
                         observations: vec![],
@@ -263,6 +263,7 @@ impl AgentLoop {
                 // Execute tools and build observations
                 let mut observations = Vec::new();
                 let mut all_succeeded = true;
+                let mut executed_this_step = 0;
 
                 for action_request in tool_actions {
                     if ctx.tool_call_count >= self.config.max_tool_calls {
@@ -285,6 +286,7 @@ impl AgentLoop {
                     }
 
                     ctx.tool_call_count += 1;
+                    executed_this_step += 1;
                 }
 
                 if !all_succeeded {
@@ -309,7 +311,7 @@ impl AgentLoop {
                         },
                         final_response,
                         should_continue: false,
-                        tool_call_count_delta: 0,
+                        tool_call_count_delta: executed_this_step,
                         observations,
                     });
                 }
@@ -317,7 +319,7 @@ impl AgentLoop {
                 if observations.is_empty() {
                     return Ok(StepResult {
                         stop_reason: "no_observations".into(),
-                        final_response: reply,
+                        final_response: final_text,
                         should_continue: false,
                         tool_call_count_delta: 0,
                         observations: vec![],
@@ -327,9 +329,9 @@ impl AgentLoop {
                 // Continue to next iteration
                 Ok(StepResult {
                     stop_reason: String::new(), // Will be set by caller if this is the last step
-                    final_response: reply,
+                    final_response: final_text,
                     should_continue: true,
-                    tool_call_count_delta: ctx.tool_call_count - ctx.step_count,
+                    tool_call_count_delta: executed_this_step,
                     observations,
                 })
             }
@@ -405,27 +407,18 @@ impl AgentLoop {
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<Vec<AgentActionRequest>> {
-        self.parse_tool_calls_inner(reply, _action_ctx, run, tool_call_count)
+        Ok(self
+            .parse_agent_reply(reply, _action_ctx, run, tool_call_count)?
+            .actions)
     }
 
-    #[cfg(not(test))]
-    fn parse_tool_calls(
+    fn parse_agent_reply(
         &self,
         reply: &str,
         _action_ctx: &ActionExecutionContext<'_>,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
-    ) -> Result<Vec<AgentActionRequest>> {
-        self.parse_tool_calls_inner(reply, _action_ctx, run, tool_call_count)
-    }
-
-    fn parse_tool_calls_inner(
-        &self,
-        reply: &str,
-        _action_ctx: &ActionExecutionContext<'_>,
-        run: &mut AgentRun,
-        tool_call_count: &mut u32,
-    ) -> Result<Vec<AgentActionRequest>> {
+    ) -> Result<ParsedAgentReply> {
         let json_str = try_extract_json(reply);
         let json_str = if let Some(s) = json_str {
             s
@@ -434,7 +427,10 @@ impl AgentLoop {
             reply
         } else {
             // No JSON found - treat entire response as final answer
-            return Ok(Vec::new());
+            return Ok(ParsedAgentReply {
+                final_text: reply.to_string(),
+                actions: Vec::new(),
+            });
         };
 
         let v: Value = match serde_json::from_str(json_str) {
@@ -445,7 +441,10 @@ impl AgentLoop {
                     "Parse warning: invalid JSON in model response: {}",
                     e
                 ));
-                return Ok(Vec::new());
+                return Ok(ParsedAgentReply {
+                    final_text: reply.to_string(),
+                    actions: Vec::new(),
+                });
             }
         };
 
@@ -461,25 +460,43 @@ impl AgentLoop {
             }
         }
 
+        let final_text = v
+            .get("final")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| reply.to_string());
+
         // If "final" is present, this is a final answer - no tool calls
         if v.get("final").is_some() {
-            return Ok(Vec::new());
+            return Ok(ParsedAgentReply {
+                final_text,
+                actions: Vec::new(),
+            });
         }
 
         // Parse actions (new format) or tool_calls (legacy format)
         let calls = if let Some(actions) = v.get("actions").and_then(|a| a.as_array()) {
             if actions.is_empty() {
-                return Ok(Vec::new());
+                return Ok(ParsedAgentReply {
+                    final_text,
+                    actions: Vec::new(),
+                });
             }
             actions
         } else if let Some(tool_calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
             if tool_calls.is_empty() {
-                return Ok(Vec::new());
+                return Ok(ParsedAgentReply {
+                    final_text,
+                    actions: Vec::new(),
+                });
             }
             tool_calls
         } else {
             // No actions or tool_calls - treat as final answer
-            return Ok(Vec::new());
+            return Ok(ParsedAgentReply {
+                final_text,
+                actions: Vec::new(),
+            });
         };
 
         let mut requests = Vec::new();
@@ -509,7 +526,10 @@ impl AgentLoop {
             });
         }
 
-        Ok(requests)
+        Ok(ParsedAgentReply {
+            final_text,
+            actions: requests,
+        })
     }
 
     fn build_follow_up_messages(
@@ -585,6 +605,11 @@ impl AgentLoop {
 struct GeneratedAgentResponse {
     runtime_output: AgentRuntimeOutput,
     reply: String,
+}
+
+struct ParsedAgentReply {
+    final_text: String,
+    actions: Vec<AgentActionRequest>,
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {

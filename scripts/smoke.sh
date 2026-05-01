@@ -25,7 +25,7 @@ echo "   ✅ Rust 测试通过"
 echo ""
 echo "3️⃣  前端测试..."
 cd frontend
-npm test -- --run
+corepack pnpm test -- --run
 echo "   ✅ 前端测试通过"
 cd ..
 

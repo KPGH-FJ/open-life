@@ -714,8 +714,14 @@ impl McpRegistry {
             return "".into();
         }
         let mut lines = vec!["\n你可以使用以下工具:\n".to_string()];
-        for m in &manifests {
+        for m in manifests
+            .iter()
+            .filter(|m| m.enabled && !m.declarative_only)
+        {
             lines.push(format!("- {}: {}", m.name, m.description));
+        }
+        if lines.len() == 1 {
+            return "".into();
         }
         lines.push("\n如果需要使用工具，请回复 JSON: {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}".into());
         lines.join("\n")

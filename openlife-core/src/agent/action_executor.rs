@@ -1,4 +1,7 @@
-use crate::agent::types::{AgentAction, AgentObservation, ToolActionScope};
+use crate::agent::types::{
+    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
+    ToolActionScope,
+};
 use crate::mcp::{McpArgumentInspection, McpRegistry};
 use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
@@ -62,6 +65,8 @@ pub struct ActionExecutionContext<'a> {
     pub safe_paths: &'a [String],
     pub life_model: Option<&'a crate::life_model::LifeModel>,
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
+    pub proposal_store: Option<&'a crate::agent::ProposalStore>,
+    pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
 }
 
 /// Centralized action executor for all agent actions.
@@ -216,7 +221,7 @@ impl ActionExecutor {
                             allowed: false,
                             requires_confirmation: false,
                             decision: "blocked".into(),
-                            reason: format!("Path '{}' is not in safe paths list", path),
+                            reason: filesystem_access_error(path, ctx.safe_paths),
                             policy_id: None,
                         },
                         manifest.as_ref(),
@@ -398,7 +403,7 @@ impl ActionExecutor {
                 let manifests = ctx.registry.list_manifests();
                 let tools: Vec<_> = manifests
                     .into_iter()
-                    .filter(|m| m.enabled)
+                    .filter(|m| m.enabled && !m.declarative_only)
                     .map(|m| {
                         serde_json::json!({
                             "name": m.name,
@@ -412,6 +417,82 @@ impl ActionExecutor {
                     .collect();
                 serde_json::json!({ "tools": tools }).to_string()
             }
+            "proposal.list" => {
+                if let Some(store) = ctx.proposal_store {
+                    let proposals = store.list_pending_proposals(20)?;
+                    serde_json::to_string(&proposals)
+                        .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string())
+                } else {
+                    serde_json::json!({
+                        "status": "unavailable",
+                        "reason": "ProposalStore not available in execution context",
+                        "proposals": []
+                    })
+                    .to_string()
+                }
+            }
+            "agent_run.lookup" => {
+                let run_id = args
+                    .get("run_id")
+                    .or_else(|| args.get("runId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if run_id.is_empty() {
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "agent_run.lookup requires run_id"
+                    })
+                    .to_string()
+                } else if let Some(store) = ctx.agent_run_store {
+                    match store.get_run(run_id)? {
+                        Some(run) => serde_json::to_string(&run)
+                            .unwrap_or_else(|_| "{\"error\":\"serialization failed\"}".to_string()),
+                        None => serde_json::json!({
+                            "status": "not_found",
+                            "run_id": run_id
+                        })
+                        .to_string(),
+                    }
+                } else {
+                    serde_json::json!({
+                        "status": "unavailable",
+                        "reason": "AgentRunStore not available in execution context"
+                    })
+                    .to_string()
+                }
+            }
+            "life_model.propose_patch" => self
+                .create_core_os_proposal(
+                    ctx,
+                    ProposalType::LifeModelUpdate,
+                    args.get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or("life_model"),
+                    args.clone(),
+                    "Agent proposed a LifeModel patch via Core OS tool.",
+                    RiskLevel::High,
+                )?
+                .to_string(),
+            "memory.propose_write" => self
+                .create_core_os_proposal(
+                    ctx,
+                    ProposalType::MemoryWrite,
+                    "memory.candidates",
+                    args.clone(),
+                    "Agent proposed a MemoryWrite via Core OS tool.",
+                    RiskLevel::Medium,
+                )?
+                .to_string(),
+            "memory.propose_archive" => self
+                .create_core_os_proposal(
+                    ctx,
+                    ProposalType::MemoryArchive,
+                    "memory.archive",
+                    args.clone(),
+                    "Agent proposed a MemoryArchive via Core OS tool.",
+                    RiskLevel::Medium,
+                )?
+                .to_string(),
             _ => {
                 return Ok(ToolCallInternalResult {
                     success: false,
@@ -426,6 +507,37 @@ impl ActionExecutor {
             output: Some(output),
             error: None,
         })
+    }
+
+    fn create_core_os_proposal(
+        &self,
+        ctx: &ActionExecutionContext<'_>,
+        proposal_type: ProposalType,
+        affected_path: &str,
+        after: Value,
+        reason: &str,
+        risk: RiskLevel,
+    ) -> Result<Value> {
+        let store = ctx
+            .proposal_store
+            .ok_or_else(|| anyhow::anyhow!("ProposalStore not available in execution context"))?;
+        let proposal = AgentProposal::new(
+            proposal_type,
+            affected_path,
+            after,
+            reason,
+            0.8,
+            risk,
+            ProposalSource::Manual,
+        );
+        let proposal_id = proposal.id.clone();
+        store.create_proposal(&proposal)?;
+        Ok(serde_json::json!({
+            "status": "proposal_created",
+            "proposal_id": proposal_id,
+            "proposal_type": proposal.proposal_type.to_string(),
+            "affected_path": proposal.affected_path,
+        }))
     }
 
     /// Execute an Execution tool (file.read, web.fetch, etc.).
@@ -447,7 +559,7 @@ impl ActionExecutor {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
-                        error: Some(format!("Path '{}' is not in safe paths list", path)),
+                        error: Some(filesystem_access_error(path, ctx.safe_paths)),
                     });
                 }
 
@@ -579,14 +691,25 @@ impl ActionExecutor {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
-                        error: Some(format!("Path '{}' is not in safe paths list", path)),
+                        error: Some(filesystem_access_error(path, ctx.safe_paths)),
                     });
                 }
 
                 // Return a structured proposal for file write
                 let proposal = serde_json::json!({
                     "proposal_type": "external_write_action",
+                    "external_write_action": {
+                        "path": path,
+                        "content": content,
+                        "content_preview": if content.len() > 200 {
+                            format!("{}... [truncated]", &content[..200])
+                        } else {
+                            content.to_string()
+                        },
+                        "content_length": content.len()
+                    },
                     "path": path,
+                    "content": content,
                     "content_preview": if content.len() > 200 {
                         format!("{}... [truncated]", &content[..200])
                     } else {
@@ -865,10 +988,10 @@ fn should_mark_needs_confirmation(
 }
 
 /// Check if a path is within the safe paths list.
-/// Returns true if safe_paths is empty (allow all) or if the path is under any safe path.
+/// Returns false if safe_paths is empty: filesystem access must be explicitly scoped.
 fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
     if safe_paths.is_empty() {
-        return true; // If no safe paths configured, allow all (backward compatible)
+        return false;
     }
 
     let path = std::path::Path::new(path);
@@ -894,6 +1017,14 @@ fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
     }
 
     false
+}
+
+fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
+    if safe_paths.is_empty() {
+        "No safe paths configured for filesystem access".to_string()
+    } else {
+        format!("Path '{}' is not in safe paths list", path)
+    }
 }
 
 /// Check if a URL points to a private/internal address.
@@ -1058,6 +1189,8 @@ mod tests {
             safe_paths: &[],
             life_model: None,
             memory_store: None,
+            proposal_store: None,
+            agent_run_store: None,
         }
     }
 
@@ -1127,14 +1260,20 @@ mod tests {
         let audit_file = tempfile::NamedTempFile::new().unwrap();
         let audit_store = McpAuditStore::new(audit_file.path());
         let privacy_engine = PrivacyEngine::default();
-        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = [safe_path];
+        let target_path = safe_dir.path().join("a.txt");
+        std::fs::write(&target_path, "").unwrap();
+        ctx.safe_paths = &safe_paths;
 
         let result = ActionExecutor::new(ActionExecutorConfig::default())
             .execute(
                 AgentActionRequest {
                     action_type: "mcp_tool".into(),
                     target: "write_file".into(),
-                    input: serde_json::json!({"arguments": {"path": "a.txt"}}),
+                    input: serde_json::json!({"arguments": {"path": target_path}}),
                     source_run_id: Some("run-1".into()),
                     step_index: 0,
                 },
@@ -1487,6 +1626,48 @@ mod tests {
 
         assert_eq!(result.status, ActionExecutionStatus::Succeeded);
         assert_eq!(result.observation.content, "Hello, OpenLife!");
+    }
+
+    #[test]
+    fn execution_tool_file_read_blocks_when_safe_paths_empty() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "file.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), "blocked").unwrap();
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "file.read".into(),
+                    input: serde_json::json!({"arguments": {"path": temp_file.path()}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result
+            .observation
+            .content
+            .contains("No safe paths configured for filesystem access"));
     }
 
     #[test]
