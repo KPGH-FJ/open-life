@@ -59,6 +59,9 @@ pub struct ActionExecutionContext<'a> {
     pub permission_store: &'a ToolPermissionStore,
     pub audit_store: &'a McpAuditStore,
     pub privacy_engine: &'a PrivacyEngine,
+    pub safe_paths: &'a [String],
+    pub life_model: Option<&'a crate::life_model::LifeModel>,
+    pub memory_store: Option<&'a crate::memory::MemoryStore>,
 }
 
 /// Centralized action executor for all agent actions.
@@ -116,14 +119,26 @@ impl ActionExecutor {
         // 2. Inspect PII
         let inspection = ctx.registry.inspect_call_arguments(tool_name, &args);
 
-        // 3. Check permission
+        // 3. Check permission with canonical decision order:
+        //    unknown -> blocked
+        //    disabled/declarative-only -> blocked
+        //    explicit deny -> blocked
+        //    allow_once -> execute (consume in step 5)
+        //    allow_until_revoked -> execute
+        //    high-risk without allow -> needs_confirmation
+        //    low-risk read -> execute
         let decision = if let Some(ref manifest) = manifest {
-            if !manifest.enabled {
+            if !manifest.enabled || manifest.declarative_only {
                 ToolPermissionDecision {
                     allowed: false,
                     requires_confirmation: false,
                     decision: "deny".into(),
-                    reason: "tool is disabled".into(),
+                    reason: if manifest.declarative_only {
+                        "tool is declarative-only (no executor available)"
+                    } else {
+                        "tool is disabled"
+                    }
+                    .into(),
                     policy_id: None,
                 }
             } else {
@@ -134,7 +149,7 @@ impl ActionExecutor {
                         &manifest.name,
                         &source,
                         &manifest.risk_level,
-                        "mcp_tool_call",
+                        &manifest.action_type,
                         &manifest.capabilities,
                     )
                     .unwrap_or(ToolPermissionDecision {
@@ -158,7 +173,9 @@ impl ActionExecutor {
 
         // 4. Determine if blocked
         let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
-        let blocked = manifest.as_ref().is_none_or(|m| !m.enabled)
+        let blocked = manifest
+            .as_ref()
+            .is_none_or(|m| !m.enabled || m.declarative_only)
             || inspection_blocks
             || decision.requires_confirmation
             || !decision.allowed;
@@ -186,12 +203,56 @@ impl ActionExecutor {
             });
         }
 
-        // 5. Execute
+        // 5. Safe Paths check for filesystem tools
+        if let Some(ref m) = manifest {
+            if m.capabilities.contains(&"filesystem".to_string()) {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if !is_path_in_safe_paths(path, ctx.safe_paths) {
+                    let (action, observation) = self.build_blocked_action_observation(
+                        tool_name,
+                        &args,
+                        &inspection,
+                        &ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: false,
+                            decision: "blocked".into(),
+                            reason: format!("Path '{}' is not in safe paths list", path),
+                            policy_id: None,
+                        },
+                        manifest.as_ref(),
+                        &request,
+                    );
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::Blocked,
+                        stop_reason: Some("path_not_in_safe_paths".into()),
+                    });
+                }
+            }
+        }
+
+        // 6. Execute
         let manifest_ref = manifest
             .as_ref()
             .expect("manifest exists when execution is not blocked");
-        let result =
-            self.call_tool_internal(manifest_ref, args.clone(), ctx.registry, ctx.audit_store);
+        let result = if manifest_ref.tags.contains(&"core_os".to_string()) {
+            self.execute_core_os_tool(tool_name, &args, ctx)
+                .unwrap_or_else(|e| ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(e.to_string()),
+                })
+        } else if manifest_ref.tags.contains(&"execution".to_string()) {
+            self.execute_execution_tool(tool_name, &args, ctx)
+                .unwrap_or_else(|e| ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(e.to_string()),
+                })
+        } else {
+            self.call_tool_internal(manifest_ref, args.clone(), ctx.registry, ctx.audit_store)
+        };
 
         let (action, observation) = self.build_success_action_observation(
             tool_name,
@@ -254,6 +315,302 @@ impl ActionExecutor {
         }
     }
 
+    /// Execute a Core OS tool with real data from LifeModel.
+    fn execute_core_os_tool(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        ctx: &ActionExecutionContext<'_>,
+    ) -> Result<ToolCallInternalResult> {
+        let output = match tool_name {
+            "life_model.read" => {
+                let life_model = ctx.life_model.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LifeModel not available in execution context for core_os tool '{}'",
+                        tool_name
+                    )
+                })?;
+                serde_json::to_string_pretty(&life_model)
+                    .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
+            }
+            "goal.read" => {
+                let life_model = ctx.life_model.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LifeModel not available in execution context for core_os tool '{}'",
+                        tool_name
+                    )
+                })?;
+                serde_json::to_string_pretty(&life_model.goals)
+                    .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
+            }
+            "state.read" => {
+                let life_model = ctx.life_model.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "LifeModel not available in execution context for core_os tool '{}'",
+                        tool_name
+                    )
+                })?;
+                serde_json::to_string_pretty(&life_model.state)
+                    .unwrap_or_else(|_| "{\"error\": \"serialization failed\"}".to_string())
+            }
+            "memory.search" => {
+                let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+
+                if let Some(memory_store) = ctx.memory_store {
+                    match memory_store.search_text_memories(None, query, 10) {
+                        Ok(hits) => {
+                            let results: Vec<_> = hits
+                                .into_iter()
+                                .map(|hit| {
+                                    serde_json::json!({
+                                        "content": hit.chunk.content,
+                                        "source": hit.chunk.source,
+                                        "relevance": hit.relevance_score,
+                                        "tier": hit.chunk.tier,
+                                    })
+                                })
+                                .collect();
+                            serde_json::json!({
+                                "status": "success",
+                                "query": query,
+                                "hits": results,
+                                "count": results.len()
+                            })
+                            .to_string()
+                        }
+                        Err(e) => serde_json::json!({
+                            "status": "error",
+                            "reason": format!("Search failed: {}", e),
+                            "hits": []
+                        })
+                        .to_string(),
+                    }
+                } else {
+                    serde_json::json!({
+                        "status": "unavailable",
+                        "reason": "MemoryStore not available in execution context",
+                        "hits": []
+                    })
+                    .to_string()
+                }
+            }
+            "tool.list_available" => {
+                let manifests = ctx.registry.list_manifests();
+                let tools: Vec<_> = manifests
+                    .into_iter()
+                    .filter(|m| m.enabled)
+                    .map(|m| {
+                        serde_json::json!({
+                            "name": m.name,
+                            "description": m.description,
+                            "source": m.source.to_string(),
+                            "action_type": m.action_type,
+                            "risk_level": m.risk_level,
+                            "capabilities": m.capabilities,
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "tools": tools }).to_string()
+            }
+            _ => {
+                return Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!("Unknown core_os tool: {}", tool_name)),
+                });
+            }
+        };
+
+        Ok(ToolCallInternalResult {
+            success: true,
+            output: Some(output),
+            error: None,
+        })
+    }
+
+    /// Execute an Execution tool (file.read, web.fetch, etc.).
+    fn execute_execution_tool(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        ctx: &ActionExecutionContext<'_>,
+    ) -> Result<ToolCallInternalResult> {
+        match tool_name {
+            "file.read" => {
+                let path = args
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument for file.read"))?;
+
+                // Validate path is within safe_paths
+                if !is_path_in_safe_paths(path, ctx.safe_paths) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Path '{}' is not in safe paths list", path)),
+                    });
+                }
+
+                // Check file size before reading
+                let metadata = std::fs::metadata(path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {}", e))?;
+                let max_size = 100 * 1024; // 100KB limit
+                if metadata.len() > max_size {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "File size ({} bytes) exceeds maximum allowed ({} bytes)",
+                            metadata.len(),
+                            max_size
+                        )),
+                    });
+                }
+
+                match std::fs::read_to_string(path) {
+                    Ok(content) => Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(content),
+                        error: None,
+                    }),
+                    Err(e) => Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to read file '{}': {}", path, e)),
+                    }),
+                }
+            }
+            "web.fetch" => {
+                let url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for web.fetch"))?;
+
+                // Validate URL scheme
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "Invalid URL scheme. Only http:// and https:// are allowed, got: {}",
+                            url
+                        )),
+                    });
+                }
+
+                // Block private IP ranges and localhost
+                if is_private_url(url) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "URL '{}' points to a private/internal address and is blocked for security",
+                            url
+                        )),
+                    });
+                }
+
+                // Perform HTTP GET with timeout
+                let client = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+                match client.get(url).send() {
+                    Ok(response) => {
+                        let status = response.status();
+                        if status.is_success() {
+                            match response.text() {
+                                Ok(text) => {
+                                    // Convert HTML to plain text if it looks like HTML
+                                    let text = if text.trim_start().starts_with('<') {
+                                        html_to_text(&text)
+                                    } else {
+                                        text
+                                    };
+                                    // Limit response size
+                                    let max_length = 50_000; // 50KB
+                                    let truncated = if text.len() > max_length {
+                                        format!(
+                                            "{}\n\n[Truncated: response exceeded {} characters]",
+                                            &text[..max_length],
+                                            max_length
+                                        )
+                                    } else {
+                                        text
+                                    };
+                                    Ok(ToolCallInternalResult {
+                                        success: true,
+                                        output: Some(truncated),
+                                        error: None,
+                                    })
+                                }
+                                Err(e) => Ok(ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!("Failed to read response body: {}", e)),
+                                }),
+                            }
+                        } else {
+                            Ok(ToolCallInternalResult {
+                                success: false,
+                                output: None,
+                                error: Some(format!(
+                                    "HTTP {}: {}",
+                                    status.as_u16(),
+                                    status.canonical_reason().unwrap_or("Unknown error")
+                                )),
+                            })
+                        }
+                    }
+                    Err(e) => Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("HTTP request failed: {}", e)),
+                    }),
+                }
+            }
+            "file.write_proposal" => {
+                let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Validate path is within safe_paths
+                if !path.is_empty() && !is_path_in_safe_paths(path, ctx.safe_paths) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Path '{}' is not in safe paths list", path)),
+                    });
+                }
+
+                // Return a structured proposal for file write
+                let proposal = serde_json::json!({
+                    "proposal_type": "external_write_action",
+                    "path": path,
+                    "content_preview": if content.len() > 200 {
+                        format!("{}... [truncated]", &content[..200])
+                    } else {
+                        content.to_string()
+                    },
+                    "content_length": content.len(),
+                    "requires_confirmation": true,
+                    "reason": format!("Proposed file write to '{}'", path),
+                });
+
+                Ok(ToolCallInternalResult {
+                    success: true,
+                    output: Some(proposal.to_string()),
+                    error: None,
+                })
+            }
+            _ => Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!("Unknown execution tool: {}", tool_name)),
+            }),
+        }
+    }
+
     fn build_blocked_action_observation(
         &self,
         tool_name: &str,
@@ -283,7 +640,7 @@ impl ActionExecutor {
             source: canonical_tool_source(m),
             risk_level: m.risk_level.clone(),
             capabilities: m.capabilities.clone(),
-            action_type: "mcp_tool_call".into(),
+            action_type: m.action_type.clone(),
             requires_confirmation: needs_confirmation,
             allowed: false,
         });
@@ -361,7 +718,7 @@ impl ActionExecutor {
             source: canonical_tool_source(m),
             risk_level: m.risk_level.clone(),
             capabilities: m.capabilities.clone(),
-            action_type: "mcp_tool_call".into(),
+            action_type: m.action_type.clone(),
             requires_confirmation: false,
             allowed: result.success,
         });
@@ -507,6 +864,170 @@ fn should_mark_needs_confirmation(
     decision.requires_confirmation || (inspection.requires_confirmation && inspection.pii_found)
 }
 
+/// Check if a path is within the safe paths list.
+/// Returns true if safe_paths is empty (allow all) or if the path is under any safe path.
+fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
+    if safe_paths.is_empty() {
+        return true; // If no safe paths configured, allow all (backward compatible)
+    }
+
+    let path = std::path::Path::new(path);
+    let canonical_path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            // If canonicalize fails, try with the original path
+            // This handles paths that don't exist yet
+            path.to_path_buf()
+        }
+    };
+
+    for safe in safe_paths {
+        let safe_path = std::path::Path::new(safe);
+        let canonical_safe = match safe_path.canonicalize() {
+            Ok(p) => p,
+            Err(_) => safe_path.to_path_buf(),
+        };
+
+        if canonical_path.starts_with(&canonical_safe) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if a URL points to a private/internal address.
+/// Blocks localhost, private IP ranges, and link-local addresses.
+fn is_private_url(url: &str) -> bool {
+    // Quick check for localhost variants
+    if url.contains("://localhost")
+        || url.contains("://127.")
+        || url.contains("://10.")
+        || url.contains("://192.168.")
+        || url.contains("://169.254.")
+        || url.contains("://172.")
+    {
+        // More precise check for 172.16.0.0/12
+        if url.contains("://172.") {
+            let after_172 = url.split("://172.").nth(1).unwrap_or("");
+            let second_octet: u32 = after_172
+                .split('.')
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .unwrap_or(0);
+            if (16..=31).contains(&second_octet) {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    }
+
+    // Check for private IP patterns more thoroughly
+    if let Some(host_start) = url.find("://") {
+        let host_part = &url[host_start + 3..];
+        let host = host_part.split('/').next().unwrap_or(host_part);
+        let host = host.split(':').next().unwrap_or(host);
+
+        if host == "localhost" {
+            return true;
+        }
+
+        // Check for numeric IPs
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(ipv4) => {
+                    return ipv4.is_loopback() || ipv4.is_private();
+                }
+                std::net::IpAddr::V6(ipv6) => {
+                    return ipv6.is_loopback();
+                }
+            }
+        }
+    }
+
+    false
+}
+
+/// Simple HTML to plain text converter.
+/// Strips tags and converts common elements to readable text.
+fn html_to_text(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Replace common block elements with newlines
+    let block_replacements = [
+        ("<p>", "\n\n"),
+        ("</p>", ""),
+        ("<div>", "\n"),
+        ("</div>", ""),
+        ("<br>", "\n"),
+        ("<br/>", "\n"),
+        ("<li>", "\n- "),
+        ("</li>", ""),
+        ("<h1>", "\n\n# "),
+        ("</h1>", "\n\n"),
+        ("<h2>", "\n\n## "),
+        ("</h2>", "\n\n"),
+        ("<h3>", "\n\n### "),
+        ("</h3>", "\n\n"),
+        ("<h4>", "\n\n#### "),
+        ("</h4>", "\n\n"),
+        ("<h5>", "\n\n##### "),
+        ("</h5>", "\n\n"),
+        ("<h6>", "\n\n###### "),
+        ("</h6>", "\n\n"),
+        ("<ul>", "\n"),
+        ("</ul>", "\n"),
+        ("<ol>", "\n"),
+        ("</ol>", "\n"),
+        ("<pre>", "\n\n```\n"),
+        ("</pre>", "\n```\n\n"),
+        ("<code>", " `"),
+        ("</code>", "` "),
+        ("<strong>", " **"),
+        ("</strong>", "** "),
+        ("<b>", " **"),
+        ("</b>", "** "),
+        ("<em>", " *"),
+        ("</em>", "* "),
+        ("<i>", " *"),
+        ("</i>", "* "),
+    ];
+
+    for (tag, replacement) in &block_replacements {
+        text = text.replace(tag, replacement);
+    }
+
+    // Remove remaining HTML tags
+    let tag_regex =
+        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+    text = tag_regex.replace_all(&text, "").to_string();
+
+    // Decode common HTML entities
+    let entities = [
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&nbsp;", " "),
+        ("&mdash;", "—"),
+        ("&ndash;", "–"),
+        ("&hellip;", "…"),
+    ];
+
+    for (entity, decoded) in &entities {
+        text = text.replace(entity, decoded);
+    }
+
+    // Clean up excessive whitespace
+    text = text.replace("\n\n\n", "\n\n");
+    text = text.replace("  ", " ");
+
+    text.trim().to_string()
+}
+
 #[derive(Debug)]
 struct ToolCallInternalResult {
     success: bool,
@@ -534,6 +1055,9 @@ mod tests {
             permission_store,
             audit_store,
             privacy_engine,
+            safe_paths: &[],
+            life_model: None,
+            memory_store: None,
         }
     }
 
@@ -583,6 +1107,8 @@ mod tests {
                 capabilities: vec!["write".into(), "filesystem".into()],
                 requires_confirmation: true,
                 enabled: true,
+                declarative_only: false,
+                action_type: "write".into(),
                 tags: vec![],
             },
             Box::new(|_| Ok("written".into())),
@@ -593,7 +1119,7 @@ mod tests {
                 "write_file",
                 "mcp:filesystem",
                 "high",
-                "mcp_tool_call",
+                "write",
                 ToolPermissionPolicy::AllowUntilRevoked,
                 None,
             )
@@ -644,6 +1170,8 @@ mod tests {
                 capabilities: vec!["write".into(), "filesystem".into()],
                 requires_confirmation: true,
                 enabled: true,
+                declarative_only: false,
+                action_type: "write".into(),
                 tags: vec![],
             },
             Box::new(|_| Ok("should not run".into())),
@@ -654,7 +1182,7 @@ mod tests {
                 "dangerous_write",
                 "mcp:filesystem",
                 "high",
-                "mcp_tool_call",
+                "write",
                 ToolPermissionPolicy::Deny,
                 None,
             )
@@ -736,6 +1264,8 @@ mod tests {
                 capabilities: vec!["write".into()],
                 requires_confirmation: true,
                 enabled: false,
+                declarative_only: false,
+                action_type: "write".into(),
                 tags: vec![],
             },
             Box::new(|_| Ok("should not run".into())),
@@ -792,5 +1322,261 @@ mod tests {
                 .and_then(|v| v.as_bool()),
             Some(true)
         );
+    }
+
+    #[test]
+    fn core_os_life_model_read_returns_life_model_json() {
+        // Use default registry which already has core_os tools registered
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "life_model.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let life_model = crate::life_model::LifeModel::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        ctx.life_model = Some(&life_model);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "life_model.read".into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+        let output = result.observation.content;
+        assert!(output.contains("identity") || output.contains("goals"));
+    }
+
+    #[test]
+    fn core_os_tool_without_life_model_returns_error() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "life_model.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        // life_model is None by default
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "life_model.read".into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result
+            .observation
+            .content
+            .contains("LifeModel not available"));
+    }
+
+    #[test]
+    fn core_os_tool_list_available_returns_tools() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "tool.list_available",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "tool.list_available".into(),
+                    input: serde_json::json!({"arguments": {}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+        let output = result.observation.content;
+        assert!(output.contains("tools"));
+    }
+
+    #[test]
+    fn execution_tool_file_read_reads_file_content() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "file.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        // Create a temp file to read
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(temp_file.path(), "Hello, OpenLife!").unwrap();
+        let safe_path = temp_file
+            .path()
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let safe_paths = [safe_path];
+        ctx.safe_paths = &safe_paths;
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "file.read".into(),
+                    input: serde_json::json!({"arguments": {"path": temp_file.path()}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+        assert_eq!(result.observation.content, "Hello, OpenLife!");
+    }
+
+    #[test]
+    fn execution_tool_file_read_blocks_path_outside_safe_paths() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "file.read",
+                "builtin",
+                "low",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        // Set a specific safe path
+        let safe_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let safe_paths = [safe_dir];
+        ctx.safe_paths = &safe_paths;
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "file.read".into(),
+                    input: serde_json::json!({"arguments": {"path": "/etc/passwd"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result.observation.content.contains("not in safe paths"));
+    }
+
+    #[test]
+    fn execution_tool_web_fetch_blocks_private_url() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "web.fetch",
+                "builtin",
+                "medium",
+                "network",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "web.fetch".into(),
+                    input: serde_json::json!({"arguments": {"url": "http://localhost:8080/admin"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result
+            .observation
+            .content
+            .contains("private/internal address"));
+    }
+
+    #[test]
+    fn is_private_url_blocks_localhost_and_private_ips() {
+        assert!(is_private_url("http://localhost:8080"));
+        assert!(is_private_url("http://127.0.0.1/api"));
+        assert!(is_private_url("http://10.0.0.1/admin"));
+        assert!(is_private_url("http://192.168.1.1/"));
+        assert!(is_private_url("http://172.16.0.1/"));
+        assert!(is_private_url("http://169.254.1.1/"));
+        assert!(!is_private_url("https://example.com/page"));
+        assert!(!is_private_url("https://api.openai.com/v1"));
     }
 }

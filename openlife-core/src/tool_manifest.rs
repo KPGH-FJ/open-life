@@ -22,6 +22,13 @@ pub struct ToolManifest {
     pub requires_confirmation: bool,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// If true, the tool is only declarative and cannot be executed.
+    /// Used for plugin tools without a real executor.
+    #[serde(default = "default_declarative_only")]
+    pub declarative_only: bool,
+    /// Action type: "read" | "write" | "network" | "external_side_effect"
+    #[serde(default)]
+    pub action_type: String,
     /// Optional tags for recommendation engine matching.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -29,6 +36,10 @@ pub struct ToolManifest {
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_declarative_only() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +89,8 @@ impl ToolManifest {
             capabilities: Vec::new(),
             requires_confirmation: false,
             enabled: true,
+            declarative_only: false,
+            action_type: String::new(),
             tags: Vec::new(),
         }
     }
@@ -145,6 +158,44 @@ impl ToolManifest {
     pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
         self.capabilities = capabilities;
         self.normalized()
+    }
+
+    /// Mark this tool as declarative-only (cannot be executed).
+    /// Automatically disables the tool.
+    pub fn declarative_only(mut self) -> Self {
+        self.declarative_only = true;
+        self.enabled = false;
+        self
+    }
+
+    /// Infer action type from tool name when not explicitly provided.
+    pub fn infer_action_type(name: &str) -> String {
+        let lower = name.to_lowercase();
+        if lower.contains("write")
+            || lower.contains("delete")
+            || lower.contains("remove")
+            || lower.contains("create")
+            || lower.contains("update")
+            || lower.contains("patch")
+        {
+            "write".to_string()
+        } else if lower.contains("search")
+            || lower.contains("fetch")
+            || lower.contains("request")
+            || lower.contains("web")
+            || lower.contains("http")
+        {
+            "network".to_string()
+        } else if lower.contains("send")
+            || lower.contains("post")
+            || lower.contains("email")
+            || lower.contains("github")
+            || lower.contains("slack")
+        {
+            "external_side_effect".to_string()
+        } else {
+            "read".to_string()
+        }
     }
 
     /// Infer permission level from tool name when not explicitly provided.
@@ -217,5 +268,40 @@ mod tests {
     fn infer_permission_level_low_default() {
         assert_eq!(ToolManifest::infer_permission_level("hello_world"), "low");
         assert_eq!(ToolManifest::infer_permission_level("calculator"), "low");
+    }
+
+    #[test]
+    fn declarative_only_tool_is_disabled() {
+        let m = ToolManifest::new(
+            "test_plugin_tool",
+            "A plugin tool without executor",
+            serde_json::json!({}),
+            "low",
+            "1.0.0",
+            ToolSource::Plugin {
+                plugin_id: "test".to_string(),
+            },
+        )
+        .declarative_only();
+
+        assert!(m.declarative_only);
+        assert!(!m.enabled);
+    }
+
+    #[test]
+    fn plugin_tool_default_not_declarative() {
+        let m = ToolManifest::new(
+            "test_plugin_tool",
+            "A plugin tool",
+            serde_json::json!({}),
+            "low",
+            "1.0.0",
+            ToolSource::Plugin {
+                plugin_id: "test".to_string(),
+            },
+        );
+
+        assert!(!m.declarative_only);
+        assert!(m.enabled);
     }
 }

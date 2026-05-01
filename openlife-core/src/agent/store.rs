@@ -298,6 +298,7 @@ impl AgentRunStore {
                 observations,
                 reasoning_strategy,
                 reasoning_trace,
+                warnings: Vec::new(),
                 deleted_at,
                 delete_reason,
                 started_at,
@@ -438,6 +439,7 @@ impl AgentRunStore {
             observations,
             reasoning_strategy,
             reasoning_trace,
+            warnings: Vec::new(),
             deleted_at,
             delete_reason,
             started_at,
@@ -711,5 +713,24 @@ mod tests {
         let fetched = store.get_run(&run.id).unwrap().unwrap();
         assert_eq!(fetched.status, AgentRunStatus::Failed);
         assert!(fetched.error.is_some());
+    }
+
+    #[test]
+    fn test_restore_run() {
+        let store = AgentRunStore::new_in_memory().unwrap();
+        let run = create_test_run();
+        store.create_run(&run).unwrap();
+
+        // Soft delete
+        store.delete_run(&run.id, Some("test deletion")).unwrap();
+        let fetched = store.get_run(&run.id).unwrap().unwrap();
+        assert!(fetched.deleted_at.is_some());
+        assert_eq!(fetched.delete_reason, Some("test deletion".to_string()));
+
+        // Restore
+        store.restore_run(&run.id).unwrap();
+        let restored = store.get_run(&run.id).unwrap().unwrap();
+        assert!(restored.deleted_at.is_none());
+        assert!(restored.delete_reason.is_none());
     }
 }

@@ -83,7 +83,12 @@ export interface AppConfig {
   local_model: string;
   chat_proposal?: ChatProposalConfig;
   experimental_context_assembler?: boolean;
-  experimental_model_router?: boolean;
+  use_agent_loop?: boolean;
+  system?: {
+    ollama_cache_ttl_seconds?: number;
+    memory_search_top_k?: number;
+    safe_paths?: string[];
+  };
 }
 
 export async function getConfig(): Promise<AppConfig> {

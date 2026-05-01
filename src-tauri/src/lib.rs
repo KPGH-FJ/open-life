@@ -33,7 +33,7 @@ use commands::a2a::{
 };
 use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    replay_agent_action,
+    replay_agent_action, restore_agent_run,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -492,59 +492,85 @@ pub(crate) async fn persist_life_model(
     Ok(life_model)
 }
 fn try_extract_json(text: &str) -> Option<&str> {
+    // 1. Try code block with json label
     if let Some(start) = text.find("```json") {
         let rest = &text[start + 7..];
         if let Some(end) = rest.find("```") {
-            return Some(rest[..end].trim());
+            let candidate = rest[..end].trim();
+            if is_valid_agent_json(candidate) {
+                return Some(candidate);
+            }
         }
     }
+    // 2. Try generic code block
     if let Some(start) = text.find("```") {
         let rest = &text[start + 3..];
         if let Some(end) = rest.find("```") {
             let inner = rest[..end].trim();
-            if inner.starts_with('{') || inner.starts_with('[') {
+            if (inner.starts_with('{') || inner.starts_with('[')) && is_valid_agent_json(inner) {
                 return Some(inner);
             }
         }
     }
-    if let Some(start) = text.find('{') {
-        let mut depth = 0usize;
-        let mut in_string = false;
-        let mut escape = false;
-        let bytes = text.as_bytes();
-        for (idx, &b) in bytes.iter().enumerate().skip(start) {
-            if in_string {
-                if escape {
-                    escape = false;
-                    continue;
-                }
-                if b == b'\\' {
-                    escape = true;
+    // 3. Try bare JSON - must be at start or after whitespace/newline
+    let trimmed = text.trim_start();
+    if let Some(start) = trimmed.find('{') {
+        // Ensure the '{' is at the very beginning or preceded by whitespace
+        let prefix = &trimmed[..start];
+        if prefix.trim().is_empty() {
+            let mut depth = 0usize;
+            let mut in_string = false;
+            let mut escape = false;
+            let bytes = trimmed.as_bytes();
+            for (idx, &b) in bytes.iter().enumerate().skip(start) {
+                if in_string {
+                    if escape {
+                        escape = false;
+                        continue;
+                    }
+                    if b == b'\\' {
+                        escape = true;
+                        continue;
+                    }
+                    if b == b'"' {
+                        in_string = false;
+                    }
                     continue;
                 }
                 if b == b'"' {
-                    in_string = false;
-                }
-                continue;
-            }
-            if b == b'"' {
-                in_string = true;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                if depth == 0 {
+                    in_string = true;
                     continue;
                 }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[start..=idx]);
+                if b == b'{' {
+                    depth += 1;
+                } else if b == b'}' {
+                    if depth == 0 {
+                        continue;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        let candidate = &trimmed[start..=idx];
+                        if is_valid_agent_json(candidate) {
+                            return Some(candidate);
+                        }
+                        return None;
+                    }
                 }
             }
         }
     }
     None
+}
+
+/// Validate that extracted JSON is a valid agent action envelope.
+/// Must contain either "tool_calls" (array) or "final" (string) at top level.
+fn is_valid_agent_json(text: &str) -> bool {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(obj) = value.as_object() {
+            return obj.contains_key("tool_calls") || obj.contains_key("final");
+        }
+    }
+    false
 }
 
 fn try_prepare_tool_calls(
@@ -575,6 +601,9 @@ fn try_prepare_tool_calls(
         permission_store,
         audit_store: audit,
         privacy_engine,
+        safe_paths: &[],
+        life_model: None,
+        memory_store: None,
     };
 
     let mut results = Vec::new();
@@ -1569,6 +1598,31 @@ async fn send_message(
         None
     };
 
+    // Dual-track: use AgentLoop if feature flag is enabled
+    let use_agent_loop = {
+        let cfg = state.config.lock().await;
+        cfg.use_agent_loop
+    };
+
+    if use_agent_loop {
+        return send_message_with_agent_loop(
+            session_id,
+            messages,
+            user_msg,
+            life_model,
+            tools_prompt,
+            privacy_engine,
+            privacy_map,
+            desensitized_messages,
+            embed_err,
+            auto_checkin_msg,
+            layer,
+            state,
+        )
+        .await;
+    }
+
+    // Legacy path (preserved completely)
     // Create AgentRun for tracking
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
         &session_id,
@@ -1765,6 +1819,153 @@ async fn send_message(
         run_id: Some(agent_run.id.clone()),
     })
 }
+
+/// AgentLoop-based chat execution (dual-track beta path).
+#[allow(clippy::too_many_arguments)]
+async fn send_message_with_agent_loop(
+    session_id: String,
+    _messages: Vec<ChatMessage>,
+    user_msg: Option<ChatMessage>,
+    life_model: LifeModel,
+    tools_prompt: String,
+    privacy_engine: PrivacyEngine,
+    privacy_map: HashMap<String, String>,
+    desensitized_messages: Vec<ChatMessage>,
+    embed_err: Option<String>,
+    auto_checkin_msg: Option<String>,
+    layer: Layer,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    let scheduler = state.scheduler.lock().await.clone();
+    let cfg = state.config.lock().await;
+    let safe_paths = cfg.system.safe_paths.clone();
+    let agent_runtime =
+        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
+    let action_executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
+    );
+    let loop_config = openlife_core::agent::AgentLoopConfig {
+        max_steps: 5,
+        max_tool_calls: 3,
+        timeout_seconds: 120,
+        allow_writes: true,
+        allow_cloud: true,
+    };
+    let agent_loop = openlife_core::agent::AgentLoop::new(
+        agent_runtime,
+        action_executor,
+        scheduler,
+        loop_config,
+    );
+
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Conversation,
+        session_id: session_id.clone(),
+        user_text: user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
+        messages: desensitized_messages.clone(),
+        layer,
+    };
+
+    let (reg, audit) = state.get_mcp_state().await;
+    let permission_store = state.tool_permission_store.lock().await;
+    let memory_store = state.memory_store.lock().await;
+    let action_ctx = openlife_core::agent::ActionExecutionContext {
+        registry: &reg,
+        permission_store: &permission_store,
+        audit_store: &audit,
+        privacy_engine: &privacy_engine,
+        safe_paths: &safe_paths,
+        life_model: Some(&life_model),
+        memory_store: Some(&memory_store),
+    };
+
+    let loop_result = agent_loop
+        .run(
+            &task,
+            &life_model,
+            &tools_prompt,
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+        .map_err(|e| format!("AgentLoop execution failed: {}", e))?;
+
+    let mut reply = loop_result.final_response;
+    let mut agent_run = loop_result.run;
+
+    // Apply privacy reconstruction
+    reply = privacy_engine.reconstruct(&reply, &privacy_map);
+
+    // Apply auto checkin message
+    if let Some(msg) = auto_checkin_msg {
+        if !reply.contains(&msg) {
+            reply = format!("{}\n\n[系统] {}", reply, msg);
+        }
+    }
+
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+
+    let mut reasoning_trace = agent_run.reasoning_trace.clone().unwrap_or_default();
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
+
+    finalize_chat_agent_run(
+        &session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        &state,
+    )
+    .await?;
+
+    // Convert AgentLoop actions to ToolCallResult for frontend compatibility
+    let tool_calls: Vec<ToolCallResult> = agent_run
+        .actions
+        .iter()
+        .map(|action| ToolCallResult {
+            name: action.target.clone().unwrap_or_default(),
+            arguments: action.input.clone(),
+            sanitized_arguments: None,
+            success: action.status == "succeeded" || action.status == "completed",
+            output: action
+                .output
+                .as_ref()
+                .and_then(|o| o.as_str().map(|s| s.to_string())),
+            error: action.error.clone(),
+            permission_level: action
+                .tool_scope
+                .as_ref()
+                .map(|s| s.risk_level.clone())
+                .unwrap_or_else(|| "low".to_string()),
+            status: action.status.clone(),
+            requires_confirmation: action.permission_decision.as_deref()
+                == Some("needs_confirmation"),
+            pii_found: false,
+            privacy_warnings: Vec::new(),
+            action_id: Some(action.id.clone()),
+            run_id: Some(agent_run.id.clone()),
+            permission_decision: action.permission_decision.clone(),
+        })
+        .collect();
+
+    Ok(SendMessageResult {
+        reply,
+        reasoning_trace,
+        tool_calls,
+        run_id: Some(agent_run.id.clone()),
+    })
+}
+
 #[derive(serde::Deserialize, Clone, Debug)]
 struct StartStreamMessageArgs {
     session_id: String,
@@ -1828,6 +2029,236 @@ fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     }
 }
 
+/// Stream-mode AgentLoop execution: runs AgentLoop and emits stream events.
+/// This provides consistency when use_agent_loop=true in stream mode.
+async fn start_stream_message_with_agent_loop(
+    session_id: String,
+    messages: Vec<ChatMessage>,
+    user_msg: Option<ChatMessage>,
+    _layer: Layer,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    // AgentRun tracking
+    let user_input_text = user_msg
+        .as_ref()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(e) = store.create_run(&agent_run) {
+            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+        }
+    }
+
+    // Preprocess
+    let (
+        mut life_model,
+        tools_prompt,
+        privacy_engine,
+        privacy_map,
+        desensitized_messages,
+        embed_err,
+        _context_summary,
+    ) = match preprocess_chat_input_v2(&session_id, &messages, &state).await {
+        Ok(result) => result,
+        Err(message) => {
+            let error = openlife_core::agent::AgentRunError {
+                message: message.clone(),
+                phase: "preprocess".to_string(),
+                recoverable: true,
+            };
+            agent_run.fail(error);
+            if let Some(ref store_arc) = state.agent_run_store {
+                let store = store_arc.lock().await;
+                let _ = store.update_run(&agent_run);
+            }
+            return Err(message);
+        }
+    };
+
+    let auto_checkin_msg = if let Some(ref m) = user_msg {
+        let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
+        if msg.is_some() {
+            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await;
+        }
+        msg
+    } else {
+        None
+    };
+
+    // Emit stream start
+    let _ = app_handle.emit(
+        "stream-message-start",
+        serde_json::json!({
+            "session_id": &session_id,
+            "run_id": agent_run.id,
+            "reasoning_trace": ReasoningTrace::default(),
+            "tool_calls": Vec::<ToolCallResult>::new(),
+        }),
+    );
+
+    // Run AgentLoop
+    let scheduler = state.scheduler.lock().await.clone();
+    let cfg = state.config.lock().await;
+    let safe_paths = cfg.system.safe_paths.clone();
+    let agent_runtime =
+        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
+    let action_executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
+    );
+    let loop_config = openlife_core::agent::AgentLoopConfig {
+        max_steps: 5,
+        max_tool_calls: 3,
+        timeout_seconds: 120,
+        allow_writes: true,
+        allow_cloud: true,
+    };
+    let agent_loop = openlife_core::agent::AgentLoop::new(
+        agent_runtime,
+        action_executor,
+        scheduler,
+        loop_config,
+    );
+
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Conversation,
+        session_id: session_id.clone(),
+        user_text: user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
+        messages: desensitized_messages.clone(),
+        layer: _layer,
+    };
+
+    let (reg, audit) = state.get_mcp_state().await;
+    let permission_store = state.tool_permission_store.lock().await;
+    let memory_store = state.memory_store.lock().await;
+    let action_ctx = openlife_core::agent::ActionExecutionContext {
+        registry: &reg,
+        permission_store: &permission_store,
+        audit_store: &audit,
+        privacy_engine: &privacy_engine,
+        safe_paths: &safe_paths,
+        life_model: Some(&life_model),
+        memory_store: Some(&memory_store),
+    };
+
+    let loop_result = match agent_loop
+        .run(
+            &task,
+            &life_model,
+            &tools_prompt,
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            let error_msg = format!("AgentLoop execution failed: {}", e);
+            let _ = app_handle.emit(
+                "stream-message-error",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": agent_run.id,
+                    "error": error_msg.clone(),
+                }),
+            );
+            let error = openlife_core::agent::AgentRunError {
+                message: error_msg.clone(),
+                phase: "agent_loop".to_string(),
+                recoverable: false,
+            };
+            agent_run.fail(error);
+            if let Some(ref store_arc) = state.agent_run_store {
+                let store = store_arc.lock().await;
+                let _ = store.update_run(&agent_run);
+            }
+            return Err(error_msg);
+        }
+    };
+
+    let mut reply = loop_result.final_response;
+    let mut agent_run = loop_result.run;
+
+    // Apply privacy reconstruction
+    reply = privacy_engine.reconstruct(&reply, &privacy_map);
+
+    // Apply auto checkin message
+    if let Some(msg) = auto_checkin_msg {
+        if !reply.contains(&msg) {
+            reply = format!("{}\n\n[系统] {}", reply, msg);
+        }
+    }
+
+    // Emit the result as a single chunk (simulating streaming)
+    let _ = app_handle.emit(
+        "stream-message-chunk",
+        serde_json::json!({
+            "session_id": &session_id,
+            "run_id": agent_run.id,
+            "chunk": reply.clone(),
+        }),
+    );
+
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+
+    let mut reasoning_trace = agent_run.reasoning_trace.clone().unwrap_or_default();
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
+
+    // Save assistant message
+    let _ = persist_chat_message_if_needed(&session_id, &assistant_message, &state).await;
+    let _ = persist_vector_memory_for_message(&session_id, &assistant_message, &state).await;
+
+    // Finalize AgentRun
+    let result = finalize_chat_agent_run(
+        &session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        &state,
+    )
+    .await;
+
+    match result {
+        Ok(_) => {
+            let _ = app_handle.emit(
+                "stream-message-done",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": agent_run.id,
+                    "reply": reply,
+                    "reasoning_trace": reasoning_trace,
+                    "tool_calls": Vec::<ToolCallResult>::new(),
+                }),
+            );
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app_handle.emit(
+                "stream-message-error",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": agent_run.id,
+                    "error": e.clone(),
+                }),
+            );
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 async fn start_stream_message(
     args: Option<StartStreamMessageArgs>,
@@ -1877,6 +2308,19 @@ async fn start_stream_message(
     } else {
         Layer::L2
     };
+
+    // AgentLoop stream integration: when use_agent_loop is enabled,
+    // delegate to AgentLoop and simulate streaming by emitting the result
+    let cfg = state.config.lock().await;
+    let use_agent_loop = cfg.system.use_agent_loop.unwrap_or(false);
+    drop(cfg);
+
+    if use_agent_loop && layer != Layer::L1 {
+        return start_stream_message_with_agent_loop(
+            session_id, messages, user_msg, layer, app_handle, state,
+        )
+        .await;
+    }
 
     // Layer 1: direct reflex response (non-streaming, emit as single chunk)
     if layer == Layer::L1 {
@@ -2513,7 +2957,7 @@ async fn start_stream_message(
     };
     let preview = preview_text(&reply, 200);
     agent_run.complete(&preview, model_route, context_summary);
-    finalize_chat_agent_run(
+    if let Err(e) = finalize_chat_agent_run(
         &session_id,
         &assistant_message,
         &reply,
@@ -2522,7 +2966,19 @@ async fn start_stream_message(
         &life_model,
         &state,
     )
-    .await?;
+    .await
+    {
+        eprintln!("[Stream] finalize_chat_agent_run failed: {}", e);
+        let _ = app_handle.emit(
+            "stream-message-error",
+            serde_json::json!({
+                "session_id": &session_id,
+                "run_id": agent_run.id,
+                "error": format!("AgentRun 持久化失败: {}", e),
+            }),
+        );
+        return Err(e);
+    }
 
     let _ = app_handle.emit(
         "stream-message-done",
@@ -2546,6 +3002,8 @@ async fn execute_tool_call(
     let (reg, audit) = state.get_mcp_state().await;
     let permission_store = state.tool_permission_store.lock().await;
     let privacy_engine = state.privacy_engine.lock().await;
+    let cfg = state.config.lock().await;
+    let safe_paths = cfg.system.safe_paths.clone();
 
     let executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
@@ -2555,6 +3013,9 @@ async fn execute_tool_call(
         permission_store: &permission_store,
         audit_store: &audit,
         privacy_engine: &privacy_engine,
+        safe_paths: &safe_paths,
+        life_model: None,
+        memory_store: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -2861,6 +3322,7 @@ pub fn run() {
             list_agent_runs,
             list_agent_runs_for_session,
             delete_agent_run,
+            restore_agent_run,
             replay_agent_action,
             get_pending_proposals,
             list_proposals,

@@ -44,6 +44,29 @@ pub struct AgentLoopResult {
     pub step_count: u32,
 }
 
+/// Result of a single step in the agent loop.
+#[derive(Debug, Clone)]
+struct StepResult {
+    pub stop_reason: String,
+    pub final_response: String,
+    pub should_continue: bool,
+    pub tool_call_count_delta: u32,
+    pub observations: Vec<AgentObservation>,
+}
+
+/// Context for executing a single step of the agent loop.
+struct StepContext<'a> {
+    pub task: &'a AgentTask,
+    pub life_model: &'a LifeModel,
+    pub tools_prompt: &'a str,
+    pub memory_context: Option<String>,
+    pub privacy_engine: PrivacyEngine,
+    pub action_ctx: &'a ActionExecutionContext<'a>,
+    pub run: &'a mut AgentRun,
+    pub step_count: u32,
+    pub tool_call_count: u32,
+}
+
 /// The AgentLoop executes a task with a fixed 2-step pattern:
 ///
 /// 1. Model response (with optional tool calls)
@@ -72,7 +95,8 @@ impl AgentLoop {
         }
     }
 
-    /// Run the 2-step agent loop for a given task.
+    /// Run the iterative agent loop for a given task.
+    /// Supports multi-step ReAct: generate -> parse tools -> execute -> observe -> repeat.
     pub async fn run(
         &self,
         task: &AgentTask,
@@ -88,70 +112,35 @@ impl AgentLoop {
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
-        let mut _final_response = String::new();
-        let mut _stop_reason = String::new();
+        let mut final_response = String::new();
+        let mut current_task = task.clone();
+        let mut current_tools_prompt = tools_prompt.to_string();
+        let current_memory_context = memory_context;
+        let current_privacy_engine = privacy_engine;
 
-        // Step 1: Generate initial model response
-        let generated = self
-            .generate_response(
-                task,
-                life_model,
-                tools_prompt,
-                memory_context.clone(),
-                privacy_engine.clone(),
-            )
-            .await
-            .inspect_err(|e| {
-                run.status = AgentRunStatus::Failed;
-                run.error = Some(AgentRunError {
-                    message: e.to_string(),
-                    phase: "model".into(),
-                    recoverable: false,
-                });
-            })?;
-
-        step_count += 1;
-        let runtime_output = generated.runtime_output;
-        run.context_summary = Some(runtime_output.context_summary.clone());
-        run.reasoning_trace = Some(runtime_output.reasoning_trace.clone());
+        // Set reasoning strategy
         run.reasoning_strategy = Some(if task.layer == Layer::L3 {
             "layered".into()
         } else {
             "direct".into()
         });
 
-        let first_reply = generated.reply;
+        // Compiler cannot prove loop executes at least once, so we need an initial
+        // value. The loop always executes in practice due to the normal flow.
+        #[allow(unused_assignments)]
+        let mut stop_reason = String::new();
 
-        // Check for tool calls in the reply
-        let tool_actions =
-            self.parse_tool_calls(&first_reply, action_ctx, &mut run, &mut tool_call_count)?;
-
-        let has_tool_calls = !tool_actions.is_empty();
-
-        if has_tool_calls {
-            // Execute tools and build observations
-            let mut observations = Vec::new();
-            let mut all_succeeded = true;
-
-            for action_request in tool_actions {
-                if tool_call_count >= self.config.max_tool_calls {
-                    let obs = self.create_budget_exceeded_observation(&run, tool_call_count);
-                    observations.push(obs.clone());
-                    run.observations.push(obs);
-                    all_succeeded = false;
-                    break;
+        loop {
+            // Check step budget
+            if step_count >= self.config.max_steps {
+                stop_reason = "max_steps_reached".into();
+                if final_response.is_empty() {
+                    final_response = format!(
+                        "已达到最大执行步数 ({})。当前结果：{}",
+                        self.config.max_steps, final_response
+                    );
                 }
-
-                let exec_result = self.action_executor.execute(action_request, action_ctx)?;
-                run.actions.push(exec_result.action.clone());
-
-                observations.push(exec_result.observation.clone());
-                run.observations.push(exec_result.observation);
-                if exec_result.status != ActionExecutionStatus::Succeeded {
-                    all_succeeded = false;
-                }
-
-                tool_call_count += 1;
+                break;
             }
 
             // Check timeout
@@ -162,84 +151,204 @@ impl AgentLoop {
                     phase: "execution".into(),
                     recoverable: false,
                 });
-                _stop_reason = "timeout".into();
-                _final_response = "执行超时，请稍后重试。".into();
-                return Ok(self.build_result(
-                    run,
-                    _final_response,
-                    _stop_reason,
-                    tool_call_count,
-                    step_count,
-                ));
+                stop_reason = "timeout".into();
+                final_response = "执行超时，请稍后重试。".into();
+                break;
             }
 
-            // Step 2: Follow-up response with tool results
-            if all_succeeded && !observations.is_empty() {
-                let follow_up_messages =
-                    self.build_follow_up_messages(task, &first_reply, &observations);
-                let follow_up_task = AgentTask {
-                    messages: follow_up_messages,
-                    ..task.clone()
-                };
-
-                let follow_up_generated = self
-                    .generate_response(
-                        &follow_up_task,
-                        life_model,
-                        "",
-                        memory_context,
-                        privacy_engine,
-                    )
-                    .await
-                    .inspect_err(|e| {
-                        run.status = AgentRunStatus::Failed;
-                        run.error = Some(AgentRunError {
-                            message: e.to_string(),
-                            phase: "follow_up".into(),
-                            recoverable: false,
-                        });
-                    })?;
-
-                step_count += 1;
-                _final_response = follow_up_generated.reply;
-                _stop_reason = "completed_with_follow_up".into();
-            } else if !all_succeeded {
-                // Some tools failed or need confirmation
-                let pending_count = run
-                    .actions
-                    .iter()
-                    .filter(|a| a.status == "needs_confirmation")
-                    .count();
-                if pending_count > 0 {
-                    _final_response =
-                        "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
-                            .into();
-                    _stop_reason = "needs_confirmation".into();
-                } else {
-                    _final_response = "工具执行过程中出现错误，请检查配置或稍后重试。".into();
-                    _stop_reason = "tool_execution_failed".into();
-                }
+            // Search memory for relevant context
+            let memory_context = if let Some(memory_store) = action_ctx.memory_store {
+                search_memory_for_context(memory_store, &current_task.user_text, &task.session_id)
+                    .unwrap_or_else(|e| {
+                        eprintln!("[AgentLoop] Memory search failed: {}", e);
+                        current_memory_context.clone()
+                    })
             } else {
-                _final_response = first_reply.clone();
-                _stop_reason = "no_observations".into();
+                current_memory_context.clone()
+            };
+
+            // Execute single step
+            let step_result = self
+                .run_single_step(StepContext {
+                    task: &current_task,
+                    life_model,
+                    tools_prompt: &current_tools_prompt,
+                    memory_context,
+                    privacy_engine: current_privacy_engine.clone(),
+                    action_ctx,
+                    run: &mut run,
+                    step_count,
+                    tool_call_count,
+                })
+                .await?;
+
+            step_count += 1;
+            tool_call_count += step_result.tool_call_count_delta;
+            final_response = step_result.final_response;
+            stop_reason = step_result.stop_reason;
+
+            if !step_result.should_continue {
+                break;
             }
-        } else {
-            // No tool calls, use first reply directly
-            _final_response = first_reply;
-            _stop_reason = "no_tools".into();
+
+            // Prepare for next iteration
+            let follow_up_messages = self.build_follow_up_messages(
+                &current_task,
+                &final_response,
+                &step_result.observations,
+            );
+            current_task = AgentTask {
+                messages: follow_up_messages,
+                ..current_task.clone()
+            };
+            current_tools_prompt.clear();
         }
 
         run.status = AgentRunStatus::Completed;
-        run.output_preview = Some(preview_text(&_final_response, 200));
+        run.output_preview = Some(preview_text(&final_response, 200));
         run.finished_at = Some(chrono::Utc::now());
 
         Ok(self.build_result(
             run,
-            _final_response,
-            _stop_reason,
+            final_response,
+            stop_reason,
             tool_call_count,
             step_count,
         ))
+    }
+
+    /// Execute a single step of the agent loop.
+    async fn run_single_step(&self, mut ctx: StepContext<'_>) -> Result<StepResult> {
+        // Generate model response
+        let generated = self
+            .generate_response(
+                ctx.task,
+                ctx.life_model,
+                ctx.tools_prompt,
+                ctx.memory_context,
+                ctx.privacy_engine,
+            )
+            .await;
+
+        match generated {
+            Ok(gen) => {
+                if ctx.run.context_summary.is_none() {
+                    ctx.run.context_summary = Some(gen.runtime_output.context_summary.clone());
+                }
+                if ctx.run.reasoning_trace.is_none() {
+                    ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
+                }
+
+                let reply = gen.reply;
+
+                // Check for tool calls in the reply
+                let tool_actions = self.parse_tool_calls(
+                    &reply,
+                    ctx.action_ctx,
+                    ctx.run,
+                    &mut ctx.tool_call_count,
+                )?;
+
+                if tool_actions.is_empty() {
+                    // No tool calls - this is the final answer
+                    return Ok(StepResult {
+                        stop_reason: "no_tools".into(),
+                        final_response: reply,
+                        should_continue: false,
+                        tool_call_count_delta: 0,
+                        observations: vec![],
+                    });
+                }
+
+                // Execute tools and build observations
+                let mut observations = Vec::new();
+                let mut all_succeeded = true;
+
+                for action_request in tool_actions {
+                    if ctx.tool_call_count >= self.config.max_tool_calls {
+                        let obs =
+                            self.create_budget_exceeded_observation(ctx.run, ctx.tool_call_count);
+                        observations.push(obs.clone());
+                        ctx.run.observations.push(obs);
+                        all_succeeded = false;
+                        break;
+                    }
+
+                    let exec_result = self
+                        .action_executor
+                        .execute(action_request, ctx.action_ctx)?;
+                    ctx.run.actions.push(exec_result.action.clone());
+                    observations.push(exec_result.observation.clone());
+                    ctx.run.observations.push(exec_result.observation.clone());
+                    if exec_result.status != ActionExecutionStatus::Succeeded {
+                        all_succeeded = false;
+                    }
+
+                    ctx.tool_call_count += 1;
+                }
+
+                if !all_succeeded {
+                    // Some tools failed or need confirmation
+                    let pending_count = ctx
+                        .run
+                        .actions
+                        .iter()
+                        .filter(|a| a.status == "needs_confirmation")
+                        .count();
+                    let final_response = if pending_count > 0 {
+                        "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
+                            .into()
+                    } else {
+                        "工具执行过程中出现错误，请检查配置或稍后重试。".into()
+                    };
+                    return Ok(StepResult {
+                        stop_reason: if pending_count > 0 {
+                            "needs_confirmation".into()
+                        } else {
+                            "tool_execution_failed".into()
+                        },
+                        final_response,
+                        should_continue: false,
+                        tool_call_count_delta: 0,
+                        observations,
+                    });
+                }
+
+                if observations.is_empty() {
+                    return Ok(StepResult {
+                        stop_reason: "no_observations".into(),
+                        final_response: reply,
+                        should_continue: false,
+                        tool_call_count_delta: 0,
+                        observations: vec![],
+                    });
+                }
+
+                // Continue to next iteration
+                Ok(StepResult {
+                    stop_reason: String::new(), // Will be set by caller if this is the last step
+                    final_response: reply,
+                    should_continue: true,
+                    tool_call_count_delta: ctx.tool_call_count - ctx.step_count,
+                    observations,
+                })
+            }
+            Err(e) => {
+                ctx.run.status = AgentRunStatus::Failed;
+                ctx.run.error = Some(AgentRunError {
+                    message: e.to_string(),
+                    phase: "model".into(),
+                    recoverable: false,
+                });
+                Ok(StepResult {
+                    stop_reason: "model_error".into(),
+                    final_response: format!("模型生成失败: {}", e),
+                    should_continue: false,
+                    tool_call_count_delta: 0,
+                    observations: vec![],
+                })
+            }
+        }
     }
 
     async fn generate_response(
@@ -285,6 +394,21 @@ impl AgentLoop {
         })
     }
 
+    /// Parse model response for JSON envelope.
+    /// Supports format: {"final": "...", "actions": [...], "thought_summary": "...", "warnings": [...]}
+    /// Fail-soft: malformed JSON or missing envelope returns empty actions (treat as final).
+    #[cfg(test)]
+    pub fn parse_tool_calls(
+        &self,
+        reply: &str,
+        _action_ctx: &ActionExecutionContext<'_>,
+        run: &mut AgentRun,
+        tool_call_count: &mut u32,
+    ) -> Result<Vec<AgentActionRequest>> {
+        self.parse_tool_calls_inner(reply, _action_ctx, run, tool_call_count)
+    }
+
+    #[cfg(not(test))]
     fn parse_tool_calls(
         &self,
         reply: &str,
@@ -292,31 +416,92 @@ impl AgentLoop {
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<Vec<AgentActionRequest>> {
+        self.parse_tool_calls_inner(reply, _action_ctx, run, tool_call_count)
+    }
+
+    fn parse_tool_calls_inner(
+        &self,
+        reply: &str,
+        _action_ctx: &ActionExecutionContext<'_>,
+        run: &mut AgentRun,
+        tool_call_count: &mut u32,
+    ) -> Result<Vec<AgentActionRequest>> {
         let json_str = try_extract_json(reply);
-        let Some(json_str) = json_str else {
+        let json_str = if let Some(s) = json_str {
+            s
+        } else if reply.contains('{') {
+            // Found '{' but no valid JSON object - try parsing anyway for error recording
+            reply
+        } else {
+            // No JSON found - treat entire response as final answer
             return Ok(Vec::new());
         };
 
-        let v: Value =
-            serde_json::from_str(json_str).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
-        let calls = match v.get("tool_calls").and_then(|c| c.as_array()) {
-            Some(calls) if !calls.is_empty() => calls,
-            _ => return Ok(Vec::new()),
+        let v: Value = match serde_json::from_str(json_str) {
+            Ok(v) => v,
+            Err(e) => {
+                // Fail-soft: malformed JSON, record warning and treat as final
+                run.warnings.push(format!(
+                    "Parse warning: invalid JSON in model response: {}",
+                    e
+                ));
+                return Ok(Vec::new());
+            }
+        };
+
+        // Check for thought_summary and warnings
+        if let Some(thought) = v.get("thought_summary").and_then(|t| t.as_str()) {
+            run.warnings.push(format!("Model thought: {}", thought));
+        }
+        if let Some(warnings) = v.get("warnings").and_then(|w| w.as_array()) {
+            for warning in warnings {
+                if let Some(w) = warning.as_str() {
+                    run.warnings.push(format!("Model warning: {}", w));
+                }
+            }
+        }
+
+        // If "final" is present, this is a final answer - no tool calls
+        if v.get("final").is_some() {
+            return Ok(Vec::new());
+        }
+
+        // Parse actions (new format) or tool_calls (legacy format)
+        let calls = if let Some(actions) = v.get("actions").and_then(|a| a.as_array()) {
+            if actions.is_empty() {
+                return Ok(Vec::new());
+            }
+            actions
+        } else if let Some(tool_calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+            if tool_calls.is_empty() {
+                return Ok(Vec::new());
+            }
+            tool_calls
+        } else {
+            // No actions or tool_calls - treat as final answer
+            return Ok(Vec::new());
         };
 
         let mut requests = Vec::new();
         for (idx, call) in calls.iter().enumerate() {
             let name = call
                 .get("name")
+                .or_else(|| call.get("tool"))
                 .and_then(|n| n.as_str())
                 .context("tool call missing name")?;
             let args = call
                 .get("arguments")
+                .or_else(|| call.get("args"))
+                .or_else(|| call.get("input"))
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
 
             requests.push(AgentActionRequest {
-                action_type: "mcp_tool".to_string(),
+                action_type: call
+                    .get("action_type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("mcp_tool")
+                    .to_string(),
                 target: name.to_string(),
                 input: serde_json::json!({ "arguments": args }),
                 source_run_id: Some(run.id.clone()),
@@ -408,6 +593,35 @@ fn preview_text(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &text[..max_len])
     }
+}
+
+/// Search memory store for relevant context and format as a string.
+fn search_memory_for_context(
+    memory_store: &crate::memory::MemoryStore,
+    query: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    if query.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let hits = memory_store.search_text_memories(Some(session_id), query, 5)?;
+    if hits.is_empty() {
+        return Ok(None);
+    }
+
+    let mut context = String::from("以下是与当前话题相关的历史记忆：\n\n");
+    for (idx, hit) in hits.iter().enumerate() {
+        context.push_str(&format!(
+            "[记忆 {}] {} (相关度: {:.2})\n{}\n\n",
+            idx + 1,
+            hit.chunk.source,
+            hit.relevance_score,
+            hit.chunk.content
+        ));
+    }
+
+    Ok(Some(context))
 }
 
 /// Extract JSON object from text.

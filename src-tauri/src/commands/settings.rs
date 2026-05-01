@@ -75,12 +75,10 @@ pub async fn save_config(
         config.llm.embedding_enabled,
     );
 
-    // Add ModelRouter if experimental feature is enabled
-    if config.experimental_model_router {
-        let router = openlife_core::agent::ModelRouter::new();
-        new_scheduler = new_scheduler.with_model_router(router);
-        eprintln!("[Scheduler] ModelRouter enabled (experimental)");
-    }
+    // ModelRouter is now graduated from experimental (Beta)
+    let router = openlife_core::agent::ModelRouter::new();
+    new_scheduler = new_scheduler.with_model_router(router);
+    eprintln!("[Scheduler] ModelRouter enabled (Beta)");
 
     *scheduler = new_scheduler;
     Ok(())

@@ -250,6 +250,239 @@ impl ProposalGenerator for ToolProposalGenerator {
     }
 }
 
+/// Chat proposal generator - extracts LifeModel change suggestions from conversation.
+pub struct ChatProposalGenerator;
+
+impl ProposalGenerator for ChatProposalGenerator {
+    fn name(&self) -> &'static str {
+        "chat"
+    }
+
+    fn source(&self) -> ProposalSource {
+        ProposalSource::ChatConversation
+    }
+
+    fn generate(
+        &self,
+        _run: &AgentRun,
+        output: &str,
+        life_model: &LifeModel,
+    ) -> Result<Vec<AgentProposal>> {
+        let mut proposals = Vec::new();
+
+        // Pattern 1: Goal updates
+        if let Some(goal) = extract_goal_suggestion(output) {
+            let confidence = calculate_goal_confidence(output, &goal);
+            if confidence > 0.6 {
+                let after = serde_json::json!({
+                    "goals": {
+                        "short_term": [goal]
+                    }
+                });
+                proposals.push(AgentProposal::new(
+                    ProposalType::LifeModelUpdate,
+                    "goals.short_term",
+                    after,
+                    &format!("对话中检测到目标建议: {}", goal),
+                    confidence,
+                    RiskLevel::Low,
+                    ProposalSource::ChatConversation,
+                ));
+            }
+        }
+
+        // Pattern 2: State updates (emotion, focus, health)
+        if let Some((path, value)) = extract_state_suggestion(output) {
+            let confidence = calculate_state_confidence(output, &path, &value);
+            if confidence > 0.6 {
+                let after = serde_json::json!({
+                    "state": {
+                        &path: value
+                    }
+                });
+                proposals.push(AgentProposal::new(
+                    ProposalType::LifeModelUpdate,
+                    &format!("state.{}", path),
+                    after,
+                    &format!("对话中检测到状态更新建议: {} = {}", path, value),
+                    confidence,
+                    RiskLevel::Low,
+                    ProposalSource::ChatConversation,
+                ));
+            }
+        }
+
+        // Pattern 3: Capability updates
+        if let Some(capability) = extract_capability_suggestion(output) {
+            let confidence = calculate_capability_confidence(output, &capability);
+            if confidence > 0.6 {
+                let mut capabilities = life_model.capabilities.clone();
+                let skill_exists = capabilities.skills.iter().any(|s| s.name == capability);
+                if !skill_exists {
+                    capabilities.skills.push(crate::life_model::Skill {
+                        name: capability.clone(),
+                        proficiency: 1,
+                        description: format!("从对话中提取的能力建议: {}", capability),
+                    });
+                }
+                let after = serde_json::json!({ "capabilities": capabilities });
+                proposals.push(AgentProposal::new(
+                    ProposalType::LifeModelUpdate,
+                    "capabilities.skills",
+                    after,
+                    &format!("对话中检测到能力培养建议: {}", capability),
+                    confidence,
+                    RiskLevel::Low,
+                    ProposalSource::ChatConversation,
+                ));
+            }
+        }
+
+        Ok(proposals)
+    }
+}
+
+/// Extract goal suggestion from assistant output.
+fn extract_goal_suggestion(text: &str) -> Option<String> {
+    // Pattern: "建议你将...作为目标" / "你的目标应该是..." / "我推荐你设定..."
+    let patterns = [
+        r"建议你将(.+?)(?:作为|设为)目标",
+        r"你的目标应该是(.+?)(?:。|$)",
+        r"我推荐你设定(.+?)(?:目标|计划)",
+        r"(?:可以|应该)把(.+?)加入(?:你的)?(?:短期|近期)?目标",
+    ];
+
+    for pattern in &patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(text) {
+                if let Some(matched) = caps.get(1) {
+                    let goal = matched.as_str().trim();
+                    if !goal.is_empty() && goal.len() > 3 {
+                        return Some(goal.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract state suggestion from assistant output.
+fn extract_state_suggestion(text: &str) -> Option<(String, String)> {
+    // Pattern: "你现在的状态是..." / "你的情绪看起来..." / "当前焦点在..."
+    let patterns: [(&str, &str); 4] = [
+        (
+            r"(?:你现在的|当前)(?:情绪|心情|感受)(?:是|看起来)(.+?)(?:。|$)",
+            "emotional_state",
+        ),
+        (
+            r"(?:你的|当前)(?:焦点|关注点)(?:是|在)(.+?)(?:。|$)",
+            "current_focus",
+        ),
+        (
+            r"(?:你(?:看起来|似乎)|当前)(?:健康|身体)(?:状况|状态)(?:是|为)(.+?)(?:。|$)",
+            "health_status",
+        ),
+        (
+            r"(?:你|当前)(?:精力|能量|状态)(?:水平|指数)(?:是|为)(.+?)(?:。|$)",
+            "energy_level",
+        ),
+    ];
+
+    for (pattern, field) in &patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(text) {
+                if let Some(matched) = caps.get(1) {
+                    let value = matched.as_str().trim();
+                    if !value.is_empty() && value.len() > 2 {
+                        return Some((field.to_string(), value.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract capability suggestion from assistant output.
+fn extract_capability_suggestion(text: &str) -> Option<String> {
+    // Pattern: "你需要培养..." / "建议你学习..." / "提升...能力"
+    let patterns = [
+        r"(?:需要|应该|建议)(?:你)?(?:培养|发展|提升|学习)(?:.+?)?(.+?)(?:能力|技能|素质)",
+        r"(?:可以|值得)(?:你)?(?:学习|掌握|培养)(?:一下)?(.+?)(?:。|$)",
+    ];
+
+    for pattern in &patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(text) {
+                if let Some(matched) = caps.get(1) {
+                    let cap = matched.as_str().trim();
+                    if !cap.is_empty() && cap.len() > 2 {
+                        return Some(cap.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Calculate confidence score for goal suggestion.
+fn calculate_goal_confidence(text: &str, goal: &str) -> f32 {
+    let mut score: f32 = 0.5;
+
+    // Direct suggestion indicators increase confidence
+    if text.contains("建议") || text.contains("推荐") {
+        score += 0.15;
+    }
+    if text.contains("目标") || text.contains("计划") {
+        score += 0.1;
+    }
+
+    // Specific and actionable goals are higher confidence
+    if goal.len() > 10 {
+        score += 0.1;
+    }
+    if goal.contains("每天") || goal.contains("每周") || goal.contains("每月") {
+        score += 0.1; // Time-bound goals are more specific
+    }
+
+    score.min(0.95)
+}
+
+/// Calculate confidence score for state suggestion.
+fn calculate_state_confidence(text: &str, _path: &str, value: &str) -> f32 {
+    let mut score: f32 = 0.5;
+
+    if text.contains("看起来") || text.contains("似乎") {
+        score += 0.1;
+    }
+    if text.contains("现在") || text.contains("当前") {
+        score += 0.1;
+    }
+
+    // Specific values are higher confidence
+    if value.len() > 3 && value.len() < 50 {
+        score += 0.15;
+    }
+
+    score.min(0.95)
+}
+
+/// Calculate confidence score for capability suggestion.
+fn calculate_capability_confidence(text: &str, _capability: &str) -> f32 {
+    let mut score: f32 = 0.5;
+
+    if text.contains("培养") || text.contains("学习") || text.contains("提升") {
+        score += 0.15;
+    }
+    if text.contains("能力") || text.contains("技能") {
+        score += 0.1;
+    }
+
+    score.min(0.95)
+}
+
 fn collect_memory_proposals_from_value(
     value: &Value,
     source_detail: &str,

@@ -310,22 +310,29 @@ pub fn dot_to_pointer(dot_path: &str) -> String {
 
 /// Convert a JSON Pointer to a display-friendly string.
 /// Example: "/identity/values/0/weight" → "Identity > Values > [0] > Weight"
-pub fn pointer_to_display(pointer: &str, _model: &crate::life_model::LifeModel) -> String {
-    // TODO: In a real implementation, traverse the model to get human-readable names
-    // For now, format the path segments nicely
+pub fn pointer_to_display(pointer: &str, model: &crate::life_model::LifeModel) -> String {
     let parts: Vec<String> = pointer
         .split('/')
         .filter(|s| !s.is_empty())
-        .map(|s| {
+        .enumerate()
+        .map(|(idx, s)| {
             // Check if it's an array index
-            if s.parse::<usize>().is_ok() {
+            if let Ok(index) = s.parse::<usize>() {
+                // Try to get a meaningful name for array items
+                let parent_path: Vec<&str> = pointer.split('/').filter(|p| !p.is_empty()).collect();
+                if idx > 0 && idx <= parent_path.len() {
+                    let parent = parent_path[idx - 1];
+                    return get_array_item_name(parent, index, model);
+                }
                 format!("[{}]", s)
             } else {
-                // Capitalize first letter
-                let mut chars = s.chars();
-                match chars.next() {
-                    Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                    None => s.to_string(),
+                // Map known field names to human-readable labels
+                let label = get_field_label(s);
+                if idx == 0 {
+                    // Top-level section
+                    label.to_string()
+                } else {
+                    label
                 }
             }
         })
@@ -336,6 +343,117 @@ pub fn pointer_to_display(pointer: &str, _model: &crate::life_model::LifeModel) 
     } else {
         parts.join(" > ")
     }
+}
+
+/// Map field names to human-readable labels.
+fn get_field_label(field: &str) -> String {
+    let labels = [
+        ("identity", "Identity (身份)"),
+        ("goals", "Goals (目标)"),
+        ("capabilities", "Capabilities (能力)"),
+        ("state", "State (状态)"),
+        ("values", "Values (价值观)"),
+        ("personality_traits", "Personality Traits (个性特征)"),
+        ("life_philosophy", "Life Philosophy (人生哲学)"),
+        ("mission_statement", "Mission Statement (使命宣言)"),
+        ("role_definition", "Role Definition (角色定义)"),
+        ("short_term", "Short-term Goals (短期目标)"),
+        ("medium_term", "Medium-term Goals (中期目标)"),
+        ("long_term", "Long-term Goals (长期目标)"),
+        ("daily", "Daily Goals (每日目标)"),
+        ("current_focus", "Current Focus (当前焦点)"),
+        ("health_status", "Health Status (健康状况)"),
+        ("emotional_state", "Emotional State (情绪状态)"),
+        ("habit_streaks", "Habit Streaks (习惯 streak)"),
+        ("custom_dimensions", "Custom Dimensions (自定义维度)"),
+        ("alerts", "Alerts (警报)"),
+        ("name", "Name (名称)"),
+        ("description", "Description (描述)"),
+        ("priority", "Priority (优先级)"),
+        ("progress", "Progress (进度)"),
+        ("deadline", "Deadline (截止日期)"),
+        ("milestones", "Milestones (里程碑)"),
+        ("skills", "Skills (技能)"),
+        ("resources", "Resources (资源)"),
+        ("networks", "Networks (网络)"),
+        ("tools", "Tools (工具)"),
+        ("knowledge_domains", "Knowledge Domains (知识领域)"),
+        ("proficiency", "Proficiency (熟练度)"),
+        ("source", "Source (来源)"),
+        ("content", "Content (内容)"),
+        ("tags", "Tags (标签)"),
+    ];
+
+    for (key, label) in &labels {
+        if *key == field {
+            return label.to_string();
+        }
+    }
+
+    // Fallback: capitalize first letter
+    let mut chars = field.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
+        None => field.to_string(),
+    }
+}
+
+/// Get a meaningful name for array items based on parent field.
+fn get_array_item_name(parent: &str, index: usize, model: &crate::life_model::LifeModel) -> String {
+    match parent {
+        "values" => {
+            if let Some(value) = model.identity.values.get(index) {
+                return format!("[{}] {}", index, value.name);
+            }
+        }
+        "personality_traits" => {
+            if let Some(trait_item) = model.identity.personality_traits.get(index) {
+                return format!("[{}] {}", index, trait_item.trait_name);
+            }
+        }
+        "short_term" => {
+            if let Some(goal) = model.goals.short_term.get(index) {
+                return format!("[{}] {}", index, goal.name);
+            }
+        }
+        "medium_term" => {
+            if let Some(goal) = model.goals.medium_term.get(index) {
+                return format!("[{}] {}", index, goal.name);
+            }
+        }
+        "long_term" => {
+            if let Some(goal) = model.goals.long_term.get(index) {
+                return format!("[{}] {}", index, goal.name);
+            }
+        }
+        "daily" => {
+            if let Some(goal) = model.goals.daily.get(index) {
+                return format!("[{}] {}", index, goal.name);
+            }
+        }
+        "skills" => {
+            if let Some(skill) = model.capabilities.skills.get(index) {
+                return format!("[{}] {}", index, skill.name);
+            }
+        }
+        "resources" => {
+            if let Some(resource) = model.capabilities.resources.get(index) {
+                return format!("[{}] {}", index, resource.name);
+            }
+        }
+        "habit_streaks" => {
+            if let Some(streak) = model.state.habit_streaks.get(index) {
+                return format!("[{}] {}", index, streak.name);
+            }
+        }
+        "custom_dimensions" => {
+            if let Some(dim) = model.state.custom_dimensions.get(index) {
+                return format!("[{}] {}", index, dim.name);
+            }
+        }
+        _ => {}
+    }
+    format!("[{}]", index)
 }
 
 /// Detect conflicts between patches.
@@ -495,7 +613,7 @@ mod tests {
         let model = LifeModel::default();
         assert_eq!(
             pointer_to_display("/identity/values/0/weight", &model),
-            "Identity > Values > [0] > Weight"
+            "Identity (身份) > Values (价值观) > [0] > Weight"
         );
     }
 

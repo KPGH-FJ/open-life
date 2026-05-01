@@ -12,6 +12,9 @@ pub mod runtime;
 pub mod store;
 pub mod types;
 
+#[cfg(test)]
+mod tests;
+
 pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,

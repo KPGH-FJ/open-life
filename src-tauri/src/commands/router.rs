@@ -30,23 +30,16 @@ pub struct ModelRouterStatus {
 pub async fn get_model_router_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ModelRouterStatus, String> {
-    let cfg = state.config.lock().await.clone();
+    let _cfg = state.config.lock().await.clone();
 
     // Check cache first
     if let Some(cache) = state.provider_health_cache.lock().await.as_ref() {
         if cache.is_fresh() {
             return Ok(ModelRouterStatus {
-                enabled: cfg.experimental_model_router,
+                enabled: true,
                 providers: cache.providers.clone(),
                 last_check_at: Some(cache.checked_at.clone()),
-                message: if cfg.experimental_model_router {
-                    Some("Provider health cached (within 30s).".into())
-                } else {
-                    Some(
-                        "ModelRouter is disabled; provider health is shown for diagnostics only."
-                            .into(),
-                    )
-                },
+                message: Some("Provider health cached (within 30s).".into()),
             });
         }
     }
@@ -104,14 +97,10 @@ pub async fn get_model_router_status(
     *state.provider_health_cache.lock().await = Some(cache);
 
     Ok(ModelRouterStatus {
-        enabled: cfg.experimental_model_router && scheduler.model_router.is_some(),
+        enabled: scheduler.model_router.is_some(),
         providers,
         last_check_at: Some(checked_at),
-        message: if cfg.experimental_model_router {
-            None
-        } else {
-            Some("ModelRouter is disabled; provider health is shown for diagnostics only.".into())
-        },
+        message: None,
     })
 }
 

@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：Agent Framework Alpha+ / Beta Foundation。`AgentRun`、Proposal/Review Center、Action/Observation、ToolPermission、Skill/Plugin Manifest、ModelRouter/ContextAssembler 灰度能力已经形成骨架。项目尚未诚实达到 Beta：Beta 的标准是 ReAct 执行闭环可信，即模型能通过 governed tools/skills 执行任务、观察结果、请求权限、在用户确认后 replay/apply，并在 Runs 中完整审计。
+- **当前阶段**：Agent Framework Beta。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。Execution Tools 以 P1（真实）/ P2（declarative-only stub）分层落地。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -586,15 +586,17 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 ### 待重构区域
 
-1. **reqwest 版本统一**：将 `openlife-core` 升级到 `reqwest 0.12`。
+1. ~~**reqwest 版本统一**：将 `openlife-core` 升级到 `reqwest 0.12`。~~ ✅ 已完成（Gate 0）
 2. ~~**Agent Runtime 引入**：新增 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal` 和 `AgentRunStore`，先从 Chat 主链路接入。~~ ✅ 已完成（AgentRun/Proposal 基线已落地）
-3. **ModelRouter 升级**：灰度中；已补齐 provider health 语义和隐私优先路由，后续继续做 role-aware 策略与真实探针覆盖。
+3. ~~**ModelRouter 升级**：灰度中；已补齐 provider health 语义和隐私优先路由，后续继续做 role-aware 策略与真实探针覆盖。~~ ✅ 已完成（Gate 6：已毕业，移除 experimental flag）
 4. ~~**Proposal 统一**：Builder、Calibration、Evolution、Memory 更新应统一走 Proposal/Confirmation，而不是各自实现审批流。~~ ✅ 已完成（Builder/Calibration/Chat/Memory/Tool Permission MVP 已接入 Proposal 流）
 5. ~~**LayeredReasoner / ReAct 边界重构**：三层推理总线应纳入 AgentRuntime 或成为其中一种策略。~~ ✅ 已完成（LayeredReasoner 已作为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册）
-6. **前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。
+6. ~~**前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。~~ ✅ 已完成（Gate 7：导航收敛为 Chat/Review/Runs/Settings）
 7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
-8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试）
+8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试 + 10 个集成测试）
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
+10. **Execution Tools 真实实现**：file.read/web.fetch 目前是 stub，需实现真实执行器。
+11. **AgentLoop Streaming**：当前 stream 路径仍使用 legacy 逻辑，需接入 AgentLoop。
 
 ---
 
@@ -673,6 +675,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-26 | Proposal/Confirmation 统一层收敛完成：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路；AgentRun ↔ Proposal 双向关联溯源；Safe Mode 限制 Proposal 操作；Review Center 强化（分类/风险筛选/编辑/批量/空状态/失败态/Dashboard 提醒） | AI Agent |
 | 2026-04-28 | 推理架构治理：LayeredReasoner 成为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册；新增 DirectReasoner 作为备选策略；统一超时配置；SafetyChecker 替代 Arbitrator；更新 AGENTS.md 和架构文档 | AI Agent |
 | 2026-04-29 | Stabilization / Spine Consolidation：Builder 默认 Proposal-Only；MemoryWrite/MemoryArchive/ToolPermission Proposal MVP 可应用；Chat Proposal 与 AgentRun.generated_proposals 关联收敛；ModelRouter provider health 与隐私优先路由增强；make ci 增加前端生产构建/typecheck | AI Agent |
+| 2026-05-01 | **Beta 开发完成（Gates 0-8）**：reqwest 0.12 升级；AgentLoop 双轨（feature flag）；Action Parser JSON envelope + fail-soft；Core OS Tools + Execution Tools 注册；Permission/Replay 闭环；ModelRouter 毕业；UI 导航收敛；Settings 新增 safe paths / AgentLoop toggle；`make ci` 持续通过 | AI Agent |
 
 ---
 

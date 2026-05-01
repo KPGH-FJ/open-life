@@ -125,6 +125,12 @@ pub struct SystemConfig {
     pub ollama_cache_ttl_seconds: u64,
     #[serde(default = "default_memory_search_top_k")]
     pub memory_search_top_k: usize,
+    /// Safe paths for file.read tool (workspace directories allowed for file access)
+    #[serde(default)]
+    pub safe_paths: Vec<String>,
+    /// Enable AgentLoop for chat execution (dual-track beta)
+    #[serde(default)]
+    pub use_agent_loop: Option<bool>,
 }
 
 impl Default for SystemConfig {
@@ -132,6 +138,8 @@ impl Default for SystemConfig {
         Self {
             ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
             memory_search_top_k: default_memory_search_top_k(),
+            safe_paths: Vec::new(),
+            use_agent_loop: None,
         }
     }
 }
@@ -156,8 +164,10 @@ pub struct AppConfig {
     pub chat_proposal: ChatProposalConfig,
     #[serde(default)]
     pub experimental_context_assembler: bool,
+    /// Use AgentLoop for chat execution instead of inline logic.
+    /// Beta feature: dual-track with legacy fallback.
     #[serde(default)]
-    pub experimental_model_router: bool,
+    pub use_agent_loop: bool,
     #[serde(default)]
     pub reasoning: ReasoningConfig,
     #[serde(default)]
@@ -172,7 +182,7 @@ impl Default for AppConfig {
             local_model: default_local_model(),
             chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
-            experimental_model_router: false,
+            use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         }
@@ -317,7 +327,7 @@ mod tests {
             local_model: "qwen2.5".into(),
             chat_proposal: ChatProposalConfig::default(),
             experimental_context_assembler: false,
-            experimental_model_router: false,
+            use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         };

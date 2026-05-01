@@ -12,12 +12,15 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Alpha+ / Beta Foundation** 阶段：
+当前项目处于 **Agent Framework Beta** 阶段：
 
-- 已经具备 LifeModel、Builder、Chat、Memory、MCP/A2A、Calibration、VersionControl、Diagnostics 等核心材料。
-- `AgentRun` 和 `Proposal/Review Center` 已成为主线骨架，Chat/Builder/Calibration 都能产生可追踪运行记录和待确认提案。
-- 接下来的开发重点不是继续堆页面，而是把 ReAct 执行主线打通：`AgentTask -> ContextAssembler -> ModelRouter -> AgentLoop -> Tool/Skill Action -> Observation -> Proposal/Permission -> Apply/Replay -> AgentRun Trace`。
-- Beta 的标准不是“模块存在”，而是 OpenClaw-like 的工具执行能力在 OpenLife 的个人数据治理约束下可信闭环：能调用 tools/skills、能观察结果、能请求权限、能在 Review 后 replay/apply、能完整审计。
+- **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
+- **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
+- **Execution Tools 分层落地**：P1（file.read、web.fetch）真实注册，P2（calendar、email）declarative-only stub。
+- **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
+- **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
+- **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
+- **`make ci` 为发布门控**：258 测试全绿，前端生产构建通过。
 
 新的架构基准文档见：
 

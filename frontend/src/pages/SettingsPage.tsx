@@ -1003,22 +1003,97 @@ export default function SettingsPage() {
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
-                checked={config.experimental_model_router ?? false}
+                checked={config.use_agent_loop ?? false}
                 onChange={e =>
                   setConfig(prev => ({
                     ...prev,
-                    experimental_model_router: e.target.checked,
+                    use_agent_loop: e.target.checked,
                   }))
                 }
                 className="rounded border-gray-300"
               />
-              <span className="text-sm text-gray-700">启用 ModelRouter（灰度测试）</span>
+              <span className="text-sm text-gray-700">启用 AgentLoop（Beta 双轨）</span>
             </label>
 
             <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
-              <p>⚠️ 实验性功能可能导致不稳定行为。</p>
-              <p>开启后会同时使用新旧实现，用于对比测试。</p>
-              <p>如遇到问题，请关闭后反馈。</p>
+              <p>AgentLoop 启用后，Chat 将使用新的 ReAct 执行循环。</p>
+              <p>如遇问题可关闭，会自动回退到旧路径。</p>
+            </div>
+
+            {/* Safe Paths */}
+            <div className="mt-4">
+              <h4 className="text-sm font-medium text-gray-900 mb-2">
+                Safe Paths（文件读取白名单）
+              </h4>
+              <div className="space-y-2">
+                {(config.system?.safe_paths ?? []).map((path, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={path}
+                      readOnly
+                      className="flex-1 px-3 py-1.5 text-sm border rounded bg-gray-50"
+                    />
+                    <button
+                      onClick={() =>
+                        setConfig(prev => ({
+                          ...prev,
+                          system: {
+                            ...prev.system,
+                            safe_paths: (prev.system?.safe_paths ?? []).filter((_, i) => i !== idx),
+                          },
+                        }))
+                      }
+                      className="px-2 py-1 text-sm text-red-600 hover:bg-red-50 rounded"
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    placeholder="添加路径..."
+                    id="new-safe-path"
+                    className="flex-1 px-3 py-1.5 text-sm border rounded"
+                  />
+                  <button
+                    onClick={() => {
+                      const input = document.getElementById("new-safe-path") as HTMLInputElement;
+                      const path = input.value.trim();
+                      if (!path) {
+                        alert("路径不能为空");
+                        return;
+                      }
+                      // Validate absolute path
+                      const isAbsolute = path.startsWith("/") || /^[A-Za-z]:[\\\/]/.test(path);
+                      if (!isAbsolute) {
+                        alert(
+                          "路径必须是绝对路径（例如 /Users/xxx/workspace 或 C:\\Users\\xxx\\workspace）"
+                        );
+                        return;
+                      }
+                      // Check for duplicates
+                      const existing = config.system?.safe_paths ?? [];
+                      if (existing.includes(path)) {
+                        alert("路径已存在");
+                        return;
+                      }
+                      setConfig(prev => ({
+                        ...prev,
+                        system: {
+                          ...prev.system,
+                          safe_paths: [...(prev.system?.safe_paths ?? []), path],
+                        },
+                      }));
+                      input.value = "";
+                    }}
+                    className="px-3 py-1.5 text-sm bg-stone-900 text-white rounded hover:bg-stone-800"
+                  >
+                    添加
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </section>

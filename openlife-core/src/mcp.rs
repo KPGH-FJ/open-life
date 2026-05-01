@@ -266,7 +266,7 @@ impl McpRegistry {
     }
 
     fn register_default_builtins(&mut self) {
-        // Built-in: echo
+        // Built-in: echo (test utility)
         let echo_manifest = ToolManifest {
             id: "builtin_echo".into(),
             name: "builtin_echo".into(),
@@ -285,6 +285,8 @@ impl McpRegistry {
             capabilities: vec!["read".into()],
             requires_confirmation: false,
             enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
             tags: vec!["test".into(), "utility".into()],
         };
         self.register_builtin(
@@ -292,6 +294,241 @@ impl McpRegistry {
             Box::new(|args| {
                 let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 Ok(text.to_string())
+            }),
+        );
+
+        // Core OS Tools: Read-only
+        self.register_core_os_tool(
+            "life_model.read",
+            "读取当前 LifeModel 的四维数据（Identity/Goals/Capabilities/State）",
+            "low",
+            vec!["read".into(), "lifemodel".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "tool.list_available",
+            "列出所有已注册且可用的工具",
+            "low",
+            vec!["read".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "goal.read",
+            "读取当前 Goals 和 Daily Goals",
+            "low",
+            vec!["read".into(), "lifemodel".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "memory.search",
+            "搜索向量记忆库，返回相关记忆片段",
+            "low",
+            vec!["read".into(), "memory".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "proposal.list",
+            "列出当前待处理的 Proposal",
+            "low",
+            vec!["read".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "agent_run.lookup",
+            "按 ID 查询 AgentRun 执行记录",
+            "low",
+            vec!["read".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "snapshot.create",
+            "创建当前状态的 Git-like 快照",
+            "medium",
+            vec!["write".into()],
+            "write",
+        );
+
+        // Core OS Tools: Write (Proposal-First)
+        self.register_core_os_tool(
+            "life_model.propose_patch",
+            "提议修改 LifeModel（生成 Proposal，不直接写入）",
+            "high",
+            vec!["write".into(), "lifemodel".into()],
+            "write",
+        );
+
+        self.register_core_os_tool(
+            "memory.propose_write",
+            "提议写入记忆（生成 Proposal，不直接写入）",
+            "medium",
+            vec!["write".into(), "memory".into()],
+            "write",
+        );
+
+        self.register_core_os_tool(
+            "memory.propose_archive",
+            "提议归档记忆（生成 Proposal，不直接归档）",
+            "medium",
+            vec!["write".into(), "memory".into()],
+            "write",
+        );
+
+        // Execution Tools: P1 (file, web)
+        self.register_execution_tool(
+            "file.read",
+            "读取指定路径的文件内容（仅限 safe_paths）",
+            "low",
+            vec!["read".into(), "filesystem".into()],
+            "read",
+        );
+
+        self.register_execution_tool(
+            "file.write_proposal",
+            "提议写入文件（生成 ExternalWriteAction Proposal，不直接写入）",
+            "high",
+            vec!["write".into(), "filesystem".into()],
+            "write",
+        );
+
+        self.register_execution_tool(
+            "web.fetch",
+            "获取指定 URL 的内容",
+            "medium",
+            vec!["network".into()],
+            "network",
+        );
+
+        // Execution Tools: P2 (declarative-only stubs)
+        self.register_declarative_stub(
+            "web.search",
+            "搜索网页（Beta stub：需要配置 search provider）",
+        );
+
+        self.register_declarative_stub(
+            "calendar.read",
+            "读取日历事件（Beta stub：需要配置 ICS source）",
+        );
+
+        self.register_declarative_stub("calendar.propose_event", "提议创建日历事件（Beta stub）");
+
+        self.register_declarative_stub(
+            "email.read",
+            "读取邮件（Beta stub：需要配置 IMAP account）",
+        );
+
+        self.register_declarative_stub("email.propose_draft", "提议创建邮件草稿（Beta stub）");
+    }
+
+    /// Helper to register a Core OS tool with standard metadata.
+    pub fn register_core_os_tool(
+        &mut self,
+        id: &str,
+        description: &str,
+        risk_level: &str,
+        capabilities: Vec<String>,
+        action_type: &str,
+    ) {
+        let manifest = ToolManifest {
+            id: id.into(),
+            name: id.into(),
+            description: description.into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {}
+            }),
+            permission_level: risk_level.into(),
+            risk_level: risk_level.into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities,
+            requires_confirmation: risk_level == "high",
+            enabled: true,
+            declarative_only: false,
+            action_type: action_type.into(),
+            tags: vec!["core_os".into()],
+        };
+        let id_owned = id.to_string();
+        self.register_builtin(
+            manifest,
+            Box::new(move |_args| {
+                Ok(format!(
+                    "Core OS tool '{}' executed (Beta MVP stub)",
+                    id_owned
+                ))
+            }),
+        );
+    }
+
+    /// Helper to register an Execution tool.
+    fn register_execution_tool(
+        &mut self,
+        id: &str,
+        description: &str,
+        risk_level: &str,
+        capabilities: Vec<String>,
+        action_type: &str,
+    ) {
+        let manifest = ToolManifest {
+            id: id.into(),
+            name: id.into(),
+            description: description.into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path or URL" }
+                }
+            }),
+            permission_level: risk_level.into(),
+            risk_level: risk_level.into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities,
+            requires_confirmation: risk_level == "high",
+            enabled: true,
+            declarative_only: false,
+            action_type: action_type.into(),
+            tags: vec!["execution".into()],
+        };
+        let id_owned = id.to_string();
+        self.register_builtin(
+            manifest,
+            Box::new(move |_args| {
+                Ok(format!(
+                    "Execution tool '{}' executed (Beta MVP stub)",
+                    id_owned
+                ))
+            }),
+        );
+    }
+
+    /// Helper to register a declarative-only stub tool.
+    fn register_declarative_stub(&mut self, id: &str, description: &str) {
+        let manifest = ToolManifest {
+            id: id.into(),
+            name: id.into(),
+            description: description.into(),
+            parameters: serde_json::json!({"type": "object"}),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: true,
+            action_type: "read".into(),
+            tags: vec!["execution".into(), "stub".into()],
+        };
+        self.register_builtin(
+            manifest,
+            Box::new(move |_args| {
+                Ok("This tool is a declarative-only stub for Beta. Configure the appropriate provider to enable it.".to_string())
             }),
         );
     }
@@ -396,6 +633,8 @@ impl McpRegistry {
                             requires_confirmation: ToolManifest::infer_permission_level(&tool.name)
                                 == "high",
                             enabled: true,
+                            declarative_only: false,
+                            action_type: ToolManifest::infer_action_type(&tool.name),
                             tags: Vec::new(),
                         }
                         .normalized(),

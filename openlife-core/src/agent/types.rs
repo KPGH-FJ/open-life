@@ -249,6 +249,9 @@ pub struct AgentRun {
     pub reasoning_strategy: Option<String>,
     /// Trace from the reasoning process (e.g., LayeredReasoner phases)
     pub reasoning_trace: Option<crate::agent::reasoning::ReasoningTrace>,
+    /// Warnings generated during execution (e.g., parse warnings, budget warnings)
+    #[serde(default)]
+    pub warnings: Vec<String>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub delete_reason: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -274,6 +277,7 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            warnings: Vec::new(),
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -299,6 +303,7 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            warnings: Vec::new(),
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -324,6 +329,7 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            warnings: Vec::new(),
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -437,6 +443,7 @@ pub enum ProposalSource {
     SkillRuntime,
     Plugin,
     Manual,
+    ChatConversation,
     /// 预留，暂未实现
     #[serde(skip)]
     ProactiveAgent,
@@ -452,6 +459,7 @@ impl std::fmt::Display for ProposalSource {
             ProposalSource::SkillRuntime => write!(f, "skill_runtime"),
             ProposalSource::Plugin => write!(f, "plugin"),
             ProposalSource::Manual => write!(f, "manual"),
+            ProposalSource::ChatConversation => write!(f, "chat_conversation"),
             ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
         }
     }
@@ -559,6 +567,7 @@ impl AgentProposal {
             ProposalSource::SkillRuntime => chrono::Duration::days(14),
             ProposalSource::Plugin => chrono::Duration::days(14),
             ProposalSource::Manual => chrono::Duration::days(365),
+            ProposalSource::ChatConversation => chrono::Duration::days(3),
             ProposalSource::ProactiveAgent => chrono::Duration::days(7),
         };
         Some(Utc::now() + duration)

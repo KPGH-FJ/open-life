@@ -63,6 +63,31 @@ pub async fn delete_agent_run(
 }
 
 #[tauri::command]
+pub async fn restore_agent_run(
+    run_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AgentRun, String> {
+    // 1. Restore the run in store
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        store.restore_run(&run_id).map_err(|e| e.to_string())?;
+    } else {
+        return Err("AgentRun store not available".to_string());
+    }
+
+    // 2. Retrieve and return the restored run
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        store
+            .get_run(&run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Run not found after restore".to_string())
+    } else {
+        Err("AgentRun store not available".to_string())
+    }
+}
+
+#[tauri::command]
 pub async fn replay_agent_action(
     run_id: String,
     action_id: String,
@@ -136,6 +161,9 @@ pub async fn replay_agent_action(
         permission_store: &permission_store,
         audit_store: &audit,
         privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        life_model: None,
+        memory_store: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {
