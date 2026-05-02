@@ -92,20 +92,21 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Push-Location $FrontendDir
+Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
 $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 
 try {
     if (Test-Path $localTauri) {
         Write-Info "使用本地 Tauri CLI 构建..."
-        corepack pnpm tauri build
+        & $localTauri build
     } elseif ($globalTauri) {
         Write-Info "使用全局 Tauri CLI 构建..."
         tauri build
     } else {
-        Write-Info "使用 pnpm 构建 Tauri..."
-        corepack pnpm exec tauri build
+        Write-Error "Tauri CLI 不可用"
+        Write-Info "请先运行: corepack pnpm --dir `"$FrontendDir`" install"
+        exit 1
     }
 } finally {
     Pop-Location

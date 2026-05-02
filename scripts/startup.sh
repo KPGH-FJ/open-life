@@ -177,7 +177,7 @@ check_environment() {
     # 检查 Tauri CLI
     if ! check_command "tauri"; then
         if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
-            log_success "Tauri CLI 存在于 node_modules (使用 pnpm exec tauri)"
+            log_success "Tauri CLI 存在于 node_modules"
         else
             log_warn "Tauri CLI 未全局安装，将在首次运行时通过 pnpm 安装"
         fi
@@ -344,13 +344,14 @@ start_dev() {
     # 检查使用哪种方式启动 Tauri
     if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
         log_info "使用本地 Tauri CLI 启动..."
-        corepack pnpm --dir "$FRONTEND_DIR" tauri dev
+        "$FRONTEND_DIR/node_modules/.bin/tauri" dev
     elif command -v tauri &>/dev/null; then
         log_info "使用全局 Tauri CLI 启动..."
         tauri dev
     else
-        log_info "使用 pnpm 启动 Tauri..."
-        cd "$FRONTEND_DIR" && corepack pnpm exec tauri dev
+        log_error "Tauri CLI 不可用"
+        log_info "请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
+        exit 1
     fi
 }
 

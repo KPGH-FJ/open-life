@@ -101,15 +101,14 @@ $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
 try {
     if (Test-Path $localTauri) {
         Write-Host "[INFO] 使用本地 Tauri CLI 启动..." -ForegroundColor Blue
-        Push-Location $FrontendDir
-        try { corepack pnpm tauri dev } finally { Pop-Location }
+        & $localTauri dev
     } elseif ($globalTauri) {
         Write-Host "[INFO] 使用全局 Tauri CLI 启动..." -ForegroundColor Blue
         tauri dev
     } else {
-        Write-Host "[INFO] 使用 pnpm 启动 Tauri..." -ForegroundColor Blue
-        Push-Location $FrontendDir
-        try { corepack pnpm exec tauri dev } finally { Pop-Location }
+        Write-Host "[ERROR] Tauri CLI 不可用" -ForegroundColor Red
+        Write-Host "       请先运行: corepack pnpm --dir `"$FrontendDir`" install"
+        exit 1
     }
 } finally {
     Pop-Location

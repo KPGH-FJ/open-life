@@ -139,7 +139,7 @@ echo -e "${GREEN}║  产物将输出到 src-tauri/target/release/bundle/       
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
-cd "$FRONTEND_DIR"
+cd "$REPO_ROOT"
 
 # 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm symlink）
 if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
@@ -151,13 +151,14 @@ fi
 # 检查使用哪种方式调用 Tauri
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     log_info "使用本地 Tauri CLI 构建..."
-    corepack pnpm tauri build --target "$BUILD_TARGET"
+    "$FRONTEND_DIR/node_modules/.bin/tauri" build --target "$BUILD_TARGET"
 elif command -v tauri &>/dev/null; then
     log_info "使用全局 Tauri CLI 构建..."
     tauri build --target "$BUILD_TARGET"
 else
-    log_info "使用 pnpm 构建 Tauri..."
-    corepack pnpm exec tauri build --target "$BUILD_TARGET"
+    log_error "Tauri CLI 不可用"
+    log_info "请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
+    exit 1
 fi
 
 # 检查构建结果

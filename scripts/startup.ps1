@@ -184,7 +184,7 @@ function Test-Environment {
     if (-not (Test-Command "tauri")) {
         $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
         if (Test-Path $localTauri) {
-            Write-Success "Tauri CLI 存在于 node_modules (使用 pnpm tauri)"
+            Write-Success "Tauri CLI 存在于 node_modules"
         }
         else {
             Write-Warn "Tauri CLI 未全局安装，将在首次运行时通过 pnpm 安装"
@@ -376,27 +376,16 @@ function Start-Dev {
     try {
         if (Test-Path $localTauri) {
             Write-Info "使用本地 Tauri CLI 启动..."
-            Push-Location $FrontendDir
-            try {
-                corepack pnpm tauri dev
-            }
-            finally {
-                Pop-Location
-            }
+            & $localTauri dev
         }
         elseif ($globalTauri) {
             Write-Info "使用全局 Tauri CLI 启动..."
             tauri dev
         }
         else {
-            Write-Info "使用 pnpm 启动 Tauri..."
-            Push-Location $FrontendDir
-            try {
-                corepack pnpm exec tauri dev
-            }
-            finally {
-                Pop-Location
-            }
+            Write-Error "Tauri CLI 不可用"
+            Write-Info "请先运行: corepack pnpm --dir `"$FrontendDir`" install"
+            exit 1
         }
     }
     finally {

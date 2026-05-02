@@ -676,6 +676,14 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-28 | 推理架构治理：LayeredReasoner 成为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册；新增 DirectReasoner 作为备选策略；统一超时配置；SafetyChecker 替代 Arbitrator；更新 AGENTS.md 和架构文档 | AI Agent |
 | 2026-04-29 | Stabilization / Spine Consolidation：Builder 默认 Proposal-Only；MemoryWrite/MemoryArchive/ToolPermission Proposal MVP 可应用；Chat Proposal 与 AgentRun.generated_proposals 关联收敛；ModelRouter provider health 与隐私优先路由增强；make ci 增加前端生产构建/typecheck | AI Agent |
 | 2026-05-01 | **Beta 开发完成（Gates 0-8）**：reqwest 0.12 升级；AgentLoop 双轨（feature flag）；Action Parser JSON envelope + fail-soft；Core OS Tools + Execution Tools 注册；Permission/Replay 闭环；ModelRouter 毕业；UI 导航收敛；Settings 新增 safe paths / AgentLoop toggle；`make ci` 持续通过 | AI Agent |
+| 2026-05-01 | **Week 1: ExternalWriteAction 闭环**：`is_path_in_safe_paths` 公共化；`file.write_proposal` 自动创建 Proposal（含 content_hash/size_bytes/operation）；ExternalWriteAction apply 真实文件写入（safe_paths + 100KB 限制 + 自动创建父目录） | AI Agent |
+| 2026-05-08 | **Week 2: Stub 转 Proposal + Task MVP**：calendar.propose_event / email.propose_draft 生成 ScheduledTask/DataExport Proposal；ScheduledTask MVP（本地 JSON）；DataExport MVP（safe_paths 内文件导出） | AI Agent |
+| 2026-05-08 | **Week 3: AgentLoop Stream + Fallback**：AgentLoop 句子级分 chunk 流式输出（30ms 间隔）；AgentLoop graceful fallback 到 legacy direct generation；保持默认关闭 | AI Agent |
+| 2026-05-08 | **Week 4: 可观察性 + Feature Flag**：stream-message-start 传递真实 ReasoningTrace（AgentLoop actions/observations）；debug 构建默认启用 AgentLoop | AI Agent |
+| 2026-05-08 | **Week 5: Workspace + Chat Trace**：Dashboard 新增 Workspace 概览卡片（Pending Proposals / Recent Runs / New Chat）；Chat 最后一条 assistant 消息显示模型/provider/工具数/Proposal 数/fallback 标记 | AI Agent |
+| 2026-05-08 | **Week 6: Review Center + 页面收敛**：Chat 顶部 pending proposals banner；主导航从 7 个收敛到 6 个（Memory 移出主导航，保留路由） | AI Agent |
+| 2026-05-08 | **Week 7: 测试补齐 + AgentLoop 默认启用**：新增 ExternalWriteAction/ScheduledTask/DataExport apply 测试；AgentLoop 生产环境默认启用 | AI Agent |
+| 2026-05-08 | **Week 8: 收口回归**：文档更新；连续 8 周 `make ci` 通过 | AI Agent |
 
 ---
 

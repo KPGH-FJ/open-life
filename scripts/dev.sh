@@ -97,11 +97,12 @@ fi
 # 自动检测 Tauri CLI 启动方式
 if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
     echo -e "${BLUE}[INFO]${NC} 使用本地 Tauri CLI 启动..."
-    corepack pnpm --dir "$FRONTEND_DIR" tauri dev
+    "$FRONTEND_DIR/node_modules/.bin/tauri" dev
 elif command -v tauri &>/dev/null; then
     echo -e "${BLUE}[INFO]${NC} 使用全局 Tauri CLI 启动..."
     tauri dev
 else
-    echo -e "${BLUE}[INFO]${NC} 使用 pnpm 启动 Tauri..."
-    cd "$FRONTEND_DIR" && corepack pnpm exec tauri dev
+    echo -e "${YELLOW}[ERROR]${NC} Tauri CLI 不可用"
+    echo "       请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
+    exit 1
 fi
