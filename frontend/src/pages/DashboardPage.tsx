@@ -49,9 +49,13 @@ import {
   markCalibrationShown,
   listSnapshots,
   getSystemDiagnostics,
+  getPendingProposals,
+  listAgentRuns,
   type CapabilityGap,
   type AlignmentIssue,
   type SystemDiagnostics,
+  type AgentProposal,
+  type AgentRun,
 } from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import EmptyState from "../components/EmptyState";
@@ -305,6 +309,8 @@ export default function DashboardPage() {
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [calibrationError, setCalibrationError] = useState<string | null>(null);
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
+  const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
+  const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
   const navigate = useNavigate();
 
   const warningText = (label: string, error: unknown) =>
@@ -432,6 +438,18 @@ export default function DashboardPage() {
       }
     } catch (e) {
       warnings.push(warningText("版本快照", e));
+    }
+    try {
+      const proposals = await getPendingProposals(10);
+      setPendingProposals(proposals);
+    } catch (e) {
+      warnings.push(warningText("待处理提案", e));
+    }
+    try {
+      const runs = await listAgentRuns(5, 0);
+      setRecentRuns(runs);
+    } catch (e) {
+      warnings.push(warningText("最近运行", e));
     }
     setLoadWarnings(warnings);
   };
@@ -1119,6 +1137,59 @@ export default function DashboardPage() {
             </Link>
           </div>
         )}
+
+        {/* Workspace Overview */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <Link
+            to="/review"
+            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
+          >
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-gray-800 text-sm">待处理提案</div>
+              <div className="text-xs text-gray-500">Review</div>
+            </div>
+            <div className="mt-2 flex items-baseline gap-1">
+              <span className="text-2xl font-bold text-indigo-600">{pendingProposals.length}</span>
+              <span className="text-sm text-gray-500">个待确认</span>
+            </div>
+            {pendingProposals.length > 0 && (
+              <div className="mt-1 text-xs text-gray-500 truncate">
+                最新: {pendingProposals[0].affectedPath || pendingProposals[0].proposalType}
+              </div>
+            )}
+          </Link>
+          <Link
+            to="/runs"
+            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
+          >
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-gray-800 text-sm">最近运行</div>
+              <div className="text-xs text-gray-500">Runs</div>
+            </div>
+            <div className="mt-2 flex items-baseline gap-1">
+              <span className="text-2xl font-bold text-emerald-600">{recentRuns.length}</span>
+              <span className="text-sm text-gray-500">条记录</span>
+            </div>
+            {recentRuns.length > 0 && recentRuns[0].outputPreview && (
+              <div className="mt-1 text-xs text-gray-500 truncate">
+                最新: {recentRuns[0].outputPreview}
+              </div>
+            )}
+          </Link>
+          <Link
+            to="/chat"
+            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
+          >
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-gray-800 text-sm">新对话</div>
+              <div className="text-xs text-gray-500">Chat</div>
+            </div>
+            <div className="mt-2 text-sm text-gray-600">与 Agent 开始新的对话</div>
+            <div className="mt-1 text-xs text-indigo-600 flex items-center gap-1">
+              开始对话 <ArrowRight size={12} />
+            </div>
+          </Link>
+        </div>
 
         {/* Top: Daily Goals + Quick Stats */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

@@ -14,6 +14,7 @@ import {
   Sparkles,
   Heart,
   CheckCircle2,
+  ShieldCheck,
 } from "lucide-react";
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -39,9 +40,11 @@ import {
   indexMemoryChunk,
   listAgentRunsForSession,
   getAgentRun,
+  getPendingProposals,
 } from "../tauri";
 import type {
   AgentRun,
+  AgentProposal,
   ChatSession,
   ReasoningTrace,
   StreamMessageDonePayload,
@@ -243,6 +246,7 @@ export default function ChatPage() {
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
+  const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -280,6 +284,15 @@ export default function ChatPage() {
       if (currentSessionIdRef.current === sessionId) {
         setCurrentRun(null);
       }
+    }
+  };
+
+  const refreshPendingProposals = async () => {
+    try {
+      const proposals = await getPendingProposals(10);
+      setPendingProposals(proposals);
+    } catch {
+      setPendingProposals([]);
     }
   };
 
@@ -325,6 +338,7 @@ export default function ChatPage() {
     getLifeModel()
       .then(setModel)
       .catch(() => {});
+    refreshPendingProposals();
   }, []);
 
   useEffect(() => {
@@ -336,6 +350,7 @@ export default function ChatPage() {
         .then(setDiagnostics)
         .catch(() => {});
       loadSessions(currentSessionIdRef.current);
+      refreshPendingProposals();
     };
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -1054,6 +1069,24 @@ export default function ChatPage() {
             </div>
           </div>
         )}
+        {/* Pending Proposals Alert */}
+        {pendingProposals.length > 0 && (
+          <div className="border-b border-indigo-100 bg-indigo-50 px-6 py-2">
+            <div className="max-w-3xl text-xs text-indigo-800 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <ShieldCheck size={14} />
+                <span className="font-medium">{pendingProposals.length} 个待处理提案</span>
+                <span className="text-indigo-600">
+                  （{pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）
+                </span>
+              </div>
+              <Link to="/review" className="underline font-medium">
+                去 Review Center 确认
+              </Link>
+            </div>
+          </div>
+        )}
+
         {/* Chat mode selector */}
         <div className="border-b px-6 py-2 bg-white">
           <div className="flex items-center gap-2 overflow-x-auto">
@@ -1282,6 +1315,20 @@ export default function ChatPage() {
                 <div className="whitespace-pre-wrap">{m.content}</div>
                 {m.role === "assistant" && (
                   <div className="mt-3 space-y-2">
+                    {currentRun && i === messages.length - 1 && (
+                      <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                        <span className="flex items-center gap-1">
+                          <Activity size={10} />
+                          {currentRun.modelRoute?.provider || "unknown"}
+                          {currentRun.modelRoute?.preferLocal && " (local)"}
+                        </span>
+                        <span>{currentRun.actions?.length || 0} 工具</span>
+                        <span>{currentRun.generatedProposals?.length || 0} 提案</span>
+                        {currentRun.modelRoute?.fallbackReason && (
+                          <span className="text-amber-500">fallback</span>
+                        )}
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() =>

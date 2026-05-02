@@ -1,7 +1,6 @@
 import { Component, ReactNode, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
 import {
-  Brain,
   Hammer,
   LayoutDashboard,
   Settings,
@@ -215,9 +214,6 @@ function App() {
           </NavLink>
           <NavLink to="/life" className={navClass}>
             <Hammer size={16} /> Life
-          </NavLink>
-          <NavLink to="/memory" className={navClass}>
-            <Brain size={16} /> Memory
           </NavLink>
         </nav>
       </header>
