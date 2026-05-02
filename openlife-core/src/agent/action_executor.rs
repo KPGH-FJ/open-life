@@ -8,6 +8,7 @@ use crate::privacy::PrivacyEngine;
 use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::{ToolPermissionDecision, ToolPermissionStore};
 use anyhow::Result;
+use ring::digest::{digest, SHA256};
 use serde_json::Value;
 
 /// Configuration for action execution.
@@ -107,7 +108,8 @@ impl ActionExecutor {
         request: AgentActionRequest,
         ctx: &ActionExecutionContext<'_>,
     ) -> Result<ActionExecutionResult> {
-        let tool_name = &request.target;
+        let normalized_target = normalize_tool_name(&request.target, ctx.registry);
+        let tool_name = &normalized_target;
         let args = request
             .input
             .get("arguments")
@@ -186,6 +188,41 @@ impl ActionExecutor {
             || !decision.allowed;
 
         if blocked {
+            // Special handling for declarative stubs that should create proposals
+            if let Some(ref m) = manifest {
+                if m.declarative_only {
+                    match tool_name.as_str() {
+                        "calendar.propose_event" => {
+                            if let Some(result) = self.create_declarative_stub_proposal(
+                                &request,
+                                ctx,
+                                tool_name,
+                                &args,
+                                ProposalType::ScheduledTask,
+                                "calendar",
+                                "Agent proposed calendar event",
+                            ) {
+                                return result;
+                            }
+                        }
+                        "email.propose_draft" => {
+                            if let Some(result) = self.create_declarative_stub_proposal(
+                                &request,
+                                ctx,
+                                tool_name,
+                                &args,
+                                ProposalType::DataExport,
+                                "email",
+                                "Agent proposed email draft",
+                            ) {
+                                return result;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
             let (action, observation) = self.build_blocked_action_observation(
                 tool_name,
@@ -249,7 +286,7 @@ impl ActionExecutor {
                     error: Some(e.to_string()),
                 })
         } else if manifest_ref.tags.contains(&"execution".to_string()) {
-            self.execute_execution_tool(tool_name, &args, ctx)
+            self.execute_execution_tool(tool_name, &args, ctx, &request)
                 .unwrap_or_else(|e| ToolCallInternalResult {
                     success: false,
                     output: None,
@@ -546,6 +583,7 @@ impl ActionExecutor {
         tool_name: &str,
         args: &Value,
         ctx: &ActionExecutionContext<'_>,
+        request: &AgentActionRequest,
     ) -> Result<ToolCallInternalResult> {
         match tool_name {
             "file.read" => {
@@ -622,65 +660,7 @@ impl ActionExecutor {
                     });
                 }
 
-                // Perform HTTP GET with timeout
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()
-                    .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
-
-                match client.get(url).send() {
-                    Ok(response) => {
-                        let status = response.status();
-                        if status.is_success() {
-                            match response.text() {
-                                Ok(text) => {
-                                    // Convert HTML to plain text if it looks like HTML
-                                    let text = if text.trim_start().starts_with('<') {
-                                        html_to_text(&text)
-                                    } else {
-                                        text
-                                    };
-                                    // Limit response size
-                                    let max_length = 50_000; // 50KB
-                                    let truncated = if text.len() > max_length {
-                                        format!(
-                                            "{}\n\n[Truncated: response exceeded {} characters]",
-                                            &text[..max_length],
-                                            max_length
-                                        )
-                                    } else {
-                                        text
-                                    };
-                                    Ok(ToolCallInternalResult {
-                                        success: true,
-                                        output: Some(truncated),
-                                        error: None,
-                                    })
-                                }
-                                Err(e) => Ok(ToolCallInternalResult {
-                                    success: false,
-                                    output: None,
-                                    error: Some(format!("Failed to read response body: {}", e)),
-                                }),
-                            }
-                        } else {
-                            Ok(ToolCallInternalResult {
-                                success: false,
-                                output: None,
-                                error: Some(format!(
-                                    "HTTP {}: {}",
-                                    status.as_u16(),
-                                    status.canonical_reason().unwrap_or("Unknown error")
-                                )),
-                            })
-                        }
-                    }
-                    Err(e) => Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("HTTP request failed: {}", e)),
-                    }),
-                }
+                fetch_url_on_worker_thread(url)
             }
             "file.write_proposal" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -695,34 +675,83 @@ impl ActionExecutor {
                     });
                 }
 
-                // Return a structured proposal for file write
-                let proposal = serde_json::json!({
+                // Compute content metadata
+                let hash = digest(&SHA256, content.as_bytes());
+                let content_hash: String =
+                    hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
+                let size_bytes = content.len();
+                let operation = if std::path::Path::new(path).exists() {
+                    "overwrite"
+                } else {
+                    "create"
+                };
+                let content_preview = if content.len() > 4000 {
+                    format!(
+                        "{}... [truncated {} bytes]",
+                        &content[..4000],
+                        content.len() - 4000
+                    )
+                } else {
+                    content.to_string()
+                };
+
+                // Auto-create ExternalWriteAction Proposal if path is non-empty
+                if !path.is_empty() {
+                    if let Some(proposal_store) = ctx.proposal_store {
+                        let mut proposal = AgentProposal::new(
+                            ProposalType::ExternalWriteAction,
+                            &format!("filesystem.{}", path),
+                            serde_json::json!({
+                                "path": path,
+                                "content": content,
+                                "content_preview": content_preview,
+                                "content_hash": content_hash,
+                                "size_bytes": size_bytes,
+                                "encoding": "utf-8",
+                                "operation": operation,
+                            }),
+                            &format!("Agent proposed file write to '{}' ({})", path, operation),
+                            0.9,
+                            RiskLevel::High,
+                            ProposalSource::Manual,
+                        );
+                        // Link to source run if available
+                        if let Some(ref run_id) = request.source_run_id {
+                            proposal.run_id = Some(run_id.clone());
+                        }
+                        if let Err(e) = proposal_store.create_proposal(&proposal) {
+                            eprintln!(
+                                "[warn] Failed to create ExternalWriteAction Proposal: {}",
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Return structured result with unified payload
+                let result_payload = serde_json::json!({
                     "proposal_type": "external_write_action",
                     "external_write_action": {
                         "path": path,
-                        "content": content,
-                        "content_preview": if content.len() > 200 {
-                            format!("{}... [truncated]", &content[..200])
-                        } else {
-                            content.to_string()
-                        },
-                        "content_length": content.len()
+                        "content_preview": content_preview,
+                        "content_hash": content_hash,
+                        "size_bytes": size_bytes,
+                        "encoding": "utf-8",
+                        "operation": operation,
                     },
                     "path": path,
-                    "content": content,
-                    "content_preview": if content.len() > 200 {
-                        format!("{}... [truncated]", &content[..200])
-                    } else {
-                        content.to_string()
-                    },
-                    "content_length": content.len(),
+                    "content_preview": content_preview,
+                    "content_hash": content_hash,
+                    "size_bytes": size_bytes,
+                    "encoding": "utf-8",
+                    "operation": operation,
                     "requires_confirmation": true,
-                    "reason": format!("Proposed file write to '{}'", path),
+                    "reason": format!("Proposed file write to '{}' ({})", path, operation),
                 });
 
                 Ok(ToolCallInternalResult {
                     success: true,
-                    output: Some(proposal.to_string()),
+                    output: Some(result_payload.to_string()),
                     error: None,
                 })
             }
@@ -915,6 +944,73 @@ impl ActionExecutor {
         ))
     }
 
+    /// For declarative-only stub tools (calendar, email), create a Proposal instead of blocking.
+    #[allow(clippy::too_many_arguments)]
+    fn create_declarative_stub_proposal(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        proposal_type: ProposalType,
+        category: &str,
+        reason: &str,
+    ) -> Option<Result<ActionExecutionResult>> {
+        let proposal_store = ctx.proposal_store?;
+
+        // Build after payload from tool arguments
+        let after = match tool_name {
+            "calendar.propose_event" => serde_json::json!({
+                "title": args.get("title").and_then(Value::as_str).unwrap_or("Untitled Event"),
+                "scheduled_at": args.get("scheduled_at").or_else(|| args.get("date")).and_then(Value::as_str).unwrap_or(""),
+                "description": args.get("description").and_then(Value::as_str).unwrap_or(""),
+                "tool": tool_name,
+                "raw_args": args,
+            }),
+            "email.propose_draft" => serde_json::json!({
+                "to": args.get("to").and_then(Value::as_str).unwrap_or(""),
+                "subject": args.get("subject").and_then(Value::as_str).unwrap_or(""),
+                "body": args.get("body").and_then(Value::as_str).unwrap_or(""),
+                "tool": tool_name,
+                "raw_args": args,
+            }),
+            _ => args.clone(),
+        };
+
+        let affected_path = format!("{}.{}", category, tool_name);
+        let mut proposal = AgentProposal::new(
+            proposal_type,
+            &affected_path,
+            after,
+            reason,
+            0.8,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+
+        if let Some(ref run_id) = request.source_run_id {
+            proposal.run_id = Some(run_id.clone());
+        }
+
+        if let Err(e) = proposal_store.create_proposal(&proposal) {
+            eprintln!(
+                "[warn] Failed to create {} Proposal for {}: {}",
+                proposal_type, tool_name, e
+            );
+            return None;
+        }
+
+        let result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: created {} Proposal (id: {})",
+                tool_name, proposal_type, proposal.id
+            ),
+        );
+
+        Some(Ok(result))
+    }
+
     fn build_proposal_required_action(
         &self,
         request: AgentActionRequest,
@@ -980,6 +1076,37 @@ fn canonical_tool_source(manifest: &ToolManifest) -> String {
     manifest.source.to_string()
 }
 
+fn normalize_tool_name(tool_name: &str, registry: &McpRegistry) -> String {
+    if registry
+        .list_manifests()
+        .iter()
+        .any(|manifest| manifest.name == tool_name || manifest.id == tool_name)
+    {
+        return tool_name.to_string();
+    }
+
+    let trimmed = tool_name.trim();
+    let candidate = match trimmed {
+        "fetch" | ".fetch" => Some("web.fetch"),
+        "search" | ".search" => Some("web.search"),
+        "read" | ".read" => Some("file.read"),
+        "write_proposal" | ".write_proposal" => Some("file.write_proposal"),
+        _ => None,
+    };
+
+    if let Some(candidate) = candidate {
+        if registry
+            .list_manifests()
+            .iter()
+            .any(|manifest| manifest.name == candidate || manifest.id == candidate)
+        {
+            return candidate.to_string();
+        }
+    }
+
+    trimmed.to_string()
+}
+
 fn should_mark_needs_confirmation(
     decision: &ToolPermissionDecision,
     inspection: &McpArgumentInspection,
@@ -987,9 +1114,81 @@ fn should_mark_needs_confirmation(
     decision.requires_confirmation || (inspection.requires_confirmation && inspection.pii_found)
 }
 
+fn fetch_url_on_worker_thread(url: &str) -> Result<ToolCallInternalResult> {
+    let url = url.to_string();
+    std::thread::spawn(move || fetch_url_blocking(&url))
+        .join()
+        .unwrap_or_else(|_| {
+            Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some("web.fetch worker thread panicked".to_string()),
+            })
+        })
+}
+
+fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+    match client.get(url).send() {
+        Ok(response) => {
+            let status = response.status();
+            if status.is_success() {
+                match response.text() {
+                    Ok(text) => {
+                        let text = if text.trim_start().starts_with('<') {
+                            html_to_text(&text)
+                        } else {
+                            text
+                        };
+                        let max_length = 50_000;
+                        let truncated = if text.len() > max_length {
+                            format!(
+                                "{}\n\n[Truncated: response exceeded {} characters]",
+                                &text[..max_length],
+                                max_length
+                            )
+                        } else {
+                            text
+                        };
+                        Ok(ToolCallInternalResult {
+                            success: true,
+                            output: Some(truncated),
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Failed to read response body: {}", e)),
+                    }),
+                }
+            } else {
+                Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "HTTP {}: {}",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("Unknown error")
+                    )),
+                })
+            }
+        }
+        Err(e) => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(format!("HTTP request failed: {}", e)),
+        }),
+    }
+}
+
 /// Check if a path is within the safe paths list.
 /// Returns false if safe_paths is empty: filesystem access must be explicitly scoped.
-fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
+pub fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
     if safe_paths.is_empty() {
         return false;
     }
@@ -1019,7 +1218,7 @@ fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
     false
 }
 
-fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
+pub fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
     if safe_paths.is_empty() {
         "No safe paths configured for filesystem access".to_string()
     } else {
@@ -1747,6 +1946,43 @@ mod tests {
             .observation
             .content
             .contains("private/internal address"));
+    }
+
+    #[test]
+    fn web_fetch_alias_normalizes_to_registered_tool() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "web.fetch",
+                "builtin",
+                "medium",
+                "network",
+                crate::tool_permissions::ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: ".fetch".into(),
+                    input: serde_json::json!({"arguments": {"url": "ftp://example.com"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.action.target.as_deref(), Some("web.fetch"));
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result.observation.content.contains("Invalid URL scheme"));
     }
 
     #[test]

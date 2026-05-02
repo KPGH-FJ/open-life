@@ -723,7 +723,10 @@ impl McpRegistry {
         if lines.len() == 1 {
             return "".into();
         }
-        lines.push("\n如果需要使用工具，请回复 JSON: {\"tool_calls\": [{\"name\": \"...\", \"arguments\": {...}}]}".into());
+        lines.push(
+            "\n如果需要使用工具，只回复一个合法 JSON 对象，不要使用 markdown 代码块，不要附加解释。格式：{\"tool_calls\": [{\"name\": \"web.fetch\", \"arguments\": {\"url\": \"https://example.com\"}}]}。工具名必须完整匹配上面的名称，URL 必须包含 http:// 或 https://。"
+                .into(),
+        );
         lines.join("\n")
     }
 

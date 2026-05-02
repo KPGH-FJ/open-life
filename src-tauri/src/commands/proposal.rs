@@ -1,4 +1,4 @@
-use crate::{persist_life_model, AppState};
+use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
 use openlife_core::life_model::LifeModel;
 use serde_json::Value;
@@ -201,11 +201,37 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
                 }
             }
         }
+        ProposalType::ExternalWriteAction => {
+            let path = after
+                .get("path")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            if path.is_none() {
+                return Err(
+                    "ExternalWriteAction Proposal 缺少 after.path（非空字符串）。".to_string(),
+                );
+            }
+            Ok(())
+        }
+        ProposalType::ScheduledTask => {
+            let title = after
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty());
+            if title.is_none() {
+                return Err("ScheduledTask Proposal 缺少 after.title（非空字符串）。".to_string());
+            }
+            Ok(())
+        }
+        ProposalType::DataExport => {
+            let content = after.get("content").and_then(Value::as_str);
+            if content.is_none() {
+                return Err("DataExport Proposal 缺少 after.content（字符串）。".to_string());
+            }
+            Ok(())
+        }
         ProposalType::PluginPermission
-        | ProposalType::ScheduledTask
-        | ProposalType::ExternalWriteAction
         | ProposalType::ModelPolicyChange
-        | ProposalType::DataExport
         | ProposalType::ScheduleCheckin
         | ProposalType::Unsupported => {
             // These types are not yet implemented; validation passes but apply will fail
@@ -466,11 +492,179 @@ async fn apply_proposal_to_state(
                 None,
             ))
         }
+        ProposalType::ExternalWriteAction => {
+            let path = after
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "ExternalWriteAction Proposal 缺少 after.path。".to_string())?;
+            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
+
+            // Load safe_paths from config
+            let safe_paths = {
+                let cfg = state.config.lock().await;
+                cfg.system.safe_paths.clone()
+            };
+
+            // Validate path is within safe_paths
+            if !openlife_core::agent::action_executor::is_path_in_safe_paths(path, &safe_paths) {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "external_write",
+                    Some(
+                        openlife_core::agent::action_executor::filesystem_access_error(
+                            path,
+                            &safe_paths,
+                        ),
+                    ),
+                ));
+            }
+
+            // Check content size (100KB limit, same as file.read)
+            let max_size = 100 * 1024;
+            if content.len() > max_size {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "external_write",
+                    Some(format!(
+                        "Content size ({} bytes) exceeds maximum allowed ({} bytes)",
+                        content.len(),
+                        max_size
+                    )),
+                ));
+            }
+
+            // Ensure parent directory exists
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "external_write",
+                        Some(format!("Failed to create parent directory: {}", e)),
+                    ));
+                }
+            }
+
+            // Execute file write
+            match std::fs::write(path, content) {
+                Ok(_) => Ok(patch_result_for_proposal(
+                    proposal,
+                    true,
+                    "external_write",
+                    None,
+                )),
+                Err(e) => Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "external_write",
+                    Some(format!("Failed to write file '{}': {}", path, e)),
+                )),
+            }
+        }
+        ProposalType::ScheduledTask => {
+            let title = after
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled Task");
+            let scheduled_at = after
+                .get("scheduled_at")
+                .or_else(|| after.get("date"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+
+            let task = serde_json::json!({
+                "id": proposal.id,
+                "title": title,
+                "prompt": after.get("description").and_then(Value::as_str).unwrap_or(""),
+                "action_type": after.get("tool").and_then(Value::as_str).unwrap_or("scheduled_task"),
+                "scheduled_at": scheduled_at,
+                "status": "pending",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "source_run_id": proposal.run_id,
+                "source_proposal_id": proposal.id,
+            });
+
+            // Append to scheduled_tasks.json
+            let tasks_path = app_data_dir().join("scheduled_tasks.json");
+            let mut tasks = if tasks_path.exists() {
+                std::fs::read_to_string(&tasks_path)
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            };
+            tasks.push(task);
+            if let Err(e) = std::fs::write(
+                &tasks_path,
+                serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,
+            ) {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "scheduled_task",
+                    Some(format!("Failed to save scheduled task: {}", e)),
+                ));
+            }
+
+            Ok(patch_result_for_proposal(
+                proposal,
+                true,
+                "scheduled_task",
+                None,
+            ))
+        }
+        ProposalType::DataExport => {
+            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
+            let filename = after
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or("export.txt");
+
+            // Use first safe path or fallback to data_dir/exports
+            let safe_paths = {
+                let cfg = state.config.lock().await;
+                cfg.system.safe_paths.clone()
+            };
+            let export_dir = if !safe_paths.is_empty() {
+                std::path::PathBuf::from(&safe_paths[0])
+            } else {
+                app_data_dir().join("exports")
+            };
+
+            if let Err(e) = std::fs::create_dir_all(&export_dir) {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "data_export",
+                    Some(format!("Failed to create export directory: {}", e)),
+                ));
+            }
+
+            let export_path = export_dir.join(filename);
+            match std::fs::write(&export_path, content) {
+                Ok(_) => Ok(patch_result_for_proposal(
+                    proposal,
+                    true,
+                    "data_export",
+                    None,
+                )),
+                Err(e) => Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "data_export",
+                    Some(format!(
+                        "Failed to write export file '{}': {}",
+                        export_path.display(),
+                        e
+                    )),
+                )),
+            }
+        }
         ProposalType::PluginPermission
-        | ProposalType::ScheduledTask
-        | ProposalType::ExternalWriteAction
         | ProposalType::ModelPolicyChange
-        | ProposalType::DataExport
         | ProposalType::ScheduleCheckin
         | ProposalType::Unsupported => Err(format!(
             "{} Proposal 尚未接入应用器，已保持 pending。",
@@ -1099,6 +1293,200 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn accept_external_write_action_writes_file_to_safe_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path_canonical = safe_path.canonicalize().unwrap();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.safe_paths = vec![safe_path_canonical.to_string_lossy().to_string()];
+        }
+
+        let file_path = safe_path_canonical.join("test.txt");
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy().to_string(),
+                "content": "Hello from test",
+                "content_hash": "",
+                "size_bytes": 15,
+                "operation": "create",
+            }),
+            "测试写入文件",
+            0.8,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+        let content = std::fs::read_to_string(&file_path).unwrap();
+        assert_eq!(content, "Hello from test");
+    }
+
+    #[tokio::test]
+    async fn accept_external_write_action_blocks_outside_safe_paths() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path_canonical = safe_path.canonicalize().unwrap();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.safe_paths = vec![safe_path_canonical.to_string_lossy().to_string()];
+        }
+
+        let file_path = temp_dir.path().join("unsafe.txt");
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy().to_string(),
+                "content": "should not write",
+            }),
+            "测试安全路径拦截",
+            0.8,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let err = accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not in safe paths"));
+        assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn accept_scheduled_task_returns_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "calendar.event",
+            serde_json::json!({
+                "title": "Team Meeting",
+                "scheduled_at": "2026-05-10T10:00:00Z",
+                "description": "Weekly sync",
+            }),
+            "测试创建计划任务",
+            0.8,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_data_export_returns_success() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.safe_paths = vec![safe_path.to_string_lossy().to_string()];
+        }
+
+        let proposal = AgentProposal::new(
+            ProposalType::DataExport,
+            "export.file",
+            serde_json::json!({
+                "content": "exported data",
+                "filename": "export.txt",
+            }),
+            "测试数据导出",
+            0.8,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
     }
 
     #[test]

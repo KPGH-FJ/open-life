@@ -1856,7 +1856,7 @@ async fn send_message_with_agent_loop(
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
         action_executor,
-        scheduler,
+        scheduler.clone(),
         loop_config,
     );
 
@@ -1907,11 +1907,56 @@ async fn send_message_with_agent_loop(
                 &action_ctx,
             )
             .await
-    }
-    .map_err(|e| format!("AgentLoop execution failed: {}", e))?;
+    };
 
-    let mut reply = loop_result.final_response;
-    let mut agent_run = loop_result.run;
+    let (mut reply, mut agent_run) = match loop_result {
+        Ok(result) => (result.final_response, result.run),
+        Err(e) => {
+            eprintln!(
+                "[warn] AgentLoop failed in send_message, falling back to legacy: {}",
+                e
+            );
+            let fallback_reply = generate_non_stream_fallback(
+                &scheduler,
+                desensitized_messages.clone(),
+                &life_model,
+                &tools_prompt,
+            )
+            .await
+            .map_err(|fallback_err| {
+                format!(
+                    "AgentLoop failed: {}. Fallback also failed: {}",
+                    e, fallback_err
+                )
+            })?;
+
+            let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
+                &session_id,
+                &user_msg
+                    .as_ref()
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default(),
+            );
+            agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+            agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
+            agent_run
+                .warnings
+                .push(format!("fallback: agent_loop_error: {}", e));
+            agent_run.finished_at = Some(chrono::Utc::now());
+
+            if let Some(ref store_arc) = state.agent_run_store {
+                let store = store_arc.lock().await;
+                let _ = store.create_run(&agent_run);
+            }
+
+            return Ok(SendMessageResult {
+                reply: fallback_reply,
+                reasoning_trace: ReasoningTrace::default(),
+                tool_calls: Vec::new(),
+                run_id: Some(agent_run.id),
+            });
+        }
+    };
 
     // Apply privacy reconstruction
     reply = privacy_engine.reconstruct(&reply, &privacy_map);
@@ -2004,6 +2049,29 @@ fn preview_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+/// Split text into sentences for streaming.
+/// Preserves sentence terminators (Chinese/English punctuation and newlines).
+fn split_into_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+
+    for (i, c) in text.char_indices() {
+        if c == '。' || c == '.' || c == '?' || c == '？' || c == '!' || c == '！' || c == '\n' {
+            let end = i + c.len_utf8();
+            if end > start {
+                sentences.push(&text[start..end]);
+            }
+            start = end;
+        }
+    }
+
+    if start < text.len() {
+        sentences.push(&text[start..]);
+    }
+
+    sentences
+}
+
 fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     if life_model.is_effectively_empty() {
         Vec::new()
@@ -2059,7 +2127,15 @@ fn agent_actions_to_tool_call_results(
 }
 
 fn chat_should_use_agent_loop(cfg: &openlife_core::config::AppConfig) -> bool {
-    cfg.use_agent_loop || cfg.system.use_agent_loop.unwrap_or(false)
+    // If explicitly configured, respect the setting
+    if cfg.use_agent_loop {
+        return true;
+    }
+    if let Some(v) = cfg.system.use_agent_loop {
+        return v;
+    }
+    // Default: enabled (Week 7 graduation)
+    true
 }
 
 /// Stream-mode AgentLoop execution: runs AgentLoop and emits stream events.
@@ -2124,7 +2200,7 @@ async fn start_stream_message_with_agent_loop(
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
         action_executor,
-        scheduler,
+        scheduler.clone(),
         loop_config,
     );
 
@@ -2177,24 +2253,56 @@ async fn start_stream_message_with_agent_loop(
             .await
     };
 
-    let loop_result = match loop_result {
-        Ok(result) => result,
+    let (mut reply, mut agent_run) = match loop_result {
+        Ok(result) => (result.final_response, result.run),
         Err(e) => {
-            let error_msg = format!("AgentLoop execution failed: {}", e);
-            let _ = app_handle.emit(
-                "stream-message-error",
-                serde_json::json!({
-                    "session_id": &session_id,
-                    "run_id": placeholder_run_id,
-                    "error": error_msg.clone(),
-                }),
+            eprintln!(
+                "[warn] AgentLoop failed in stream, falling back to legacy: {}",
+                e
             );
-            return Err(error_msg);
+            let fallback_reply = match generate_non_stream_fallback(
+                &scheduler,
+                desensitized_messages.clone(),
+                &life_model,
+                &tools_prompt,
+            )
+            .await
+            {
+                Ok(reply) => reply,
+                Err(fallback_err) => {
+                    let error_msg = format!(
+                        "AgentLoop failed: {}. Fallback also failed: {}",
+                        e, fallback_err
+                    );
+                    let _ = app_handle.emit(
+                        "stream-message-error",
+                        serde_json::json!({
+                            "session_id": &session_id,
+                            "run_id": placeholder_run_id,
+                            "error": error_msg.clone(),
+                        }),
+                    );
+                    return Err(error_msg);
+                }
+            };
+
+            let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
+                &session_id,
+                &user_msg
+                    .as_ref()
+                    .map(|m| m.content.clone())
+                    .unwrap_or_default(),
+            );
+            agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+            agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
+            agent_run
+                .warnings
+                .push(format!("fallback: agent_loop_error: {}", e));
+            agent_run.finished_at = Some(chrono::Utc::now());
+
+            (fallback_reply, agent_run)
         }
     };
-
-    let mut reply = loop_result.final_response;
-    let mut agent_run = loop_result.run;
 
     // Apply privacy reconstruction
     reply = privacy_engine.reconstruct(&reply, &privacy_map);
@@ -2206,35 +2314,52 @@ async fn start_stream_message_with_agent_loop(
         }
     }
 
+    let mut reasoning_trace = agent_run.reasoning_trace.clone().unwrap_or_default();
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
+
     let _ = app_handle.emit(
         "stream-message-start",
         serde_json::json!({
             "session_id": &session_id,
             "run_id": agent_run.id,
-            "reasoning_trace": ReasoningTrace::default(),
+            "reasoning_trace": reasoning_trace.clone(),
             "tool_calls": Vec::<ToolCallResult>::new(),
         }),
     );
 
-    // Emit the result as a single chunk (simulating streaming)
-    let _ = app_handle.emit(
-        "stream-message-chunk",
-        serde_json::json!({
-            "session_id": &session_id,
-            "run_id": agent_run.id,
-            "chunk": reply.clone(),
-        }),
-    );
+    // Emit sentence-by-sentence for a more natural streaming experience
+    let sentences = split_into_sentences(&reply);
+    if sentences.is_empty() {
+        // Fallback: emit the full reply as a single chunk
+        let _ = app_handle.emit(
+            "stream-message-chunk",
+            serde_json::json!({
+                "session_id": &session_id,
+                "run_id": agent_run.id,
+                "chunk": reply.clone(),
+            }),
+        );
+    } else {
+        for sentence in sentences {
+            let _ = app_handle.emit(
+                "stream-message-chunk",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": agent_run.id,
+                    "chunk": sentence,
+                }),
+            );
+            // Small delay to simulate typing speed
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    }
 
     let assistant_message = ChatMessage {
         role: "assistant".into(),
         content: reply.clone(),
     };
-
-    let mut reasoning_trace = agent_run.reasoning_trace.clone().unwrap_or_default();
-    if let Some(err) = embed_err {
-        reasoning_trace.errors.push(err);
-    }
 
     // Finalize AgentRun
     let result = finalize_chat_agent_run(
@@ -2269,10 +2394,10 @@ async fn start_stream_message_with_agent_loop(
                 serde_json::json!({
                     "session_id": &session_id,
                     "run_id": agent_run.id,
-                    "error": e.clone(),
+                    "error": e,
                 }),
             );
-            Err(e)
+            Ok(())
         }
     }
 }
