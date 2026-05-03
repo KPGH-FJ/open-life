@@ -21,6 +21,7 @@ const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
 const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
+import { initPerformanceMonitoring } from "./utils/performance";
 
 class ErrorBoundary extends Component<
   { children: ReactNode },
@@ -151,6 +152,10 @@ function App() {
     getSystemDiagnostics()
       .then(setDiagnostics)
       .catch(() => setDiagnostics(null));
+  }, []);
+
+  useEffect(() => {
+    initPerformanceMonitoring();
   }, []);
 
   const safeMode = isSafeMode(diagnostics);
