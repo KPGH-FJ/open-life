@@ -1,21 +1,24 @@
-import { Component, ReactNode, useEffect, useState } from "react";
+import React, { Component, ReactNode, Suspense, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
 import { LayoutDashboard, Settings, Sparkles, ShieldCheck, Bot, History } from "lucide-react";
-import LifeMapPage from "./pages/LifeMapPage";
-import ChatPage from "./pages/ChatPage";
-import VersionControl from "./pages/VersionControl";
-import MemorySearch from "./pages/MemorySearch";
-import A2APage from "./pages/A2APage";
-import McpPage from "./pages/McpPage";
-import BuilderPage from "./pages/BuilderPage";
-import DashboardPage from "./pages/DashboardPage";
-import SettingsPage from "./pages/SettingsPage";
-import CalibrationPage from "./pages/CalibrationPage";
-import ProposalReviewPage from "./pages/ProposalReviewPage";
-import RunsPage from "./pages/RunsPage";
-import AgentRunDetail from "./pages/AgentRunDetail";
-import MetricsPage from "./pages/MetricsPage";
+import LoadingSpinner from "./components/LoadingSpinner";
 import OnboardingWizard from "./components/OnboardingWizard";
+
+// Lazy load page components for code splitting
+const LifeMapPage = React.lazy(() => import("./pages/LifeMapPage"));
+const ChatPage = React.lazy(() => import("./pages/ChatPage"));
+const VersionControl = React.lazy(() => import("./pages/VersionControl"));
+const MemorySearch = React.lazy(() => import("./pages/MemorySearch"));
+const A2APage = React.lazy(() => import("./pages/A2APage"));
+const McpPage = React.lazy(() => import("./pages/McpPage"));
+const BuilderPage = React.lazy(() => import("./pages/BuilderPage"));
+const DashboardPage = React.lazy(() => import("./pages/DashboardPage"));
+const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
+const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
+const ProposalReviewPage = React.lazy(() => import("./pages/ProposalReviewPage"));
+const RunsPage = React.lazy(() => import("./pages/RunsPage"));
+const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
+const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
 
@@ -254,30 +257,32 @@ function App() {
       )}
       <main className="flex-1 overflow-hidden">
         <ErrorBoundary>
-          <Routes>
-            <Route path="/" element={<DashboardPage />} />
-            <Route path="/workspace" element={<DashboardPage />} />
-            {/* Agent: Chat + Runs */}
-            <Route path="/agent" element={<ChatPage />} />
-            <Route path="/chat" element={<ChatPage />} />
-            <Route path="/runs" element={<RunsPage />} />
-            <Route path="/runs/:runId" element={<AgentRunDetail />} />
-            {/* Life: Builder + LifeModel */}
-            <Route path="/life" element={<BuilderPage />} />
-            <Route path="/builder" element={<BuilderPage />} />
-            <Route path="/map" element={<LifeMapPage />} />
-            {/* Memory */}
-            <Route path="/memory" element={<MemorySearch />} />
-            {/* Review */}
-            <Route path="/review" element={<ProposalReviewPage />} />
-            {/* Settings + Experimental */}
-            <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/versions" element={<VersionControl />} />
-            <Route path="/mcp" element={<McpPage />} />
-            <Route path="/a2a" element={<A2APage />} />
-            <Route path="/calibration" element={<CalibrationPage />} />
-            <Route path="/metrics" element={<MetricsPage />} />
-          </Routes>
+          <Suspense fallback={<LoadingSpinner text="加载中..." />}>
+            <Routes>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/workspace" element={<DashboardPage />} />
+              {/* Agent: Chat + Runs */}
+              <Route path="/agent" element={<ChatPage />} />
+              <Route path="/chat" element={<ChatPage />} />
+              <Route path="/runs" element={<RunsPage />} />
+              <Route path="/runs/:runId" element={<AgentRunDetail />} />
+              {/* Life: Builder + LifeModel */}
+              <Route path="/life" element={<BuilderPage />} />
+              <Route path="/builder" element={<BuilderPage />} />
+              <Route path="/map" element={<LifeMapPage />} />
+              {/* Memory */}
+              <Route path="/memory" element={<MemorySearch />} />
+              {/* Review */}
+              <Route path="/review" element={<ProposalReviewPage />} />
+              {/* Settings + Experimental */}
+              <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/versions" element={<VersionControl />} />
+              <Route path="/mcp" element={<McpPage />} />
+              <Route path="/a2a" element={<A2APage />} />
+              <Route path="/calibration" element={<CalibrationPage />} />
+              <Route path="/metrics" element={<MetricsPage />} />
+            </Routes>
+          </Suspense>
         </ErrorBoundary>
       </main>
       {wizardReady && showWizard && <OnboardingWizard onComplete={() => setShowWizard(false)} />}
