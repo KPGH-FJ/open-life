@@ -1,4 +1,6 @@
-use crate::agent::types::{AgentProposal, AgentRun, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::types::{
+    AgentProposal, AgentRun, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+};
 use crate::life_model::LifeModel;
 use anyhow::Result;
 use serde_json::Value;
@@ -122,7 +124,121 @@ impl ProposalGenerator for CalibrationProposalGenerator {
 }
 
 /// Feedback proposal generator.
-pub struct FeedbackProposalGenerator;
+pub struct FeedbackProposalGenerator {
+    feedback_store: Option<std::sync::Arc<std::sync::Mutex<crate::feedback::FeedbackStore>>>,
+}
+
+impl FeedbackProposalGenerator {
+    pub fn new(
+        feedback_store: Option<std::sync::Arc<std::sync::Mutex<crate::feedback::FeedbackStore>>>,
+    ) -> Self {
+        Self { feedback_store }
+    }
+
+    fn generate_from_signals(
+        &self,
+        signals: &crate::evolution::EvolutionSignals,
+        _life_model: &LifeModel,
+    ) -> Vec<AgentProposal> {
+        let mut proposals = Vec::new();
+
+        // Check for significant feedback signals
+        for (word, delta) in &signals.feedback {
+            if delta.abs() < 0.02 {
+                continue;
+            }
+
+            // Map feedback keywords to LifeModel dimensions
+            let (dimension, reason) = if word.contains("goal") || word.contains("目标") {
+                (
+                    "goals",
+                    format!("反馈信号显示目标 '{}' 需要调整 (delta: {:.2})", word, delta),
+                )
+            } else if word.contains("value") || word.contains("价值") || word.contains("价值观")
+            {
+                (
+                    "identity.values",
+                    format!(
+                        "反馈信号显示价值观 '{}' 需要关注 (delta: {:.2})",
+                        word, delta
+                    ),
+                )
+            } else if word.contains("state") || word.contains("状态") {
+                (
+                    "state",
+                    format!(
+                        "反馈信号显示状态维度 '{}' 有变化趋势 (delta: {:.2})",
+                        word, delta
+                    ),
+                )
+            } else if word.contains("capability") || word.contains("能力") {
+                (
+                    "capabilities",
+                    format!("反馈信号显示能力 '{}' 有变化 (delta: {:.2})", word, delta),
+                )
+            } else {
+                (
+                    "state.custom_dimensions",
+                    format!(
+                        "反馈关键词 '{}' 信号强度 {:.2}，建议记录为自定义状态维度",
+                        word, delta
+                    ),
+                )
+            };
+
+            let proposal_type = ProposalType::StateUpdate;
+
+            proposals.push(AgentProposal {
+                id: format!("feedback-{}-{}", word, chrono::Utc::now().timestamp()),
+                proposal_type,
+                affected_path: dimension.into(),
+                before: Some(serde_json::json!({"word": word, "current_delta": 0.0})),
+                after: serde_json::json!({"word": word, "suggested_delta": delta}),
+                reason,
+                confidence: delta.abs().min(0.95),
+                risk_level: RiskLevel::Low,
+                status: ProposalStatus::Pending,
+                source: ProposalSource::FeedbackEvolution,
+                source_detail: None,
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
+                run_id: None,
+            });
+        }
+
+        // Check behavior signals
+        for (focus, weight) in &signals.behavior {
+            if *weight < 0.02 {
+                continue;
+            }
+            proposals.push(AgentProposal {
+                id: format!("behavior-{}-{}", focus, chrono::Utc::now().timestamp()),
+                proposal_type: ProposalType::StateUpdate,
+                affected_path: "state.current_focus".into(),
+                before: None,
+                after: serde_json::json!({"focus": focus, "weight": weight}),
+                reason: format!(
+                    "行为分析显示用户近期关注 '{}' (权重 {:.2})，建议更新当前焦点",
+                    focus, weight
+                ),
+                confidence: weight.min(0.8),
+                risk_level: RiskLevel::Low,
+                status: ProposalStatus::Pending,
+                source: ProposalSource::FeedbackEvolution,
+                source_detail: None,
+                created_at: chrono::Utc::now(),
+                resolved_at: None,
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::days(7)),
+                run_id: None,
+            });
+        }
+
+        // Limit proposals
+        proposals.truncate(5);
+        proposals
+    }
+}
 
 impl ProposalGenerator for FeedbackProposalGenerator {
     fn name(&self) -> &'static str {
@@ -137,10 +253,18 @@ impl ProposalGenerator for FeedbackProposalGenerator {
         &self,
         _run: &AgentRun,
         _output: &str,
-        _life_model: &LifeModel,
+        life_model: &LifeModel,
     ) -> Result<Vec<AgentProposal>> {
-        // TODO: Implement feedback-based proposal generation
-        Ok(Vec::new())
+        let Some(store) = &self.feedback_store else {
+            return Ok(Vec::new());
+        };
+
+        let store = store
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let signals = store.fetch_evolution_signals(7)?;
+
+        Ok(self.generate_from_signals(&signals, life_model))
     }
 }
 

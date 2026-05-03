@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import {
   Loader2,
@@ -531,7 +531,7 @@ export default function ChatPage() {
     }
   };
 
-  const handleNewSession = async () => {
+  const handleNewSession = useCallback(async () => {
     const id = generateSessionId();
     try {
       await createChatSession(id, "新会话");
@@ -540,9 +540,9 @@ export default function ChatPage() {
     } catch (e) {
       console.error("创建会话失败", e);
     }
-  };
+  }, []);
 
-  const handleDeleteSession = async (id: string) => {
+  const handleDeleteSession = useCallback(async (id: string) => {
     try {
       await deleteChatSession(id);
       const list = await listChatSessions();
@@ -553,14 +553,14 @@ export default function ChatPage() {
     } catch (e) {
       console.error("删除会话失败", e);
     }
-  };
+  }, []);
 
-  const startEditTitle = (s: ChatSession) => {
+  const startEditTitle = useCallback((s: ChatSession) => {
     setEditingId(s.session_id);
     setEditingTitle(s.title);
-  };
+  }, []);
 
-  const commitEditTitle = async () => {
+  const commitEditTitle = useCallback(async () => {
     if (!editingId) return;
     try {
       await renameChatSession(editingId, editingTitle.trim() || "未命名");
@@ -571,56 +571,59 @@ export default function ChatPage() {
       setEditingId(null);
       setEditingTitle("");
     }
-  };
+  }, [editingId, editingTitle]);
 
-  const handleExecuteToolCall = async (index: number) => {
-    const call = toolCalls[index];
-    if (!call?.requires_confirmation) return;
-    if (!call.run_id || !call.action_id) {
-      console.error("Tool call missing run_id or action_id");
-      return;
-    }
-    try {
-      const result = await replayAgentAction(call.run_id, call.action_id);
-      setToolCalls(prev =>
-        prev.map((item, idx) =>
-          idx === index
-            ? {
-                ...item,
-                success: result.status === "succeeded",
-                status: result.status as any,
-                requires_confirmation: false,
-                output: result.output?.text,
-              }
-            : item
-        )
-      );
-    } catch (e) {
-      const errMsg = String(e);
-      // 如果是因为未授权，保持 pending 状态，不改为 error
-      if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
-        // 保持 requires_confirmation: true，让用户去 Review Center 授权
-        console.warn("Tool call still needs authorization:", errMsg);
-        throw e; // 抛出错误让 ToolCallCard 显示提示
+  const handleExecuteToolCall = useCallback(
+    async (index: number) => {
+      const call = toolCalls[index];
+      if (!call?.requires_confirmation) return;
+      if (!call.run_id || !call.action_id) {
+        console.error("Tool call missing run_id or action_id");
+        return;
       }
-      // 其他错误才标记为失败
-      setToolCalls(prev =>
-        prev.map((item, idx) =>
-          idx === index
-            ? {
-                ...item,
-                success: false,
-                error: errMsg,
-                status: "error",
-                requires_confirmation: false,
-              }
-            : item
-        )
-      );
-    }
-  };
+      try {
+        const result = await replayAgentAction(call.run_id, call.action_id);
+        setToolCalls(prev =>
+          prev.map((item, idx) =>
+            idx === index
+              ? {
+                  ...item,
+                  success: result.status === "succeeded",
+                  status: result.status as any,
+                  requires_confirmation: false,
+                  output: result.output?.text,
+                }
+              : item
+          )
+        );
+      } catch (e) {
+        const errMsg = String(e);
+        // 如果是因为未授权，保持 pending 状态，不改为 error
+        if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
+          // 保持 requires_confirmation: true，让用户去 Review Center 授权
+          console.warn("Tool call still needs authorization:", errMsg);
+          throw e; // 抛出错误让 ToolCallCard 显示提示
+        }
+        // 其他错误才标记为失败
+        setToolCalls(prev =>
+          prev.map((item, idx) =>
+            idx === index
+              ? {
+                  ...item,
+                  success: false,
+                  error: errMsg,
+                  status: "error",
+                  requires_confirmation: false,
+                }
+              : item
+          )
+        );
+      }
+    },
+    [toolCalls]
+  );
 
-  const tryHandleQuickCommand = async (text: string): Promise<string | null> => {
+  const tryHandleQuickCommand = useCallback(async (text: string): Promise<string | null> => {
     const t = text.trim();
     if (t.startsWith("/goal")) {
       try {
@@ -706,9 +709,9 @@ export default function ChatPage() {
       }
     }
     return null;
-  };
+  }, []);
 
-  const handleSend = async () => {
+  const handleSend = useCallback(async () => {
     if (!input.trim() || sending) return;
     if (!currentSessionId || typeof currentSessionId !== "string") {
       setMessages(prev => [
@@ -772,16 +775,16 @@ export default function ChatPage() {
       setStreamingReply("");
       setSending(false);
     }
-  };
+  }, [input, sending, currentSessionId, messages, diagnostics, tryHandleQuickCommand]);
 
-  const retryLastUserMessage = () => {
+  const retryLastUserMessage = useCallback(() => {
     const last =
       lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
     if (!last || sending) return;
     setInput(last.content);
-  };
+  }, [messages, sending]);
 
-  const handleContinueStream = async () => {
+  const handleContinueStream = useCallback(async () => {
     const lastUser =
       lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
     if (!lastUser || sending) return;
@@ -809,9 +812,9 @@ export default function ChatPage() {
       setStreamingReply("");
       setSending(false);
     }
-  };
+  }, [currentSessionId, messages, sending]);
 
-  const readiness = buildReadinessSummary(diagnostics);
+  const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const readinessClass =
     readiness.tone === "ready"
       ? "bg-emerald-50 border-emerald-100 text-emerald-800"
@@ -897,9 +900,9 @@ export default function ChatPage() {
     },
   ];
 
-  const fillPrompt = (prompt: string) => {
+  const fillPrompt = useCallback((prompt: string) => {
     setInput(prompt);
-  };
+  }, []);
 
   const selectChatMode = (mode: string) => {
     setChatMode(mode);
@@ -941,7 +944,7 @@ export default function ChatPage() {
     { key: "free", label: "自由聊天", icon: <MessageSquare size={14} />, prompt: "" },
   ];
 
-  const handleSaveAsDailyGoal = async (content: string) => {
+  const handleSaveAsDailyGoal = useCallback(async (content: string) => {
     const name = content
       .split(/[。！？\n]/)[0]
       .slice(0, 30)
@@ -952,52 +955,58 @@ export default function ChatPage() {
     } catch (e) {
       console.error("保存今日目标失败", e);
     }
-  };
+  }, []);
 
-  const handleIndexMemory = async (content: string) => {
-    if (isSafeMode(diagnostics)) {
-      setMessages(prev => [
-        ...prev,
-        {
-          role: "assistant",
-          content: `当前处于 Safe Mode，${getSafeModeReason(diagnostics)} 建议先去设置页恢复控制台处理数据风险，再执行“加入记忆”。`,
-        },
-      ]);
-      return;
-    }
-    try {
-      await indexMemoryChunk(currentSessionId, content, "chat");
-    } catch (e) {
-      console.error("加入记忆失败", e);
-    }
-  };
+  const handleIndexMemory = useCallback(
+    async (content: string) => {
+      if (isSafeMode(diagnostics)) {
+        setMessages(prev => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `当前处于 Safe Mode，${getSafeModeReason(diagnostics)} 建议先去设置页恢复控制台处理数据风险，再执行"加入记忆"。`,
+          },
+        ]);
+        return;
+      }
+      try {
+        await indexMemoryChunk(currentSessionId, content, "chat");
+      } catch (e) {
+        console.error("加入记忆失败", e);
+      }
+    },
+    [diagnostics, currentSessionId]
+  );
 
-  const buildAssistantActionPrompt = (
-    kind: "continue" | "action" | "state" | "goal",
-    content: string
-  ) => {
-    if (kind === "continue") {
-      return `请继续围绕上一条回复展开，但更具体一点：${content.slice(0, 240)}`;
-    }
-    if (kind === "action") {
-      return `请把上一条回复提炼成今天可以执行的 3 个行动，每个行动都要足够小，并说明第一步。`;
-    }
-    if (kind === "state") {
-      return `请根据上一条对话，帮我总结当前状态：情绪、精力、压力、注意力分别是什么，并给出适合用 /state 记录的建议。`;
-    }
-    return `请把上一条回复拆成一个目标结构：目标名、为什么重要、里程碑、今天可以做的一步、可能风险。`;
-  };
+  const buildAssistantActionPrompt = useCallback(
+    (kind: "continue" | "action" | "state" | "goal", content: string) => {
+      if (kind === "continue") {
+        return `请继续围绕上一条回复展开，但更具体一点：${content.slice(0, 240)}`;
+      }
+      if (kind === "action") {
+        return `请把上一条回复提炼成今天可以执行的 3 个行动，每个行动都要足够小，并说明第一步。`;
+      }
+      if (kind === "state") {
+        return `请根据上一条对话，帮我总结当前状态：情绪、精力、压力、注意力分别是什么，并给出适合用 /state 记录的建议。`;
+      }
+      return `请把上一条回复拆成一个目标结构：目标名、为什么重要、里程碑、今天可以做的一步、可能风险。`;
+    },
+    []
+  );
 
-  const handleFeedback = async (index: number, type: "up" | "down") => {
-    const msg = messages[index];
-    if (!msg || msg.role !== "assistant") return;
-    try {
-      await saveFeedback(currentSessionId, index, type, msg.content.slice(0, 200));
-      setFeedbackGiven(prev => ({ ...prev, [index]: type }));
-    } catch (e) {
-      console.error("反馈保存失败", e);
-    }
-  };
+  const handleFeedback = useCallback(
+    async (index: number, type: "up" | "down") => {
+      const msg = messages[index];
+      if (!msg || msg.role !== "assistant") return;
+      try {
+        await saveFeedback(currentSessionId, index, type, msg.content.slice(0, 200));
+        setFeedbackGiven(prev => ({ ...prev, [index]: type }));
+      } catch (e) {
+        console.error("反馈保存失败", e);
+      }
+    },
+    [messages, currentSessionId]
+  );
 
   return (
     <div className="h-full flex bg-white">

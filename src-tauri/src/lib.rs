@@ -3465,7 +3465,9 @@ pub fn run() {
             engine.register(Box::new(
                 openlife_core::agent::ChatProposalGeneratorAdapter::new(),
             ));
-            engine.register(Box::new(openlife_core::agent::FeedbackProposalGenerator));
+            engine.register(Box::new(
+                openlife_core::agent::FeedbackProposalGenerator::new(None),
+            ));
             engine.register(Box::new(openlife_core::agent::MemoryProposalGenerator));
             engine.register(Box::new(openlife_core::agent::ToolProposalGenerator));
             engine
