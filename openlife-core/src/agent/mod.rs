@@ -19,7 +19,7 @@ pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,
 };
-pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult};
+pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,

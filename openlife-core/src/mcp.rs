@@ -467,24 +467,31 @@ impl McpRegistry {
             Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
         );
 
-        // Execution Tools: P2 (declarative-only stubs)
-        self.register_declarative_stub(
+        // Execution Tools: P1 calendar.read (reads ICS files)
+        self.register_execution_tool(
             "calendar.read",
-            "读取日历事件（Beta stub：需要配置 ICS source）",
+            "读取日历事件（从配置的 ICS 文件中解析 VEVENT）",
+            "low",
+            vec!["read".into()],
+            "read",
         );
 
+        // Execution Tools: P2 (declarative-only stubs)
         self.register_declarative_stub("calendar.propose_event", "提议创建日历事件（Beta stub）");
 
         self.register_declarative_stub(
             "email.read",
             "读取邮件（Beta stub：需要配置 IMAP account）",
         );
-
         self.register_declarative_stub("email.propose_draft", "提议创建邮件草稿（Beta stub）");
 
-        self.register_declarative_stub(
+        // P1 task.create_proposal: creates real local tasks via TaskStore
+        self.register_execution_tool(
             "task.create_proposal",
-            "提议创建任务/提醒/待办事项（Beta stub：生成 ScheduledTask 或 Goal Proposal）",
+            "创建本地任务/提醒/待办事项（P1：持久化到本地 TaskStore）",
+            "medium",
+            vec!["write".into()],
+            "write",
         );
 
         // A2A: declarative-only in Beta (execution adapter not yet wired)

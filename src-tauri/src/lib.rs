@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use openlife_core::agent::ContextAssembler;
 use openlife_core::agent::ReasoningTrace;
+use openlife_core::agent::StreamingCallback;
 use openlife_core::builder::{BuilderSession, BuilderSessionStore};
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -615,6 +616,7 @@ fn try_prepare_tool_calls(
         audit_store: audit,
         privacy_engine,
         safe_paths: &[],
+        calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
         proposal_store: None,
@@ -1880,6 +1882,7 @@ async fn send_message_with_agent_loop(
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
+    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     let agent_runtime =
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
     let action_executor = openlife_core::agent::ActionExecutor::new(
@@ -1932,6 +1935,7 @@ async fn send_message_with_agent_loop(
             audit_store: &audit,
             privacy_engine: &privacy_engine,
             safe_paths: &safe_paths,
+            calendar_ics_paths: &calendar_ics_paths,
             life_model: Some(&life_model),
             memory_store: Some(&memory_store),
             proposal_store: proposal_store_guard.as_deref(),
@@ -2114,29 +2118,6 @@ fn preview_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-/// Split text into sentences for streaming.
-/// Preserves sentence terminators (Chinese/English punctuation and newlines).
-fn split_into_sentences(text: &str) -> Vec<&str> {
-    let mut sentences = Vec::new();
-    let mut start = 0;
-
-    for (i, c) in text.char_indices() {
-        if c == '。' || c == '.' || c == '?' || c == '？' || c == '!' || c == '！' || c == '\n' {
-            let end = i + c.len_utf8();
-            if end > start {
-                sentences.push(&text[start..end]);
-            }
-            start = end;
-        }
-    }
-
-    if start < text.len() {
-        sentences.push(&text[start..]);
-    }
-
-    sentences
-}
-
 fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     if life_model.is_effectively_empty() {
         Vec::new()
@@ -2208,7 +2189,78 @@ fn chat_should_use_agent_loop(cfg: &openlife_core::config::AppConfig) -> bool {
     true
 }
 
-/// Stream-mode AgentLoop execution: runs AgentLoop and emits stream events.
+/// Streaming callback that forwards AgentLoop events to Tauri frontend via emit().
+struct TauriStreamingCallback {
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    run_id: String,
+}
+
+#[async_trait::async_trait]
+impl StreamingCallback for TauriStreamingCallback {
+    async fn on_chunk(&self, chunk: &str, _step: u32, _phase: &str) {
+        let _ = self.app_handle.emit(
+            "stream-message-chunk",
+            serde_json::json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "chunk": chunk,
+            }),
+        );
+    }
+
+    async fn on_tool_start(&self, tool_name: &str, _step: u32) {
+        let _ = self.app_handle.emit(
+            "tool-start",
+            serde_json::json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "tool_name": tool_name,
+                "phase": "executing_tool",
+            }),
+        );
+    }
+
+    async fn on_tool_result(&self, tool_name: &str, success: bool, _step: u32) {
+        let _ = self.app_handle.emit(
+            "tool-result",
+            serde_json::json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "tool_name": tool_name,
+                "success": success,
+                "phase": "observing",
+            }),
+        );
+    }
+
+    async fn on_proposal(&self, proposal_type: &str, proposal_id: &str) {
+        let _ = self.app_handle.emit(
+            "proposal-created",
+            serde_json::json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "proposal_type": proposal_type,
+                "proposal_id": proposal_id,
+            }),
+        );
+    }
+
+    async fn on_status(&self, status: &str, message: &str, step: u32) {
+        let _ = self.app_handle.emit(
+            "agent-status",
+            serde_json::json!({
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "status": status,
+                "message": message,
+                "step": step,
+            }),
+        );
+    }
+}
+
+/// Stream-mode AgentLoop execution: runs AgentLoop and emits real token-level stream events.
 /// This provides consistency when use_agent_loop=true in stream mode.
 async fn start_stream_message_with_agent_loop(
     session_id: String,
@@ -2255,6 +2307,7 @@ async fn start_stream_message_with_agent_loop(
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
+    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     let agent_runtime =
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
     let action_executor = openlife_core::agent::ActionExecutor::new(
@@ -2287,6 +2340,24 @@ async fn start_stream_message_with_agent_loop(
 
     let network_policy = cfg.system.network_policy.clone();
 
+    // Create streaming callback with run_id placeholder (will be updated after AgentLoop starts)
+    let callback = Arc::new(TauriStreamingCallback {
+        app_handle: app_handle.clone(),
+        session_id: session_id.clone(),
+        run_id: placeholder_run_id.clone(),
+    });
+
+    // Emit stream-message-start before running agent loop
+    let _ = app_handle.emit(
+        "stream-message-start",
+        serde_json::json!({
+            "session_id": &session_id,
+            "run_id": placeholder_run_id,
+            "reasoning_trace": ReasoningTrace::default(),
+            "tool_calls": Vec::<ToolCallResult>::new(),
+        }),
+    );
+
     let loop_result = {
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
@@ -2307,6 +2378,7 @@ async fn start_stream_message_with_agent_loop(
             audit_store: &audit,
             privacy_engine: &privacy_engine,
             safe_paths: &safe_paths,
+            calendar_ics_paths: &calendar_ics_paths,
             life_model: Some(&life_model),
             memory_store: Some(&memory_store),
             proposal_store: proposal_store_guard.as_deref(),
@@ -2315,13 +2387,14 @@ async fn start_stream_message_with_agent_loop(
         };
 
         agent_loop
-            .run(
+            .run_streaming(
                 &task,
                 &life_model,
                 &tools_prompt,
                 None,
                 privacy_engine.clone(),
                 &action_ctx,
+                callback,
             )
             .await
     };
@@ -2330,7 +2403,7 @@ async fn start_stream_message_with_agent_loop(
         Ok(result) => (result.final_response, result.run),
         Err(e) => {
             eprintln!(
-                "[warn] AgentLoop failed in stream, falling back to legacy: {}",
+                "[warn] AgentLoop streaming failed, falling back to legacy: {}",
                 e
             );
             let fallback_reply = match generate_non_stream_fallback(
@@ -2373,6 +2446,16 @@ async fn start_stream_message_with_agent_loop(
                 .push(format!("fallback: agent_loop_error: {}", e));
             agent_run.finished_at = Some(chrono::Utc::now());
 
+            // Emit fallback reply as a single chunk
+            let _ = app_handle.emit(
+                "stream-message-chunk",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "run_id": placeholder_run_id,
+                    "chunk": fallback_reply,
+                }),
+            );
+
             (fallback_reply, agent_run)
         }
     };
@@ -2390,43 +2473,6 @@ async fn start_stream_message_with_agent_loop(
     let mut reasoning_trace = agent_run.reasoning_trace.clone().unwrap_or_default();
     if let Some(err) = embed_err {
         reasoning_trace.errors.push(err);
-    }
-
-    let _ = app_handle.emit(
-        "stream-message-start",
-        serde_json::json!({
-            "session_id": &session_id,
-            "run_id": agent_run.id,
-            "reasoning_trace": reasoning_trace.clone(),
-            "tool_calls": Vec::<ToolCallResult>::new(),
-        }),
-    );
-
-    // Emit sentence-by-sentence for a more natural streaming experience
-    let sentences = split_into_sentences(&reply);
-    if sentences.is_empty() {
-        // Fallback: emit the full reply as a single chunk
-        let _ = app_handle.emit(
-            "stream-message-chunk",
-            serde_json::json!({
-                "session_id": &session_id,
-                "run_id": agent_run.id,
-                "chunk": reply.clone(),
-            }),
-        );
-    } else {
-        for sentence in sentences {
-            let _ = app_handle.emit(
-                "stream-message-chunk",
-                serde_json::json!({
-                    "session_id": &session_id,
-                    "run_id": agent_run.id,
-                    "chunk": sentence,
-                }),
-            );
-            // Small delay to simulate typing speed
-            tokio::time::sleep(Duration::from_millis(30)).await;
-        }
     }
 
     let assistant_message = ChatMessage {
@@ -3241,6 +3287,7 @@ async fn execute_tool_call(
         audit_store: &audit,
         privacy_engine: &privacy_engine,
         safe_paths: &safe_paths,
+        calendar_ics_paths: &[],
         life_model: None,
         memory_store: None,
         proposal_store: None,

@@ -150,6 +150,7 @@ pub async fn replay_agent_action(
     let privacy_engine = state.privacy_engine.lock().await;
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
+    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
@@ -183,6 +184,7 @@ pub async fn replay_agent_action(
         audit_store: &audit,
         privacy_engine: &privacy_engine,
         safe_paths: &safe_paths,
+        calendar_ics_paths: &calendar_ics_paths,
         life_model: Some(&life_model),
         memory_store: Some(&memory_store),
         proposal_store: proposal_store_guard.as_deref(),

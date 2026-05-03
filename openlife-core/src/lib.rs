@@ -1,6 +1,7 @@
 pub mod a2a;
 pub mod agent;
 pub mod builder;
+pub mod calendar;
 pub mod config;
 pub mod evolution;
 pub mod feedback;
@@ -19,6 +20,7 @@ pub mod reflex_engine;
 pub mod router;
 pub mod scheduler;
 pub mod skills;
+pub mod tasks;
 pub mod tool_manifest;
 pub mod tool_permissions;
 pub mod vectors;

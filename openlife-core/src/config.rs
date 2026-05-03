@@ -168,6 +168,9 @@ pub struct SystemConfig {
     /// Network access policy for web tools
     #[serde(default)]
     pub network_policy: NetworkPolicy,
+    /// ICS calendar file paths for calendar.read tool
+    #[serde(default)]
+    pub calendar_ics_paths: Vec<String>,
 }
 
 impl Default for SystemConfig {
@@ -178,6 +181,7 @@ impl Default for SystemConfig {
             safe_paths: Vec::new(),
             use_agent_loop: None,
             network_policy: NetworkPolicy::default(),
+            calendar_ics_paths: Vec::new(),
         }
     }
 }
