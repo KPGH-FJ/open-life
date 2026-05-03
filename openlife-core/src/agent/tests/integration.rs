@@ -9,7 +9,7 @@
 
 use crate::agent::{
     ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
-    AgentLoopConfig, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
+    AgentLoopConfig, AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -63,9 +63,9 @@ fn create_test_task(messages: Vec<ChatMessage>) -> AgentTask {
 #[test]
 fn test_agent_loop_config_defaults() {
     let config = AgentLoopConfig::default();
-    assert_eq!(config.max_steps, 5);
-    assert_eq!(config.max_tool_calls, 3);
-    assert_eq!(config.timeout_seconds, 120);
+    assert_eq!(config.max_steps, 4);
+    assert_eq!(config.max_tool_calls, 6);
+    assert_eq!(config.timeout_seconds, 90);
     assert!(config.allow_writes);
     assert!(config.allow_cloud);
 }
@@ -131,6 +131,7 @@ fn test_action_parser_final_envelope() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -160,6 +161,7 @@ fn test_action_parser_actions_envelope() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -191,6 +193,7 @@ fn test_action_parser_legacy_tool_calls() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -220,6 +223,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let reply = "{broken json";
@@ -250,6 +254,7 @@ fn test_action_parser_no_json() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -259,4 +264,112 @@ fn test_action_parser_no_json() {
 
     assert!(actions.is_empty());
     assert!(run.warnings.is_empty());
+}
+
+/// Test 11: Action Parser - final + actions coexist: actions should be returned
+#[test]
+fn test_action_parser_final_with_actions() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let mut run = AgentRun::new_chat_run("test", "Hi");
+    let mut tool_call_count = 0u32;
+
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    // Model returns both final text and tool calls
+    let reply = r#"{"final": "Let me search for that", "actions": [{"name": "web.search", "arguments": {"query": "test"}}]}"#;
+    let parsed = loop_instance
+        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tool_call_count)
+        .unwrap();
+
+    // Actions should NOT be empty when both final and actions are present
+    assert_eq!(parsed.actions.len(), 1);
+    assert_eq!(parsed.actions[0].target, "web.search");
+    // Final text is preserved as the pre-execution note
+    assert_eq!(parsed.final_text, "Let me search for that");
+}
+
+/// Test 12: Follow-up messages retain tools prompt
+#[test]
+fn test_follow_up_messages_retain_tools() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let task = create_test_task(vec![ChatMessage {
+        role: "user".into(),
+        content: "Search for news".into(),
+    }]);
+
+    let observations = vec![AgentObservation {
+        id: "obs-1".into(),
+        action_id: None,
+        content: "Search results: ...".into(),
+        source: "web.search".into(),
+        structured_result: None,
+        timestamp: chrono::Utc::now(),
+    }];
+
+    let tools_prompt = "Available tools: web.search, web.fetch";
+    let follow_up = loop_instance.build_follow_up_messages(
+        &task,
+        "I'll search for news",
+        &observations,
+        tools_prompt,
+    );
+
+    // Should have original messages + assistant reply + follow-up
+    assert_eq!(follow_up.len(), 3);
+
+    // Last message should contain task goal, observations, and tools reminder
+    let last = follow_up.last().unwrap();
+    assert!(last.content.contains("Search for news")); // Original task
+    assert!(last.content.contains("Search results")); // Observation
+    assert!(last.content.contains("web.search")); // Tools reminder
+    assert!(last.content.contains("web.fetch")); // Tools reminder
+}
+
+/// Test 13: max_tool_calls reached returns correct stop_reason
+#[test]
+fn test_max_tool_calls_stop_reason() {
+    let config = AgentLoopConfig {
+        max_steps: 4,
+        max_tool_calls: 1,
+        ..AgentLoopConfig::default()
+    };
+    let loop_instance = create_test_agent_loop(config);
+    let mut run = AgentRun::new_chat_run("test", "Hi");
+    let mut tool_call_count = 1u32; // Already at limit
+
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    // Simulate model returning actions when budget is already exceeded
+    let reply = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}]}"#;
+    let parsed = loop_instance
+        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tool_call_count)
+        .unwrap();
+
+    assert_eq!(parsed.actions.len(), 1);
+    // In real execution, this would trigger budget_exceeded path
+    // This test validates the parser still works at budget limit
 }

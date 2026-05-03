@@ -11,6 +11,10 @@ import {
   Trash2,
   Download,
   Play,
+  Wrench,
+  Eye,
+  Zap,
+  ListOrdered,
 } from "lucide-react";
 
 function statusIcon(status: string) {
@@ -166,6 +170,52 @@ export default function AgentRunDetail() {
             </div>
           </div>
 
+          {/* Stats Summary */}
+          <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="bg-stone-50 rounded-lg p-3 text-center">
+              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                <ListOrdered size={14} />
+                <span>推理步数</span>
+              </div>
+              <div className="text-xl font-bold text-stone-900">{run.stepCount ?? 0}</div>
+            </div>
+            <div className="bg-stone-50 rounded-lg p-3 text-center">
+              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                <Wrench size={14} />
+                <span>工具调用</span>
+              </div>
+              <div className="text-xl font-bold text-stone-900">{run.toolCallCount ?? 0}</div>
+            </div>
+            <div className="bg-stone-50 rounded-lg p-3 text-center">
+              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                <Zap size={14} />
+                <span>Actions</span>
+              </div>
+              <div className="text-xl font-bold text-stone-900">{run.actions.length}</div>
+            </div>
+            <div className="bg-stone-50 rounded-lg p-3 text-center">
+              <div className="flex items-center justify-center gap-1 text-stone-500 text-xs mb-1">
+                <Eye size={14} />
+                <span>Observations</span>
+              </div>
+              <div className="text-xl font-bold text-stone-900">{run.observations.length}</div>
+            </div>
+          </div>
+
+          {/* Duration */}
+          {run.finishedAt && (
+            <div className="mb-6 text-xs text-stone-500">
+              持续时间:{" "}
+              {(() => {
+                const start = new Date(run.startedAt).getTime();
+                const end = new Date(run.finishedAt).getTime();
+                const diff = Math.round((end - start) / 1000);
+                if (diff < 60) return `${diff} 秒`;
+                return `${Math.floor(diff / 60)} 分 ${diff % 60} 秒`;
+              })()}
+            </div>
+          )}
+
           {run.userInput && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入</h3>
@@ -241,6 +291,61 @@ export default function AgentRunDetail() {
                     {run.modelRoute.providerHealthIsEstimated ? "estimated / gray" : "probed"}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Status Timeline */}
+          {run.statusUpdates && run.statusUpdates.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">
+                状态时间线 ({run.statusUpdates.length})
+              </h3>
+              <div className="space-y-1">
+                {run.statusUpdates.map((update, idx) => (
+                  <div
+                    key={idx}
+                    className="flex items-start gap-3 text-sm py-1.5 px-3 rounded-lg hover:bg-stone-50 transition"
+                  >
+                    <div className="flex-shrink-0 w-16 text-xs text-stone-400">
+                      {new Date(update.timestamp).toLocaleTimeString()}
+                    </div>
+                    <div className="flex-shrink-0">
+                      {update.phase === "thinking" && (
+                        <Activity size={14} className="text-blue-500" />
+                      )}
+                      {update.phase === "executing_tool" && (
+                        <Wrench size={14} className="text-amber-500" />
+                      )}
+                      {update.phase === "observing" && <Eye size={14} className="text-green-500" />}
+                      {update.phase === "generating" && (
+                        <Zap size={14} className="text-purple-500" />
+                      )}
+                      {update.phase === "completed" && (
+                        <CheckCircle size={14} className="text-emerald-500" />
+                      )}
+                      {update.phase === "error" && <XCircle size={14} className="text-red-500" />}
+                      {![
+                        "thinking",
+                        "executing_tool",
+                        "observing",
+                        "generating",
+                        "completed",
+                        "error",
+                      ].includes(update.phase) && <Clock size={14} className="text-stone-400" />}
+                    </div>
+                    <div className="flex-1">
+                      <span className="text-xs font-medium text-stone-600">{update.phase}</span>
+                      <span className="text-stone-700 ml-2">{update.message}</span>
+                      {(update.stepIndex !== undefined || update.toolCallIndex !== undefined) && (
+                        <span className="text-xs text-stone-400 ml-2">
+                          {update.stepIndex !== undefined && `step ${update.stepIndex}`}
+                          {update.toolCallIndex !== undefined && ` · tool ${update.toolCallIndex}`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}

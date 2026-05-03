@@ -120,6 +120,40 @@ fn default_generation_timeout_ms() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NetworkPolicy {
+    #[serde(default = "default_network_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_network_default_decision")]
+    pub default_decision: String,
+    #[serde(default)]
+    pub domain_allowlist: Vec<String>,
+    #[serde(default)]
+    pub domain_denylist: Vec<String>,
+    #[serde(default)]
+    pub tool_overrides: std::collections::HashMap<String, String>,
+}
+
+impl Default for NetworkPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: default_network_enabled(),
+            default_decision: default_network_default_decision(),
+            domain_allowlist: Vec::new(),
+            domain_denylist: Vec::new(),
+            tool_overrides: std::collections::HashMap::new(),
+        }
+    }
+}
+
+fn default_network_enabled() -> bool {
+    true
+}
+
+fn default_network_default_decision() -> String {
+    "ask".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     #[serde(default = "default_ollama_cache_ttl_seconds")]
     pub ollama_cache_ttl_seconds: u64,
@@ -131,6 +165,9 @@ pub struct SystemConfig {
     /// Enable AgentLoop for chat execution (dual-track beta)
     #[serde(default)]
     pub use_agent_loop: Option<bool>,
+    /// Network access policy for web tools
+    #[serde(default)]
+    pub network_policy: NetworkPolicy,
 }
 
 impl Default for SystemConfig {
@@ -140,6 +177,7 @@ impl Default for SystemConfig {
             memory_search_top_k: default_memory_search_top_k(),
             safe_paths: Vec::new(),
             use_agent_loop: None,
+            network_policy: NetworkPolicy::default(),
         }
     }
 }

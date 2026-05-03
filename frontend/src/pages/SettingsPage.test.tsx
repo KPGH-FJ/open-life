@@ -38,6 +38,11 @@ describe("SettingsPage", () => {
       </MemoryRouter>
     );
 
+  const clickTab = async (tabName: string) => {
+    const tab = await screen.findByRole("button", { name: tabName });
+    fireEvent.click(tab);
+  };
+
   it("renders trial console title and checklist", async () => {
     renderSettings();
 
@@ -48,6 +53,8 @@ describe("SettingsPage", () => {
     expect(screen.getByText(/试用路径 Checklist/)).toBeInTheDocument();
     expect(screen.getByText(/试用闭环定义/)).toBeInTheDocument();
     expect(screen.getByText(/核心链路已就绪/)).toBeInTheDocument();
+
+    await clickTab("数据");
     expect(screen.getByText(/导出全部数据/)).toBeInTheDocument();
   });
 
@@ -127,6 +134,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
+    await clickTab("数据");
     const exportButton = await screen.findByText("导出全部数据");
     fireEvent.click(exportButton);
 
@@ -139,6 +147,7 @@ describe("SettingsPage", () => {
   it("tests the current DeepSeek form config instead of only saved config", async () => {
     renderSettings();
 
+    await clickTab("模型");
     const keyInput = await screen.findByPlaceholderText("sk-...");
     fireEvent.change(keyInput, { target: { value: "sk-deepseek-form" } });
     fireEvent.click(screen.getByRole("button", { name: "测试连接" }));
@@ -180,6 +189,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
+    await clickTab("模型");
     expect(await screen.findByText(/当前选择的是 DeepSeek 推理模型/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "一键改为 deepseek-chat" }));
     expect(screen.getByDisplayValue("deepseek-chat")).toBeInTheDocument();
@@ -188,6 +198,7 @@ describe("SettingsPage", () => {
   it("explains DeepSeek embedding fallback in settings", async () => {
     renderSettings();
 
+    await clickTab("模型");
     expect(await screen.findByText(/DeepSeek 主要用于聊天/)).toBeInTheDocument();
     expect(screen.getByText(/请先保存当前设置，再去恢复控制台重建向量索引/)).toBeInTheDocument();
   });
@@ -500,6 +511,7 @@ describe("SettingsPage", () => {
 
     renderSettings();
 
+    await clickTab("数据");
     const importButton = await screen.findByRole("button", { name: "导入全部数据" });
     expect(importButton).toBeDisabled();
   });

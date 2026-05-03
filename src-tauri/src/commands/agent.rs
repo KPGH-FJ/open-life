@@ -187,6 +187,7 @@ pub async fn replay_agent_action(
         memory_store: Some(&memory_store),
         proposal_store: proposal_store_guard.as_deref(),
         agent_run_store: agent_run_store_guard.as_deref(),
+        network_policy: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -239,7 +240,13 @@ pub async fn replay_agent_action(
         }
     }
 
-    // 8. Update run in store
+    // 8. Update run status if no more pending actions
+    let still_pending = run.actions.iter().any(|a| a.status == "needs_confirmation");
+    if !still_pending && run.status == openlife_core::agent::AgentRunStatus::WaitingPermission {
+        run.status = openlife_core::agent::AgentRunStatus::Completed;
+    }
+
+    // 9. Update run in store
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store.update_run(&run).map_err(|e| e.to_string())?;

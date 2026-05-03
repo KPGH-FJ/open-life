@@ -9,12 +9,16 @@ import {
   ChevronUp,
   Shield,
   Clock,
+  ShieldCheck,
+  RotateCcw,
+  Info,
 } from "lucide-react";
 import type { ToolCallResult } from "../tauri";
 
 interface Props {
   call: ToolCallResult;
   onExecute?: () => Promise<void>;
+  onReplay?: () => Promise<void>;
 }
 
 function StatusBadge({ call }: { call: ToolCallResult }) {
@@ -56,9 +60,47 @@ function StatusBadge({ call }: { call: ToolCallResult }) {
   );
 }
 
-export default function ToolCallCard({ call, onExecute }: Props) {
-  const isHighRisk = call.permission_level === "high" || call.requires_confirmation;
+function RiskBadge({ level }: { level?: string }) {
+  if (level === "high") {
+    return (
+      <span className="inline-flex items-center gap-1 text-red-600 text-xs bg-red-50 px-1.5 py-0.5 rounded">
+        <AlertTriangle size={12} /> 高风险
+      </span>
+    );
+  }
+  if (level === "medium") {
+    return (
+      <span className="inline-flex items-center gap-1 text-amber-600 text-xs bg-amber-50 px-1.5 py-0.5 rounded">
+        <ShieldCheck size={12} /> 中风险
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-green-600 text-xs bg-green-50 px-1.5 py-0.5 rounded">
+      <ShieldCheck size={12} /> 低风险
+    </span>
+  );
+}
+
+function PermissionLabel({ decision }: { decision?: string }) {
+  const labels: Record<string, string> = {
+    allow: "允许",
+    deny: "拒绝",
+    ask_every_time: "每次询问",
+    allow_once: "允许一次",
+  };
+  if (!decision) return null;
+  return (
+    <span className="text-xs text-gray-500">
+      权限: {labels[decision] || decision}
+      {decision === "allow_once" && <span className="text-amber-600 ml-1">(一次性)</span>}
+    </span>
+  );
+}
+
+export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
   const [executing, setExecuting] = useState(false);
+  const [replaying, setReplaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
 
@@ -68,6 +110,8 @@ export default function ToolCallCard({ call, onExecute }: Props) {
     call.requires_confirmation ||
     call.permission_decision === "deny" ||
     call.permission_decision === "ask_every_time";
+
+  const isFailed = !call.success && (call.status === "error" || call.error);
 
   const handleExecute = async () => {
     if (!onExecute || executing) return;
@@ -87,41 +131,73 @@ export default function ToolCallCard({ call, onExecute }: Props) {
     }
   };
 
+  const handleReplay = async () => {
+    if (!onReplay || replaying) return;
+    setReplaying(true);
+    setError(null);
+    try {
+      await onReplay();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReplaying(false);
+    }
+  };
+
   const openReviewCenter = () => {
     window.location.hash = "/review";
   };
 
+  // Result preview (truncated)
+  const resultPreview =
+    call.success && call.output
+      ? call.output.slice(0, 120) + (call.output.length > 120 ? "..." : "")
+      : null;
+
   return (
     <div className="border rounded-lg p-3 bg-white/60 text-sm space-y-2">
-      <div className="flex items-center gap-2 font-medium">
-        <Wrench size={14} className="text-gray-500" />
-        <span>{call.name}</span>
+      {/* Header row */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <Wrench size={14} className="text-gray-500 flex-shrink-0" />
+        <span className="font-medium">{call.name}</span>
         <StatusBadge call={call} />
-        {isHighRisk && (
-          <span className="ml-auto inline-flex items-center gap-1 text-orange-600 text-xs bg-orange-50 px-1.5 py-0.5 rounded">
-            <AlertTriangle size={12} /> 高风险
-          </span>
-        )}
+        <div className="ml-auto">
+          <RiskBadge
+            level={call.permission_level || (call.requires_confirmation ? "high" : "low")}
+          />
+        </div>
       </div>
 
-      {/* Permission decision line */}
-      {call.permission_decision && (
-        <div className="text-xs text-gray-500">
-          权限策略: {call.permission_decision}
-          {call.permission_decision === "allow_once" && (
-            <span className="text-amber-600 ml-1">(一次性授权)</span>
-          )}
+      {/* Permission decision */}
+      {call.permission_decision && <PermissionLabel decision={call.permission_decision} />}
+
+      {/* Result preview (when not expanded) */}
+      {resultPreview && !expanded && (
+        <div className="text-xs text-gray-600 bg-green-50/50 rounded px-2 py-1.5 border border-green-100">
+          <span className="font-medium text-green-700">结果: </span>
+          <span className="line-clamp-2">{resultPreview}</span>
+        </div>
+      )}
+
+      {/* Error preview (when not expanded) */}
+      {isFailed && !expanded && call.error && (
+        <div className="text-xs text-red-600 bg-red-50 rounded px-2 py-1.5 border border-red-100">
+          <span className="font-medium">错误: </span>
+          <span className="line-clamp-2">{call.error}</span>
         </div>
       )}
 
       {/* Blocked / Needs Confirmation state */}
       {isBlocked && (
         <div className="rounded-md bg-orange-50 border border-orange-100 p-3 space-y-2">
-          <p className="text-xs text-orange-800">
-            {call.status === "blocked" || call.permission_decision === "deny"
-              ? "该工具调用已被权限策略阻断。"
-              : "该工具调用需要授权确认。"}
-          </p>
+          <div className="flex items-start gap-2">
+            <Info size={14} className="text-orange-600 mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-orange-800">
+              {call.status === "blocked" || call.permission_decision === "deny"
+                ? "该工具调用已被权限策略阻断。"
+                : "该工具调用需要授权确认。"}
+            </p>
+          </div>
           {call.privacy_warnings && call.privacy_warnings.length > 0 && (
             <div className="text-xs text-orange-900 bg-white/80 rounded p-2">
               <div className="font-medium mb-1">隐私提醒:</div>
@@ -141,7 +217,7 @@ export default function ToolCallCard({ call, onExecute }: Props) {
             </div>
           )}
           {error && <div className="text-xs text-red-600 bg-red-50 rounded p-2">{error}</div>}
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             {call.permission_decision !== "deny" && (
               <button
                 onClick={handleExecute}
@@ -161,7 +237,21 @@ export default function ToolCallCard({ call, onExecute }: Props) {
         </div>
       )}
 
-      {/* Expandable details for all states */}
+      {/* Replay button for failed tools */}
+      {isFailed && !isBlocked && onReplay && (
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleReplay}
+            disabled={replaying}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-gray-300 text-gray-700 text-xs hover:bg-gray-50 disabled:opacity-50"
+          >
+            <RotateCcw size={12} />
+            {replaying ? "重试中..." : "重试"}
+          </button>
+        </div>
+      )}
+
+      {/* Expandable details */}
       <button
         onClick={() => setExpanded(!expanded)}
         className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
@@ -190,20 +280,20 @@ export default function ToolCallCard({ call, onExecute }: Props) {
           )}
           {call.success && call.output && (
             <div className="text-xs text-gray-700 bg-green-50 rounded p-2">
-              <div className="font-medium mb-1">结果:</div>
+              <div className="font-medium mb-1">完整结果:</div>
               <pre className="whitespace-pre-wrap break-all">{call.output}</pre>
             </div>
           )}
           {call.error && (
             <div className="text-xs text-red-700 bg-red-50 rounded p-2">
-              <div className="font-medium mb-1">错误:</div>
-              {call.error}
+              <div className="font-medium mb-1">错误详情:</div>
+              <pre className="whitespace-pre-wrap break-all">{call.error}</pre>
             </div>
           )}
-          {call.action_id && (
-            <div className="text-xs text-gray-400">Action ID: {call.action_id}</div>
-          )}
-          {call.run_id && <div className="text-xs text-gray-400">Run ID: {call.run_id}</div>}
+          <div className="flex flex-wrap gap-x-3 text-xs text-gray-400">
+            {call.action_id && <span>Action ID: {call.action_id}</span>}
+            {call.run_id && <span>Run ID: {call.run_id}</span>}
+          </div>
         </div>
       )}
     </div>

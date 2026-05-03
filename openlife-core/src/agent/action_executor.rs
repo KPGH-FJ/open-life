@@ -74,6 +74,7 @@ pub struct ActionExecutionContext<'a> {
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
     pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
+    pub network_policy: Option<&'a crate::config::NetworkPolicy>,
 }
 
 /// Centralized action executor for all agent actions.
@@ -495,8 +496,30 @@ impl ActionExecutor {
                 let manifests = ctx.registry.list_manifests();
                 let tools: Vec<_> = manifests
                     .into_iter()
-                    .filter(|m| m.enabled && !m.declarative_only)
                     .map(|m| {
+                        // Determine execution status
+                        let execution_status = if !m.enabled {
+                            "disabled"
+                        } else if m.declarative_only {
+                            "declarative_only"
+                        } else if m.requires_confirmation
+                            || m.risk_level == "high"
+                            || m.capabilities.iter().any(|c| {
+                                matches!(
+                                    c.as_str(),
+                                    "write"
+                                        | "filesystem"
+                                        | "memory"
+                                        | "lifemodel"
+                                        | "external_side_effect"
+                                )
+                            })
+                        {
+                            "needs_permission"
+                        } else {
+                            "executable"
+                        };
+
                         serde_json::json!({
                             "name": m.name,
                             "description": m.description,
@@ -504,6 +527,10 @@ impl ActionExecutor {
                             "action_type": m.action_type,
                             "risk_level": m.risk_level,
                             "capabilities": m.capabilities,
+                            "execution_status": execution_status,
+                            "enabled": m.enabled,
+                            "declarative_only": m.declarative_only,
+                            "requires_confirmation": m.requires_confirmation,
                         })
                     })
                     .collect();
@@ -640,6 +667,67 @@ impl ActionExecutor {
         ctx: &ActionExecutionContext<'_>,
         request: &AgentActionRequest,
     ) -> Result<ToolCallInternalResult> {
+        // Check network policy for web tools
+        if matches!(tool_name, "web.fetch" | "web.search") {
+            if let Some(policy) = ctx.network_policy {
+                if !policy.enabled {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(
+                            "Network tools are disabled by policy. Enable network access in Settings to use web tools.".to_string(),
+                        ),
+                    });
+                }
+
+                // Check tool override
+                if let Some(override_decision) = policy.tool_overrides.get(tool_name) {
+                    if override_decision == "deny" {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!(
+                                "Tool '{}' is denied by network policy override",
+                                tool_name
+                            )),
+                        });
+                    }
+                }
+
+                // For web.fetch, check domain allowlist/denylist
+                if tool_name == "web.fetch" {
+                    if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                        if let Some(host) = extract_host_from_url(url) {
+                            // Check denylist first
+                            if policy.domain_denylist.iter().any(|d| host.ends_with(d)) {
+                                return Ok(ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!(
+                                        "Domain '{}' is in the network denylist",
+                                        host
+                                    )),
+                                });
+                            }
+                            // If allowlist is not empty, only allow listed domains
+                            if !policy.domain_allowlist.is_empty()
+                                && !policy.domain_allowlist.iter().any(|d| host.ends_with(d))
+                            {
+                                return Ok(ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!(
+                                        "Domain '{}' is not in the network allowlist",
+                                        host
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         match tool_name {
             "file.read" => {
                 let path = args
@@ -1392,6 +1480,14 @@ fn search_web_blocking(query: &str, max_results: usize) -> Result<ToolCallIntern
     }
 }
 
+fn extract_host_from_url(url: &str) -> Option<String> {
+    url.split("//")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .and_then(|s| s.split(':').next())
+        .map(|s| s.to_lowercase())
+}
+
 fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1786,6 +1882,7 @@ mod tests {
             memory_store: None,
             proposal_store: None,
             agent_run_store: None,
+            network_policy: None,
         }
     }
 
@@ -2173,6 +2270,29 @@ mod tests {
         assert_eq!(result.status, ActionExecutionStatus::Succeeded);
         let output = result.observation.content;
         assert!(output.contains("tools"));
+
+        // Verify execution_status classification is present
+        let json: serde_json::Value = serde_json::from_str(&output).unwrap();
+        let tools = json["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+
+        // Check that at least one tool has execution_status field
+        let first_tool = &tools[0];
+        assert!(first_tool["execution_status"].is_string());
+        let status = first_tool["execution_status"].as_str().unwrap();
+        assert!(
+            matches!(
+                status,
+                "executable" | "needs_permission" | "declarative_only" | "disabled"
+            ),
+            "unexpected execution_status: {}",
+            status
+        );
+
+        // Verify enabled and declarative_only fields are present
+        assert!(first_tool["enabled"].is_boolean());
+        assert!(first_tool["declarative_only"].is_boolean());
+        assert!(first_tool["requires_confirmation"].is_boolean());
     }
 
     #[test]
@@ -2941,5 +3061,103 @@ mod tests {
         let proposals = proposal_store.list_pending_proposals(10).unwrap();
         assert_eq!(proposals.len(), 1);
         assert_eq!(proposals[0].id, proposal_id.unwrap());
+    }
+
+    #[test]
+    fn network_policy_disabled_blocks_web_tools() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let policy = crate::config::NetworkPolicy {
+            enabled: false,
+            ..Default::default()
+        };
+        ctx.network_policy = Some(&policy);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "web.fetch".into(),
+                    input: serde_json::json!({"arguments": {"url": "https://example.com"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result.observation.content.contains("disabled by policy"));
+    }
+
+    #[test]
+    fn network_policy_domain_denylist_blocks_url() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let policy = crate::config::NetworkPolicy {
+            enabled: true,
+            domain_denylist: vec!["evil.com".to_string()],
+            ..Default::default()
+        };
+        ctx.network_policy = Some(&policy);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "web.fetch".into(),
+                    input: serde_json::json!({"arguments": {"url": "https://evil.com/page"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result.observation.content.contains("denylist"));
+    }
+
+    #[test]
+    fn network_policy_domain_allowlist_blocks_unlisted() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let policy = crate::config::NetworkPolicy {
+            enabled: true,
+            domain_allowlist: vec!["github.com".to_string()],
+            ..Default::default()
+        };
+        ctx.network_policy = Some(&policy);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "web.fetch".into(),
+                    input: serde_json::json!({"arguments": {"url": "https://example.com"}}),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result
+            .observation
+            .content
+            .contains("not in the network allowlist"));
     }
 }

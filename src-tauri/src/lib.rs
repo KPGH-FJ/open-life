@@ -619,6 +619,7 @@ fn try_prepare_tool_calls(
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
+        network_policy: None,
     };
 
     let mut results = Vec::new();
@@ -1506,6 +1507,7 @@ async fn send_message(
     session_id: String,
     messages: Vec<ChatMessage>,
     state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -1655,6 +1657,7 @@ async fn send_message(
             auto_checkin_msg,
             layer,
             state,
+            app_handle,
         )
         .await;
     }
@@ -1872,6 +1875,7 @@ async fn send_message_with_agent_loop(
     auto_checkin_msg: Option<String>,
     layer: Layer,
     state: State<'_, Arc<AppState>>,
+    app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
@@ -1882,9 +1886,9 @@ async fn send_message_with_agent_loop(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: 5,
-        max_tool_calls: 3,
-        timeout_seconds: 120,
+        max_steps: 4,
+        max_tool_calls: 6,
+        timeout_seconds: 90,
         allow_writes: true,
         allow_cloud: true,
     };
@@ -1905,6 +1909,8 @@ async fn send_message_with_agent_loop(
         messages: desensitized_messages.clone(),
         layer,
     };
+
+    let network_policy = cfg.system.network_policy.clone();
 
     let loop_result = {
         let (reg, audit) = state.get_mcp_state().await;
@@ -1930,6 +1936,7 @@ async fn send_message_with_agent_loop(
             memory_store: Some(&memory_store),
             proposal_store: proposal_store_guard.as_deref(),
             agent_run_store: agent_run_store_guard.as_deref(),
+            network_policy: Some(&network_policy),
         };
 
         agent_loop
@@ -1944,8 +1951,25 @@ async fn send_message_with_agent_loop(
             .await
     };
 
-    let (mut reply, mut agent_run) = match loop_result {
-        Ok(result) => (result.final_response, result.run),
+    let (mut reply, mut agent_run, _status_updates) = match loop_result {
+        Ok(result) => {
+            // Emit AgentLoop status updates as Tauri events
+            for update in &result.status_updates {
+                let _ = app_handle.emit(
+                    "agent-status-update",
+                    serde_json::json!({
+                        "session_id": &session_id,
+                        "run_id": &result.run.id,
+                        "phase": update.phase.to_string(),
+                        "message": &update.message,
+                        "step_index": update.step_index,
+                        "tool_call_index": update.tool_call_index,
+                        "timestamp": update.timestamp,
+                    }),
+                );
+            }
+            (result.final_response, result.run, result.status_updates)
+        }
         Err(e) => {
             eprintln!(
                 "[warn] AgentLoop failed in send_message, falling back to legacy: {}",
@@ -1992,6 +2016,10 @@ async fn send_message_with_agent_loop(
             });
         }
     };
+
+    // Store status_updates in agent_run for persistence
+    // (This requires adding a field to AgentRun, which we'll skip for now
+    // and just use the Tauri events for real-time UI updates)
 
     // Apply privacy reconstruction
     reply = privacy_engine.reconstruct(&reply, &privacy_map);
@@ -2233,9 +2261,9 @@ async fn start_stream_message_with_agent_loop(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: 5,
-        max_tool_calls: 3,
-        timeout_seconds: 120,
+        max_steps: 4,
+        max_tool_calls: 6,
+        timeout_seconds: 90,
         allow_writes: true,
         allow_cloud: true,
     };
@@ -2256,6 +2284,8 @@ async fn start_stream_message_with_agent_loop(
         messages: desensitized_messages.clone(),
         layer: _layer,
     };
+
+    let network_policy = cfg.system.network_policy.clone();
 
     let loop_result = {
         let (reg, audit) = state.get_mcp_state().await;
@@ -2281,6 +2311,7 @@ async fn start_stream_message_with_agent_loop(
             memory_store: Some(&memory_store),
             proposal_store: proposal_store_guard.as_deref(),
             agent_run_store: agent_run_store_guard.as_deref(),
+            network_policy: Some(&network_policy),
         };
 
         agent_loop
@@ -3214,6 +3245,7 @@ async fn execute_tool_call(
         memory_store: None,
         proposal_store: None,
         agent_run_store: agent_run_store_guard.as_deref(),
+        network_policy: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {

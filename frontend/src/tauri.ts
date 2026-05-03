@@ -88,7 +88,16 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     safe_paths?: string[];
+    network_policy?: NetworkPolicy;
   };
+}
+
+export interface NetworkPolicy {
+  enabled?: boolean;
+  default_decision?: "ask" | "allow" | "deny";
+  domain_allowlist?: string[];
+  domain_denylist?: string[];
+  tool_overrides?: Record<string, "ask" | "allow" | "deny">;
 }
 
 export async function getConfig(): Promise<AppConfig> {
@@ -1226,6 +1235,14 @@ export interface AgentObservation {
   timestamp: string;
 }
 
+export interface AgentStatusUpdate {
+  phase: string;
+  message: string;
+  stepIndex: number;
+  toolCallIndex?: number;
+  timestamp: string;
+}
+
 export interface AgentRunError {
   message: string;
   phase: string;
@@ -1236,7 +1253,7 @@ export interface AgentRun {
   id: string;
   taskId: string;
   sessionId?: string;
-  status: "running" | "completed" | "failed" | "cancelled";
+  status: "running" | "waiting_permission" | "completed" | "failed" | "cancelled";
   kind:
     | "conversation"
     | "builder"
@@ -1258,6 +1275,9 @@ export interface AgentRun {
   generatedProposals: string[];
   actions: AgentAction[];
   observations: AgentObservation[];
+  statusUpdates?: AgentStatusUpdate[];
+  stepCount?: number;
+  toolCallCount?: number;
   warnings?: string[];
   deletedAt?: string;
   deleteReason?: string;

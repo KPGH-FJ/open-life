@@ -97,6 +97,7 @@ pub struct AgentTask {
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Running,
+    WaitingPermission,
     Completed,
     Failed,
     Cancelled,
@@ -106,11 +107,59 @@ impl std::fmt::Display for AgentRunStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AgentRunStatus::Running => write!(f, "running"),
+            AgentRunStatus::WaitingPermission => write!(f, "waiting_permission"),
             AgentRunStatus::Completed => write!(f, "completed"),
             AgentRunStatus::Failed => write!(f, "failed"),
             AgentRunStatus::Cancelled => write!(f, "cancelled"),
         }
     }
+}
+
+/// Phase of the AgentLoop execution for real-time status streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLoopPhase {
+    /// Understanding the task and planning next step
+    Thinking,
+    /// Model has decided to use a tool, preparing the call
+    PlanningTool,
+    /// Tool is being executed
+    ExecutingTool,
+    /// Tool result received, processing observation
+    Observing,
+    /// Waiting for user permission confirmation
+    WaitingPermission,
+    /// Generating the final answer
+    GeneratingFinal,
+    /// Execution completed successfully
+    Completed,
+    /// Execution failed
+    Failed,
+}
+
+impl std::fmt::Display for AgentLoopPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentLoopPhase::Thinking => write!(f, "thinking"),
+            AgentLoopPhase::PlanningTool => write!(f, "planning_tool"),
+            AgentLoopPhase::ExecutingTool => write!(f, "executing_tool"),
+            AgentLoopPhase::Observing => write!(f, "observing"),
+            AgentLoopPhase::WaitingPermission => write!(f, "waiting_permission"),
+            AgentLoopPhase::GeneratingFinal => write!(f, "generating_final"),
+            AgentLoopPhase::Completed => write!(f, "completed"),
+            AgentLoopPhase::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// A single status update emitted during AgentLoop execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentLoopStatusUpdate {
+    pub phase: AgentLoopPhase,
+    pub message: String,
+    pub step_index: u32,
+    pub tool_call_index: Option<u32>,
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Trace of which model was chosen and why.
@@ -252,6 +301,15 @@ pub struct AgentRun {
     /// Warnings generated during execution (e.g., parse warnings, budget warnings)
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Status updates emitted during AgentLoop execution
+    #[serde(default)]
+    pub status_updates: Vec<AgentLoopStatusUpdate>,
+    /// Number of steps executed
+    #[serde(default)]
+    pub step_count: u32,
+    /// Number of tool calls made
+    #[serde(default)]
+    pub tool_call_count: u32,
     pub deleted_at: Option<DateTime<Utc>>,
     pub delete_reason: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -278,6 +336,9 @@ impl AgentRun {
             reasoning_strategy: None,
             reasoning_trace: None,
             warnings: Vec::new(),
+            status_updates: Vec::new(),
+            step_count: 0,
+            tool_call_count: 0,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -304,6 +365,9 @@ impl AgentRun {
             reasoning_strategy: None,
             reasoning_trace: None,
             warnings: Vec::new(),
+            status_updates: Vec::new(),
+            step_count: 0,
+            tool_call_count: 0,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -330,6 +394,9 @@ impl AgentRun {
             reasoning_strategy: None,
             reasoning_trace: None,
             warnings: Vec::new(),
+            status_updates: Vec::new(),
+            step_count: 0,
+            tool_call_count: 0,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -356,6 +423,9 @@ impl AgentRun {
             reasoning_strategy: None,
             reasoning_trace: None,
             warnings: Vec::new(),
+            status_updates: Vec::new(),
+            step_count: 0,
+            tool_call_count: 0,
             deleted_at: None,
             delete_reason: None,
             started_at: now,

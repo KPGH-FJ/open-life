@@ -25,9 +25,9 @@ pub struct AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            max_steps: 5,
-            max_tool_calls: 3,
-            timeout_seconds: 120,
+            max_steps: 4,
+            max_tool_calls: 6,
+            timeout_seconds: 90,
             allow_writes: true,
             allow_cloud: true,
         }
@@ -42,6 +42,7 @@ pub struct AgentLoopResult {
     pub stop_reason: String,
     pub tool_call_count: u32,
     pub step_count: u32,
+    pub status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate>,
 }
 
 /// Result of a single step in the agent loop.
@@ -52,6 +53,7 @@ struct StepResult {
     pub should_continue: bool,
     pub tool_call_count_delta: u32,
     pub observations: Vec<AgentObservation>,
+    pub status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate>,
 }
 
 /// Context for executing a single step of the agent loop.
@@ -94,6 +96,23 @@ impl AgentLoop {
         }
     }
 
+    fn emit_status(
+        &self,
+        updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+        phase: crate::agent::types::AgentLoopPhase,
+        message: impl Into<String>,
+        step_index: u32,
+        tool_call_index: Option<u32>,
+    ) {
+        updates.push(crate::agent::types::AgentLoopStatusUpdate {
+            phase,
+            message: message.into(),
+            step_index,
+            tool_call_index,
+            timestamp: chrono::Utc::now(),
+        });
+    }
+
     /// Run the iterative agent loop for a given task.
     /// Supports multi-step ReAct: generate -> parse tools -> execute -> observe -> repeat.
     pub async fn run(
@@ -113,9 +132,10 @@ impl AgentLoop {
         let mut tool_call_count: u32 = 0;
         let mut final_response = String::new();
         let mut current_task = task.clone();
-        let mut current_tools_prompt = tools_prompt.to_string();
+        let current_tools_prompt = tools_prompt.to_string();
         let current_memory_context = memory_context;
         let current_privacy_engine = privacy_engine;
+        let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
         // Set reasoning strategy
         run.reasoning_strategy = Some(if task.layer == Layer::L3 {
@@ -128,6 +148,18 @@ impl AgentLoop {
         let mut stop_reason = String::new();
 
         loop {
+            // Emit thinking status at start of each step
+            self.emit_status(
+                &mut status_updates,
+                crate::agent::types::AgentLoopPhase::Thinking,
+                format!(
+                    "Step {}: analyzing task and planning next action",
+                    step_count + 1
+                ),
+                step_count,
+                None,
+            );
+
             // Check step budget
             if step_count >= self.config.max_steps {
                 stop_reason = "max_steps_reached".into();
@@ -182,6 +214,7 @@ impl AgentLoop {
             tool_call_count += step_result.tool_call_count_delta;
             final_response = step_result.final_response;
             stop_reason = step_result.stop_reason;
+            status_updates.extend(step_result.status_updates);
 
             if !step_result.should_continue {
                 break;
@@ -192,12 +225,33 @@ impl AgentLoop {
                 &current_task,
                 &final_response,
                 &step_result.observations,
+                &current_tools_prompt,
             );
             current_task = AgentTask {
                 messages: follow_up_messages,
                 ..current_task.clone()
             };
-            current_tools_prompt.clear();
+            // Keep tools_prompt for next iteration so the model retains tool awareness
+            // current_tools_prompt.clear(); // REMOVED: was causing step 2+ to lose tools
+        }
+
+        // Emit final status
+        if run.status == AgentRunStatus::Failed {
+            self.emit_status(
+                &mut status_updates,
+                crate::agent::types::AgentLoopPhase::Failed,
+                format!("Execution failed: {}", stop_reason),
+                step_count,
+                None,
+            );
+        } else {
+            self.emit_status(
+                &mut status_updates,
+                crate::agent::types::AgentLoopPhase::Completed,
+                format!("Execution completed: {}", stop_reason),
+                step_count,
+                None,
+            );
         }
 
         if run.status != AgentRunStatus::Failed {
@@ -212,11 +266,14 @@ impl AgentLoop {
             stop_reason,
             tool_call_count,
             step_count,
+            status_updates,
         ))
     }
 
     /// Execute a single step of the agent loop.
     async fn run_single_step(&self, mut ctx: StepContext<'_>) -> Result<StepResult> {
+        let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
+
         // Generate model response
         let generated = self
             .generate_response(
@@ -251,33 +308,60 @@ impl AgentLoop {
 
                 if tool_actions.is_empty() {
                     // No tool calls - this is the final answer
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::GeneratingFinal,
+                        "No tools needed, generating final answer",
+                        0,
+                        None,
+                    );
                     return Ok(StepResult {
                         stop_reason: "no_tools".into(),
                         final_response: final_text,
                         should_continue: false,
                         tool_call_count_delta: 0,
                         observations: vec![],
+                        status_updates,
                     });
                 }
+
+                // Model wants to use tools
+                self.emit_status(
+                    &mut status_updates,
+                    crate::agent::types::AgentLoopPhase::PlanningTool,
+                    format!("Planning to execute {} tool(s)", tool_actions.len()),
+                    0,
+                    None,
+                );
 
                 // Execute tools and build observations
                 let mut observations = Vec::new();
                 let mut all_succeeded = true;
                 let mut executed_this_step = 0;
+                let mut budget_exceeded = false;
 
-                for action_request in tool_actions {
+                for (idx, action_request) in tool_actions.iter().enumerate() {
                     if ctx.tool_call_count >= self.config.max_tool_calls {
                         let obs =
                             self.create_budget_exceeded_observation(ctx.run, ctx.tool_call_count);
                         observations.push(obs.clone());
                         ctx.run.observations.push(obs);
                         all_succeeded = false;
+                        budget_exceeded = true;
                         break;
                     }
 
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::ExecutingTool,
+                        format!("Executing tool: {}", action_request.target),
+                        0,
+                        Some(idx as u32),
+                    );
+
                     let exec_result = self
                         .action_executor
-                        .execute(action_request, ctx.action_ctx)?;
+                        .execute(action_request.clone(), ctx.action_ctx)?;
 
                     // Collect proposal_id from action output if present
                     if let Some(ref output) = exec_result.action.output {
@@ -308,12 +392,49 @@ impl AgentLoop {
                     ctx.run.actions.push(exec_result.action.clone());
                     observations.push(exec_result.observation.clone());
                     ctx.run.observations.push(exec_result.observation.clone());
+
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::Observing,
+                        format!(
+                            "Tool {} result: {}",
+                            action_request.target,
+                            if exec_result.status == ActionExecutionStatus::Succeeded {
+                                "success"
+                            } else {
+                                "failed"
+                            }
+                        ),
+                        0,
+                        Some(idx as u32),
+                    );
+
                     if exec_result.status != ActionExecutionStatus::Succeeded {
                         all_succeeded = false;
                     }
 
                     ctx.tool_call_count += 1;
                     executed_this_step += 1;
+                }
+
+                if budget_exceeded {
+                    let final_response = format!(
+                        "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
+                        self.config.max_tool_calls,
+                        observations
+                            .iter()
+                            .map(|o| format!("- {}", o.content))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    return Ok(StepResult {
+                        stop_reason: "max_tool_calls_reached".into(),
+                        final_response,
+                        should_continue: false,
+                        tool_call_count_delta: executed_this_step,
+                        observations,
+                        status_updates,
+                    });
                 }
 
                 if !all_succeeded {
@@ -325,6 +446,14 @@ impl AgentLoop {
                         .filter(|a| a.status == "needs_confirmation")
                         .count();
                     let final_response = if pending_count > 0 {
+                        ctx.run.status = AgentRunStatus::WaitingPermission;
+                        self.emit_status(
+                            &mut status_updates,
+                            crate::agent::types::AgentLoopPhase::WaitingPermission,
+                            "Waiting for user permission to continue",
+                            0,
+                            None,
+                        );
                         "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
                             .into()
                     } else {
@@ -340,6 +469,7 @@ impl AgentLoop {
                         should_continue: false,
                         tool_call_count_delta: executed_this_step,
                         observations,
+                        status_updates,
                     });
                 }
 
@@ -350,6 +480,7 @@ impl AgentLoop {
                         should_continue: false,
                         tool_call_count_delta: 0,
                         observations: vec![],
+                        status_updates,
                     });
                 }
 
@@ -360,6 +491,7 @@ impl AgentLoop {
                     should_continue: true,
                     tool_call_count_delta: executed_this_step,
                     observations,
+                    status_updates,
                 })
             }
             Err(e) => {
@@ -369,12 +501,20 @@ impl AgentLoop {
                     phase: "model".into(),
                     recoverable: false,
                 });
+                self.emit_status(
+                    &mut status_updates,
+                    crate::agent::types::AgentLoopPhase::Failed,
+                    format!("Model generation failed: {}", e),
+                    0,
+                    None,
+                );
                 Ok(StepResult {
                     stop_reason: "model_error".into(),
                     final_response: format!("模型生成失败: {}", e),
                     should_continue: false,
                     tool_call_count_delta: 0,
                     observations: vec![],
+                    status_updates,
                 })
             }
         }
@@ -439,7 +579,7 @@ impl AgentLoop {
             .actions)
     }
 
-    fn parse_agent_reply(
+    pub(crate) fn parse_agent_reply(
         &self,
         reply: &str,
         _action_ctx: &ActionExecutionContext<'_>,
@@ -493,15 +633,9 @@ impl AgentLoop {
             .map(ToString::to_string)
             .unwrap_or_else(|| reply.to_string());
 
-        // If "final" is present, this is a final answer - no tool calls
-        if v.get("final").is_some() {
-            return Ok(ParsedAgentReply {
-                final_text,
-                actions: Vec::new(),
-            });
-        }
-
         // Parse actions (new format) or tool_calls (legacy format)
+        // If both "final" and "actions"/"tool_calls" are present,
+        // execute the actions and treat "final" as a pre-execution note.
         let calls = if let Some(actions) = v.get("actions").and_then(|a| a.as_array()) {
             if actions.is_empty() {
                 return Ok(ParsedAgentReply {
@@ -559,11 +693,12 @@ impl AgentLoop {
         })
     }
 
-    fn build_follow_up_messages(
+    pub(crate) fn build_follow_up_messages(
         &self,
         task: &AgentTask,
         assistant_reply: &str,
         observations: &[AgentObservation],
+        tools_prompt: &str,
     ) -> Vec<ChatMessage> {
         let mut messages = task.messages.clone();
         messages.push(ChatMessage {
@@ -571,15 +706,36 @@ impl AgentLoop {
             content: assistant_reply.into(),
         });
 
-        let results_text = observations
-            .iter()
-            .map(|obs| format!("工具结果: {}", obs.content))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Build structured follow-up with: task goal, available tools, observations
+        let mut follow_up = String::new();
+
+        // Remind the model of the original task
+        follow_up.push_str(&format!(
+            "[系统] 继续完成用户的原始请求：\"{}\"\n\n",
+            task.user_text
+        ));
+
+        // Include observations from tool executions
+        if !observations.is_empty() {
+            follow_up.push_str("工具执行结果：\n");
+            for (idx, obs) in observations.iter().enumerate() {
+                follow_up.push_str(&format!("[{}] {}\n", idx + 1, obs.content));
+            }
+            follow_up.push('\n');
+        }
+
+        // Remind available tools for next step
+        if !tools_prompt.is_empty() {
+            follow_up.push_str("下一步可用工具：\n");
+            follow_up.push_str(tools_prompt);
+            follow_up.push('\n');
+        }
+
+        follow_up.push_str("请继续使用工具或提供最终回答。");
 
         messages.push(ChatMessage {
             role: "user".into(),
-            content: format!("[系统] 工具执行结果:\n{}", results_text),
+            content: follow_up,
         });
 
         messages
@@ -613,18 +769,23 @@ impl AgentLoop {
 
     fn build_result(
         &self,
-        run: AgentRun,
+        mut run: AgentRun,
         final_response: String,
         stop_reason: String,
         tool_call_count: u32,
         step_count: u32,
+        status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate>,
     ) -> AgentLoopResult {
+        run.step_count = step_count;
+        run.tool_call_count = tool_call_count;
+        run.status_updates = status_updates.clone();
         AgentLoopResult {
             run,
             final_response,
             stop_reason,
             tool_call_count,
             step_count,
+            status_updates,
         }
     }
 }
@@ -634,9 +795,9 @@ struct GeneratedAgentResponse {
     reply: String,
 }
 
-struct ParsedAgentReply {
-    final_text: String,
-    actions: Vec<AgentActionRequest>,
+pub(crate) struct ParsedAgentReply {
+    pub(crate) final_text: String,
+    pub(crate) actions: Vec<AgentActionRequest>,
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {

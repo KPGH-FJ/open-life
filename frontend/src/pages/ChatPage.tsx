@@ -15,6 +15,7 @@ import {
   Heart,
   CheckCircle2,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -56,6 +57,7 @@ import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
+import AgentStateIndicator from "../components/AgentStateIndicator";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
@@ -236,7 +238,7 @@ export default function ChatPage() {
   const [showReasoningTrace, setShowReasoningTrace] = useState(false);
   const [toolCalls, setToolCalls] = useState<ToolCallResult[]>([]);
   const [showToolCalls, setShowToolCalls] = useState(false);
-  const [, setCurrentRunId] = useState<string | null>(null);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
   const [model, setModel] = useState<LifeModel | null>(null);
   const [showGuide, setShowGuide] = useState(true);
   const [chatMode, setChatMode] = useState<string | null>(null);
@@ -1316,18 +1318,64 @@ export default function ChatPage() {
                 {m.role === "assistant" && (
                   <div className="mt-3 space-y-2">
                     {currentRun && i === messages.length - 1 && (
-                      <div className="flex items-center gap-3 text-[10px] text-gray-400">
-                        <span className="flex items-center gap-1">
-                          <Activity size={10} />
-                          {currentRun.modelRoute?.provider || "unknown"}
-                          {currentRun.modelRoute?.preferLocal && " (local)"}
-                        </span>
-                        <span>{currentRun.actions?.length || 0} 工具</span>
-                        <span>{currentRun.generatedProposals?.length || 0} 提案</span>
-                        {currentRun.modelRoute?.fallbackReason && (
-                          <span className="text-amber-500">fallback</span>
-                        )}
-                      </div>
+                      <>
+                        <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                          <span className="flex items-center gap-1">
+                            <Activity size={10} />
+                            {currentRun.modelRoute?.provider || "unknown"}
+                            {currentRun.modelRoute?.preferLocal && " (local)"}
+                          </span>
+                          <span>{currentRun.actions?.length || 0} 工具</span>
+                          <span>{currentRun.generatedProposals?.length || 0} 提案</span>
+                          {currentRun.modelRoute?.fallbackReason && (
+                            <span className="text-amber-500">fallback</span>
+                          )}
+                        </div>
+                        {/* Execution summary line */}
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
+                              currentRun.status === "completed"
+                                ? "bg-green-50 text-green-700"
+                                : currentRun.status === "waiting_permission"
+                                  ? "bg-amber-50 text-amber-700"
+                                  : currentRun.status === "failed"
+                                    ? "bg-red-50 text-red-700"
+                                    : "bg-blue-50 text-blue-700"
+                            }`}
+                          >
+                            {currentRun.status === "completed" && (
+                              <>
+                                <CheckCircle2 size={12} />
+                                已完成 · {currentRun.stepCount || 0}步 ·{" "}
+                                {currentRun.toolCallCount || 0}工具
+                              </>
+                            )}
+                            {currentRun.status === "waiting_permission" && (
+                              <>
+                                <ShieldCheck size={12} />
+                                等待确认 ·{" "}
+                                {currentRun.actions?.filter(
+                                  (a: any) => a.status === "needs_confirmation"
+                                ).length || 0}
+                                个权限请求
+                              </>
+                            )}
+                            {currentRun.status === "failed" && (
+                              <>
+                                <XCircle size={12} />
+                                失败 · {currentRun.error?.phase || "unknown"}
+                              </>
+                            )}
+                            {currentRun.status === "running" && (
+                              <>
+                                <Loader2 size={12} className="animate-spin" />
+                                运行中...
+                              </>
+                            )}
+                          </span>
+                        </div>
+                      </>
                     )}
                     <div className="flex flex-wrap gap-2">
                       <button
@@ -1404,8 +1452,12 @@ export default function ChatPage() {
           )}
           {sending && !streamingReply && (
             <div className="flex justify-start">
-              <div className="bg-gray-100 text-gray-500 px-4 py-3 rounded-xl rounded-bl-none text-sm flex items-center gap-2">
-                <Loader2 size={16} className="animate-spin" /> 思考中...
+              <div className="bg-gray-100 text-gray-800 px-4 py-3 rounded-xl rounded-bl-none text-sm">
+                <AgentStateIndicator
+                  sessionId={currentSessionId}
+                  runId={currentRunId || undefined}
+                  isActive={sending}
+                />
               </div>
             </div>
           )}

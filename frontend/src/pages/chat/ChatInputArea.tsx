@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { Send, Loader2, Target, Activity } from "lucide-react";
+import { Send, Loader2, Target, Activity, Wifi, WifiOff, Cloud, Server } from "lucide-react";
 import type { SystemDiagnostics } from "../../tauri";
 
 interface ChatInputAreaProps {
@@ -16,6 +16,48 @@ interface ChatInputAreaProps {
   ) => { text: string; action: string; link: string } | null;
 }
 
+function NetworkStatusIndicator({ diagnostics }: { diagnostics: SystemDiagnostics | null }) {
+  if (!diagnostics) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-gray-400">
+        <WifiOff size={12} />
+        <span>检查中...</span>
+      </div>
+    );
+  }
+
+  if (diagnostics.chat_ready) {
+    const backend = diagnostics.ollama_online
+      ? `本地 ${diagnostics.resolved_local_model || diagnostics.local_model}`
+      : diagnostics.cloud_provider || "云端";
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-green-600">
+        <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+        {diagnostics.ollama_online ? <Server size={12} /> : <Cloud size={12} />}
+        <span>{backend}</span>
+      </div>
+    );
+  }
+
+  if (!diagnostics.ollama_online && !diagnostics.cloud_api_configured) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-red-600">
+        <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+        <WifiOff size={12} />
+        <span>无可用后端</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-amber-600">
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+      <Wifi size={12} />
+      <span>{!diagnostics.ollama_online ? "本地离线" : "云端未配置"}</span>
+    </div>
+  );
+}
+
 export default function ChatInputArea({
   input,
   sending,
@@ -30,6 +72,15 @@ export default function ChatInputArea({
   return (
     <div className="border-t px-6 py-4 bg-white">
       <div className="max-w-3xl mx-auto space-y-2">
+        {/* Network status indicator */}
+        <div className="flex items-center justify-between">
+          <NetworkStatusIndicator diagnostics={diagnostics} />
+          {diagnostics?.chat_ready &&
+            diagnostics.prefer_local_model &&
+            diagnostics.ollama_online && (
+              <span className="text-[10px] text-gray-400">本地优先模式</span>
+            )}
+        </div>
         {diagnostics && !diagnostics.chat_ready && diagnostics.readiness_issues.length > 0 && (
           <div className="rounded-lg border border-amber-100 bg-amber-50 px-3 py-2 text-xs text-amber-800">
             <div className="font-medium mb-1">普通对话暂不可用，快捷指令仍可使用：</div>

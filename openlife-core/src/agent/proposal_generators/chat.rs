@@ -146,6 +146,54 @@ impl ChatProposalGenerator {
             }
         }
 
+        // Extract memory signals (explicit and implicit)
+        if let Some(memory_content) = Self::extract_explicit_memory(message) {
+            // Explicit memory: high confidence, bypass threshold
+            let mut proposal = AgentProposal::new(
+                ProposalType::MemoryWrite,
+                "/memory/explicit",
+                serde_json::json!({
+                    "content": memory_content,
+                    "source": "chat_explicit",
+                    "session_id": session_id,
+                }),
+                &format!(
+                    "用户明确要求记住: {}",
+                    &memory_content[..memory_content.len().min(50)]
+                ),
+                0.95,
+                RiskLevel::Medium,
+                ProposalSource::FeedbackEvolution,
+            );
+            proposal.source_detail = Some(format!("session:{}", session_id));
+            proposals.push(proposal);
+        } else if let Some(memory_content) = Self::extract_implicit_memory(message) {
+            // Implicit memory: high threshold, evidence required
+            let confidence =
+                Self::calculate_confidence(1, message.len(), Self::has_emphasis_markers(message));
+            if confidence >= 0.8 {
+                let mut proposal = AgentProposal::new(
+                    ProposalType::MemoryWrite,
+                    "/memory/implicit",
+                    serde_json::json!({
+                        "content": memory_content,
+                        "source": "chat_implicit",
+                        "session_id": session_id,
+                        "evidence": format!("检测到记忆信号: {}", &memory_content[..memory_content.len().min(50)]),
+                    }),
+                    &format!(
+                        "对话中检测到可记忆内容: {}",
+                        &memory_content[..memory_content.len().min(50)]
+                    ),
+                    confidence,
+                    RiskLevel::Low,
+                    ProposalSource::FeedbackEvolution,
+                );
+                proposal.source_detail = Some(format!("session:{}", session_id));
+                proposals.push(proposal);
+            }
+        }
+
         // Update last extraction time
         if !proposals.is_empty() {
             self.update_last_extraction(session_id);
@@ -318,6 +366,82 @@ impl ChatProposalGenerator {
         } else {
             None
         }
+    }
+
+    /// Extract explicit memory request from text.
+    /// Returns the content to remember if user explicitly asks.
+    fn extract_explicit_memory(text: &str) -> Option<String> {
+        let text_lower = text.to_lowercase();
+
+        // Explicit memory triggers
+        let triggers = [
+            "记住这个",
+            "记住",
+            "以后提醒我",
+            "这是我的偏好",
+            "保存这个",
+            "记下来",
+            "remember this",
+            "save this",
+            "this is my preference",
+        ];
+
+        for trigger in &triggers {
+            if let Some(pos) = text_lower.find(trigger) {
+                let start = pos + trigger.len();
+                let remaining = &text[start..];
+                // Extract up to punctuation or 100 chars
+                let end_pos = remaining
+                    .find(['。', '，', '！', '\n', '.', '!'])
+                    .unwrap_or(remaining.len().min(100));
+                let memory_text = remaining[..end_pos].trim();
+                if !memory_text.is_empty() && memory_text.len() > 3 {
+                    return Some(memory_text.to_string());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Extract implicit memory signals from text.
+    /// Detects important personal information, preferences, habits.
+    fn extract_implicit_memory(text: &str) -> Option<String> {
+        let text_lower = text.to_lowercase();
+
+        // Implicit memory signals
+        let memory_signals = [
+            "我喜欢",
+            "我不喜欢",
+            "我习惯",
+            "我通常",
+            "我总是",
+            "我从不",
+            "我的生日",
+            "我的爱好",
+            "i like",
+            "i don't like",
+            "i usually",
+            "i always",
+            "my birthday",
+            "my hobby",
+        ];
+
+        for signal in &memory_signals {
+            if let Some(pos) = text_lower.find(signal) {
+                let start = pos;
+                let remaining = &text[start..];
+                let end_pos = remaining
+                    .find(['。', '，', '！', '\n', '.', '!'])
+                    .unwrap_or(remaining.len().min(100));
+                let memory_text = remaining[..end_pos].trim();
+                if !memory_text.is_empty() && memory_text.len() > 5 {
+                    return Some(memory_text.to_string());
+                }
+            }
+        }
+
+        None
     }
 
     /// Extract capabilities from text.
@@ -537,5 +661,55 @@ mod tests {
         let max_conf = ChatProposalGenerator::calculate_confidence(10, 10, true);
         assert!(max_conf <= 0.95, "Maximum confidence should be <= 0.95");
         assert!(max_conf > 0.8, "High signal + emphasis should be > 0.8");
+    }
+
+    #[test]
+    fn test_extract_explicit_memory() {
+        let text = "记住这个：我每天早上 6 点起床跑步";
+        let memory = ChatProposalGenerator::extract_explicit_memory(text);
+        assert!(memory.is_some());
+        assert!(memory.unwrap().contains("早上 6 点起床跑步"));
+    }
+
+    #[test]
+    fn test_extract_explicit_memory_english() {
+        let text = "Remember this: I prefer dark mode for all my apps";
+        let memory = ChatProposalGenerator::extract_explicit_memory(text);
+        assert!(memory.is_some());
+        assert!(memory.unwrap().contains("dark mode"));
+    }
+
+    #[test]
+    fn test_no_explicit_memory() {
+        let text = "今天天气不错";
+        let memory = ChatProposalGenerator::extract_explicit_memory(text);
+        assert!(memory.is_none());
+    }
+
+    #[test]
+    fn test_extract_implicit_memory() {
+        let text = "我喜欢在周末去爬山，这是我最大的爱好";
+        let memory = ChatProposalGenerator::extract_implicit_memory(text);
+        assert!(memory.is_some());
+        assert!(memory.unwrap().contains("喜欢"));
+    }
+
+    #[test]
+    fn test_generate_memory_proposal_explicit() {
+        let generator = create_test_generator();
+        let model = LifeModel::default();
+        let proposals = generator
+            .generate_proposals("session-1", "记住这个：我喜欢喝美式咖啡", &model)
+            .unwrap();
+
+        // Should have memory proposal
+        assert!(proposals
+            .iter()
+            .any(|p| p.proposal_type == ProposalType::MemoryWrite));
+        let memory_proposal = proposals
+            .iter()
+            .find(|p| p.proposal_type == ProposalType::MemoryWrite)
+            .unwrap();
+        assert!(memory_proposal.confidence >= 0.9); // Explicit memory should have high confidence
     }
 }

@@ -1,14 +1,6 @@
 import { Component, ReactNode, useEffect, useState } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import {
-  Hammer,
-  LayoutDashboard,
-  Settings,
-  Sparkles,
-  ShieldCheck,
-  Bot,
-  History,
-} from "lucide-react";
+import { LayoutDashboard, Settings, Sparkles, ShieldCheck, Bot, History } from "lucide-react";
 import LifeMapPage from "./pages/LifeMapPage";
 import ChatPage from "./pages/ChatPage";
 import VersionControl from "./pages/VersionControl";
@@ -201,7 +193,7 @@ function App() {
             <LayoutDashboard size={16} /> Workspace
           </NavLink>
           <NavLink to="/chat" className={navClass}>
-            <Bot size={16} /> Chat
+            <Bot size={16} /> Agent
           </NavLink>
           <NavLink to="/review" className={navClass}>
             <ShieldCheck size={16} /> Review
@@ -211,9 +203,6 @@ function App() {
           </NavLink>
           <NavLink to="/settings" className={navClass}>
             <Settings size={16} /> Settings
-          </NavLink>
-          <NavLink to="/life" className={navClass}>
-            <Hammer size={16} /> Life
           </NavLink>
         </nav>
       </header>
