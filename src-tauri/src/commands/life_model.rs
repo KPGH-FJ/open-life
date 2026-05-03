@@ -121,6 +121,7 @@ mod tests {
             )),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 

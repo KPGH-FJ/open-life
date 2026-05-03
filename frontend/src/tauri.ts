@@ -108,6 +108,8 @@ export async function sendMessage(sessionId: string, messages: ChatMessage[]): P
   return result.reply;
 }
 
+export type ToolCallStatus = "success" | "error" | "pending" | "blocked" | "needs_confirmation";
+
 export interface ToolCallResult {
   name: string;
   arguments: Record<string, any>;
@@ -116,7 +118,7 @@ export interface ToolCallResult {
   output?: string;
   error?: string;
   permission_level?: string;
-  status?: "pending" | "success" | "error";
+  status?: ToolCallStatus;
   requires_confirmation?: boolean;
   pii_found?: boolean;
   privacy_warnings?: string[];
@@ -372,6 +374,10 @@ export async function listMcpTools(): Promise<any[]> {
   return safeInvoke<any[]>("list_mcp_tools");
 }
 
+export async function listToolManifests(): Promise<ToolManifest[]> {
+  return safeInvoke<ToolManifest[]>("list_tool_manifests");
+}
+
 export interface McpTemplate {
   id: string;
   name: string;
@@ -404,6 +410,8 @@ export interface ToolManifest {
   capabilities: string[];
   requires_confirmation: boolean;
   enabled: boolean;
+  declarative_only: boolean;
+  action_type: string;
   tags: string[];
 }
 
@@ -1250,6 +1258,7 @@ export interface AgentRun {
   generatedProposals: string[];
   actions: AgentAction[];
   observations: AgentObservation[];
+  warnings?: string[];
   deletedAt?: string;
   deleteReason?: string;
   startedAt: string;

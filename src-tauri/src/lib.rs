@@ -67,7 +67,8 @@ use commands::feedback::{
 use commands::life_model::{get_life_model, save_life_model};
 use commands::mcp::{
     clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
-    list_mcp_tools, recommend_mcp_manifests, register_mcp_server, unregister_mcp_server,
+    list_mcp_tools, list_tool_manifests, recommend_mcp_manifests, register_mcp_server,
+    unregister_mcp_server,
 };
 use commands::memory::{
     archive_low_access_memories, count_memory_chunks, get_hot_cache, get_memory_tier_stats,
@@ -97,6 +98,16 @@ use storage::{
 };
 
 #[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCallStatus {
+    Success,
+    Error,
+    Pending,
+    Blocked,
+    NeedsConfirmation,
+}
+
+#[derive(Clone, serde::Serialize)]
 pub struct ToolCallResult {
     pub name: String,
     pub arguments: serde_json::Value,
@@ -105,7 +116,7 @@ pub struct ToolCallResult {
     pub output: Option<String>,
     pub error: Option<String>,
     pub permission_level: String,
-    pub status: String,
+    pub status: ToolCallStatus,
     pub requires_confirmation: bool,
     pub pii_found: bool,
     pub privacy_warnings: Vec<String>,
@@ -391,6 +402,8 @@ pub struct AppState {
     pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
     pub startup_warnings: Vec<String>,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
+    /// Guards concurrent access to scheduled_tasks.json
+    pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -679,7 +692,7 @@ fn try_prepare_tool_calls(
                     output: None,
                     error: Some(e.to_string()),
                     permission_level: "high".into(),
-                    status: "error".into(),
+                    status: ToolCallStatus::Error,
                     requires_confirmation: false,
                     pii_found: false,
                     privacy_warnings: vec![],
@@ -725,12 +738,13 @@ fn action_execution_result_to_tool_call(
             .map(|s| s.risk_level.clone())
             .unwrap_or_else(|| "medium".into()),
         status: match result.status {
-            openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
-            openlife_core::agent::ActionExecutionStatus::Failed => "error",
-            openlife_core::agent::ActionExecutionStatus::Blocked => "error",
-            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
-        }
-        .into(),
+            openlife_core::agent::ActionExecutionStatus::Succeeded => ToolCallStatus::Success,
+            openlife_core::agent::ActionExecutionStatus::Failed => ToolCallStatus::Error,
+            openlife_core::agent::ActionExecutionStatus::Blocked => ToolCallStatus::Blocked,
+            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
+                ToolCallStatus::NeedsConfirmation
+            }
+        },
         requires_confirmation: result.status
             == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
         pii_found: false, // Simplified
@@ -893,11 +907,32 @@ async fn finalize_chat_agent_run(
         }
     }
 
-    if inserted {
-        persist_vector_memory_for_message(session_id, assistant_message, state).await;
+    if inserted
+        && timeout(
+            Duration::from_secs(CHAT_VECTOR_PERSIST_TIMEOUT_SECS),
+            persist_vector_memory_for_message(session_id, assistant_message, state),
+        )
+        .await
+        .is_err()
+    {
+        eprintln!(
+            "[memory] vector persistence timed out after {}s for assistant message in session {}",
+            CHAT_VECTOR_PERSIST_TIMEOUT_SECS, session_id
+        );
     }
 
-    generate_and_persist_chat_proposals(state.inner(), agent_run, reply, life_model).await;
+    if timeout(
+        Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
+        generate_and_persist_chat_proposals(state.inner(), agent_run, reply, life_model),
+    )
+    .await
+    .is_err()
+    {
+        eprintln!(
+            "[ChatProposal] Proposal generation timed out after {}s for run {}",
+            CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
+        );
+    }
     Ok(())
 }
 
@@ -1484,9 +1519,9 @@ async fn send_message(
         None
     };
 
-    let layer = if let Some(ref i) = intent {
+    let layer = if let (Some(ref i), Some(ref m)) = (&intent, &user_msg) {
         let lr = state.layer_router.lock().await;
-        lr.resolve(i, &user_msg.as_ref().unwrap().content)
+        lr.resolve(i, &m.content)
     } else {
         Layer::L2
     };
@@ -2008,6 +2043,8 @@ struct StartStreamMessageArgs {
 const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
 const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
 const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
+const CHAT_VECTOR_PERSIST_TIMEOUT_SECS: u64 = 8;
+const CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS: u64 = 5;
 
 fn emit_stream_error(
     app_handle: &tauri::AppHandle,
@@ -2114,7 +2151,12 @@ fn agent_actions_to_tool_call_results(
                     .as_ref()
                     .map(|scope| scope.risk_level.clone())
                     .unwrap_or_else(|| "low".to_string()),
-                status: action.status.clone(),
+                status: match action.status.as_str() {
+                    "success" | "succeeded" | "completed" => ToolCallStatus::Success,
+                    "needs_confirmation" => ToolCallStatus::NeedsConfirmation,
+                    "blocked" => ToolCallStatus::Blocked,
+                    _ => ToolCallStatus::Error,
+                },
                 requires_confirmation: action.status == "needs_confirmation",
                 pii_found: false,
                 privacy_warnings: Vec::new(),
@@ -2431,9 +2473,9 @@ async fn start_stream_message(
         None
     };
 
-    let layer = if let Some(ref i) = intent {
+    let layer = if let (Some(ref i), Some(ref m)) = (&intent, &user_msg) {
         let lr = state.layer_router.lock().await;
-        lr.resolve(i, &user_msg.as_ref().unwrap().content)
+        lr.resolve(i, &m.content)
     } else {
         Layer::L2
     };
@@ -3149,6 +3191,16 @@ async fn execute_tool_call(
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
 
+    // Create an AgentRun for direct tool execution audit trail
+    let mut run = openlife_core::agent::AgentRun::new_tool_execution_run(&name);
+    let run_id = run.id.clone();
+
+    let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
+        Some(store.lock().await)
+    } else {
+        None
+    };
+
     let executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
@@ -3161,18 +3213,34 @@ async fn execute_tool_call(
         life_model: None,
         memory_store: None,
         proposal_store: None,
-        agent_run_store: None,
+        agent_run_store: agent_run_store_guard.as_deref(),
     };
 
     let request = openlife_core::agent::AgentActionRequest {
         action_type: "mcp_tool".to_string(),
         target: name.clone(),
         input: serde_json::json!({ "arguments": arguments }),
-        source_run_id: None,
+        source_run_id: Some(run_id.clone()),
         step_index: 0,
     };
 
     let result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
+
+    // Persist the AgentRun
+    run.actions.push(result.action.clone());
+    run.observations.push(result.observation.clone());
+    run.status = match result.status {
+        openlife_core::agent::ActionExecutionStatus::Succeeded => {
+            openlife_core::agent::AgentRunStatus::Completed
+        }
+        _ => openlife_core::agent::AgentRunStatus::Failed,
+    };
+    run.finished_at = Some(chrono::Utc::now());
+
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&run);
+    }
 
     let tool_result = ToolCallResult {
         name: name.clone(),
@@ -3192,18 +3260,19 @@ async fn execute_tool_call(
             .map(|s| s.risk_level.clone())
             .unwrap_or_else(|| "medium".into()),
         status: match result.status {
-            openlife_core::agent::ActionExecutionStatus::Succeeded => "success",
-            openlife_core::agent::ActionExecutionStatus::Failed => "error",
-            openlife_core::agent::ActionExecutionStatus::Blocked => "error",
-            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "pending",
-        }
-        .into(),
+            openlife_core::agent::ActionExecutionStatus::Succeeded => ToolCallStatus::Success,
+            openlife_core::agent::ActionExecutionStatus::Failed => ToolCallStatus::Error,
+            openlife_core::agent::ActionExecutionStatus::Blocked => ToolCallStatus::Blocked,
+            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
+                ToolCallStatus::NeedsConfirmation
+            }
+        },
         requires_confirmation: result.status
             == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
         pii_found: false,
         privacy_warnings: vec![],
         action_id: Some(result.action.id),
-        run_id: None,
+        run_id: Some(run_id),
         permission_decision: result.action.permission_decision,
     };
 
@@ -3371,6 +3440,7 @@ pub fn run() {
         })),
         startup_warnings,
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
     });
 
     let app_state_for_setup = app_state.clone();
@@ -3489,6 +3559,7 @@ pub fn run() {
             list_mcp_tools,
             list_mcp_templates,
             recommend_mcp_manifests,
+            list_tool_manifests,
             list_mcp_audit_logs,
             clear_mcp_audit_logs,
             get_system_diagnostics,

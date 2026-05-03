@@ -120,7 +120,7 @@ The current Settings -> Builder -> Chat -> Dashboard path must remain usable whi
 
 ## 5. Phase Plan
 
-## Phase 1: AgentRun Baseline
+## Phase 1: AgentRun Baseline ✅
 
 Goal:
 
@@ -128,24 +128,24 @@ Create the minimum Agent Runtime spine without disrupting current Chat.
 
 Deliverables:
 
-- Add `agent` module in `openlife-core`.
-- Define `AgentTask`, `AgentRun`, `AgentRunStatus`, `ModelRouteTrace`, `ContextSummary`, `AgentRunError`.
-- Add `AgentRunStore` backed by SQLite.
-- Add Tauri commands:
+- ✅ Add `agent` module in `openlife-core`.
+- ✅ Define `AgentTask`, `AgentRun`, `AgentRunStatus`, `ModelRouteTrace`, `ContextSummary`, `AgentRunError`.
+- ✅ Add `AgentRunStore` backed by SQLite.
+- ✅ Add Tauri commands:
   - `create_agent_task`
   - `get_agent_run`
   - `list_agent_runs`
-- Wrap `start_stream_message` so every normal chat creates an AgentRun.
-- Record session id, user input, context summary, provider/model route, output status, and error state.
+- ✅ Wrap `start_stream_message` so every normal chat creates an AgentRun.
+- ✅ Record session id, user input, context summary, provider/model route, output status, and error state.
 
 Acceptance criteria:
 
-- Sending one chat message creates an AgentRun.
-- The run can be queried after refresh.
-- Runtime errors are attached to the run.
-- Existing Chat history still works.
+- ✅ Sending one chat message creates an AgentRun.
+- ✅ The run can be queried after refresh.
+- ✅ Runtime errors are attached to the run.
+- ✅ Existing Chat history still works.
 
-## Phase 2: Chat as Agent Surface
+## Phase 2: Chat as Agent Surface ✅
 
 Goal:
 
@@ -170,7 +170,7 @@ Acceptance criteria:
 - User can answer “which model was used?”
 - User can answer “what personal context was considered?”
 
-## Phase 3: Unified Proposal Layer
+## Phase 3: Unified Proposal Layer ✅
 
 Goal:
 
@@ -203,7 +203,7 @@ Acceptance criteria:
 - Every LifeModel-changing suggestion has source, reason, confidence, risk level, and decision state.
 - High-risk fields default to explicit confirmation.
 
-## Phase 4: ModelRouter Upgrade
+## Phase 4: ModelRouter Upgrade ✅
 
 Goal:
 
@@ -235,7 +235,7 @@ Acceptance criteria:
 - Each AgentRun can explain its model route.
 - Custom providers do not accidentally use the wrong environment key.
 
-## Phase 5: Workspace Frontend Restructure
+## Phase 5: Workspace Frontend Restructure ✅
 
 Goal:
 
@@ -319,15 +319,40 @@ Every major development round should verify:
 7. Open Workspace/Dashboard and confirm next action.
 8. Open Memory and VersionControl to confirm traceability and recovery.
 
-## 7. Current Next Step
+## 7. Completed Work Summary (2026-05-02)
+
+### Phase 1-5 全部完成
+
+| Phase | 状态 | 关键交付 |
+|-------|------|----------|
+| Phase 1: AgentRun Baseline | ✅ | AgentTask/AgentRun/AgentRunStore/SQLite/Tauri 命令 |
+| Phase 2: Chat as Agent Surface | ✅ | Run Trace 面板（provider/model/context/memory/error） |
+| Phase 3: Unified Proposal Layer | ✅ | ProposalEngine/ProposalStore/全类型 Proposal/Builder+Calibration+Chat 接入 |
+| Phase 4: ModelRouter Upgrade | ✅ | Provider registry/health diagnostics/privacy routing/route trace |
+| Phase 5: Workspace Frontend Restructure | ✅ | Workspace/Agent/LifeModel/Memory/Runs/Settings 导航收敛 |
+
+### Beta Execution Tools 落地
+
+- **P1 真实可执行**: `file.read`, `file.write_proposal`, `web.fetch`, `mcp.call_tool`, `permission.*`, Core OS Tools
+- **P2 declarative-only**: `web.search`, `a2a.call_agent`, `calendar.*`, `email.*`, `task.create_proposal`
+- **安全加固**: safe_paths strict canonical parent, web.fetch DNS 私网拦截, ExternalWriteAction 二次校验
+- **权限闭环**: peek() + check(), replay 预检查, ToolPermission Proposal, Review Center 授权
+
+### 测试覆盖
+
+- Rust: 270 passed (openlife-core) + 25 passed (openlife-tauri)
+- Frontend: 133 passed
+- `make ci`: 通过
+
+## 8. Current Next Step
 
 The next concrete development task is:
 
 ```text
-Implement Phase 1: AgentRun Baseline for Chat
+Phase 6: Proactive Agent MVP
 ```
 
-This is the first non-negotiable step toward the new OpenLife architecture.
+Let OpenLife safely initiate useful check-ins without becoming intrusive.
 
 ## 8. Historical Plans
 

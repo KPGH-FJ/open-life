@@ -13,14 +13,14 @@ describe("ToolCallCard", () => {
           arguments: { path: "/tmp/demo.txt" },
           success: false,
           permission_level: "high",
-          status: "pending",
+          status: "needs_confirmation",
           requires_confirmation: true,
         }}
         onExecute={onExecute}
       />
     );
 
-    expect(screen.getByText("需要授权")).toBeInTheDocument();
+    expect(screen.getByText("待授权")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重新执行" }));
 
     await waitFor(() => {
@@ -37,7 +37,7 @@ describe("ToolCallCard", () => {
           sanitized_arguments: { query: "查 <EMAIL_0>" },
           success: false,
           permission_level: "medium",
-          status: "pending",
+          status: "needs_confirmation",
           requires_confirmation: true,
           pii_found: true,
           privacy_warnings: ["$.query 命中 Email: test@example.com"],

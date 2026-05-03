@@ -264,6 +264,85 @@ impl ToolPermissionStore {
         }
     }
 
+    /// Peek at the permission decision without consuming `AllowOnce` policies.
+    /// Used for replay pre-checks: the permission is not consumed until `check()` is called.
+    pub fn peek(
+        &self,
+        tool_name: &str,
+        source: &str,
+        risk_level: &str,
+        action_type: &str,
+        capabilities: &[String],
+    ) -> Result<ToolPermissionDecision> {
+        let record = self.find_best(tool_name, source, risk_level, action_type)?;
+        let Some(record) = record else {
+            let asks = risk_level == "high"
+                || capabilities.iter().any(|c| {
+                    matches!(
+                        c.as_str(),
+                        "write" | "memory" | "lifemodel" | "filesystem" | "external_side_effect"
+                    )
+                });
+            return Ok(ToolPermissionDecision {
+                allowed: !asks,
+                requires_confirmation: asks,
+                decision: if asks { "ask_every_time" } else { "allow" }.to_string(),
+                reason: if asks {
+                    "no policy for high-risk/write action".to_string()
+                } else {
+                    "low-risk read action allowed by default".to_string()
+                },
+                policy_id: None,
+            });
+        };
+
+        if record
+            .expires_at
+            .is_some_and(|expires| expires < Utc::now())
+        {
+            return Ok(ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: true,
+                decision: "expired".to_string(),
+                reason: "matching policy expired".to_string(),
+                policy_id: Some(record.id),
+            });
+        }
+
+        match record.policy {
+            ToolPermissionPolicy::Allow | ToolPermissionPolicy::AllowUntilRevoked => {
+                Ok(ToolPermissionDecision {
+                    allowed: true,
+                    requires_confirmation: false,
+                    decision: record.policy.to_string(),
+                    reason: "matching allow policy".to_string(),
+                    policy_id: Some(record.id),
+                })
+            }
+            ToolPermissionPolicy::Deny => Ok(ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "deny".to_string(),
+                reason: "matching deny policy".to_string(),
+                policy_id: Some(record.id),
+            }),
+            ToolPermissionPolicy::AskEveryTime => Ok(ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: true,
+                decision: "ask_every_time".to_string(),
+                reason: "matching ask-every-time policy".to_string(),
+                policy_id: Some(record.id),
+            }),
+            ToolPermissionPolicy::AllowOnce => Ok(ToolPermissionDecision {
+                allowed: true,
+                requires_confirmation: false,
+                decision: "allow_once".to_string(),
+                reason: "matching allow-once policy (not consumed yet)".to_string(),
+                policy_id: Some(record.id),
+            }),
+        }
+    }
+
     fn consume(&self, id: &str) -> Result<()> {
         let conn = self
             .conn
@@ -508,5 +587,149 @@ mod tests {
             .unwrap();
         assert!(!mcp_check.allowed);
         assert!(mcp_check.requires_confirmation);
+    }
+
+    #[test]
+    fn peek_allow_once_does_not_consume() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+        store
+            .grant(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "write",
+                ToolPermissionPolicy::AllowOnce,
+                None,
+            )
+            .unwrap();
+
+        // First peek should show allowed but not consume
+        let peek1 = store
+            .peek(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "write",
+                &["write".into()],
+            )
+            .unwrap();
+        assert!(peek1.allowed);
+        assert_eq!(peek1.decision, "allow_once");
+
+        // Second peek should still show allowed (not consumed)
+        let peek2 = store
+            .peek(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "write",
+                &["write".into()],
+            )
+            .unwrap();
+        assert!(peek2.allowed);
+        assert_eq!(peek2.decision, "allow_once");
+
+        // check() should consume the policy
+        let check1 = store
+            .check(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "write",
+                &["write".into()],
+            )
+            .unwrap();
+        assert!(check1.allowed);
+        assert_eq!(check1.decision, "allow_once");
+
+        // Second check should require confirmation (already consumed)
+        let check2 = store
+            .check(
+                "dangerous_write",
+                "mcp:filesystem",
+                "high",
+                "write",
+                &["write".into()],
+            )
+            .unwrap();
+        assert!(!check2.allowed);
+        assert!(check2.requires_confirmation);
+    }
+
+    #[test]
+    fn peek_and_check_other_policies_behave_same() {
+        let store = ToolPermissionStore::new_in_memory().unwrap();
+
+        // Allow policy
+        store
+            .grant(
+                "read_file",
+                "builtin",
+                "low",
+                "read",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let peek_allow = store
+            .peek("read_file", "builtin", "low", "read", &["read".into()])
+            .unwrap();
+        let check_allow = store
+            .check("read_file", "builtin", "low", "read", &["read".into()])
+            .unwrap();
+        assert_eq!(peek_allow.allowed, check_allow.allowed);
+        assert_eq!(peek_allow.decision, check_allow.decision);
+
+        // Deny policy
+        store
+            .grant(
+                "delete_all",
+                "builtin",
+                "high",
+                "write",
+                ToolPermissionPolicy::Deny,
+                None,
+            )
+            .unwrap();
+        let peek_deny = store
+            .peek("delete_all", "builtin", "high", "write", &["write".into()])
+            .unwrap();
+        let check_deny = store
+            .check("delete_all", "builtin", "high", "write", &["write".into()])
+            .unwrap();
+        assert_eq!(peek_deny.allowed, check_deny.allowed);
+        assert_eq!(peek_deny.decision, check_deny.decision);
+
+        // AskEveryTime policy
+        store
+            .grant(
+                "network_call",
+                "builtin",
+                "medium",
+                "network",
+                ToolPermissionPolicy::AskEveryTime,
+                None,
+            )
+            .unwrap();
+        let peek_ask = store
+            .peek(
+                "network_call",
+                "builtin",
+                "medium",
+                "network",
+                &["network".into()],
+            )
+            .unwrap();
+        let check_ask = store
+            .check(
+                "network_call",
+                "builtin",
+                "medium",
+                "network",
+                &["network".into()],
+            )
+            .unwrap();
+        assert_eq!(peek_ask.allowed, check_ask.allowed);
+        assert_eq!(peek_ask.decision, check_ask.decision);
     }
 }

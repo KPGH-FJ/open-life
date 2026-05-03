@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use ring::digest::{digest, SHA256};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -685,6 +686,28 @@ fn get_embedding_cache() -> &'static std::sync::Mutex<EmbeddingCache> {
     EMBEDDING_CACHE.get_or_init(|| std::sync::Mutex::new(EmbeddingCache::new(1000, 3600)))
 }
 
+fn embedding_cache_key(
+    provider: &str,
+    openai_base: &str,
+    embedding_model: &str,
+    embedding_enabled: bool,
+    text: &str,
+) -> String {
+    let text_hash = digest(&SHA256, text.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
+    format!(
+        "provider={}|base={}|model={}|enabled={}|text_sha256={}",
+        provider.trim(),
+        openai_base.trim_end_matches('/'),
+        embedding_model.trim(),
+        embedding_enabled,
+        text_hash
+    )
+}
+
 /// Clear the embedding cache.
 pub fn clear_embedding_cache() {
     if let Ok(mut guard) = get_embedding_cache().lock() {
@@ -722,10 +745,18 @@ pub async fn embed_text_with_config(
     embedding_model: &str,
     embedding_enabled: bool,
 ) -> Result<Vec<f32>> {
+    let cache_key = embedding_cache_key(
+        provider,
+        openai_base,
+        embedding_model,
+        embedding_enabled,
+        text,
+    );
+
     // Check cache first
     {
         if let Ok(mut cache) = get_embedding_cache().lock() {
-            if let Some(cached) = cache.get(text) {
+            if let Some(cached) = cache.get(&cache_key) {
                 return Ok(cached);
             }
         }
@@ -769,7 +800,7 @@ pub async fn embed_text_with_config(
                             .collect::<Vec<f32>>();
                         if !embedding.is_empty() {
                             if let Ok(mut cache) = get_embedding_cache().lock() {
-                                cache.put(text.to_string(), embedding.clone());
+                                cache.put(cache_key.clone(), embedding.clone());
                             }
                             return Ok(embedding);
                         }
@@ -784,7 +815,7 @@ pub async fn embed_text_with_config(
         if let Ok(emb) = crate::ollama::ollama_embed(text, "nomic-embed-text").await {
             if !emb.is_empty() {
                 if let Ok(mut cache) = get_embedding_cache().lock() {
-                    cache.put(text.to_string(), emb.clone());
+                    cache.put(cache_key.clone(), emb.clone());
                 }
                 return Ok(emb);
             }
@@ -794,7 +825,7 @@ pub async fn embed_text_with_config(
     // Fallback 2: deterministic hash-based embedding
     let embedding = crate::ollama::fallback_embed(text);
     if let Ok(mut cache) = get_embedding_cache().lock() {
-        cache.put(text.to_string(), embedding.clone());
+        cache.put(cache_key, embedding.clone());
     }
     Ok(embedding)
 }
@@ -1084,6 +1115,56 @@ mod tests {
         // Cache hit
         let result = cache.get("hello").unwrap();
         assert_eq!(result, vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn embedding_cache_key_separates_provider_and_model() {
+        let text = "same text";
+        let key_a = super::embedding_cache_key(
+            "openai",
+            "https://api.example.com/v1",
+            "model-a",
+            true,
+            text,
+        );
+        let key_b = super::embedding_cache_key(
+            "openai",
+            "https://api.example.com/v1",
+            "model-b",
+            true,
+            text,
+        );
+        let key_c = super::embedding_cache_key(
+            "ollama",
+            "https://api.example.com/v1",
+            "model-a",
+            true,
+            text,
+        );
+
+        assert_ne!(key_a, key_b);
+        assert_ne!(key_a, key_c);
+        assert!(!key_a.contains(text));
+    }
+
+    #[test]
+    fn embedding_cache_key_is_stable_for_same_config() {
+        let key_a = super::embedding_cache_key(
+            "openai",
+            "https://api.example.com/v1/",
+            "model-a",
+            true,
+            "hello",
+        );
+        let key_b = super::embedding_cache_key(
+            "openai",
+            "https://api.example.com/v1",
+            "model-a",
+            true,
+            "hello",
+        );
+
+        assert_eq!(key_a, key_b);
     }
 
     #[test]

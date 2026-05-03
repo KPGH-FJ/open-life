@@ -124,8 +124,6 @@ impl AgentLoop {
             "direct".into()
         });
 
-        // Compiler cannot prove loop executes at least once, so we need an initial
-        // value. The loop always executes in practice due to the normal flow.
         #[allow(unused_assignments)]
         let mut stop_reason = String::new();
 
@@ -202,7 +200,9 @@ impl AgentLoop {
             current_tools_prompt.clear();
         }
 
-        run.status = AgentRunStatus::Completed;
+        if run.status != AgentRunStatus::Failed {
+            run.status = AgentRunStatus::Completed;
+        }
         run.output_preview = Some(preview_text(&final_response, 200));
         run.finished_at = Some(chrono::Utc::now());
 
@@ -278,6 +278,33 @@ impl AgentLoop {
                     let exec_result = self
                         .action_executor
                         .execute(action_request, ctx.action_ctx)?;
+
+                    // Collect proposal_id from action output if present
+                    if let Some(ref output) = exec_result.action.output {
+                        let proposal_id = output
+                            .get("proposal_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                // Action output may be wrapped as { "text": "...json string..." }
+                                output
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|text| {
+                                        serde_json::from_str::<serde_json::Value>(text)
+                                            .ok()
+                                            .and_then(|json| {
+                                                json.get("proposal_id")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|s| s.to_string())
+                                            })
+                                    })
+                            });
+                        if let Some(id) = proposal_id {
+                            ctx.run.add_generated_proposal(&id);
+                        }
+                    }
+
                     ctx.run.actions.push(exec_result.action.clone());
                     observations.push(exec_result.observation.clone());
                     ctx.run.observations.push(exec_result.observation.clone());
@@ -613,10 +640,32 @@ struct ParsedAgentReply {
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
+    if text.chars().count() <= max_len {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_len])
+        format!("{}...", text.chars().take(max_len).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_text;
+
+    #[test]
+    fn preview_text_truncates_on_char_boundary() {
+        let text = format!("{}星", "a".repeat(199));
+        assert_eq!(preview_text(&text, 200), text);
+
+        let text = format!("{}星期几", "a".repeat(199));
+        let preview = preview_text(&text, 200);
+        assert!(preview.ends_with("星..."));
+    }
+
+    #[test]
+    fn preview_text_handles_emoji_without_panic() {
+        let text = format!("{}😀more", "a".repeat(199));
+        let preview = preview_text(&text, 200);
+        assert!(preview.ends_with("😀..."));
     }
 }
 

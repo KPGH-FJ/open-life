@@ -9,8 +9,39 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+const FTS_QUERY_MAX_CHARS: usize = 256;
+const FTS_QUERY_MAX_TOKENS: usize = 8;
+
 pub struct MemoryStore {
     conn: Mutex<Connection>,
+}
+
+fn normalize_fts_query(query: &str) -> Option<String> {
+    let limited = query
+        .trim()
+        .chars()
+        .take(FTS_QUERY_MAX_CHARS)
+        .collect::<String>();
+    let tokens = limited
+        .split_whitespace()
+        .filter_map(|part| {
+            let trimmed = part.trim_matches(|c: char| {
+                !c.is_alphanumeric() && !('\u{4e00}'..='\u{9fff}').contains(&c)
+            });
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(format!("\"{}\"", trimmed.replace('"', "\"\"")))
+            }
+        })
+        .take(FTS_QUERY_MAX_TOKENS)
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -663,16 +694,9 @@ impl MemoryStore {
             return Ok(vec![]);
         }
 
-        let normalized_query = query
-            .split_whitespace()
-            .map(|part| {
-                part.trim_matches(|c: char| {
-                    !c.is_alphanumeric() && !('\u{4e00}'..='\u{9fff}').contains(&c)
-                })
-            })
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        let Some(normalized_query) = normalize_fts_query(query) else {
+            return Ok(vec![]);
+        };
 
         let conn = self
             .conn
@@ -721,11 +745,16 @@ impl MemoryStore {
         }
 
         let now = Utc::now().to_rfc3339();
-        for hit in &results {
-            let _ = conn.execute(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-                params![&now, hit.chunk.id],
+        let ids: Vec<i64> = results.iter().map(|h| h.chunk.id).collect();
+        if !ids.is_empty() {
+            let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id IN ({})",
+                placeholders
             );
+            let mut params_vec: Vec<&dyn rusqlite::ToSql> = vec![&now];
+            params_vec.extend(ids.iter().map(|id| id as &dyn rusqlite::ToSql));
+            let _ = conn.execute(&sql, &*params_vec);
         }
         results.truncate(limit);
         Ok(results)
@@ -917,6 +946,58 @@ mod tests {
 
         let latest = store.get_latest_state_entries(5).unwrap();
         assert_eq!(latest.len(), 2);
+    }
+
+    #[test]
+    fn fts_query_escape_handles_special_syntax_without_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
+        store
+            .save_memory_record(
+                "s1",
+                "alpha quoted value with 中文 token",
+                "note",
+                "test",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+
+        let long_query = "alpha ".repeat(100);
+        for query in [
+            "\"quoted\"",
+            "alpha OR NEAR * ()",
+            "foo\"bar",
+            long_query.as_str(),
+        ] {
+            store.search_text_memories(Some("s1"), query, 5).unwrap();
+        }
+    }
+
+    #[test]
+    fn fts_query_escape_preserves_normal_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
+        store
+            .save_memory_record(
+                "s1",
+                "deep work 深度工作 planning",
+                "note",
+                "test",
+                &[],
+                "private",
+                None,
+            )
+            .unwrap();
+
+        let english = store.search_text_memories(Some("s1"), "deep", 5).unwrap();
+        assert_eq!(english.len(), 1);
+
+        let chinese = store
+            .search_text_memories(Some("s1"), "深度工作", 5)
+            .unwrap();
+        assert_eq!(chinese.len(), 1);
     }
 
     #[test]

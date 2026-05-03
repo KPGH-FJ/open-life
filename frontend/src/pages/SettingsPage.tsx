@@ -27,8 +27,10 @@ import {
   listToolPermissions,
   revokeToolPermission,
   listPlugins,
+  listToolManifests,
   type ToolPermissionRecord,
   type PluginRecord,
+  type ToolManifest,
 } from "../tauri";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
@@ -97,6 +99,7 @@ export default function SettingsPage() {
   const [privacyPolicy, setPrivacyPolicyState] = useState<PrivacyPolicy | null>(null);
   const [toolPermissions, setToolPermissions] = useState<ToolPermissionRecord[]>([]);
   const [plugins, setPlugins] = useState<PluginRecord[]>([]);
+  const [toolManifests, setToolManifests] = useState<ToolManifest[]>([]);
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
 
@@ -117,7 +120,7 @@ export default function SettingsPage() {
   }, []);
 
   const refreshAllDiagnostics = async () => {
-    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords] =
+    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
       await Promise.all([
         getRouterStatus().catch(() => null),
         getModelRouterStatus().catch(() => null),
@@ -126,6 +129,7 @@ export default function SettingsPage() {
         getPrivacyPolicy().catch(() => null),
         listToolPermissions().catch(() => []),
         listPlugins().catch(() => []),
+        listToolManifests().catch(() => []),
       ]);
     setRouterStatus(router);
     setModelRouterStatus(modelRouter);
@@ -134,6 +138,7 @@ export default function SettingsPage() {
     setPrivacyPolicyState(policy);
     setToolPermissions(permissions);
     setPlugins(pluginRecords);
+    setToolManifests(manifests);
     return diag;
   };
 
@@ -1404,6 +1409,75 @@ export default function SettingsPage() {
                   </button>
                 </div>
               ))
+            )}
+          </div>
+        </section>
+
+        {/* Tool Registry */}
+        <section className="space-y-4 border-t pt-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-medium text-gray-700">Tool Registry</h3>
+            <button
+              onClick={refreshAllDiagnostics}
+              className="rounded-md border border-gray-200 bg-white px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+            >
+              刷新
+            </button>
+          </div>
+          <div className="space-y-2 max-h-64 overflow-auto">
+            {toolManifests.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-3 text-xs text-gray-500">
+                暂无工具注册
+              </div>
+            ) : (
+              toolManifests.map(manifest => {
+                const isDeclarative = manifest.declarative_only;
+                const isDisabled = !manifest.enabled;
+                const isReal = !isDeclarative && !isDisabled;
+                const sourceStr =
+                  typeof manifest.source === "string"
+                    ? manifest.source
+                    : manifest.source.type === "BuiltIn"
+                      ? "builtin"
+                      : manifest.source.type === "Mcp"
+                        ? `mcp:${manifest.source.server_name}`
+                        : manifest.source.type === "A2A"
+                          ? `a2a:${manifest.source.agent_name}`
+                          : `plugin:${manifest.source.plugin_id}`;
+                return (
+                  <div
+                    key={manifest.id}
+                    className={`flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-xs ${
+                      isReal
+                        ? "border-green-200 bg-green-50"
+                        : isDeclarative
+                          ? "border-amber-200 bg-amber-50"
+                          : "border-red-200 bg-red-50"
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-900">{manifest.name}</div>
+                      <div className="mt-0.5 text-gray-500">
+                        {sourceStr} · {manifest.risk_level} · {manifest.action_type || "—"}
+                      </div>
+                      <div className="mt-0.5 text-gray-400">
+                        {manifest.capabilities.join(", ") || "none"}
+                      </div>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        isReal
+                          ? "bg-green-100 text-green-700"
+                          : isDeclarative
+                            ? "bg-amber-100 text-amber-700"
+                            : "bg-red-100 text-red-700"
+                      }`}
+                    >
+                      {isReal ? "✅ 可执行" : isDeclarative ? "⚠️ 声明-only" : "❌ 禁用"}
+                    </span>
+                  </div>
+                );
+              })
             )}
           </div>
         </section>

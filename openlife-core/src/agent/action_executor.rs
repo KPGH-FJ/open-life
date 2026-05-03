@@ -5,11 +5,12 @@ use crate::agent::types::{
 use crate::mcp::{McpArgumentInspection, McpRegistry};
 use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
-use crate::tool_manifest::ToolManifest;
+use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::{ToolPermissionDecision, ToolPermissionStore};
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
+use std::net::ToSocketAddrs;
 
 /// Configuration for action execution.
 #[derive(Debug, Clone)]
@@ -17,6 +18,10 @@ pub struct ActionExecutorConfig {
     pub allow_writes: bool,
     pub allow_cloud: bool,
     pub timeout_seconds: u64,
+    /// Whether to consume `allow_once` policies during permission check.
+    /// Default is `true`. Set to `false` for replay paths to avoid
+    /// consuming one-time permissions.
+    pub consume_allow_once: bool,
 }
 
 impl Default for ActionExecutorConfig {
@@ -25,6 +30,7 @@ impl Default for ActionExecutorConfig {
             allow_writes: true,
             allow_cloud: true,
             timeout_seconds: 120,
+            consume_allow_once: true,
         }
     }
 }
@@ -151,21 +157,31 @@ impl ActionExecutor {
             } else {
                 let source = canonical_tool_source(manifest);
 
-                ctx.permission_store
-                    .check(
+                let perm_check = if self.config.consume_allow_once {
+                    ctx.permission_store.check(
                         &manifest.name,
                         &source,
                         &manifest.risk_level,
                         &manifest.action_type,
                         &manifest.capabilities,
                     )
-                    .unwrap_or(ToolPermissionDecision {
-                        allowed: false,
-                        requires_confirmation: true,
-                        decision: "ask_every_time".into(),
-                        reason: "permission check failed".into(),
-                        policy_id: None,
-                    })
+                } else {
+                    ctx.permission_store.peek(
+                        &manifest.name,
+                        &source,
+                        &manifest.risk_level,
+                        &manifest.action_type,
+                        &manifest.capabilities,
+                    )
+                };
+
+                perm_check.unwrap_or(ToolPermissionDecision {
+                    allowed: false,
+                    requires_confirmation: true,
+                    decision: "ask_every_time".into(),
+                    reason: "permission check failed".into(),
+                    policy_id: None,
+                })
             }
         } else {
             // No manifest found
@@ -277,7 +293,7 @@ impl ActionExecutor {
         // 6. Execute
         let manifest_ref = manifest
             .as_ref()
-            .expect("manifest exists when execution is not blocked");
+            .ok_or_else(|| anyhow::anyhow!("Tool manifest not found for '{}'", tool_name))?;
         let result = if manifest_ref.tags.contains(&"core_os".to_string()) {
             self.execute_core_os_tool(tool_name, &args, ctx)
                 .unwrap_or_else(|e| ToolCallInternalResult {
@@ -293,16 +309,60 @@ impl ActionExecutor {
                     error: Some(e.to_string()),
                 })
         } else {
-            self.call_tool_internal(manifest_ref, args.clone(), ctx.registry, ctx.audit_store)
+            self.call_tool_internal(
+                manifest_ref,
+                args.clone(),
+                ctx.registry,
+                ctx.audit_store,
+                inspection.pii_found,
+            )
         };
 
-        let (action, observation) = self.build_success_action_observation(
+        let (mut action, observation) = self.build_success_action_observation(
             tool_name,
             &args,
             &result,
             manifest.as_ref(),
             &request,
         );
+
+        // For mcp.call_tool: override tool_scope with target manifest and handle
+        // target tool permission failures as NeedsConfirmation instead of Failed
+        if tool_name == "mcp.call_tool" {
+            if let Some(target_name) = args.get("tool_name").and_then(|v| v.as_str()) {
+                if let Some(target_manifest) = ctx
+                    .registry
+                    .list_manifests()
+                    .into_iter()
+                    .find(|m| m.name == target_name || m.id == target_name)
+                {
+                    action.tool_scope = Some(ToolActionScope {
+                        tool_name: target_manifest.name.clone(),
+                        tool_id: target_manifest.id.clone(),
+                        source: canonical_tool_source(&target_manifest),
+                        risk_level: target_manifest.risk_level.clone(),
+                        capabilities: target_manifest.capabilities.clone(),
+                        action_type: target_manifest.action_type.clone(),
+                        requires_confirmation: false,
+                        allowed: result.success,
+                    });
+                }
+            }
+            // If target tool permission was denied, treat as NeedsConfirmation
+            if !result.success {
+                if let Some(ref error) = result.error {
+                    if error.contains("blocked") || error.contains("ask_every_time") {
+                        action.status = "needs_confirmation".to_string();
+                        return Ok(ActionExecutionResult {
+                            action,
+                            observation,
+                            status: ActionExecutionStatus::NeedsConfirmation,
+                            stop_reason: Some("target_tool_needs_confirmation".into()),
+                        });
+                    }
+                }
+            }
+        }
 
         let status = if result.success {
             ActionExecutionStatus::Succeeded
@@ -324,12 +384,10 @@ impl ActionExecutor {
         args: Value,
         registry: &McpRegistry,
         audit: &McpAuditStore,
+        pii_found: bool,
     ) -> ToolCallInternalResult {
         match registry.execute_manifest(manifest, args.clone()) {
             Ok(r) => {
-                let pii_found = registry
-                    .inspect_call_arguments(&manifest.name, &args)
-                    .pii_found;
                 if let Err(e) = audit.insert_log(&manifest.name, &args, &r, true, pii_found) {
                     eprintln!("[warn] audit log write failed: {}", e);
                 }
@@ -340,9 +398,6 @@ impl ActionExecutor {
                 }
             }
             Err(e) => {
-                let pii_found = registry
-                    .inspect_call_arguments(&manifest.name, &args)
-                    .pii_found;
                 if let Err(log_err) =
                     audit.insert_log(&manifest.name, &args, &e.to_string(), false, pii_found)
                 {
@@ -662,6 +717,130 @@ impl ActionExecutor {
 
                 fetch_url_on_worker_thread(url)
             }
+            "web.search" => {
+                let query = args
+                    .get("query")
+                    .or_else(|| args.get("q"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'query' argument for web.search"))?;
+                let max_results = args
+                    .get("max_results")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5)
+                    .clamp(1, 10) as usize;
+
+                if query.trim().is_empty() {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some("Search query cannot be empty".to_string()),
+                    });
+                }
+
+                search_web_on_worker_thread(query, max_results)
+            }
+            "mcp.call_tool" => {
+                let target_tool_name =
+                    args.get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Missing 'tool_name' argument for mcp.call_tool")
+                        })?;
+                let server = args.get("server").and_then(|v| v.as_str());
+                let tool_args = args
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+
+                // 1. Find target manifest
+                let manifests = ctx.registry.list_manifests();
+                let mut target_manifests: Vec<_> = manifests
+                    .into_iter()
+                    .filter(|m| m.name == target_tool_name || m.id == target_tool_name)
+                    .collect();
+
+                let target_manifest = if let Some(server_name) = server {
+                    target_manifests
+                        .into_iter()
+                        .find(|m| matches!(&m.source, ToolSource::Mcp { server_name: s } if s == server_name))
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "MCP tool '{}' not found on server '{}'",
+                            target_tool_name,
+                            server_name
+                        ))?
+                } else if target_manifests.len() == 1 {
+                    target_manifests.remove(0)
+                } else if target_manifests.is_empty() {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("MCP tool '{}' not found", target_tool_name)),
+                    });
+                } else {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "Multiple MCP tools named '{}'. Please specify 'server' parameter.",
+                            target_tool_name
+                        )),
+                    });
+                };
+
+                // 2. Check permission using target tool's canonical scope
+                let target_source = canonical_tool_source(&target_manifest);
+                let target_decision = ctx
+                    .permission_store
+                    .check(
+                        &target_manifest.name,
+                        &target_source,
+                        &target_manifest.risk_level,
+                        &target_manifest.action_type,
+                        &target_manifest.capabilities,
+                    )
+                    .unwrap_or(ToolPermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        decision: "ask_every_time".into(),
+                        reason: "permission check failed".into(),
+                        policy_id: None,
+                    });
+
+                if !target_decision.allowed || target_decision.requires_confirmation {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "MCP tool '{}' blocked: {} (decision: {})",
+                            target_tool_name, target_decision.reason, target_decision.decision
+                        )),
+                    });
+                }
+
+                // 3. Inspect PII using target tool
+                let inspection = ctx
+                    .registry
+                    .inspect_call_arguments(&target_manifest.name, &tool_args);
+                if inspection.requires_confirmation && inspection.pii_found {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "MCP tool '{}' blocked: PII detected in arguments",
+                            target_tool_name
+                        )),
+                    });
+                }
+
+                // 4. Execute target tool
+                Ok(self.call_tool_internal(
+                    &target_manifest,
+                    tool_args,
+                    ctx.registry,
+                    ctx.audit_store,
+                    inspection.pii_found,
+                ))
+            }
             "file.write_proposal" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
@@ -686,16 +865,18 @@ impl ActionExecutor {
                     "create"
                 };
                 let content_preview = if content.len() > 4000 {
+                    let preview: String = content.chars().take(4000).collect();
                     format!(
                         "{}... [truncated {} bytes]",
-                        &content[..4000],
-                        content.len() - 4000
+                        preview,
+                        content.len() - preview.len()
                     )
                 } else {
                     content.to_string()
                 };
 
                 // Auto-create ExternalWriteAction Proposal if path is non-empty
+                let mut proposal_id: Option<String> = None;
                 if !path.is_empty() {
                     if let Some(proposal_store) = ctx.proposal_store {
                         let mut proposal = AgentProposal::new(
@@ -719,17 +900,20 @@ impl ActionExecutor {
                         if let Some(ref run_id) = request.source_run_id {
                             proposal.run_id = Some(run_id.clone());
                         }
+                        let id = proposal.id.clone();
                         if let Err(e) = proposal_store.create_proposal(&proposal) {
                             eprintln!(
                                 "[warn] Failed to create ExternalWriteAction Proposal: {}",
                                 e
                             );
+                        } else {
+                            proposal_id = Some(id);
                         }
                     }
                 }
 
-                // Return structured result with unified payload
-                let result_payload = serde_json::json!({
+                // Return structured result with unified payload, including proposal_id
+                let mut result_payload = serde_json::json!({
                     "proposal_type": "external_write_action",
                     "external_write_action": {
                         "path": path,
@@ -748,6 +932,11 @@ impl ActionExecutor {
                     "requires_confirmation": true,
                     "reason": format!("Proposed file write to '{}' ({})", path, operation),
                 });
+                if let Some(id) = proposal_id {
+                    if let Some(obj) = result_payload.as_object_mut() {
+                        obj.insert("proposal_id".to_string(), serde_json::json!(id));
+                    }
+                }
 
                 Ok(ToolCallInternalResult {
                     success: true,
@@ -1127,6 +1316,82 @@ fn fetch_url_on_worker_thread(url: &str) -> Result<ToolCallInternalResult> {
         })
 }
 
+fn search_web_on_worker_thread(query: &str, max_results: usize) -> Result<ToolCallInternalResult> {
+    let query = query.to_string();
+    std::thread::spawn(move || search_web_blocking(&query, max_results))
+        .join()
+        .unwrap_or_else(|_| {
+            Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some("web.search worker thread panicked".to_string()),
+            })
+        })
+}
+
+fn search_web_blocking(query: &str, max_results: usize) -> Result<ToolCallInternalResult> {
+    let url = reqwest::Url::parse_with_params(
+        "https://duckduckgo.com/html/",
+        &[("q", query), ("kl", "wt-wt")],
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to build search URL: {}", e))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .user_agent("OpenLife/0.1 (+local agent web.search)")
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+    match client.get(url).send() {
+        Ok(response) => {
+            let status = response.status();
+            if !status.is_success() {
+                return Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Search HTTP {}: {}",
+                        status.as_u16(),
+                        status.canonical_reason().unwrap_or("Unknown error")
+                    )),
+                });
+            }
+
+            match response.text() {
+                Ok(html) => {
+                    let results = extract_duckduckgo_results(&html, max_results);
+                    let output = if results.is_empty() {
+                        truncate_text(
+                            &format!(
+                                "No structured search results parsed. Raw page text:\n{}",
+                                html_to_text(&html)
+                            ),
+                            12_000,
+                        )
+                    } else {
+                        format_search_results(query, &results)
+                    };
+                    Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(output),
+                        error: None,
+                    })
+                }
+                Err(e) => Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!("Failed to read search response body: {}", e)),
+                }),
+            }
+        }
+        Err(e) => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(format!("Search request failed: {}", e)),
+        }),
+    }
+}
+
 fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -1145,15 +1410,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                             text
                         };
                         let max_length = 50_000;
-                        let truncated = if text.len() > max_length {
-                            format!(
-                                "{}\n\n[Truncated: response exceeded {} characters]",
-                                &text[..max_length],
-                                max_length
-                            )
-                        } else {
-                            text
-                        };
+                        let truncated = truncate_text(&text, max_length);
                         Ok(ToolCallInternalResult {
                             success: true,
                             output: Some(truncated),
@@ -1186,36 +1443,177 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
+fn extract_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    let block_regex = regex::Regex::new(
+        r#"(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>(?P<body>.*?)(?:<a[^>]*class=["'][^"']*result__a|</body>|$)"#,
+    )
+    .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    let snippet_regex = regex::Regex::new(
+        r#"(?is)<a[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</a>"#,
+    )
+    .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+
+    let mut results = Vec::new();
+    for caps in block_regex.captures_iter(html) {
+        if results.len() >= max_results {
+            break;
+        }
+        let raw_href = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let title_html = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+        let body = caps.name("body").map(|m| m.as_str()).unwrap_or_default();
+        let snippet_html = snippet_regex
+            .captures(body)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str())
+            .unwrap_or_default();
+
+        let title = html_to_text(title_html);
+        let url = normalize_duckduckgo_href(raw_href);
+        let snippet = html_to_text(snippet_html);
+
+        if !title.is_empty() && !url.is_empty() {
+            results.push(SearchResult {
+                title,
+                url,
+                snippet,
+            });
+        }
+    }
+    results
+}
+
+fn normalize_duckduckgo_href(raw_href: &str) -> String {
+    let href = raw_href.replace("&amp;", "&");
+    let absolute = if href.starts_with("//") {
+        format!("https:{}", href)
+    } else if href.starts_with('/') {
+        format!("https://duckduckgo.com{}", href)
+    } else {
+        href
+    };
+
+    if let Ok(url) = reqwest::Url::parse(&absolute) {
+        if let Some((_, uddg)) = url.query_pairs().find(|(key, _)| key == "uddg") {
+            return uddg.into_owned();
+        }
+        return url.to_string();
+    }
+    String::new()
+}
+
+fn format_search_results(query: &str, results: &[SearchResult]) -> String {
+    let mut lines = vec![format!("Search results for \"{}\":", query)];
+    for (idx, result) in results.iter().enumerate() {
+        lines.push(format!(
+            "{}. {}\n   URL: {}\n   Snippet: {}",
+            idx + 1,
+            result.title,
+            result.url,
+            result.snippet
+        ));
+    }
+    lines.join("\n")
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        format!(
+            "{}\n\n[Truncated: response exceeded {} characters]",
+            text.chars().take(max_chars).collect::<String>(),
+            max_chars
+        )
+    }
+}
+
 /// Check if a path is within the safe paths list.
 /// Returns false if safe_paths is empty: filesystem access must be explicitly scoped.
+///
+/// Security rules:
+/// - safe_paths are canonicalized; failures skip that path. All invalid => deny.
+/// - Paths containing ".." components are rejected.
+/// - Existing files: canonicalize full path and check against safe_paths.
+/// - Non-existing files: parent must exist and be canonicalized; only a single
+///   valid filename may be appended. Empty or non-UTF8 filenames are rejected.
+/// - Symlinks are resolved by canonicalize; escaping safe_paths is blocked.
 pub fn is_path_in_safe_paths(path: &str, safe_paths: &[String]) -> bool {
     if safe_paths.is_empty() {
         return false;
     }
 
     let path = std::path::Path::new(path);
-    let canonical_path = match path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // If canonicalize fails, try with the original path
-            // This handles paths that don't exist yet
-            path.to_path_buf()
-        }
-    };
 
-    for safe in safe_paths {
-        let safe_path = std::path::Path::new(safe);
-        let canonical_safe = match safe_path.canonicalize() {
-            Ok(p) => p,
-            Err(_) => safe_path.to_path_buf(),
-        };
-
-        if canonical_path.starts_with(&canonical_safe) {
-            return true;
+    // Reject paths with parent directory references
+    for component in path.components() {
+        if let std::path::Component::ParentDir = component {
+            return false;
         }
     }
 
-    false
+    // Determine the canonical base path
+    let canonical_base = if let Ok(canonical) = path.canonicalize() {
+        // Path exists: use full canonical path
+        canonical
+    } else {
+        // Path doesn't exist: parent must exist and be canonicalized
+        let parent = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => return false,
+        };
+
+        let canonical_parent = match parent.canonicalize() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+
+        // Validate filename: must exist, be non-empty, and valid UTF-8
+        if let Some(filename) = path.file_name() {
+            if let Some(name_str) = filename.to_str() {
+                if name_str.is_empty() {
+                    return false;
+                }
+            } else {
+                return false; // Non-UTF8 filename
+            }
+        } else {
+            return false; // No filename (e.g. trailing slash)
+        }
+
+        canonical_parent
+    };
+
+    // Canonicalize safe paths, skipping ones that fail or are symlinks.
+    // If all safe paths fail to canonicalize, deny.
+    let valid_safe_paths: Vec<std::path::PathBuf> = safe_paths
+        .iter()
+        .filter_map(|safe| {
+            let safe_path = std::path::Path::new(safe);
+            // Reject safe paths that are symlinks
+            if let Ok(meta) = safe_path.symlink_metadata() {
+                if meta.file_type().is_symlink() {
+                    return None;
+                }
+            }
+            safe_path.canonicalize().ok()
+        })
+        .collect();
+
+    if valid_safe_paths.is_empty() {
+        return false;
+    }
+
+    // Check if canonical_base is within any safe path
+    valid_safe_paths
+        .iter()
+        .any(|safe| canonical_base.starts_with(safe))
 }
 
 pub fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
@@ -1226,55 +1624,53 @@ pub fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
     }
 }
 
-/// Check if a URL points to a private/internal address.
-/// Blocks localhost, private IP ranges, and link-local addresses.
-fn is_private_url(url: &str) -> bool {
-    // Quick check for localhost variants
-    if url.contains("://localhost")
-        || url.contains("://127.")
-        || url.contains("://10.")
-        || url.contains("://192.168.")
-        || url.contains("://169.254.")
-        || url.contains("://172.")
-    {
-        // More precise check for 172.16.0.0/12
-        if url.contains("://172.") {
-            let after_172 = url.split("://172.").nth(1).unwrap_or("");
-            let second_octet: u32 = after_172
-                .split('.')
-                .next()
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
-            if (16..=31).contains(&second_octet) {
-                return true;
-            }
-        } else {
-            return true;
+/// Check if an IP address is private/internal.
+/// Blocks loopback, private ranges, and link-local addresses.
+pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local()
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback() || ipv6.is_unique_local() || ipv6.is_unicast_link_local()
         }
     }
+}
 
-    // Check for private IP patterns more thoroughly
-    if let Some(host_start) = url.find("://") {
-        let host_part = &url[host_start + 3..];
-        let host = host_part.split('/').next().unwrap_or(host_part);
-        let host = host.split(':').next().unwrap_or(host);
-
-        if host == "localhost" {
-            return true;
-        }
-
-        // Check for numeric IPs
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            match ip {
-                std::net::IpAddr::V4(ipv4) => {
-                    return ipv4.is_loopback() || ipv4.is_private();
-                }
-                std::net::IpAddr::V6(ipv6) => {
-                    return ipv6.is_loopback();
-                }
+/// Resolve a hostname and check if any resolved IP is private.
+/// Returns true if any resolved address is private/internal.
+fn resolve_host_is_private(host: &str) -> bool {
+    // Try to add a dummy port for ToSocketAddrs resolution
+    let addr_with_port = format!("{}:80", host);
+    if let Ok(addrs) = addr_with_port.to_socket_addrs() {
+        for addr in addrs {
+            let ip = addr.ip();
+            if is_private_ip(&ip) {
+                return true;
             }
         }
+    }
+    false
+}
+
+/// Check if a URL points to a private/internal address.
+/// Blocks localhost, private IP ranges, and link-local addresses.
+/// Only checks the host portion of the URL; query/path fragments are ignored.
+pub fn is_private_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+
+    if let Some(host) = parsed.host_str() {
+        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+            return is_private_ip(&ip);
+        }
+
+        let domain = host.trim_end_matches('.').to_ascii_lowercase();
+        if domain == "localhost" || domain.ends_with(".localhost") {
+            return true;
+        }
+        return resolve_host_is_private(&domain);
     }
 
     false
@@ -1988,12 +2384,562 @@ mod tests {
     #[test]
     fn is_private_url_blocks_localhost_and_private_ips() {
         assert!(is_private_url("http://localhost:8080"));
+        assert!(is_private_url("http://foo.localhost/path"));
         assert!(is_private_url("http://127.0.0.1/api"));
         assert!(is_private_url("http://10.0.0.1/admin"));
         assert!(is_private_url("http://192.168.1.1/"));
         assert!(is_private_url("http://172.16.0.1/"));
         assert!(is_private_url("http://169.254.1.1/"));
+        assert!(is_private_url("http://[::1]/"));
+        assert!(is_private_url("http://[fe80::1]/"));
+        assert!(is_private_url("http://[fc00::1]/"));
         assert!(!is_private_url("https://example.com/page"));
+        assert!(!is_private_url(
+            "https://example.com/api?callback=http://172.16.0.1"
+        ));
         assert!(!is_private_url("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn is_private_ip_blocks_loopback_v4() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"127.255.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_blocks_loopback_v6() {
+        assert!(is_private_ip(&"::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_blocks_private_ranges() {
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"10.255.255.255".parse().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"172.31.255.255".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_blocks_link_local() {
+        assert!(is_private_ip(&"169.254.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"169.254.255.255".parse().unwrap()));
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_allows_public_ip() {
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()));
+        assert!(!is_private_ip(&"104.16.249.249".parse().unwrap()));
+        assert!(!is_private_ip(&"2001:4860:4860::8888".parse().unwrap()));
+    }
+
+    #[test]
+    fn web_fetch_url_parsing_extracts_host_correctly() {
+        // Test that host extraction handles various URL formats
+        let test_cases = [
+            ("http://example.com/path", "example.com"),
+            ("https://api.example.com:8080/v1", "api.example.com"),
+            (
+                "http://sub.domain.example.com:443/path",
+                "sub.domain.example.com",
+            ),
+        ];
+
+        for (url, expected_host) in &test_cases {
+            if let Some(host_start) = url.find("://") {
+                let host_part = &url[host_start + 3..];
+                let host = host_part.split('/').next().unwrap_or(host_part);
+                let host = host.split(':').next().unwrap_or(host);
+                assert_eq!(host, *expected_host, "URL: {}", url);
+            } else {
+                panic!("No :// in URL: {}", url);
+            }
+        }
+    }
+
+    #[test]
+    fn duckduckgo_results_are_extracted_and_urls_unwrapped() {
+        let html = r#"
+            <html><body>
+              <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fpage%3Fx%3D1&amp;rut=abc">Example &amp; Result</a>
+              <a class="result__snippet">A <b>useful</b> snippet &amp; context.</a>
+            </body></html>
+        "#;
+
+        let results = extract_duckduckgo_results(html, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "Example & Result");
+        assert_eq!(results[0].url, "https://example.com/page?x=1");
+        assert_eq!(results[0].snippet, "A **useful** snippet & context.");
+    }
+
+    #[test]
+    fn truncate_text_is_char_boundary_safe() {
+        let text = "今天星期几🙂明天呢";
+        let truncated = truncate_text(text, 5);
+        assert!(truncated.starts_with("今天星期几"));
+        assert!(truncated.contains("[Truncated"));
+    }
+
+    // =======================================================================
+    // Safe paths security tests
+    // =======================================================================
+
+    #[test]
+    fn safe_paths_empty_list_denies_all() {
+        let safe_paths: Vec<String> = vec![];
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        assert!(!is_path_in_safe_paths(
+            temp_file.path().to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn safe_paths_blocks_double_dot_traversal() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        // Attempt to escape using ..
+        let escaped = safe_dir
+            .path()
+            .join("subdir")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        assert!(!is_path_in_safe_paths(
+            escaped.to_str().unwrap(),
+            &safe_paths
+        ));
+
+        // Simple .. in path
+        assert!(!is_path_in_safe_paths("/safe/../outside", &safe_paths));
+    }
+
+    #[test]
+    fn safe_paths_blocks_symlink_escape() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        // Create a symlink inside safe_dir pointing outside
+        let symlink_path = safe_dir.path().join("escape_link");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(outside_dir.path(), &symlink_path).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::symlink_dir;
+            symlink_dir(outside_dir.path(), &symlink_path).unwrap();
+        }
+
+        // Attempt to access a file through the symlink
+        let escaped_file = symlink_path.join("secret.txt");
+        assert!(!is_path_in_safe_paths(
+            escaped_file.to_str().unwrap(),
+            &safe_paths
+        ));
+
+        // Clean up symlink
+        let _ = std::fs::remove_file(&symlink_path);
+    }
+
+    #[test]
+    fn safe_paths_blocks_nonexistent_parent() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        // Parent directory does not exist
+        let new_file = safe_dir
+            .path()
+            .join("nonexistent_parent")
+            .join("new_file.txt");
+        assert!(!is_path_in_safe_paths(
+            new_file.to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn safe_paths_allows_new_file_with_existing_parent() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        // Parent exists, file does not: should be allowed
+        let new_file = safe_dir.path().join("new_file.txt");
+        assert!(!new_file.exists());
+        assert!(is_path_in_safe_paths(
+            new_file.to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn safe_paths_allows_existing_file() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        // Create an existing file inside safe path
+        let existing_file = safe_dir.path().join("existing.txt");
+        std::fs::write(&existing_file, "content").unwrap();
+        assert!(is_path_in_safe_paths(
+            existing_file.to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn safe_paths_blocks_file_outside_safe_paths() {
+        let safe_dir = tempfile::tempdir().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = vec![safe_path];
+
+        let outside_file = outside_dir.path().join("outside.txt");
+        std::fs::write(&outside_file, "content").unwrap();
+        assert!(!is_path_in_safe_paths(
+            outside_file.to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn safe_paths_all_canonicalize_fails_denies_all() {
+        // Provide a safe path that does not exist -> canonicalize fails
+        let safe_paths = vec!["/nonexistent_safe_path_12345".to_string()];
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        assert!(!is_path_in_safe_paths(
+            temp_file.path().to_str().unwrap(),
+            &safe_paths
+        ));
+    }
+
+    #[test]
+    fn snapshot_create_not_in_available_tools() {
+        let registry = McpRegistry::new();
+        let manifests = registry.list_manifests();
+        let snapshot_manifests: Vec<_> = manifests
+            .iter()
+            .filter(|m| m.name == "snapshot.create")
+            .collect();
+        assert_eq!(snapshot_manifests.len(), 1);
+        assert!(snapshot_manifests[0].declarative_only);
+
+        let available = registry.tools_prompt();
+        assert!(!available.contains("snapshot.create"));
+    }
+
+    #[test]
+    fn mcp_call_tool_routes_to_target_manifest() {
+        let mut registry = McpRegistry::new();
+        // Use BuiltIn source for test so execute_manifest routes through builtins
+        registry.register_builtin(
+            ToolManifest {
+                id: "search_files".into(),
+                name: "search_files".into(),
+                description: "test search".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec![],
+            },
+            Box::new(|_| Ok("found files".into())),
+        );
+
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        // Grant permission to mcp.call_tool wrapper
+        permission_store
+            .grant(
+                "mcp.call_tool",
+                "builtin",
+                "medium",
+                "external_side_effect",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        // Grant permission to target tool
+        permission_store
+            .grant(
+                "search_files",
+                "builtin",
+                "low",
+                "read",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "mcp.call_tool".into(),
+                    input: serde_json::json!({
+                        "arguments": {
+                            "tool_name": "search_files",
+                            "arguments": {"query": "*.rs"}
+                        }
+                    }),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.status,
+            ActionExecutionStatus::Succeeded,
+            "Expected success but got: {}",
+            result.observation.content
+        );
+        assert_eq!(result.observation.content, "found files");
+    }
+
+    #[test]
+    fn mcp_call_tool_multiple_same_name_requires_server() {
+        let mut registry = McpRegistry::new();
+        // Use BuiltIn source for test
+        registry.register_builtin(
+            ToolManifest {
+                id: "search_files_a".into(),
+                name: "search_files".into(),
+                description: "test search 1".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec![],
+            },
+            Box::new(|_| Ok("from a".into())),
+        );
+        registry.register_builtin(
+            ToolManifest {
+                id: "search_files_b".into(),
+                name: "search_files".into(),
+                description: "test search 2".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec![],
+            },
+            Box::new(|_| Ok("from b".into())),
+        );
+
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        // Grant permission to mcp.call_tool wrapper
+        permission_store
+            .grant(
+                "mcp.call_tool",
+                "builtin",
+                "medium",
+                "external_side_effect",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "mcp.call_tool".into(),
+                    input: serde_json::json!({
+                        "arguments": {
+                            "tool_name": "search_files",
+                            "arguments": {}
+                        }
+                    }),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Failed);
+        assert!(result.observation.content.contains("Multiple MCP tools"));
+    }
+
+    #[test]
+    fn mcp_call_tool_uses_target_permission_scope() {
+        let mut registry = McpRegistry::new();
+        // Use BuiltIn source for test
+        registry.register_builtin(
+            ToolManifest {
+                id: "dangerous_delete".into(),
+                name: "dangerous_delete".into(),
+                description: "test delete".into(),
+                parameters: serde_json::json!({"type": "object"}),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["write".into()],
+                requires_confirmation: true,
+                enabled: true,
+                declarative_only: false,
+                action_type: "write".into(),
+                tags: vec![],
+            },
+            Box::new(|_| Ok("deleted".into())),
+        );
+
+        // Grant permission to mcp.call_tool itself (low/medium risk wrapper)
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "mcp.call_tool",
+                "builtin",
+                "medium",
+                "external_side_effect",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        // But do NOT grant permission to dangerous_delete
+
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "mcp.call_tool".into(),
+                    input: serde_json::json!({
+                        "arguments": {
+                            "tool_name": "dangerous_delete",
+                            "arguments": {}
+                        }
+                    }),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(
+            result.status,
+            ActionExecutionStatus::NeedsConfirmation,
+            "Expected NeedsConfirmation but got: {}",
+            result.observation.content
+        );
+        assert!(
+            result.observation.content.contains("blocked")
+                || result.observation.content.contains("ask_every_time"),
+            "Expected permission error but got: {}",
+            result.observation.content
+        );
+    }
+
+    #[test]
+    fn external_write_action_records_proposal_id_in_output() {
+        let registry = McpRegistry::new();
+        let permission_store = ToolPermissionStore::new_in_memory().unwrap();
+        permission_store
+            .grant(
+                "file.write_proposal",
+                "builtin",
+                "high",
+                "write",
+                ToolPermissionPolicy::Allow,
+                None,
+            )
+            .unwrap();
+        let audit_file = tempfile::NamedTempFile::new().unwrap();
+        let audit_store = McpAuditStore::new(audit_file.path());
+        let privacy_engine = PrivacyEngine::default();
+        let mut ctx = test_context(&registry, &permission_store, &audit_store, &privacy_engine);
+        let safe_dir = tempfile::tempdir().unwrap();
+        let safe_path = safe_dir.path().to_string_lossy().to_string();
+        let safe_paths = [safe_path];
+        ctx.safe_paths = &safe_paths;
+
+        // Use ProposalStore to capture the proposal
+        let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        ctx.proposal_store = Some(&proposal_store);
+
+        let result = ActionExecutor::new(ActionExecutorConfig::default())
+            .execute(
+                AgentActionRequest {
+                    action_type: "mcp_tool".into(),
+                    target: "file.write_proposal".into(),
+                    input: serde_json::json!({
+                        "arguments": {
+                            "path": safe_dir.path().join("new.txt").to_str().unwrap(),
+                            "content": "hello"
+                        }
+                    }),
+                    source_run_id: Some("run-1".into()),
+                    step_index: 0,
+                },
+                &ctx,
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Succeeded);
+        // Verify proposal_id is in the action output text
+        let output = result.action.output.as_ref().expect("output should exist");
+        let output_text = output
+            .get("text")
+            .and_then(|v| v.as_str())
+            .expect("text field should exist");
+        let output_json: serde_json::Value =
+            serde_json::from_str(output_text).expect("output should be valid JSON");
+        let proposal_id = output_json.get("proposal_id").and_then(|v| v.as_str());
+        assert!(
+            proposal_id.is_some(),
+            "proposal_id should be present in action output"
+        );
+        // Verify the proposal was actually created
+        let proposals = proposal_store.list_pending_proposals(10).unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].id, proposal_id.unwrap());
     }
 }

@@ -213,7 +213,9 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.lock().unwrap().kill();
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -323,6 +325,14 @@ impl McpRegistry {
         );
 
         self.register_core_os_tool(
+            "state.read",
+            "读取当前 State（情绪、健康、焦点、习惯等）",
+            "low",
+            vec!["read".into(), "lifemodel".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
             "memory.search",
             "搜索向量记忆库，返回相关记忆片段",
             "low",
@@ -346,12 +356,10 @@ impl McpRegistry {
             "read",
         );
 
-        self.register_core_os_tool(
+        // snapshot.create is declarative-only in Beta: use Version Control page instead
+        self.register_declarative_stub(
             "snapshot.create",
-            "创建当前状态的 Git-like 快照",
-            "medium",
-            vec!["write".into()],
-            "write",
+            "创建快照（Beta declarative-only：请使用 Version Control 页面手动创建）",
         );
 
         // Core OS Tools: Write (Proposal-First)
@@ -404,12 +412,62 @@ impl McpRegistry {
             "network",
         );
 
-        // Execution Tools: P2 (declarative-only stubs)
-        self.register_declarative_stub(
-            "web.search",
-            "搜索网页（Beta stub：需要配置 search provider）",
+        self.register_builtin(
+            ToolManifest {
+                id: "web.search".into(),
+                name: "web.search".into(),
+                description: "联网搜索网页，输入 query 返回搜索结果摘要".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query" },
+                        "max_results": { "type": "integer", "description": "Maximum number of results, default 5" }
+                    },
+                    "required": ["query"]
+                }),
+                permission_level: "medium".into(),
+                risk_level: "medium".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["network".into(), "read".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec!["execution".into(), "web".into()],
+            },
+            Box::new(|_args| Ok("web.search executed".to_string())),
         );
 
+        self.register_builtin(
+            ToolManifest {
+                id: "mcp.call_tool".into(),
+                name: "mcp.call_tool".into(),
+                description: "调用已注册的 MCP 工具（通用入口）".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tool_name": { "type": "string", "description": "目标 MCP 工具名" },
+                        "server": { "type": "string", "description": "可选：MCP server 名称" },
+                        "arguments": { "type": "object" }
+                    },
+                    "required": ["tool_name", "arguments"]
+                }),
+                permission_level: "medium".into(),
+                risk_level: "medium".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec!["network".into(), "external_side_effect".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "external_side_effect".into(),
+                tags: vec!["execution".into(), "mcp_wrapper".into()],
+            },
+            Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
+        );
+
+        // Execution Tools: P2 (declarative-only stubs)
         self.register_declarative_stub(
             "calendar.read",
             "读取日历事件（Beta stub：需要配置 ICS source）",
@@ -423,6 +481,17 @@ impl McpRegistry {
         );
 
         self.register_declarative_stub("email.propose_draft", "提议创建邮件草稿（Beta stub）");
+
+        self.register_declarative_stub(
+            "task.create_proposal",
+            "提议创建任务/提醒/待办事项（Beta stub：生成 ScheduledTask 或 Goal Proposal）",
+        );
+
+        // A2A: declarative-only in Beta (execution adapter not yet wired)
+        self.register_declarative_stub(
+            "a2a.call_agent",
+            "调用外部 A2A Agent（Beta declarative-only：执行适配未接入）",
+        );
     }
 
     /// Helper to register a Core OS tool with standard metadata.
@@ -658,7 +727,9 @@ impl McpRegistry {
                     ))
                 }
             }
-            ToolSource::Mcp { .. } => self.call_tool(&manifest.name, arguments),
+            ToolSource::Mcp { server_name } => {
+                self.call_tool_on_server(server_name, &manifest.name, arguments)
+            }
             ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
                 "Plugin tool '{}' from '{}' is declarative-only and not executable in this Beta",
@@ -707,6 +778,43 @@ impl McpRegistry {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("tool {} not found", name)))
     }
 
+    /// Call a tool on a specific MCP server by name.
+    /// Requires the server to be registered. Returns error if server or tool is not found.
+    pub fn call_tool_on_server(
+        &self,
+        server_name: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Result<String> {
+        let client = self
+            .clients
+            .get(server_name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?;
+
+        // 1. Detect and desensitize arguments
+        let args_str = arguments.to_string();
+        let pii = self.privacy_engine.detect(&args_str);
+        let (desensitized_str, map) = if pii.is_empty() {
+            (args_str, HashMap::new())
+        } else {
+            self.privacy_engine.desensitize(&args_str)
+        };
+        let desensitized_args: Value =
+            serde_json::from_str(&desensitized_str).unwrap_or_else(|_| arguments.clone());
+
+        // 2. Execute on the specific server
+        let result = client.call_tool(name, desensitized_args)?;
+
+        // 3. Reconstruct any placeholders in the result
+        let final_result = if map.is_empty() {
+            result
+        } else {
+            self.privacy_engine.reconstruct(&result, &map)
+        };
+
+        Ok(final_result)
+    }
+
     /// Generate a system prompt snippet describing available tools
     pub fn tools_prompt(&self) -> String {
         let manifests = self.list_manifests();
@@ -724,7 +832,7 @@ impl McpRegistry {
             return "".into();
         }
         lines.push(
-            "\n如果需要使用工具，只回复一个合法 JSON 对象，不要使用 markdown 代码块，不要附加解释。格式：{\"tool_calls\": [{\"name\": \"web.fetch\", \"arguments\": {\"url\": \"https://example.com\"}}]}。工具名必须完整匹配上面的名称，URL 必须包含 http:// 或 https://。"
+            "\n如果需要使用工具，只回复一个合法 JSON 对象，不要使用 markdown 代码块，不要附加解释。格式：{\"tool_calls\": [{\"name\": \"web.search\", \"arguments\": {\"query\": \"今天日期\"}}]} 或 {\"tool_calls\": [{\"name\": \"web.fetch\", \"arguments\": {\"url\": \"https://example.com\"}}]}。工具名必须完整匹配上面的名称，URL 必须包含 http:// 或 https://。"
                 .into(),
         );
         lines.join("\n")
@@ -886,5 +994,24 @@ mod tests {
         assert_eq!(inspection.permission_level, "low");
         assert!(!inspection.pii_found);
         assert!(inspection.requires_confirmation);
+    }
+
+    #[test]
+    fn web_search_is_executable_and_in_tools_prompt() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "web.search")
+            .expect("web.search manifest should be registered");
+
+        assert!(manifest.enabled);
+        assert!(!manifest.declarative_only);
+        assert_eq!(manifest.action_type, "read");
+        assert!(manifest.capabilities.iter().any(|c| c == "network"));
+
+        let prompt = registry.tools_prompt();
+        assert!(prompt.contains("web.search"));
+        assert!(prompt.contains("\"query\""));
     }
 }

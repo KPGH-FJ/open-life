@@ -20,7 +20,9 @@ import {
   rejectProposal,
   editProposal,
   getSystemDiagnostics,
+  getConfig,
   type AgentProposal,
+  type AppConfig,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
 
@@ -79,9 +81,25 @@ export default function ProposalReviewPage() {
   const [editValue, setEditValue] = useState("");
   const [batchAccepting, setBatchAccepting] = useState(false);
   const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [safePaths, setSafePaths] = useState<string[]>([]);
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
+
+  function isPathInSafePaths(path: string | undefined): boolean {
+    if (!path || safePaths.length === 0) return false;
+    // Normalize path separators
+    const normalized = path.replace(/\\/g, "/");
+    return safePaths.some(safe => {
+      const safeNorm = safe.replace(/\\/g, "/");
+      // Exact match or path is under safe directory
+      return (
+        normalized === safeNorm ||
+        normalized.startsWith(safeNorm + "/") ||
+        normalized.startsWith(safeNorm + "\\")
+      );
+    });
+  }
 
   const appliedNotice = (proposal: AgentProposal): string => {
     if (proposal.proposalType === "tool_permission") {
@@ -106,12 +124,14 @@ export default function ProposalReviewPage() {
     setLoading(true);
     setError(null);
     try {
-      const [data, diag] = await Promise.all([
+      const [data, diag, config] = await Promise.all([
         listProposals("pending", filterType || undefined, filterRisk || undefined, 100),
         getSystemDiagnostics().catch(() => null),
+        getConfig().catch(() => null),
       ]);
       setProposals(data);
       setDiagnostics(diag);
+      setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
       setSelectedIds(new Set());
     } catch (e) {
       setError(`加载 Proposal 失败：${String(e)}`);
@@ -125,15 +145,9 @@ export default function ProposalReviewPage() {
   }, [filterType, filterRisk]);
 
   const isUnsupportedType = (type: string): boolean => {
-    return [
-      "plugin_permission",
-      "scheduled_task",
-      "external_write_action",
-      "model_policy_change",
-      "data_export",
-      "schedule_checkin",
-      "unsupported",
-    ].includes(type);
+    return ["plugin_permission", "model_policy_change", "schedule_checkin", "unsupported"].includes(
+      type
+    );
   };
 
   const runAction = async (proposal: AgentProposal, action: "accept" | "reject" | "postpone") => {
@@ -482,6 +496,67 @@ export default function ProposalReviewPage() {
                             )}
                           </div>
                         )}
+                        {proposal.proposalType === "external_write_action" && proposal.after && (
+                          <div className="mt-3 rounded-lg border border-stone-200 bg-stone-50 p-3 space-y-2">
+                            <div className="text-xs font-medium text-stone-700">文件写入详情</div>
+                            <div className="grid grid-cols-2 gap-2 text-xs text-stone-600">
+                              <div>
+                                <span className="text-stone-400">路径：</span>
+                                <span className="font-mono">{proposal.after.path || "—"}</span>
+                              </div>
+                              <div>
+                                <span className="text-stone-400">操作：</span>
+                                <span
+                                  className={
+                                    proposal.after.operation === "overwrite"
+                                      ? "text-amber-600"
+                                      : "text-green-600"
+                                  }
+                                >
+                                  {proposal.after.operation === "overwrite" ? "覆盖" : "创建"}
+                                </span>
+                              </div>
+                              <div>
+                                <span className="text-stone-400">大小：</span>
+                                {proposal.after.size_bytes != null
+                                  ? `${proposal.after.size_bytes} bytes`
+                                  : "—"}
+                              </div>
+                              <div>
+                                <span className="text-stone-400">编码：</span>
+                                {proposal.after.encoding || "utf-8"}
+                              </div>
+                              {proposal.after.content_hash && (
+                                <div className="col-span-2">
+                                  <span className="text-stone-400">SHA256：</span>
+                                  <span className="font-mono text-[10px]">
+                                    {proposal.after.content_hash.slice(0, 16)}...
+                                  </span>
+                                </div>
+                              )}
+                              <div className="col-span-2">
+                                <span className="text-stone-400">Safe Path：</span>
+                                {isPathInSafePaths(proposal.after.path) ? (
+                                  <span className="text-green-600 font-medium">
+                                    ✅ 在 Safe Paths 内
+                                  </span>
+                                ) : (
+                                  <span className="text-red-600 font-medium">
+                                    ❌ 不在 Safe Paths 内（接受将失败）
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {proposal.after.content_preview && (
+                              <div className="mt-2">
+                                <div className="text-[10px] text-stone-400 mb-1">内容预览：</div>
+                                <pre className="text-xs text-stone-600 bg-white rounded p-2 max-h-24 overflow-auto whitespace-pre-wrap break-all">
+                                  {proposal.after.content_preview}
+                                </pre>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -514,12 +589,19 @@ export default function ProposalReviewPage() {
                         disabled={
                           safeMode ||
                           actingId === proposal.id ||
-                          isUnsupportedType(proposal.proposalType)
+                          isUnsupportedType(proposal.proposalType) ||
+                          (proposal.proposalType === "external_write_action" &&
+                            proposal.after &&
+                            !isPathInSafePaths(proposal.after.path))
                         }
                         title={
                           isUnsupportedType(proposal.proposalType)
                             ? "该类型 Proposal 在当前版本中尚未支持"
-                            : undefined
+                            : proposal.proposalType === "external_write_action" &&
+                                proposal.after &&
+                                !isPathInSafePaths(proposal.after.path)
+                              ? "目标路径不在 Safe Paths 内，无法应用"
+                              : undefined
                         }
                         className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-3 py-1.5 text-xs text-amber-50 hover:bg-stone-800 disabled:opacity-50"
                       >

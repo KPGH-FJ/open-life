@@ -494,39 +494,9 @@ fn collect_memory_proposals_from_value(
         }
     }
 
-    if value
-        .get("proposal_type")
-        .and_then(Value::as_str)
-        .is_some_and(|proposal_type| proposal_type == "external_write_action")
-    {
-        let after = value
-            .get("external_write_action")
-            .cloned()
-            .unwrap_or_else(|| {
-                serde_json::json!({
-                    "path": value.get("path").cloned().unwrap_or(Value::Null),
-                    "content": value.get("content").cloned().unwrap_or(Value::Null),
-                    "content_preview": value.get("content_preview").cloned().unwrap_or(Value::Null),
-                    "content_length": value.get("content_length").cloned().unwrap_or(Value::Null),
-                })
-            });
-        let path = after
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or("external_write")
-            .to_string();
-        let mut proposal = AgentProposal::new(
-            ProposalType::ExternalWriteAction,
-            &path,
-            after,
-            "检测到外部写入建议，需要用户确认；Beta 阶段不会直接写入文件。",
-            0.8,
-            RiskLevel::High,
-            ProposalSource::MemoryGovernance,
-        );
-        proposal.source_detail = Some(source_detail.to_string());
-        proposals.push(proposal);
-    }
+    // Note: external_write_action proposals are created exclusively by ActionExecutor
+    // during file.write_proposal execution. ProposalEngine no longer scans for them
+    // to avoid duplicate proposals.
 
     if let Some(memory_write) = value
         .get("memory_write")
@@ -711,12 +681,9 @@ mod tests {
 
         let proposals = gen.generate(&run, "", &LifeModel::default()).unwrap();
 
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(
-            proposals[0].proposal_type,
-            ProposalType::ExternalWriteAction
-        );
-        assert_eq!(proposals[0].affected_path, "/tmp/openlife.txt");
+        // ProposalEngine no longer creates ExternalWriteAction proposals from action output.
+        // ExternalWriteAction proposals are created exclusively by ActionExecutor.
+        assert_eq!(proposals.len(), 0);
     }
 
     #[test]

@@ -327,6 +327,41 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           tags: ["file", "filesystem", "local"],
         },
       ] as T);
+    case "list_tool_manifests":
+      return Promise.resolve([
+        {
+          id: "file.read",
+          name: "file.read",
+          description: "读取文件",
+          parameters: {},
+          permission_level: "low",
+          risk_level: "low",
+          version: "1.0.0",
+          source: { type: "BuiltIn" },
+          capabilities: ["read", "filesystem"],
+          requires_confirmation: false,
+          enabled: true,
+          declarative_only: false,
+          action_type: "read",
+          tags: ["execution"],
+        },
+        {
+          id: "web.search",
+          name: "web.search",
+          description: "搜索网页",
+          parameters: {},
+          permission_level: "low",
+          risk_level: "low",
+          version: "1.0.0",
+          source: { type: "BuiltIn" },
+          capabilities: ["network"],
+          requires_confirmation: false,
+          enabled: true,
+          declarative_only: false,
+          action_type: "read",
+          tags: ["execution", "web"],
+        },
+      ] as T);
     case "get_chat_history":
       return Promise.resolve(mockChatMessages as T);
     case "list_snapshots":

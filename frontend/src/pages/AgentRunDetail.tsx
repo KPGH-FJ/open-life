@@ -196,6 +196,20 @@ export default function AgentRunDetail() {
             </div>
           )}
 
+          {run.warnings && run.warnings.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-amber-700 mb-2">警告</h3>
+              <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800 space-y-1">
+                {run.warnings.map((warning, idx) => (
+                  <div key={idx} className="flex items-start gap-2">
+                    <AlertTriangle size={14} className="text-amber-500 mt-0.5 shrink-0" />
+                    <span>{warning}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {run.contextSummary && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">上下文摘要</h3>
@@ -256,8 +270,10 @@ export default function AgentRunDetail() {
                     ...run.observations.map(o => ({ type: "observation" as const, item: o })),
                   ];
                   timeline.sort((a, b) => {
-                    const timeA = new Date(a.item.timestamp).getTime();
-                    const timeB = new Date(b.item.timestamp).getTime();
+                    const timeA = a.item.timestamp ? new Date(a.item.timestamp).getTime() : 0;
+                    const timeB = b.item.timestamp ? new Date(b.item.timestamp).getTime() : 0;
+                    if (Number.isNaN(timeA) || timeA === 0) return 1;
+                    if (Number.isNaN(timeB) || timeB === 0) return -1;
                     return timeA - timeB;
                   });
                   return timeline.map(entry => {
@@ -294,6 +310,45 @@ export default function AgentRunDetail() {
                               </div>
                             </div>
                           )}
+                          {/* Linked proposal extraction */}
+                          {(() => {
+                            let proposalId: string | null = null;
+                            if (action.output) {
+                              // Try direct proposal_id
+                              if (typeof action.output === "object" && action.output !== null) {
+                                const direct = (action.output as any).proposal_id;
+                                if (direct) proposalId = direct;
+                                // Try wrapped in text field
+                                const text = (action.output as any).text;
+                                if (text && typeof text === "string") {
+                                  try {
+                                    const parsed = JSON.parse(text);
+                                    if (parsed.proposal_id) proposalId = parsed.proposal_id;
+                                  } catch {
+                                    /* ignore parse error */
+                                  }
+                                }
+                              }
+                            }
+                            if (!proposalId && run.generatedProposals.length > 0) {
+                              // Fallback: link to the first generated proposal if action is recent
+                              proposalId = run.generatedProposals[0];
+                            }
+                            return proposalId ? (
+                              <div className="mt-2 text-xs bg-blue-50 rounded p-2">
+                                <div className="font-medium text-blue-800 mb-1">
+                                  Linked Proposal:
+                                </div>
+                                <div className="text-blue-700">{proposalId}</div>
+                                <button
+                                  onClick={() => navigate(`/review?proposal=${proposalId}`)}
+                                  className="mt-1 text-blue-600 hover:text-blue-800 underline"
+                                >
+                                  查看 Proposal
+                                </button>
+                              </div>
+                            ) : null;
+                          })()}
                           {action.status === "needs_confirmation" && (
                             <div className="mt-2">
                               <button

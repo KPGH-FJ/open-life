@@ -337,6 +337,32 @@ impl AgentRun {
         }
     }
 
+    pub fn new_tool_execution_run(tool_name: &str) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            task_id: Uuid::new_v4().to_string(),
+            session_id: None,
+            status: AgentRunStatus::Running,
+            kind: AgentTaskKind::ToolExecution,
+            user_input: Some(format!("Direct tool call: {}", tool_name)),
+            context_summary: None,
+            model_route: None,
+            output_preview: None,
+            error: None,
+            generated_proposals: Vec::new(),
+            actions: Vec::new(),
+            observations: Vec::new(),
+            reasoning_strategy: None,
+            reasoning_trace: None,
+            warnings: Vec::new(),
+            deleted_at: None,
+            delete_reason: None,
+            started_at: now,
+            finished_at: None,
+        }
+    }
+
     pub fn complete(
         &mut self,
         output_preview: &str,

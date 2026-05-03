@@ -10,6 +10,65 @@ pub async fn list_mcp_servers(
     Ok(reg.list_servers())
 }
 
+/// Default allowlist for MCP server commands.
+/// Only these base commands are permitted to prevent arbitrary execution.
+const MCP_COMMAND_ALLOWLIST: &[&str] = &["npx", "node", "python", "python3", "uv", "uvx"];
+
+fn validate_mcp_command(command: &str) -> Result<(), String> {
+    let has_forbidden_char = command.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '/' | '\\' | ';' | '&' | '|' | '$' | '`' | '>' | '<' | '\n' | '\r'
+            )
+    });
+    if has_forbidden_char || !MCP_COMMAND_ALLOWLIST.contains(&command) {
+        return Err(format!(
+            "MCP command '{}' is not in the allowlist. Allowed commands: {}",
+            command,
+            MCP_COMMAND_ALLOWLIST.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_mcp_command;
+
+    #[test]
+    fn validate_mcp_command_allows_exact_bare_commands() {
+        assert!(validate_mcp_command("npx").is_ok());
+        assert!(validate_mcp_command("node").is_ok());
+        assert!(validate_mcp_command("python").is_ok());
+        assert!(validate_mcp_command("python3").is_ok());
+        assert!(validate_mcp_command("uv").is_ok());
+        assert!(validate_mcp_command("uvx").is_ok());
+    }
+
+    #[test]
+    fn validate_mcp_command_rejects_paths_and_shell_syntax() {
+        for command in [
+            "/tmp/npx",
+            "./npx",
+            "bin\\npx",
+            "npx --foo",
+            "npx;rm -rf",
+            "npx && echo hi",
+            "npx|cat",
+            "npx$IFS",
+            "npx`whoami`",
+            "npx>out",
+            "npx\nnode",
+        ] {
+            assert!(
+                validate_mcp_command(command).is_err(),
+                "command should be rejected: {command}"
+            );
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn register_mcp_server(
     name: String,
@@ -18,6 +77,7 @@ pub async fn register_mcp_server(
     env: Option<std::collections::HashMap<String, String>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    validate_mcp_command(&command)?;
     let mut registry = state.mcp_registry.lock().await;
     let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let env_map = env.unwrap_or_default();
@@ -72,6 +132,14 @@ pub async fn list_mcp_audit_logs(
 ) -> Result<Vec<openlife_core::mcp_audit::McpLogEntry>, String> {
     let store = state.mcp_audit_store.lock().await;
     store.list_logs(limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn list_tool_manifests(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<openlife_core::tool_manifest::ToolManifest>, String> {
+    let registry = state.mcp_registry.lock().await;
+    Ok(registry.list_manifests())
 }
 
 #[tauri::command]

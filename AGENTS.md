@@ -423,6 +423,49 @@ VectorStore.search(query_embedding, top_k=5)
 9. **HashRouter 强制使用**：前端必须使用 `HashRouter` 而非 `BrowserRouter`，因为 Tauri 桌面应用基于 `file://` 协议。
 10. **数据目录统一**：应用数据目录已统一为 `ai.openlife.app`（与 `tauri.conf.json` 的 `identifier` 一致），macOS 路径为 `~/Library/Application Support/ai.openlife.app/`。旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
 
+### Tool Taxonomy（Beta 工具分类）
+
+OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P2（declarative-only stub）**。未实现真实 executor 的工具必须标记为 `declarative_only`，不得伪装为可执行。
+
+#### Core OS Tools（P1 — 真实可执行）
+
+| 工具 | 用途 | 风险等级 | 状态 |
+|------|------|----------|------|
+| `life_model.read` | 读取 LifeModel 字段 | low | ✅ P1 |
+| `life_model.propose_patch` | 提议 LifeModel 变更 | medium | ✅ P1（生成 Proposal） |
+| `goal.read` | 读取目标 | low | ✅ P1 |
+| `goal.propose_update` | 提议目标更新 | medium | ✅ P1（生成 Proposal） |
+| `state.read` | 读取状态 | low | ✅ P1 |
+| `memory.search` | 检索记忆 | low | ✅ P1 |
+| `memory.propose_write` | 提议记忆写入 | medium | ✅ P1（生成 MemoryWrite Proposal） |
+| `memory.propose_archive` | 提议归档记忆 | medium | ✅ P1（生成 MemoryArchive Proposal） |
+| `proposal.create` | 创建提案 | low | ✅ P1 |
+| `proposal.list` | 列出提案 | low | ✅ P1 |
+| `agent_run.lookup` | 查询运行记录 | low | ✅ P1 |
+| `snapshot.create` | 创建快照 | low | ⚠️ declarative-only（Beta 不进入 tools prompt） |
+| `tool.list_available` | 列出可用工具 | low | ✅ P1 |
+| `permission.check` | 检查权限策略 | low | ✅ P1 |
+| `permission.request` | 请求权限 | medium | ✅ P1（生成 ToolPermission Proposal） |
+| `permission.replay_action` | 重放已授权动作 | medium | ✅ P1 |
+
+#### Execution Tools（混合 P1/P2）
+
+| 工具 | 用途 | 风险等级 | 状态 |
+|------|------|----------|------|
+| `file.read` | 读取本地文件 | low/medium | ✅ P1（受 safe_paths 限制） |
+| `file.write_proposal` | 提议文件写入 | high | ✅ P1（生成 ExternalWriteAction Proposal） |
+| `web.search` | 搜索网页 | medium | ⚠️ P2（declarative-only stub，需配置 search provider） |
+| `web.fetch` | 获取 URL | medium | ✅ P1（受私网拦截限制） |
+| `mcp.call_tool` | 调用 MCP 工具 | 取决于目标 | ✅ P1（wrapper，权限落在目标 tool scope） |
+| `a2a.call_agent` | 调用 A2A Agent | medium | ⚠️ P2（declarative-only，执行适配未接入） |
+| `calendar.read` | 读取日历 | low | ⚠️ P2（declarative-only，需配置 ICS source） |
+| `calendar.propose_event` | 提议日历事件 | medium | ⚠️ P2（declarative-only） |
+| `email.read` | 读取邮件 | low | ⚠️ P2（declarative-only，需配置 IMAP account） |
+| `email.propose_draft` | 提议邮件草稿 | medium | ⚠️ P2（declarative-only） |
+| `task.create_proposal` | 提议创建任务 | medium | ⚠️ P2（declarative-only） |
+
+> **P1 / P2 判定标准**：P1 工具具备真实 executor 并通过集成测试；P2 工具仅有 manifest 声明，无真实执行能力，标记为 `declarative_only: true`。P2 工具不会进入模型的 tools prompt，前端 Tool Registry 中显示为 "⚠️ 声明-only"。
+
 ---
 
 ## ⚙️ 环境配置

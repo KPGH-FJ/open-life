@@ -46,10 +46,25 @@ pub async fn get_last_model_error(
     }
 }
 
+/// Mask for sensitive API keys sent to the frontend.
+const KEY_MASK: &str = "***";
+
+fn resolve_masked_api_key(submitted_key: &str, current_key: &str) -> String {
+    if submitted_key.trim().is_empty() || submitted_key == KEY_MASK {
+        current_key.to_string()
+    } else {
+        submitted_key.to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, String> {
-    let cfg = state.config.lock().await;
-    Ok(cfg.clone())
+    let mut cfg = state.config.lock().await.clone();
+    // Sanitize API keys before sending to frontend
+    if !cfg.llm.openai_key.is_empty() {
+        cfg.llm.openai_key = KEY_MASK.to_string();
+    }
+    Ok(cfg)
 }
 
 #[tauri::command]
@@ -60,6 +75,16 @@ pub async fn save_config(
     config.normalize_provider_from_base();
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
+
+    // Preserve existing API key if the submitted config has a mask or empty key
+    let current_key = {
+        let cfg = state.config.lock().await;
+        cfg.llm.openai_key.clone()
+    };
+    if config.llm.openai_key.is_empty() || config.llm.openai_key == KEY_MASK {
+        config.llm.openai_key = current_key;
+    }
+
     config.save(&config_path).map_err(|e| e.to_string())?;
     let mut cfg = state.config.lock().await;
     *cfg = config.clone();
@@ -232,9 +257,22 @@ pub struct LlmConnectionTestResult {
 }
 
 #[tauri::command]
-pub async fn test_llm_connection(config: AppConfig) -> Result<LlmConnectionTestResult, String> {
+pub async fn test_llm_connection(
+    mut config: AppConfig,
+    state: State<'_, Arc<AppState>>,
+) -> Result<LlmConnectionTestResult, String> {
     let provider = config.llm.provider.clone();
     let label = provider_label(&provider);
+
+    let current_key = {
+        let cfg = state.config.lock().await;
+        cfg.llm.openai_key.clone()
+    };
+    let resolved_key = resolve_masked_api_key(&config.llm.openai_key, &current_key);
+    if !resolved_key.trim().is_empty() {
+        config.llm.openai_key = resolved_key;
+    }
+
     let api_key = effective_api_key(&provider, &config.llm.openai_key);
     if api_key.trim().is_empty() {
         return Ok(LlmConnectionTestResult {
@@ -359,4 +397,21 @@ pub async fn mark_onboarding_completed() -> Result<(), String> {
         completed_at: Some(chrono::Utc::now().to_rfc3339()),
     };
     save_onboarding_status_to_path(&onboarding_status_path(), &status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_masked_api_key, KEY_MASK};
+
+    #[test]
+    fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
+        assert_eq!(resolve_masked_api_key(KEY_MASK, "sk-current"), "sk-current");
+        assert_eq!(resolve_masked_api_key("", "sk-current"), "sk-current");
+        assert_eq!(resolve_masked_api_key("   ", "sk-current"), "sk-current");
+    }
+
+    #[test]
+    fn resolve_masked_api_key_uses_submitted_new_key() {
+        assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
+    }
 }

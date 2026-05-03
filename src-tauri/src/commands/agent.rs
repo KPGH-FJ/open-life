@@ -124,10 +124,11 @@ pub async fn replay_agent_action(
         .as_ref()
         .ok_or_else(|| "Action has no tool_scope".to_string())?;
 
-    let decision = {
+    // Pre-check with peek() - does NOT consume AllowOnce policies
+    let peek_decision = {
         let permission_store = state.tool_permission_store.lock().await;
         permission_store
-            .check(
+            .peek(
                 &tool_scope.tool_name,
                 &tool_scope.source,
                 &tool_scope.risk_level,
@@ -136,10 +137,10 @@ pub async fn replay_agent_action(
             )
             .map_err(|e| e.to_string())?
     };
-    if !decision.allowed {
+    if !peek_decision.allowed {
         return Err(format!(
             "Action is not authorized yet. Please accept the ToolPermission proposal in Review Center first. Decision: {} ({})",
-            decision.decision, decision.reason
+            peek_decision.decision, peek_decision.reason
         ));
     }
 
@@ -171,9 +172,11 @@ pub async fn replay_agent_action(
         .cloned()
         .unwrap_or_else(|| action.input.clone());
 
-    let executor = openlife_core::agent::ActionExecutor::new(
-        openlife_core::agent::ActionExecutorConfig::default(),
-    );
+    let executor =
+        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+            consume_allow_once: false,
+            ..Default::default()
+        });
     let ctx = openlife_core::agent::ActionExecutionContext {
         registry: &reg,
         permission_store: &permission_store,

@@ -2,8 +2,12 @@ use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
 use openlife_core::life_model::LifeModel;
 use serde_json::Value;
+use std::io::Write;
 use std::sync::Arc;
 use tauri::State;
+
+/// Maximum content size for ExternalWriteAction (100 KB)
+const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 
 fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
@@ -43,6 +47,148 @@ fn patch_result_for_proposal(
     }
 }
 
+/// Check if any component of the path is a symlink.
+/// This includes the final target and any parent directory.
+/// Returns true if any symlink is found.
+fn path_contains_symlink(path: &std::path::Path) -> bool {
+    // Check each existing component in the path
+    for component in path.ancestors() {
+        if let Ok(meta) = component.symlink_metadata() {
+            if meta.file_type().is_symlink() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn canonical_safe_paths(safe_paths: &[String]) -> Vec<std::path::PathBuf> {
+    safe_paths
+        .iter()
+        .filter_map(|safe| {
+            let path = std::path::Path::new(safe);
+            if path_contains_symlink(path) {
+                return None;
+            }
+            path.canonicalize().ok()
+        })
+        .collect()
+}
+
+fn canonical_parent_in_safe_paths(
+    target: &std::path::Path,
+    safe_paths: &[std::path::PathBuf],
+) -> Result<std::path::PathBuf, String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Path '{}' has no parent directory.", target.display()))?;
+    if path_contains_symlink(parent) {
+        return Err(format!(
+            "Path '{}' contains a symbolic link. Symbolic links are not allowed in safe paths.",
+            parent.display()
+        ));
+    }
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("Failed to canonicalize parent directory: {}", e))?;
+    if !safe_paths
+        .iter()
+        .any(|safe| canonical_parent.starts_with(safe))
+    {
+        return Err(format!(
+            "Path '{}' is not in safe paths list",
+            target.display()
+        ));
+    }
+    Ok(canonical_parent)
+}
+
+/// Write content to a file atomically within a safe directory.
+/// 1. Verifies no symlinks exist in the path or its parents.
+/// 2. Writes to a temp file in the same directory.
+/// 3. Renames the temp file to the target (atomic on Unix).
+fn safe_write_utf8(path: &str, content: &str, safe_paths: &[String]) -> Result<(), String> {
+    let target = std::path::Path::new(path);
+    let valid_safe_paths = canonical_safe_paths(safe_paths);
+    if valid_safe_paths.is_empty() {
+        return Err("No valid safe paths configured for filesystem access".to_string());
+    }
+
+    // 1. Strict symlink check: reject any symlink in the path
+    if path_contains_symlink(target) {
+        return Err(format!(
+            "Path '{}' contains a symbolic link. Symbolic links are not allowed in safe paths.",
+            path
+        ));
+    }
+
+    let canonical_parent = canonical_parent_in_safe_paths(target, &valid_safe_paths)?;
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| format!("Path '{}' has no filename.", path))?;
+    let canonical_target_path = canonical_parent.join(file_name);
+
+    // 2. Create temp file in the same directory (same filesystem for atomic rename)
+    let temp_path = canonical_parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+
+    // Write to a newly-created temp file and flush it before rename.
+    let mut temp_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|e| format!("Failed to create temporary file: {}", e))?;
+    temp_file
+        .write_all(content.as_bytes())
+        .map_err(|e| format!("Failed to write temporary file: {}", e))?;
+    temp_file
+        .sync_all()
+        .map_err(|e| format!("Failed to sync temporary file: {}", e))?;
+    drop(temp_file);
+
+    // Re-check immediately before rename: parent may have changed, and target may
+    // have become a symlink after the initial validation.
+    let pre_rename_parent = match canonical_parent_in_safe_paths(target, &valid_safe_paths) {
+        Ok(parent) => parent,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e);
+        }
+    };
+    if pre_rename_parent != canonical_parent || path_contains_symlink(target) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(format!(
+            "Path '{}' changed during safe write validation.",
+            path
+        ));
+    }
+
+    // 3. Atomic rename (Unix: atomic; Windows: best-effort)
+    match std::fs::rename(&temp_path, &canonical_target_path) {
+        Ok(_) => {
+            let canonical_target = canonical_target_path
+                .canonicalize()
+                .map_err(|e| format!("Failed to canonicalize written file: {}", e))?;
+            if valid_safe_paths
+                .iter()
+                .any(|safe| canonical_target.starts_with(safe))
+                && !path_contains_symlink(&canonical_target_path)
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Path '{}' left safe paths during write.",
+                    target.display()
+                ))
+            }
+        }
+        Err(e) => {
+            // Clean up temp file on failure
+            let _ = std::fs::remove_file(&temp_path);
+            Err(format!("Failed to rename temporary file to target: {}", e))
+        }
+    }
+}
+
 fn memory_session_id(after: &Value) -> String {
     after
         .get("session_id")
@@ -58,6 +204,32 @@ fn memory_source(after: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("proposal")
         .to_string()
+}
+
+/// Validate that a DataExport filename is a single plain filename.
+/// Rejects path traversal, absolute paths, and empty names.
+fn validate_export_filename(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("Filename cannot be empty, '.', or '..'.".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Filename cannot contain path separators.".to_string());
+    }
+    if name.contains("..") {
+        return Err("Filename cannot contain parent directory references.".to_string());
+    }
+    // Ensure it parses as a single normal filename component
+    let path = std::path::Path::new(name);
+    if path.components().count() != 1 {
+        return Err("Filename must be a single component.".to_string());
+    }
+    if !matches!(
+        path.components().next(),
+        Some(std::path::Component::Normal(_))
+    ) {
+        return Err("Filename must be a normal file name.".to_string());
+    }
+    Ok(())
 }
 
 fn memory_content(after: &Value) -> Result<String, String> {
@@ -505,7 +677,9 @@ async fn apply_proposal_to_state(
                 cfg.system.safe_paths.clone()
             };
 
-            // Validate path is within safe_paths
+            // Re-validate path is within safe_paths using strict canonical parent strategy.
+            // This is a defense-in-depth check: the path was already validated at proposal
+            // creation time, but the filesystem state may have changed.
             if !openlife_core::agent::action_executor::is_path_in_safe_paths(path, &safe_paths) {
                 return Ok(patch_result_for_proposal(
                     proposal,
@@ -520,8 +694,19 @@ async fn apply_proposal_to_state(
                 ));
             }
 
-            // Check content size (100KB limit, same as file.read)
-            let max_size = 100 * 1024;
+            // Validate content is valid UTF-8 (defense-in-depth: JSON strings are UTF-8,
+            // but we enforce it explicitly for audit clarity)
+            if std::str::from_utf8(content.as_bytes()).is_err() {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "external_write",
+                    Some("Content is not valid UTF-8.".to_string()),
+                ));
+            }
+
+            // Check content size limit
+            let max_size = EXTERNAL_WRITE_MAX_SIZE;
             if content.len() > max_size {
                 return Ok(patch_result_for_proposal(
                     proposal,
@@ -535,20 +720,34 @@ async fn apply_proposal_to_state(
                 ));
             }
 
-            // Ensure parent directory exists
-            if let Some(parent) = std::path::Path::new(path).parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "external_write",
-                        Some(format!("Failed to create parent directory: {}", e)),
-                    ));
+            // Validate content hash if present
+            if let Some(expected_hash) = after.get("content_hash").and_then(Value::as_str) {
+                if !expected_hash.is_empty() {
+                    use sha2::{Digest, Sha256};
+                    let mut hasher = Sha256::new();
+                    hasher.update(content.as_bytes());
+                    let actual_hash = format!("{:x}", hasher.finalize());
+                    if actual_hash != expected_hash {
+                        return Ok(patch_result_for_proposal(
+                            proposal,
+                            false,
+                            "external_write",
+                            Some(format!(
+                                "Content hash mismatch: expected {}, got {}",
+                                expected_hash, actual_hash
+                            )),
+                        ));
+                    }
                 }
             }
 
-            // Execute file write
-            match std::fs::write(path, content) {
+            // Beta policy: do NOT auto-create parent directories.
+            // is_path_in_safe_paths already requires the parent to exist.
+            // If the parent was removed between proposal creation and acceptance,
+            // std::fs::write will fail with a clear error and the Proposal stays pending.
+
+            // Execute file write with symlink defense and atomic temp+rename
+            match safe_write_utf8(path, content, &safe_paths) {
                 Ok(_) => Ok(patch_result_for_proposal(
                     proposal,
                     true,
@@ -559,7 +758,7 @@ async fn apply_proposal_to_state(
                     proposal,
                     false,
                     "external_write",
-                    Some(format!("Failed to write file '{}': {}", path, e)),
+                    Some(e),
                 )),
             }
         }
@@ -586,8 +785,10 @@ async fn apply_proposal_to_state(
                 "source_proposal_id": proposal.id,
             });
 
-            // Append to scheduled_tasks.json
+            // Atomic append to scheduled_tasks.json under mutex guard
             let tasks_path = app_data_dir().join("scheduled_tasks.json");
+            let _guard = state.scheduled_task_mutex.lock().await;
+
             let mut tasks = if tasks_path.exists() {
                 std::fs::read_to_string(&tasks_path)
                     .ok()
@@ -597,15 +798,26 @@ async fn apply_proposal_to_state(
                 vec![]
             };
             tasks.push(task);
+
+            let temp_path = tasks_path.with_extension("tmp");
             if let Err(e) = std::fs::write(
-                &tasks_path,
+                &temp_path,
                 serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,
             ) {
                 return Ok(patch_result_for_proposal(
                     proposal,
                     false,
                     "scheduled_task",
-                    Some(format!("Failed to save scheduled task: {}", e)),
+                    Some(format!("Failed to write scheduled task temp file: {}", e)),
+                ));
+            }
+            if let Err(e) = std::fs::rename(&temp_path, &tasks_path) {
+                let _ = std::fs::remove_file(&temp_path);
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "scheduled_task",
+                    Some(format!("Failed to atomically save scheduled tasks: {}", e)),
                 ));
             }
 
@@ -622,6 +834,15 @@ async fn apply_proposal_to_state(
                 .get("filename")
                 .and_then(Value::as_str)
                 .unwrap_or("export.txt");
+
+            if let Err(e) = validate_export_filename(filename) {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "data_export",
+                    Some(e),
+                ));
+            }
 
             // Use first safe path or fallback to data_dir/exports
             let safe_paths = {
@@ -1000,6 +1221,7 @@ mod tests {
             proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
+            scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -1393,6 +1615,60 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("not in safe paths"));
         assert!(!file_path.exists());
+    }
+
+    #[test]
+    fn safe_write_utf8_creates_and_overwrites_inside_safe_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path = safe_path.canonicalize().unwrap();
+        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
+        let file_path = safe_path.join("write.txt");
+
+        safe_write_utf8(&file_path.to_string_lossy(), "first", &safe_paths).unwrap();
+        safe_write_utf8(&file_path.to_string_lossy(), "second", &safe_paths).unwrap();
+
+        assert_eq!(std::fs::read_to_string(file_path).unwrap(), "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_utf8_rejects_target_symlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_path = temp_dir.path().join("safe");
+        let outside_path = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        std::fs::create_dir_all(&outside_path).unwrap();
+        let target = safe_path.join("link.txt");
+        let outside_file = outside_path.join("outside.txt");
+        std::fs::write(&outside_file, "outside").unwrap();
+        std::os::unix::fs::symlink(&outside_file, &target).unwrap();
+        let safe_path = safe_path.canonicalize().unwrap();
+        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
+
+        let err = safe_write_utf8(&target.to_string_lossy(), "new", &safe_paths).unwrap_err();
+        assert!(err.contains("symbolic link"));
+        assert_eq!(std::fs::read_to_string(outside_file).unwrap(), "outside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_write_utf8_rejects_parent_symlink() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let safe_path = temp_dir.path().join("safe");
+        let outside_path = temp_dir.path().join("outside");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        std::fs::create_dir_all(&outside_path).unwrap();
+        let link_dir = safe_path.join("linked-dir");
+        std::os::unix::fs::symlink(&outside_path, &link_dir).unwrap();
+        let target = link_dir.join("write.txt");
+        let safe_path = safe_path.canonicalize().unwrap();
+        let safe_paths = vec![safe_path.to_string_lossy().to_string()];
+
+        let err = safe_write_utf8(&target.to_string_lossy(), "new", &safe_paths).unwrap_err();
+        assert!(err.contains("symbolic link") || err.contains("safe paths"));
+        assert!(!outside_path.join("write.txt").exists());
     }
 
     #[tokio::test]

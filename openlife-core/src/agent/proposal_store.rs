@@ -261,22 +261,44 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
 
-        let sql = if let Some(risk) = min_risk {
-            let risk_order = match risk {
-                RiskLevel::Low => "risk_level IN ('low', 'medium', 'high', 'critical')",
-                RiskLevel::Medium => "risk_level IN ('medium', 'high', 'critical')",
-                RiskLevel::High => "risk_level IN ('high', 'critical')",
-                RiskLevel::Critical => "risk_level = 'critical'",
-            };
-            format!(
-                "SELECT COUNT(*) FROM proposals WHERE status = '{}' AND {}",
-                status, risk_order
-            )
+        let count: i64 = if let Some(risk) = min_risk {
+            match risk {
+                RiskLevel::Low => {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM proposals WHERE status = ?1 AND risk_level IN ('low', 'medium', 'high', 'critical')",
+                        params![status.to_string()],
+                        |row| row.get(0),
+                    )?
+                }
+                RiskLevel::Medium => {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM proposals WHERE status = ?1 AND risk_level IN ('medium', 'high', 'critical')",
+                        params![status.to_string()],
+                        |row| row.get(0),
+                    )?
+                }
+                RiskLevel::High => {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM proposals WHERE status = ?1 AND risk_level IN ('high', 'critical')",
+                        params![status.to_string()],
+                        |row| row.get(0),
+                    )?
+                }
+                RiskLevel::Critical => {
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM proposals WHERE status = ?1 AND risk_level = 'critical'",
+                        params![status.to_string()],
+                        |row| row.get(0),
+                    )?
+                }
+            }
         } else {
-            format!("SELECT COUNT(*) FROM proposals WHERE status = '{}'", status)
+            conn.query_row(
+                "SELECT COUNT(*) FROM proposals WHERE status = ?1",
+                params![status.to_string()],
+                |row| row.get(0),
+            )?
         };
-
-        let count: i64 = conn.query_row(&sql, [], |row| row.get(0))?;
         Ok(count)
     }
 
