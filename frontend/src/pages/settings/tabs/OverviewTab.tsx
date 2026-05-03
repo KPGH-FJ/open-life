@@ -1,8 +1,22 @@
 import { Link } from "react-router-dom";
-import type { SystemDiagnostics } from "../../../tauri";
+import {
+  runMemoryTierMaintenance,
+  rebuildMemoryIndex,
+  type SystemDiagnostics,
+} from "../../../tauri";
+import { buildSafeModeBlockedMessage } from "../../../utils/runtimeMessages";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
+}
+
+function readableError(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object") {
+    if ("message" in e && typeof (e as any).message === "string") return (e as any).message;
+    if ("error" in e && typeof (e as any).error === "string") return (e as any).error;
+  }
+  return String(e);
 }
 
 interface OverviewTabProps {
@@ -10,6 +24,14 @@ interface OverviewTabProps {
   safeMode: boolean;
   exportLoading: boolean;
   handleExport: () => Promise<void>;
+  refreshAllDiagnostics: () => Promise<SystemDiagnostics | null>;
+  tierLoading: boolean;
+  setTierLoading: (v: boolean) => void;
+  setTierResult: (v: string | null) => void;
+  rebuildLoading: boolean;
+  setRebuildLoading: (v: boolean) => void;
+  rebuildResult: string | null;
+  setRebuildResult: (v: string | null) => void;
 }
 
 export default function OverviewTab({
@@ -17,134 +39,193 @@ export default function OverviewTab({
   safeMode,
   exportLoading,
   handleExport,
+  refreshAllDiagnostics,
+  tierLoading,
+  setTierLoading,
+  setTierResult,
+  rebuildLoading,
+  setRebuildLoading,
+  rebuildResult,
+  setRebuildResult,
 }: OverviewTabProps) {
-  // Trial checks data
-  const trialChecks = diagnostics
+  // ---- Data file health ----
+  const df = diagnostics?.data_files;
+  const dataFileItems = df
     ? [
-        {
-          label: "模型后端",
-          ok: diagnostics.chat_ready,
-          detail: diagnostics.ollama_online
-            ? `本地模型 ${diagnostics.resolved_local_model || diagnostics.local_model} 在线`
-            : diagnostics.cloud_api_configured
-              ? `云端 ${diagnostics.cloud_provider} 已配置`
-              : "未配置模型后端",
-          action: diagnostics.chat_ready ? "已就绪" : "去配置",
-          href: diagnostics.chat_ready ? "#" : "#/settings",
-        },
-        {
-          label: "人生模型",
-          ok: !diagnostics.model_empty,
-          detail: diagnostics.model_empty ? "未构建" : "已构建",
-          action: diagnostics.model_empty ? "去构建" : "查看",
-          href: diagnostics.model_empty ? "#/builder" : "#/life",
-        },
-        {
-          label: "对话验证",
-          ok: (diagnostics.chat_session_count ?? 0) > 0,
-          detail:
-            (diagnostics.chat_session_count ?? 0) > 0
-              ? `已验证（${diagnostics.chat_session_count} 个会话）`
-              : "未验证",
-          action: (diagnostics.chat_session_count ?? 0) > 0 ? "已验证" : "去对话",
-          href: "#/chat",
-        },
-        {
-          label: "首次引导",
-          ok: diagnostics.onboarding_completed,
-          detail: diagnostics.onboarding_completed ? "已完成" : "未完成",
-          action: diagnostics.onboarding_completed ? "已完成" : "查看",
-          href: "#/settings",
-        },
+        { label: "消息数据库", exists: df.messages_db_exists, size: df.messages_db_size_mb },
+        { label: "向量数据库", exists: df.vectors_db_exists, size: df.vectors_db_size_mb },
+        { label: "审计数据库", exists: df.mcp_audit_db_exists, size: df.mcp_audit_db_size_mb },
+        { label: "配置文件", exists: df.config_yaml_exists, size: undefined },
+        { label: "人生模型", exists: df.life_model_yaml_exists, size: undefined },
       ]
     : [];
 
-  const betaFlow = diagnostics
-    ? [
-        {
-          title: "1. 完成设置与诊断",
-          detail: "配置模型后端，确认系统诊断无阻塞项。",
-          done: diagnostics.chat_ready,
-          action: "去设置",
-          to: "#/settings",
-        },
-        {
-          title: "2. 完成人生模型构建",
-          detail: "在 Builder 中完成 Identity、Goals、Capabilities、State 的构建。",
-          done: !diagnostics.model_empty,
-          action: "去构建",
-          to: "#/builder",
-        },
-        {
-          title: "3. 跑通第一次对话",
-          detail: "在 Chat 中发送消息，确认 AgentLoop 正常执行。",
-          done: (diagnostics.chat_session_count ?? 0) > 0,
-          action: "去对话",
-          to: "#/chat",
-        },
-        {
-          title: "4. 查看校准或版本回滚",
-          detail: "了解 Calibration 和 VersionControl 的使用。",
-          done: diagnostics.onboarding_completed,
-          action: "去校准",
-          to: "#/calibration",
-        },
-      ]
-    : [];
+  const allDataFilesOk = df
+    ? df.messages_db_exists && df.vectors_db_exists && df.config_yaml_exists
+    : null;
 
-  const recoveryIssues = diagnostics
-    ? [
-        ...((diagnostics.vector_corrupt_embedding_count ?? 0) > 0
-          ? [
-              {
-                title: "向量索引损坏",
-                detail: `检测到 ${diagnostics.vector_corrupt_embedding_count} 条损坏的向量嵌入，建议重建向量索引。`,
-                tone: "error" as const,
-              },
-            ]
-          : []),
-        ...((diagnostics.unfinished_builder_sessions ?? 0) > 0
-          ? [
-              {
-                title: "Builder 待确认 Review",
-                detail: `有 ${diagnostics.unfinished_builder_sessions} 个待继续的 Builder 会话，建议先应用 Review。`,
-                tone: "warning" as const,
-              },
-            ]
-          : []),
-        ...((diagnostics.memory_chunk_count ?? 0) === 0
-          ? [
-              {
-                title: "语义记忆为空",
-                detail: "当前没有向量记忆数据，对话上下文可能受限。",
-                tone: "warning" as const,
-              },
-            ]
-          : []),
-      ]
-    : [];
+  // ---- Trial checklist ----
+  const trialChecks = [
+    {
+      label: "云端模型",
+      ok: diagnostics?.cloud_api_configured ?? false,
+      detail: diagnostics?.cloud_api_configured
+        ? `${diagnostics?.cloud_provider ?? "云端"} 已配置${diagnostics?.config_source === "env_var" ? "（来自环境变量）" : ""}`
+        : "还没有可用的云端 API Key",
+      action: "配置模型",
+      href: "#llm-settings",
+    },
+    {
+      label: "本地模型",
+      ok: diagnostics?.ollama_online ?? false,
+      detail: diagnostics?.ollama_online
+        ? `${diagnostics?.resolved_local_model || diagnostics?.local_model} 在线`
+        : "Ollama 离线，若走本地模型需要先启动",
+      action: "查看本地配置",
+      href: "#local-model-settings",
+    },
+    {
+      label: "人生模型",
+      ok: Boolean(diagnostics?.life_model_ready && !diagnostics?.model_empty),
+      detail: diagnostics?.model_empty
+        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+          ? `有 ${diagnostics?.pending_builder_review_sessions} 个待确认的 Builder Review`
+          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+            ? `有 ${diagnostics?.unfinished_builder_sessions} 个待继续的 Builder 会话`
+            : "尚未完成初始构建"
+        : diagnostics?.life_model_ready
+          ? "可读取"
+          : "读取失败",
+      action: diagnostics?.model_empty
+        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+          ? "去审阅"
+          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+            ? "继续 Builder"
+            : "去构建"
+        : "查看模型",
+      href: diagnostics?.model_empty ? "#/builder" : "#/",
+    },
+    {
+      label: "数据文件",
+      ok: allDataFilesOk ?? false,
+      detail:
+        allDataFilesOk === true
+          ? "数据目录健康"
+          : allDataFilesOk === false
+            ? "部分数据文件缺失"
+            : "等待诊断",
+      action: "查看数据",
+      href: "#data-health",
+    },
+    {
+      label: "对话验证",
+      ok: (diagnostics?.chat_session_count ?? 0) > 0,
+      detail:
+        (diagnostics?.chat_session_count ?? 0) > 0
+          ? `${diagnostics?.chat_session_count} 个会话`
+          : "还没有完成过一轮对话",
+      action: "去对话",
+      href: "#/chat",
+    },
+  ];
 
-  const dataFileItems = diagnostics
-    ? [
-        {
-          label: "messages.db",
-          exists: diagnostics.data_files?.messages_db_exists,
-          size: diagnostics.data_files?.messages_db_size_mb,
-        },
-        {
-          label: "vectors.db",
-          exists: diagnostics.data_files?.vectors_db_exists,
-          size: diagnostics.data_files?.vectors_db_size_mb,
-        },
-        {
-          label: "mcp_audit.db",
-          exists: diagnostics.data_files?.mcp_audit_db_exists,
-          size: diagnostics.data_files?.mcp_audit_db_size_mb,
-        },
-        { label: "config.yaml", exists: diagnostics.data_files?.config_yaml_exists },
-        { label: "life_model.yaml", exists: diagnostics.data_files?.life_model_yaml_exists },
-      ]
-    : [];
+  const betaFlow = [
+    {
+      title: "1. 完成设置与诊断",
+      done: Boolean(
+        diagnostics?.chat_ready || diagnostics?.cloud_api_configured || diagnostics?.ollama_online
+      ),
+      detail: diagnostics?.chat_ready
+        ? "模型后端已经可用，基础运行环境通过。"
+        : "先把本地或云端模型跑通，避免进入聊天页后才发现不能用。",
+      to: "#llm-settings",
+      action: "检查模型配置",
+    },
+    {
+      title: "2. 完成人生模型构建",
+      done: Boolean(diagnostics && !diagnostics.model_empty && diagnostics.life_model_ready),
+      detail: diagnostics?.model_empty
+        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+          ? `Builder 里还有 ${diagnostics?.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，比重新开始更合适。`
+          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+            ? `Builder 里还有 ${diagnostics?.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，比重新开始更合适。`
+            : "Builder 还没形成最小模型，当前很多建议仍会偏通用。"
+        : "人生模型已可读取，个性化能力开始成立。",
+      to: "#/builder",
+      action: diagnostics?.model_empty
+        ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
+          ? "去审阅"
+          : (diagnostics?.unfinished_builder_sessions ?? 0) > 0
+            ? "继续 Builder"
+            : "去构建"
+        : "去构建",
+    },
+    {
+      title: "3. 跑通第一次对话",
+      done: Boolean((diagnostics?.chat_session_count ?? 0) > 0),
+      detail:
+        (diagnostics?.chat_session_count ?? 0) > 0
+          ? `已经完成 ${diagnostics?.chat_session_count ?? 0} 次对话验证。`
+          : "至少完成一轮真实对话，才能确认主链路不是只在设置页看起来正常。",
+      to: "#/chat",
+      action: "去对话",
+    },
+    {
+      title: "4. 查看校准或版本回滚",
+      done: Boolean((diagnostics?.snapshot_count ?? 0) > 0),
+      detail:
+        (diagnostics?.snapshot_count ?? 0) > 0
+          ? `已经有 ${diagnostics?.snapshot_count} 个快照，版本安全网已建立。`
+          : "至少确认一次快照/回滚路径，Beta 试用才算具备可恢复能力。",
+      to: "#/versions",
+      action: "看版本控制",
+    },
+  ];
+
+  const recoveryIssues = [
+    ...(diagnostics?.startup_warnings?.map(warning => ({
+      title: "启动降级",
+      detail: warning,
+      tone: "error" as const,
+    })) ?? []),
+    ...((diagnostics?.vector_corrupt_embedding_count ?? 0) > 0
+      ? [
+          {
+            title: "向量索引损坏",
+            detail: `检测到 ${diagnostics?.vector_corrupt_embedding_count} 条向量 embedding 记录损坏，长期记忆检索可能不完整。`,
+            tone: "warning" as const,
+          },
+        ]
+      : []),
+    ...((diagnostics?.pending_builder_review_sessions ?? 0) > 0
+      ? [
+          {
+            title: "Builder 待确认 Review",
+            detail: `当前还有 ${diagnostics?.pending_builder_review_sessions} 个待确认 Review。建议先回到 Builder 审阅并应用，再验证对话与仪表盘。`,
+            tone: "warning" as const,
+          },
+        ]
+      : []),
+    ...((diagnostics?.chat_session_count ?? 0) > 0 && (diagnostics?.memory_chunk_count ?? 0) === 0
+      ? [
+          {
+            title: "聊天已有记录，但语义记忆为空",
+            detail:
+              "说明主聊天链路跑过，但长期记忆还没真正建立。建议先重建向量索引，再验证校准与长期记忆。",
+            tone: "warning" as const,
+          },
+        ]
+      : []),
+    ...(diagnostics?.database_status === "degraded"
+      ? [
+          {
+            title: "数据库模式已降级",
+            detail: "当前应用没有运行在完全健康的数据模式下，继续试用前建议先导出备份。",
+            tone: "warning" as const,
+          },
+        ]
+      : []),
+  ];
 
   return (
     <>
@@ -209,7 +290,7 @@ export default function OverviewTab({
             <div className="mt-3 rounded-lg bg-white/70 p-3">
               <div className="text-xs font-medium text-amber-800">建议先处理：</div>
               <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-700">
-                {diagnostics.readiness_issues.map((issue: string) => (
+                {diagnostics.readiness_issues.map(issue => (
                   <li key={issue}>{issue}</li>
                 ))}
               </ul>
@@ -218,7 +299,6 @@ export default function OverviewTab({
         </div>
       </section>
 
-      {/* Beta Flow */}
       <section className="space-y-4">
         <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div className="flex items-start justify-between gap-3">
@@ -307,7 +387,6 @@ export default function OverviewTab({
         </section>
       )}
 
-      {/* Safe Mode */}
       {safeMode && (
         <section className="space-y-4 border border-amber-200 bg-amber-50/60 rounded-2xl p-4">
           <div className="flex items-start justify-between gap-3">
@@ -360,6 +439,73 @@ export default function OverviewTab({
             >
               {exportLoading ? "导出中..." : "先导出完整备份"}
             </button>
+            <button
+              onClick={refreshAllDiagnostics}
+              className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100"
+            >
+              重新检查数据状态
+            </button>
+            <button
+              onClick={async () => {
+                if (safeMode) {
+                  setTierResult(buildSafeModeBlockedMessage("记忆层级维护", diagnostics));
+                  return;
+                }
+                setTierLoading(true);
+                setTierResult(null);
+                try {
+                  const res = await runMemoryTierMaintenance();
+                  setTierResult(
+                    `记忆层级维护已完成：晋升 ${res.promoted} 条，降级 ${res.demoted} 条。`
+                  );
+                  await refreshAllDiagnostics();
+                } catch (e) {
+                  setTierResult(`记忆层级维护失败：${readableError(e)}`);
+                } finally {
+                  setTierLoading(false);
+                }
+              }}
+              disabled={tierLoading || safeMode}
+              className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-800 hover:bg-stone-50 disabled:opacity-50"
+            >
+              {tierLoading ? "检查中..." : "运行记忆层级维护"}
+            </button>
+            <button
+              onClick={async () => {
+                if (!confirm("确定重建向量索引吗？系统会基于现有聊天消息重新生成记忆向量。"))
+                  return;
+                setRebuildLoading(true);
+                setRebuildResult(null);
+                try {
+                  const res = await rebuildMemoryIndex();
+                  const refreshed = await refreshAllDiagnostics();
+                  const recovered = refreshed && !safeMode;
+                  setRebuildResult(
+                    `向量索引重建完成：共处理 ${res.processed} 条消息，重建 ${res.indexed} 条，跳过 ${res.skipped} 条。${
+                      recovered
+                        ? " 当前数据环境已恢复，可继续试用。"
+                        : " 已刷新诊断，请继续确认数据环境是否恢复。"
+                    }`
+                  );
+                } catch (e) {
+                  setRebuildResult(`向量索引重建失败：${readableError(e)}`);
+                } finally {
+                  setRebuildLoading(false);
+                }
+              }}
+              disabled={rebuildLoading}
+              className="rounded-md border border-emerald-300 bg-white px-3 py-1.5 text-xs font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50"
+            >
+              {rebuildLoading ? "重建中..." : "重建向量索引"}
+            </button>
+          </div>
+          {rebuildResult && (
+            <div className="rounded-lg bg-white/80 px-3 py-2 text-xs text-stone-700">
+              {rebuildResult}
+            </div>
+          )}
+          <div className="rounded-lg bg-white/80 px-3 py-3 text-xs text-stone-600">
+            如果这里持续提示向量损坏，建议顺序是：先导出备份，再点击“重建向量索引”，最后刷新状态确认损坏计数是否下降。
           </div>
         </section>
       )}
