@@ -17,4 +17,13 @@ export default defineConfig(async ({ command }) => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: true,
+        drop_debugger: true,
+      },
+    },
+  },
 }))
