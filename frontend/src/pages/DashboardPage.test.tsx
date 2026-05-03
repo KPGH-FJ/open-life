@@ -120,7 +120,9 @@ describe("DashboardPage", () => {
     await waitFor(() => {
       expect(screen.getByText("记忆")).toBeInTheDocument();
     });
-    expect(screen.getByText("42")).toBeInTheDocument();
+    // DashboardPage shows memory count in a card with "记忆" label
+    const memoryCard = screen.getByText("记忆").parentElement;
+    expect(memoryCard).toHaveTextContent("42");
   });
 
   it("shows state trend explanation for selected dimension", async () => {

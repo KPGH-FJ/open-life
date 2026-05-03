@@ -158,6 +158,44 @@ export default function SettingsPage() {
     }
   };
 
+  const handleExportDiagnostics = async () => {
+    setExportLoading(true);
+    setMessage(null);
+    try {
+      const diag = await getSystemDiagnostics();
+      const report = {
+        timestamp: new Date().toISOString(),
+        app_version: diag?.app_version || "unknown",
+        platform: navigator.platform,
+        userAgent: navigator.userAgent,
+        diagnostics: diag,
+        config_summary: {
+          provider: config.llm?.provider,
+          prefer_local: config.prefer_local_model,
+          local_model: config.local_model,
+          chat_proposal_enabled: config.chat_proposal?.enabled,
+          use_agent_loop: config.use_agent_loop,
+        },
+        screen_size: `${window.screen.width}x${window.screen.height}`,
+        language: navigator.language,
+      };
+      const path = await save({
+        filters: [{ name: "JSON", extensions: ["json"] }],
+        defaultPath: `openlife-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+      });
+      if (!path) {
+        setExportLoading(false);
+        return;
+      }
+      await writeTextFile(path, JSON.stringify(report, null, 2));
+      setMessage("诊断报告导出成功");
+    } catch (e: any) {
+      setMessage("诊断报告导出失败: " + readableError(e));
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   const handleExport = async () => {
     setExportLoading(true);
     setMessage(null);
@@ -1826,6 +1864,13 @@ export default function SettingsPage() {
                   className="px-3 py-2 bg-amber-600 text-white rounded-md text-sm font-medium hover:bg-amber-700 disabled:opacity-50"
                 >
                   {tierLoading ? "维护中..." : "运行记忆层级维护"}
+                </button>
+                <button
+                  onClick={handleExportDiagnostics}
+                  disabled={exportLoading}
+                  className="px-3 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {exportLoading ? "导出中..." : "导出诊断报告"}
                 </button>
               </div>
               {evolutionResult && (

@@ -11,7 +11,15 @@ import {
   Zap,
 } from "lucide-react";
 import type { SystemDiagnostics } from "../tauri";
-import { getSystemDiagnostics, listAgentRuns, listProposals, listSkills, runSkill } from "../tauri";
+import {
+  getSystemDiagnostics,
+  listAgentRuns,
+  listProposals,
+  listSkills,
+  runSkill,
+  getFeedbackSummary,
+  countMemoryChunks,
+} from "../tauri";
 import { isSafeMode } from "../utils/safeMode";
 
 interface WorkspaceStats {
@@ -20,6 +28,10 @@ interface WorkspaceStats {
   recentRuns: number;
   systemStatus: "healthy" | "warning" | "critical";
   lastActivity: string;
+  totalFeedbackUp: number;
+  totalFeedbackDown: number;
+  memoryChunks: number;
+  chatSessions: number;
 }
 
 export default function WorkspaceOverview() {
@@ -29,6 +41,10 @@ export default function WorkspaceOverview() {
     recentRuns: 0,
     systemStatus: "healthy",
     lastActivity: "-",
+    totalFeedbackUp: 0,
+    totalFeedbackDown: 0,
+    memoryChunks: 0,
+    chatSessions: 0,
   });
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [skills, setSkills] = useState<{ id: string; name: string; description: string }[]>([]);
@@ -44,11 +60,13 @@ export default function WorkspaceOverview() {
   async function loadWorkspaceData() {
     try {
       setLoading(true);
-      const [diag, proposals, runs, skillList] = await Promise.all([
+      const [diag, proposals, runs, skillList, feedback, memoryCount] = await Promise.all([
         getSystemDiagnostics().catch(() => null),
         listProposals().catch(() => []),
         listAgentRuns(100, 0).catch(() => []),
         listSkills().catch(() => []),
+        getFeedbackSummary().catch(() => ({ total_feedback_up: 0, total_feedback_down: 0 })),
+        countMemoryChunks().catch(() => 0),
       ]);
 
       setDiagnostics(diag);
@@ -77,6 +95,10 @@ export default function WorkspaceOverview() {
         recentRuns: recentCount,
         systemStatus: status,
         lastActivity: runs.length > 0 ? new Date(runs[0].startedAt).toLocaleString("zh-CN") : "-",
+        totalFeedbackUp: feedback.total_feedback_up,
+        totalFeedbackDown: feedback.total_feedback_down,
+        memoryChunks: memoryCount,
+        chatSessions: diag?.chat_session_count || 0,
       });
     } catch (e) {
       console.error("Failed to load workspace data:", e);
@@ -177,18 +199,33 @@ export default function WorkspaceOverview() {
           <div className="text-xs text-stone-500">累计运行次数</div>
         </Link>
 
-        <Link
-          to="/agent"
-          className="rounded-xl border border-stone-200 bg-white p-4 hover:shadow-md transition-shadow"
-        >
+        <div className="rounded-xl border border-stone-200 bg-white p-4">
           <div className="flex items-center justify-between mb-2">
             <MessageSquare size={18} className="text-amber-600" />
           </div>
-          <div className="text-2xl font-bold text-stone-900">
-            <Zap size={20} className="inline" />
+          <div className="text-2xl font-bold text-stone-900">{stats.chatSessions}</div>
+          <div className="text-xs text-stone-500">会话数</div>
+        </div>
+
+        <div className="rounded-xl border border-stone-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-2">
+            <Clock size={18} className="text-purple-600" />
           </div>
-          <div className="text-xs text-stone-500">开始对话</div>
-        </Link>
+          <div className="text-2xl font-bold text-stone-900">{stats.memoryChunks}</div>
+          <div className="text-xs text-stone-500">记忆块</div>
+        </div>
+
+        <div className="rounded-xl border border-stone-200 bg-white p-4">
+          <div className="flex items-center justify-between mb-2">
+            <Activity size={18} className="text-rose-600" />
+          </div>
+          <div className="text-2xl font-bold text-stone-900">
+            <span className="text-green-600">{stats.totalFeedbackUp}</span>
+            <span className="text-stone-400 mx-1">/</span>
+            <span className="text-red-600">{stats.totalFeedbackDown}</span>
+          </div>
+          <div className="text-xs text-stone-500">反馈 👍/👎</div>
+        </div>
       </div>
 
       {/* Built-in Skills */}

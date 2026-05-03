@@ -249,6 +249,7 @@ export default function ChatPage() {
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
+  const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -992,6 +993,7 @@ export default function ChatPage() {
     if (!msg || msg.role !== "assistant") return;
     try {
       await saveFeedback(currentSessionId, index, type, msg.content.slice(0, 200));
+      setFeedbackGiven(prev => ({ ...prev, [index]: type }));
     } catch (e) {
       console.error("反馈保存失败", e);
     }
@@ -1422,14 +1424,22 @@ export default function ChatPage() {
                     <div className="flex items-center justify-end gap-2">
                       <button
                         onClick={() => handleFeedback(i, "up")}
-                        className="text-gray-500 hover:text-green-600"
+                        className={`transition ${
+                          feedbackGiven[i] === "up"
+                            ? "text-green-600"
+                            : "text-gray-500 hover:text-green-600"
+                        }`}
                         title="有帮助"
                       >
                         <ThumbsUp size={14} />
                       </button>
                       <button
                         onClick={() => handleFeedback(i, "down")}
-                        className="text-gray-500 hover:text-red-600"
+                        className={`transition ${
+                          feedbackGiven[i] === "down"
+                            ? "text-red-600"
+                            : "text-gray-500 hover:text-red-600"
+                        }`}
                         title="没帮助"
                       >
                         <ThumbsDown size={14} />
