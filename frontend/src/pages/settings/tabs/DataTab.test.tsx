@@ -65,9 +65,7 @@ describe("DataTab", () => {
   });
 
   it("shows evolution result when present", () => {
-    render(
-      <DataTab {...baseProps} evolutionResult="已应用规则 2 条" />
-    );
+    render(<DataTab {...baseProps} evolutionResult="已应用规则 2 条" />);
     expect(screen.getByText("已应用规则 2 条")).toBeInTheDocument();
   });
 });

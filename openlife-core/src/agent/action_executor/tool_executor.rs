@@ -14,7 +14,25 @@ use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
-use crate::agent::types::{AgentAction, AgentObservation, ProposalType, ToolActionScope};
+use crate::agent::types::{
+    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
+    ToolActionScope,
+};
+
+/// Returns true if the tool name indicates a proposal-generation tool that
+/// only creates a user-confirmable Proposal (no direct side effect).
+fn is_proposal_generation_tool(name: &str) -> bool {
+    name.ends_with("_proposal")
+        || name.ends_with("_propose_write")
+        || name.ends_with("_propose_archive")
+        || name.ends_with("_propose_patch")
+        || name.ends_with("_propose_update")
+        || name.ends_with(".propose_write")
+        || name.ends_with(".propose_archive")
+        || name.ends_with(".propose_patch")
+        || name.ends_with(".propose_update")
+        || name.ends_with(".propose_event")
+}
 
 impl super::ActionExecutor {
     /// Execute a tool action (MCP, builtin, or plugin).
@@ -103,14 +121,22 @@ impl super::ActionExecutor {
             }
         };
 
-        // 4. Determine if blocked
+        // 4. Determine if blocked.
+        // Proposal-generation tools (file.write_proposal, memory.propose_write, etc.)
+        // only create proposals; they don't execute side effects directly.
+        // They are exempt from permission-confirmation blocking so the agent can
+        // always reach the handler that creates the proposal for user review.
+        let is_proposal_tool = manifest
+            .as_ref()
+            .is_none_or(|m| is_proposal_generation_tool(&m.name));
+        let permission_blocks =
+            !is_proposal_tool && (decision.requires_confirmation || !decision.allowed);
         let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
         let blocked = manifest
             .as_ref()
             .is_none_or(|m| !m.enabled || m.declarative_only)
             || inspection_blocks
-            || decision.requires_confirmation
-            || !decision.allowed;
+            || permission_blocks;
 
         if blocked {
             // Special handling for declarative stubs that should create proposals
@@ -149,6 +175,27 @@ impl super::ActionExecutor {
             }
 
             let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
+
+            // Auto-generate ToolPermission Proposal when blocked by policy
+            // so the user can grant permission and continue in the Review Center.
+            if needs_confirmation
+                && manifest
+                    .as_ref()
+                    .is_some_and(|m| !m.declarative_only && !is_proposal_generation_tool(&m.name))
+            {
+                if let Some(result) = self.create_tool_permission_proposal(
+                    &request,
+                    ctx,
+                    tool_name,
+                    &args,
+                    manifest.as_ref(),
+                    &decision,
+                ) {
+                    return result;
+                }
+                // Fall-through: if proposal creation fails, return NeedsConfirmation status
+            }
+
             let (action, observation) = self.build_blocked_action_observation(
                 tool_name,
                 &args,
@@ -539,5 +586,79 @@ impl super::ActionExecutor {
             },
             stop_reason: Some("proposal_required".into()),
         }
+    }
+
+    /// Auto-create a ToolPermission Proposal when a tool is blocked by policy.
+    /// The proposal records the blocked action so it can be replayed after the
+    /// user grants permission in the Review Center.
+    fn create_tool_permission_proposal(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        manifest: Option<&ToolManifest>,
+        decision: &ToolPermissionDecision,
+    ) -> Option<anyhow::Result<ActionExecutionResult>> {
+        let proposal_store = ctx.proposal_store?;
+        let source = manifest
+            .map(canonical_tool_source)
+            .unwrap_or_else(|| "builtin".to_string());
+        let risk_level = manifest
+            .map(|m| m.risk_level.clone())
+            .unwrap_or_else(|| "medium".to_string());
+
+        let after = serde_json::json!({
+            "permission_action": "grant",
+            "tool_name": tool_name,
+            "source": source,
+            "risk_level": risk_level,
+            "policy": "allow_until_revoked",
+            "blocked_action": {
+                "action_type": request.action_type,
+                "target": request.target,
+                "input": args,
+                "source_run_id": request.source_run_id,
+                "step_index": request.step_index,
+            },
+            "reason": decision.reason,
+            "auto_generated": true,
+        });
+
+        let affected_path = format!("tool_permission.{}.{}", source, tool_name);
+        let mut proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            &affected_path,
+            after,
+            &format!(
+                "[Auto] 工具 '{}' ({}，风险等级：{}) 需要权限确认。原因：{}",
+                tool_name, source, risk_level, decision.reason
+            ),
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+
+        if let Some(ref run_id) = request.source_run_id {
+            proposal.run_id = Some(run_id.clone());
+        }
+
+        if let Err(e) = proposal_store.create_proposal(&proposal) {
+            eprintln!(
+                "[warn] Failed to create ToolPermission Proposal for {}: {}",
+                tool_name, e
+            );
+            return None;
+        }
+
+        let result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
+                tool_name, proposal.id
+            ),
+        );
+
+        Some(Ok(result))
     }
 }

@@ -211,6 +211,128 @@ impl super::ActionExecutor {
                     RiskLevel::Medium,
                 )?
                 .to_string(),
+            "permission.check" => {
+                let target = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                if target.is_empty() {
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "permission.check requires tool_name argument"
+                    })
+                    .to_string()
+                } else {
+                    let manifest = ctx
+                        .registry
+                        .list_manifests()
+                        .into_iter()
+                        .find(|m| m.name == target || m.id == target);
+                    let source = args.get("source").and_then(|v| v.as_str()).unwrap_or("*");
+                    let risk_level = manifest
+                        .as_ref()
+                        .map(|m| m.risk_level.as_str())
+                        .unwrap_or("medium");
+                    let action_type = manifest
+                        .as_ref()
+                        .map(|m| m.action_type.as_str())
+                        .unwrap_or("read");
+                    let caps: Vec<String> = manifest
+                        .as_ref()
+                        .map(|m| m.capabilities.clone())
+                        .unwrap_or_default();
+                    match ctx
+                        .permission_store
+                        .peek(target, source, risk_level, action_type, &caps)
+                    {
+                        Ok(decision) => serde_json::to_string(&decision).unwrap_or_default(),
+                        Err(e) => serde_json::json!({
+                            "status": "error",
+                            "reason": format!("权限查询失败: {}", e)
+                        })
+                        .to_string(),
+                    }
+                }
+            }
+            "permission.request" => {
+                let target = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                if target.is_empty() {
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "permission.request requires tool_name argument"
+                    })
+                    .to_string()
+                } else {
+                    let manifest = ctx
+                        .registry
+                        .list_manifests()
+                        .into_iter()
+                        .find(|m| m.name == target || m.id == target);
+                    let source = manifest
+                        .as_ref()
+                        .map(super::helpers::canonical_tool_source)
+                        .unwrap_or_else(|| "builtin".to_string());
+                    let risk = manifest
+                        .as_ref()
+                        .map(|m| m.risk_level.clone())
+                        .unwrap_or_else(|| "medium".to_string());
+                    self.create_core_os_proposal(
+                        ctx,
+                        ProposalType::ToolPermission,
+                        &format!("tool_permission.{}.{}", source, target),
+                        serde_json::json!({
+                            "tool_name": target,
+                            "source": source,
+                            "risk_level": risk,
+                            "policy": "allow_until_revoked",
+                            "reason": args.get("reason").and_then(|v| v.as_str()).unwrap_or("Agent requested permission via Core OS tool"),
+                        }),
+                        "Agent requested tool permission via Core OS tool.",
+                        if risk == "high" { RiskLevel::High } else { RiskLevel::Medium },
+                    )?
+                    .to_string()
+                }
+            }
+            "permission.replay_action" => {
+                let target = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+                let action_input = args
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| args.clone());
+                if target.is_empty() {
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "permission.replay_action requires tool_name argument"
+                    })
+                    .to_string()
+                } else if target == "permission.replay_action" {
+                    serde_json::json!({
+                        "status": "error",
+                        "reason": "permission.replay_action cannot replay itself"
+                    })
+                    .to_string()
+                } else {
+                    // Replay the action through ActionExecutor
+                    let action_request = super::AgentActionRequest {
+                        action_type: "mcp_tool".into(),
+                        target: target.to_string(),
+                        input: serde_json::json!({ "arguments": action_input }),
+                        source_run_id: None,
+                        step_index: 0,
+                    };
+                    match self.execute(action_request, ctx) {
+                        Ok(result) => serde_json::json!({
+                            "status": if result.status == super::ActionExecutionStatus::Succeeded { "success" } else { "failed" },
+                            "action_status": format!("{:?}", result.status),
+                            "observation": result.observation.content,
+                            "requires_confirmation": result.status == super::ActionExecutionStatus::NeedsConfirmation,
+                        })
+                        .to_string(),
+                        Err(e) => serde_json::json!({
+                            "status": "error",
+                            "reason": format!("重放操作失败: {}", e)
+                        })
+                        .to_string(),
+                    }
+                }
+            }
             _ => {
                 return Ok(ToolCallInternalResult {
                     success: false,

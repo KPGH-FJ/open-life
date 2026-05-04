@@ -137,9 +137,7 @@ impl super::ActionExecutor {
 
                 let events = if let Some(path) = ics_path {
                     // Validate source path is within calendar_ics_paths or safe_paths
-                    let mut all_calendar_paths: Vec<String> = ctx
-                        .calendar_ics_paths
-                        .to_vec();
+                    let mut all_calendar_paths: Vec<String> = ctx.calendar_ics_paths.to_vec();
                     all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
                     if !is_path_in_safe_paths(path, &all_calendar_paths) {
                         return Ok(ToolCallInternalResult {

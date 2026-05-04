@@ -468,7 +468,10 @@ export default function ChatPage() {
       unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
           flushStreaming();
-          setMessages(prev => [...prev, { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id }]);
+          setMessages(prev => [
+            ...prev,
+            { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },
+          ]);
           setStreamingReply("");
           setSending(false);
           setReasoningTrace(event.payload.reasoning_trace ?? null);
@@ -1337,63 +1340,62 @@ export default function ChatPage() {
                       const run = currentRun;
                       return (
                         <>
-                        <div className="flex items-center gap-3 text-[10px] text-gray-400">
-                          <span className="flex items-center gap-1">
-                            <Activity size={10} />
-                            {run.modelRoute?.provider || "unknown"}
-                            {run.modelRoute?.preferLocal && " (local)"}
-                          </span>
-                          <span>{run.actions?.length || 0} 工具</span>
-                          <span>{run.generatedProposals?.length || 0} 提案</span>
-                          {run.modelRoute?.fallbackReason && (
-                            <span className="text-amber-500">fallback</span>
-                          )}
-                        </div>
-                        {/* Execution summary line */}
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
-                              run.status === "completed"
-                                ? "bg-green-50 text-green-700"
-                                : run.status === "waiting_permission"
-                                  ? "bg-amber-50 text-amber-700"
-                                  : run.status === "failed"
-                                    ? "bg-red-50 text-red-700"
-                                    : "bg-blue-50 text-blue-700"
-                            }`}
-                          >
-                            {run.status === "completed" && (
-                              <>
-                                <CheckCircle2 size={12} />
-                                已完成 · {run.stepCount || 0}步 ·{" "}
-                                {run.toolCallCount || 0}工具
-                              </>
+                          <div className="flex items-center gap-3 text-[10px] text-gray-400">
+                            <span className="flex items-center gap-1">
+                              <Activity size={10} />
+                              {run.modelRoute?.provider || "unknown"}
+                              {run.modelRoute?.preferLocal && " (local)"}
+                            </span>
+                            <span>{run.actions?.length || 0} 工具</span>
+                            <span>{run.generatedProposals?.length || 0} 提案</span>
+                            {run.modelRoute?.fallbackReason && (
+                              <span className="text-amber-500">fallback</span>
                             )}
-                            {run.status === "waiting_permission" && (
-                              <>
-                                <ShieldCheck size={12} />
-                                等待确认 ·{" "}
-                                {run.actions?.filter(
-                                  (a: any) => a.status === "needs_confirmation"
-                                ).length || 0}
-                                个权限请求
-                              </>
-                            )}
-                            {run.status === "failed" && (
-                              <>
-                                <XCircle size={12} />
-                                失败 · {run.error?.phase || "unknown"}
-                              </>
-                            )}
-                            {run.status === "running" && (
-                              <>
-                                <Loader2 size={12} className="animate-spin" />
-                                运行中...
-                              </>
-                            )}
-                          </span>
-                        </div>
-                      </>
+                          </div>
+                          {/* Execution summary line */}
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
+                                run.status === "completed"
+                                  ? "bg-green-50 text-green-700"
+                                  : run.status === "waiting_permission"
+                                    ? "bg-amber-50 text-amber-700"
+                                    : run.status === "failed"
+                                      ? "bg-red-50 text-red-700"
+                                      : "bg-blue-50 text-blue-700"
+                              }`}
+                            >
+                              {run.status === "completed" && (
+                                <>
+                                  <CheckCircle2 size={12} />
+                                  已完成 · {run.stepCount || 0}步 · {run.toolCallCount || 0}工具
+                                </>
+                              )}
+                              {run.status === "waiting_permission" && (
+                                <>
+                                  <ShieldCheck size={12} />
+                                  等待确认 ·{" "}
+                                  {run.actions?.filter(
+                                    (a: any) => a.status === "needs_confirmation"
+                                  ).length || 0}
+                                  个权限请求
+                                </>
+                              )}
+                              {run.status === "failed" && (
+                                <>
+                                  <XCircle size={12} />
+                                  失败 · {run.error?.phase || "unknown"}
+                                </>
+                              )}
+                              {run.status === "running" && (
+                                <>
+                                  <Loader2 size={12} className="animate-spin" />
+                                  运行中...
+                                </>
+                              )}
+                            </span>
+                          </div>
+                        </>
                       );
                     })()}
                     <div className="flex flex-wrap gap-2">

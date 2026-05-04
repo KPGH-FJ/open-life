@@ -606,6 +606,8 @@ async fn apply_proposal_to_state(
                 .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
             let permission = after
                 .get("permission")
+                .or_else(|| after.get("permission_action"))
+                .or_else(|| after.get("policy"))
                 .or_else(|| after.get("level"))
                 .and_then(Value::as_str)
                 .unwrap_or("allow_until_revoked");
@@ -657,11 +659,14 @@ async fn apply_proposal_to_state(
                     )
                     .map_err(|e| e.to_string())?;
             }
+            // Check for blocked_action payload from auto-generated proposals
+            // so the frontend can offer a "continue" or replay option.
+            let blocked_action = after.get("blocked_action").cloned();
             Ok(patch_result_for_proposal(
                 proposal,
                 true,
                 "tool_permission",
-                None,
+                blocked_action.map(|ba| format!("__blocked_action__:{ba}")),
             ))
         }
         ProposalType::ExternalWriteAction => {
@@ -951,10 +956,28 @@ pub(crate) async fn accept_proposal_with_state(
     }
     proposal.accept();
     update_proposal_with_state(state, &proposal).await?;
-    Ok(serde_json::json!({
+    // Check for blocked_action in the patch result error field
+    let blocked_action_info = if let Some(ref err) = result.error {
+        if err.starts_with("__blocked_action__:") {
+            err.strip_prefix("__blocked_action__:")
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut response = serde_json::json!({
         "success": true,
         "patch_result": result,
-    }))
+    });
+    if let Some(blocked) = blocked_action_info {
+        if let Ok(parsed) = serde_json::from_str::<Value>(&blocked) {
+            response["blocked_action"] = parsed;
+            response["can_continue"] = serde_json::Value::Bool(true);
+        }
+    }
+    Ok(response)
 }
 
 pub(crate) async fn reject_proposal_with_state(

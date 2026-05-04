@@ -380,3 +380,251 @@ fn test_max_tool_calls_stop_reason() {
     // In real execution, this would trigger budget_exceeded path
     // This test validates the parser still works at budget limit
 }
+
+/// Test 14: JSON self-repair flag is set when model produces malformed JSON
+#[test]
+fn test_json_self_repair_flag_on_malformed_json() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let mut run = AgentRun::new_chat_run("test", "Hi");
+    let mut tool_call_count = 0u32;
+
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    // Malformed JSON: missing closing brace
+    let malformed = r#"{"final": "hello"#;
+    let parsed = loop_instance
+        .parse_agent_reply(malformed, &action_ctx, &mut run, &mut tool_call_count)
+        .unwrap();
+
+    // json_parse_failed should be true for malformed JSON
+    assert!(parsed.json_parse_failed);
+    assert!(parsed.actions.is_empty());
+    // A warning should be recorded
+    assert_eq!(run.warnings.len(), 1);
+    assert!(run.warnings[0].contains("Parse warning"));
+}
+
+/// Test 15: Valid JSON with actions does NOT trigger json_parse_failed
+#[test]
+fn test_json_self_repair_flag_not_set_on_valid_json() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let mut run = AgentRun::new_chat_run("test", "Hi");
+    let mut tool_call_count = 0u32;
+
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
+    let parsed = loop_instance
+        .parse_agent_reply(valid, &action_ctx, &mut run, &mut tool_call_count)
+        .unwrap();
+
+    assert!(!parsed.json_parse_failed);
+    assert_eq!(parsed.actions.len(), 1);
+}
+
+/// Test 16: Proposal-generation tools bypass permission-confirmation blocking.
+#[test]
+fn test_proposal_tool_bypass_permission_blocking() {
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_default_builtins();
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
+
+    // Create a temp dir as safe_path so the filesystem precheck passes
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[safe_path.clone()],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: Some(&prop_store),
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+
+    // file.write_proposal is high-risk with "write"+"filesystem" capabilities.
+    // With no explicit permission policy, our A1 fix allows proposal tools to
+    // bypass permission blocking and create a Proposal for user review.
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "file.write_proposal".into(),
+        input: serde_json::json!({
+            "arguments": {
+                "path": safe_dir.path().join("test.md").to_str().unwrap(),
+                "content": "# Test"
+            }
+        }),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+
+    // A1 fix: proposal tool bypasses permission blocking → Proposal is created.
+    // The action status is Succeeded because the handler creates the Proposal.
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::Succeeded
+    );
+    let output = result.action.output.unwrap();
+    assert!(output.to_string().contains("proposal_id"));
+    assert!(output.to_string().contains("external_write_action"));
+}
+
+/// Test 17: permission.check tool returns a valid permission decision.
+#[test]
+fn test_permission_check_tool() {
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_default_builtins();
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+
+    // Grant permission to check against
+    permission_store
+        .grant(
+            "web.fetch",
+            "builtin",
+            "medium",
+            "network",
+            crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+
+    // Check a tool that has an explicit allow policy
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "permission.check".into(),
+        input: serde_json::json!({
+            "arguments": {
+                "tool_name": "web.fetch",
+                "source": "builtin"
+            }
+        }),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::Succeeded
+    );
+    let output = result.action.output.unwrap();
+    // The output should contain a JSON decision
+    assert!(output.to_string().contains("allowed"));
+}
+
+/// Test 18: memory.propose_write generates a MemoryWrite Proposal instead of being blocked.
+#[test]
+fn test_memory_propose_write_creates_proposal() {
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_default_builtins();
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: Some(&prop_store),
+        agent_run_store: None,
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "memory.propose_write".into(),
+        input: serde_json::json!({
+            "arguments": {
+                "content": "用户喜欢深色主题",
+                "category": "preference"
+            }
+        }),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+
+    // Should succeed because memory.propose_write is a proposal-generation tool
+    // that was exempted from permission blocking in Sprint A1
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::Succeeded
+    );
+    let output = result.action.output.unwrap();
+    assert!(
+        output.to_string().contains("proposal_id"),
+        "expected proposal_id in output: {}",
+        output
+    );
+}

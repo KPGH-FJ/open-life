@@ -135,6 +135,64 @@ impl AgentLoop {
         });
     }
 
+    /// Attempt a one-shot JSON self-repair when the model produces malformed JSON.
+    /// Injects a bilingual, schema-first correction prompt and regenerates once.
+    /// Records warnings on the run for observability.
+    /// Returns a fresh ParsedAgentReply from the regenerated response, or the
+    /// original `failed_parsed` (with `json_parse_failed: true`) if repair also fails.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_json_self_repair(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_ctx: Option<String>,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+        run: &mut AgentRun,
+        tool_call_count: &mut u32,
+    ) -> Result<ParsedAgentReply> {
+        let mut repair_task = task.clone();
+        repair_task.messages.push(ChatMessage {
+            role: "system".into(),
+            content: format!("{}{}", SELF_REPAIR_PROMPT, task.user_text),
+        });
+
+        match self
+            .generate_response(
+                &repair_task,
+                life_model,
+                tools_prompt,
+                memory_ctx,
+                privacy_engine,
+            )
+            .await
+        {
+            Ok(repaired_gen) => {
+                let parsed =
+                    self.parse_agent_reply(&repaired_gen.reply, action_ctx, run, tool_call_count)?;
+                if !parsed.json_parse_failed {
+                    run.warnings
+                        .push("JSON format self-repair succeeded".into());
+                } else {
+                    run.warnings.push(
+                        "JSON format self-repair also failed, continuing with raw reply".into(),
+                    );
+                }
+                Ok(parsed)
+            }
+            Err(e) => {
+                run.warnings
+                    .push(format!("JSON format self-repair generation failed: {}", e));
+                Ok(ParsedAgentReply {
+                    final_text: "[self-repair failed]".into(),
+                    actions: Vec::new(),
+                    json_parse_failed: true,
+                })
+            }
+        }
+    }
+
     /// Run the iterative agent loop for a given task.
     /// Supports multi-step ReAct: generate -> parse tools -> execute -> observe -> repeat.
     pub async fn run(
@@ -450,6 +508,11 @@ impl AgentLoop {
     async fn run_single_step(&self, mut ctx: StepContext<'_>) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
+        // Clone values that will be consumed by generate_response so we can
+        // re-use them in a one-shot JSON repair round.
+        let memory_ctx = ctx.memory_context.clone();
+        let privacy = ctx.privacy_engine.clone();
+
         // Generate model response
         let generated = self
             .generate_response(
@@ -473,12 +536,36 @@ impl AgentLoop {
                 let reply = gen.reply;
 
                 // Check for tool calls in the reply
-                let parsed = self.parse_agent_reply(
+                let mut parsed = self.parse_agent_reply(
                     &reply,
                     ctx.action_ctx,
                     ctx.run,
                     &mut ctx.tool_call_count,
                 )?;
+
+                // One-shot JSON self-repair
+                if parsed.json_parse_failed {
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::Thinking,
+                        "JSON parse failed, attempting one-shot repair...",
+                        0,
+                        None,
+                    );
+                    parsed = self
+                        .try_json_self_repair(
+                            ctx.task,
+                            ctx.life_model,
+                            ctx.tools_prompt,
+                            memory_ctx.clone(),
+                            privacy.clone(),
+                            ctx.action_ctx,
+                            ctx.run,
+                            &mut ctx.tool_call_count,
+                        )
+                        .await?;
+                }
+
                 let final_text = parsed.final_text;
                 let tool_actions = parsed.actions;
 
@@ -704,6 +791,10 @@ impl AgentLoop {
     ) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
+        // Clone values for potential JSON self-repair round
+        let memory_ctx = ctx.memory_context.clone();
+        let privacy = ctx.privacy_engine.clone();
+
         // Generate model response with streaming
         let generated = self
             .generate_response_streaming(
@@ -728,12 +819,35 @@ impl AgentLoop {
                 let reply = gen.reply;
 
                 // Check for tool calls in the reply
-                let parsed = self.parse_agent_reply(
+                let mut parsed = self.parse_agent_reply(
                     &reply,
                     ctx.action_ctx,
                     ctx.run,
                     &mut ctx.tool_call_count,
                 )?;
+
+                // One-shot JSON self-repair for streaming variant
+                if parsed.json_parse_failed {
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::Thinking,
+                        "JSON parse failed, attempting one-shot repair...",
+                        0,
+                        None,
+                    );
+                    parsed = self
+                        .try_json_self_repair(
+                            ctx.task,
+                            ctx.life_model,
+                            ctx.tools_prompt,
+                            memory_ctx.clone(),
+                            privacy.clone(),
+                            ctx.action_ctx,
+                            ctx.run,
+                            &mut ctx.tool_call_count,
+                        )
+                        .await?;
+                }
 
                 let final_text = parsed.final_text;
                 if parsed.actions.is_empty() {
@@ -1059,13 +1173,15 @@ impl AgentLoop {
             return Ok(ParsedAgentReply {
                 final_text: reply.to_string(),
                 actions: Vec::new(),
+                json_parse_failed: false,
             });
         };
 
         let v: Value = match serde_json::from_str(json_str) {
             Ok(v) => v,
             Err(e) => {
-                // Fail-soft: malformed JSON, record warning and treat as final
+                // Fail-soft: malformed JSON, record warning and treat as final.
+                // Signal json_parse_failed so caller can attempt a one-shot repair.
                 run.warnings.push(format!(
                     "Parse warning: invalid JSON in model response: {}",
                     e
@@ -1073,6 +1189,7 @@ impl AgentLoop {
                 return Ok(ParsedAgentReply {
                     final_text: reply.to_string(),
                     actions: Vec::new(),
+                    json_parse_failed: true,
                 });
             }
         };
@@ -1103,6 +1220,7 @@ impl AgentLoop {
                 return Ok(ParsedAgentReply {
                     final_text,
                     actions: Vec::new(),
+                    json_parse_failed: false,
                 });
             }
             actions
@@ -1111,6 +1229,7 @@ impl AgentLoop {
                 return Ok(ParsedAgentReply {
                     final_text,
                     actions: Vec::new(),
+                    json_parse_failed: false,
                 });
             }
             tool_calls
@@ -1119,6 +1238,7 @@ impl AgentLoop {
             return Ok(ParsedAgentReply {
                 final_text,
                 actions: Vec::new(),
+                json_parse_failed: false,
             });
         };
 
@@ -1152,6 +1272,7 @@ impl AgentLoop {
         Ok(ParsedAgentReply {
             final_text,
             actions: requests,
+            json_parse_failed: false,
         })
     }
 
@@ -1257,9 +1378,24 @@ struct GeneratedAgentResponse {
     reply: String,
 }
 
+/// One-shot JSON self-repair prompt sent to the model when its previous
+/// response was not valid JSON. Bilingual + schema-first for best results
+/// across different models.
+const SELF_REPAIR_PROMPT: &str = r#"Your previous response was not valid JSON for tool calling.
+请只输出一个合法 JSON object，不要 markdown，不要解释。
+
+Allowed shape:
+{"final": "reply to user", "actions": [{"name": "tool_name", "arguments": {}}], "thought_summary": "brief reasoning", "warnings": []}
+If no tools needed: {"final": "reply to user"}
+
+Original request: "#;
+
 pub(crate) struct ParsedAgentReply {
     pub(crate) final_text: String,
     pub(crate) actions: Vec<AgentActionRequest>,
+    /// True if the model generated a JSON-like response that failed to parse.
+    /// When true, the caller should attempt a one-shot repair round.
+    pub(crate) json_parse_failed: bool,
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {

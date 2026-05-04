@@ -52,28 +52,29 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Enable corepack
+        run: corepack enable
 
       - name: Install dependencies
         working-directory: frontend
-        run: npm ci
+        run: corepack pnpm install --frozen-lockfile
 
       - name: Check formatting
         working-directory: frontend
-        run: npx prettier --check "src/**/*.{ts,tsx}"
+        run: corepack pnpm exec prettier --check "src/**/*.{ts,tsx}"
 
       - name: Type check
         working-directory: frontend
-        run: npx tsc --noEmit
+        run: corepack pnpm exec tsc --noEmit
 
       - name: Build
         working-directory: frontend
-        run: npm run build
+        run: corepack pnpm build
 
       - name: Run tests
         working-directory: frontend
-        run: npm test
+        run: corepack pnpm vitest run
 
   frontend-coverage:
     name: Frontend Coverage
@@ -85,16 +86,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Enable corepack
+        run: corepack enable
 
       - name: Install dependencies
         working-directory: frontend
-        run: npm ci
+        run: corepack pnpm install --frozen-lockfile
 
       - name: Run tests with coverage
         working-directory: frontend
-        run: npx vitest run --coverage
+        run: corepack pnpm vitest run --coverage
 
       - name: Check coverage threshold
         working-directory: frontend
@@ -188,12 +190,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+
+      - name: Enable corepack
+        run: corepack enable
 
       - name: Install frontend dependencies
         working-directory: frontend
-        run: npm ci
+        run: corepack pnpm install --frozen-lockfile
 
       - name: Run smoke test
         run: |

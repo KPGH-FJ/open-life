@@ -267,7 +267,7 @@ impl McpRegistry {
         reg
     }
 
-    fn register_default_builtins(&mut self) {
+    pub(crate) fn register_default_builtins(&mut self) {
         // Built-in: echo (test utility)
         let echo_manifest = ToolManifest {
             id: "builtin_echo".into(),
@@ -354,6 +354,31 @@ impl McpRegistry {
             "low",
             vec!["read".into()],
             "read",
+        );
+
+        // Permission tools: let the agent inspect and request tool permissions.
+        self.register_core_os_tool(
+            "permission.check",
+            "查询指定工具当前的权限状态（允许/阻断/需确认及原因）",
+            "low",
+            vec!["read".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "permission.request",
+            "为指定工具请求权限（生成 ToolPermission Proposal 供用户审批）",
+            "medium",
+            vec!["read".into()],
+            "read",
+        );
+
+        self.register_core_os_tool(
+            "permission.replay_action",
+            "在权限已授权后重放之前被阻断的工具操作",
+            "medium",
+            vec!["write".into()],
+            "write",
         );
 
         // snapshot.create is declarative-only in Beta: use Version Control page instead
@@ -467,12 +492,14 @@ impl McpRegistry {
             Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
         );
 
-        // Execution Tools: P1 calendar.read (reads ICS files)
+        // Execution Tools: P1 calendar.read (reads ICS files).
+        // Note: "filesystem" capability intentionally omitted — the handler validates
+        // against calendar_ics_paths + safe_paths using the "source" arg, not "path".
         self.register_execution_tool(
             "calendar.read",
             "读取日历事件（从配置的 ICS 文件中解析 VEVENT）",
             "low",
-            vec!["read".into(), "filesystem".into(), "calendar".into()],
+            vec!["read".into(), "calendar".into()],
             "read",
         );
 

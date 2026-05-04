@@ -540,8 +540,7 @@ pub enum ProposalSource {
     Plugin,
     Manual,
     ChatConversation,
-    /// 预留，暂未实现
-    #[serde(skip)]
+    /// Agent 主动发起的提案（如定期检查、触发式建议）
     ProactiveAgent,
 }
 

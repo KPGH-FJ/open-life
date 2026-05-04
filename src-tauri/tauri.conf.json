@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "identifier": "ai.openlife.app",
   "build": {
-    "beforeBuildCommand": "cd ../frontend && npx tsc && npx vite build",
+    "beforeDevCommand": "cd ../frontend && corepack pnpm dev --host 127.0.0.1 --port 5173",
+    "beforeBuildCommand": "cd ../frontend && corepack pnpm build",
+    "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../frontend/dist"
   },
   "app": {
