@@ -87,12 +87,15 @@ struct StepContext<'a> {
     pub tool_call_count: u32,
 }
 
-/// The AgentLoop executes a task with a fixed 2-step pattern:
+/// The AgentLoop executes a task with an iterative ReAct loop:
 ///
-/// 1. Model response (with optional tool calls)
-/// 2. Follow-up response (after tool observations)
+/// Each step: model generates response (with optional tool calls) →
+///            tools are executed → observations are fed back →
+///            model generates follow-up response.
 ///
-/// This is the Beta MVP. Future versions will support iterative multi-step loops.
+/// The loop continues until stop_reason indicates completion, permission
+/// required, an error, or max_steps/max_tool_calls are exhausted.
+/// Configurable via AgentLoopConfig (max_steps default: 4, max_tool_calls default: 6).
 pub struct AgentLoop {
     runtime: AgentRuntime,
     action_executor: ActionExecutor,
@@ -273,7 +276,7 @@ impl AgentLoop {
             );
         }
 
-        if run.status != AgentRunStatus::Failed {
+        if run.status == AgentRunStatus::Running {
             run.status = AgentRunStatus::Completed;
         }
         run.output_preview = Some(preview_text(&final_response, 200));
@@ -427,7 +430,7 @@ impl AgentLoop {
             .on_status("completed", &format!("Done: {}", stop_reason), step_count)
             .await;
 
-        if run.status != AgentRunStatus::Failed {
+        if run.status == AgentRunStatus::Running {
             run.status = AgentRunStatus::Completed;
         }
         run.output_preview = Some(preview_text(&final_response, 200));

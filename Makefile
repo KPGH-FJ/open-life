@@ -199,3 +199,12 @@ check-lockfile: check-pnpm
 ## 完整 CI 检查（锁文件 + 格式检查 + Lint + 测试 + 前端生产构建）
 ci: check-lockfile format-check lint test build-front
 	@echo "✅ CI 检查全部通过"
+
+## 清理 tract crate 编译缓存（解决 rlib format 偶发错误）
+.PHONY: clean-tract
+clean-tract:
+	@echo "🧹 清理 tract 相关 crate 缓存..."
+	cargo clean -p tract-nnef 2>/dev/null || true
+	cargo clean -p tract-hir 2>/dev/null || true
+	cargo clean -p tauri-utils 2>/dev/null || true
+	@echo "✅ tract 缓存已清理，重新编译即可恢复"

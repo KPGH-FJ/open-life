@@ -468,7 +468,7 @@ export default function ChatPage() {
       unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
           flushStreaming();
-          setMessages(prev => [...prev, { role: "assistant", content: event.payload.reply }]);
+          setMessages(prev => [...prev, { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id }]);
           setStreamingReply("");
           setSending(false);
           setReasoningTrace(event.payload.reasoning_trace ?? null);
@@ -596,6 +596,8 @@ export default function ChatPage() {
               : item
           )
         );
+        loadAgentRunForSession(call.run_id, currentSessionIdRef.current);
+        refreshAgentRuns(currentSessionIdRef.current);
       } catch (e) {
         const errMsg = String(e);
         // 如果是因为未授权，保持 pending 状态，不改为 error
@@ -1328,17 +1330,22 @@ export default function ChatPage() {
                 <div className="whitespace-pre-wrap">{m.content}</div>
                 {m.role === "assistant" && (
                   <div className="mt-3 space-y-2">
-                    {currentRun && i === messages.length - 1 && (
-                      <>
+                    {(() => {
+                      const runMatches = m.run_id && currentRun && currentRun.id === m.run_id;
+                      const isLast = i === messages.length - 1;
+                      if ((!runMatches && !isLast) || !currentRun) return null;
+                      const run = currentRun;
+                      return (
+                        <>
                         <div className="flex items-center gap-3 text-[10px] text-gray-400">
                           <span className="flex items-center gap-1">
                             <Activity size={10} />
-                            {currentRun.modelRoute?.provider || "unknown"}
-                            {currentRun.modelRoute?.preferLocal && " (local)"}
+                            {run.modelRoute?.provider || "unknown"}
+                            {run.modelRoute?.preferLocal && " (local)"}
                           </span>
-                          <span>{currentRun.actions?.length || 0} 工具</span>
-                          <span>{currentRun.generatedProposals?.length || 0} 提案</span>
-                          {currentRun.modelRoute?.fallbackReason && (
+                          <span>{run.actions?.length || 0} 工具</span>
+                          <span>{run.generatedProposals?.length || 0} 提案</span>
+                          {run.modelRoute?.fallbackReason && (
                             <span className="text-amber-500">fallback</span>
                           )}
                         </div>
@@ -1346,39 +1353,39 @@ export default function ChatPage() {
                         <div className="flex items-center gap-2">
                           <span
                             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${
-                              currentRun.status === "completed"
+                              run.status === "completed"
                                 ? "bg-green-50 text-green-700"
-                                : currentRun.status === "waiting_permission"
+                                : run.status === "waiting_permission"
                                   ? "bg-amber-50 text-amber-700"
-                                  : currentRun.status === "failed"
+                                  : run.status === "failed"
                                     ? "bg-red-50 text-red-700"
                                     : "bg-blue-50 text-blue-700"
                             }`}
                           >
-                            {currentRun.status === "completed" && (
+                            {run.status === "completed" && (
                               <>
                                 <CheckCircle2 size={12} />
-                                已完成 · {currentRun.stepCount || 0}步 ·{" "}
-                                {currentRun.toolCallCount || 0}工具
+                                已完成 · {run.stepCount || 0}步 ·{" "}
+                                {run.toolCallCount || 0}工具
                               </>
                             )}
-                            {currentRun.status === "waiting_permission" && (
+                            {run.status === "waiting_permission" && (
                               <>
                                 <ShieldCheck size={12} />
                                 等待确认 ·{" "}
-                                {currentRun.actions?.filter(
+                                {run.actions?.filter(
                                   (a: any) => a.status === "needs_confirmation"
                                 ).length || 0}
                                 个权限请求
                               </>
                             )}
-                            {currentRun.status === "failed" && (
+                            {run.status === "failed" && (
                               <>
                                 <XCircle size={12} />
-                                失败 · {currentRun.error?.phase || "unknown"}
+                                失败 · {run.error?.phase || "unknown"}
                               </>
                             )}
-                            {currentRun.status === "running" && (
+                            {run.status === "running" && (
                               <>
                                 <Loader2 size={12} className="animate-spin" />
                                 运行中...
@@ -1387,7 +1394,8 @@ export default function ChatPage() {
                           </span>
                         </div>
                       </>
-                    )}
+                      );
+                    })()}
                     <div className="flex flex-wrap gap-2">
                       <button
                         onClick={() =>

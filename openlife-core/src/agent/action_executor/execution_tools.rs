@@ -136,6 +136,40 @@ impl super::ActionExecutor {
                 let ics_path = args.get("source").and_then(|v: &Value| v.as_str());
 
                 let events = if let Some(path) = ics_path {
+                    // Validate source path is within calendar_ics_paths or safe_paths
+                    let mut all_calendar_paths: Vec<String> = ctx
+                        .calendar_ics_paths
+                        .to_vec();
+                    all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
+                    if !is_path_in_safe_paths(path, &all_calendar_paths) {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(filesystem_access_error(path, &all_calendar_paths)),
+                        });
+                    }
+                    let metadata = match std::fs::metadata(path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            return Ok(ToolCallInternalResult {
+                                success: false,
+                                output: None,
+                                error: Some(format!("Failed to read ICS file metadata: {}", e)),
+                            });
+                        }
+                    };
+                    let max_size = 100 * 1024; // 100KB limit, same as file.read
+                    if metadata.len() > max_size {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!(
+                                "ICS file size ({} bytes) exceeds maximum allowed ({} bytes)",
+                                metadata.len(),
+                                max_size
+                            )),
+                        });
+                    }
                     match std::fs::read_to_string(path) {
                         Ok(content) => crate::calendar::parse_ics(&content, range_start, range_end),
                         Err(e) => {

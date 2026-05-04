@@ -228,6 +228,7 @@ export interface BuilderProgress {
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
+  run_id?: string;
 }
 
 export interface LifeModelVersion {

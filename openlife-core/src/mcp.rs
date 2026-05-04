@@ -472,7 +472,7 @@ impl McpRegistry {
             "calendar.read",
             "读取日历事件（从配置的 ICS 文件中解析 VEVENT）",
             "low",
-            vec!["read".into()],
+            vec!["read".into(), "filesystem".into(), "calendar".into()],
             "read",
         );
 

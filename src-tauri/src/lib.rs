@@ -884,7 +884,9 @@ async fn finalize_chat_agent_run(
 
     reasoning_trace.generation_result = Some(serde_json::json!({ "text": reply }));
     agent_run.output_preview = Some(preview_text(reply, 200));
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    if agent_run.status == openlife_core::agent::AgentRunStatus::Running {
+        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    }
     agent_run.finished_at = Some(chrono::Utc::now());
     agent_run.reasoning_trace = Some(reasoning_trace.clone());
 
@@ -1959,17 +1961,14 @@ async fn send_message_with_agent_loop(
         Ok(result) => {
             // Emit AgentLoop status updates as Tauri events
             for update in &result.status_updates {
-                let _ = app_handle.emit(
-                    "agent-status-update",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": &result.run.id,
-                        "phase": update.phase.to_string(),
-                        "message": &update.message,
-                        "step_index": update.step_index,
-                        "tool_call_index": update.tool_call_index,
-                        "timestamp": update.timestamp,
-                    }),
+                emit_agent_status_update(
+                    &app_handle,
+                    &session_id,
+                    &result.run.id,
+                    &update.phase.to_string(),
+                    &update.message,
+                    update.step_index,
+                    update.tool_call_index,
                 );
             }
             (result.final_response, result.run, result.status_updates)
@@ -2077,6 +2076,31 @@ const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
 const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
 const CHAT_VECTOR_PERSIST_TIMEOUT_SECS: u64 = 8;
 const CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS: u64 = 5;
+
+/// Emit a unified agent-status-update event for both streaming and non-streaming paths.
+/// Frontend AgentStateIndicator expects: phase, message, step_index, tool_call_index, timestamp.
+fn emit_agent_status_update(
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    run_id: &str,
+    phase: &str,
+    message: &str,
+    step_index: u32,
+    tool_call_index: Option<u32>,
+) {
+    let _ = app_handle.emit(
+        "agent-status-update",
+        serde_json::json!({
+            "session_id": session_id,
+            "run_id": run_id,
+            "phase": phase,
+            "message": message,
+            "step_index": step_index,
+            "tool_call_index": tool_call_index,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        }),
+    );
+}
 
 fn emit_stream_error(
     app_handle: &tauri::AppHandle,
@@ -2247,15 +2271,14 @@ impl StreamingCallback for TauriStreamingCallback {
     }
 
     async fn on_status(&self, status: &str, message: &str, step: u32) {
-        let _ = self.app_handle.emit(
-            "agent-status",
-            serde_json::json!({
-                "session_id": self.session_id,
-                "run_id": self.run_id,
-                "status": status,
-                "message": message,
-                "step": step,
-            }),
+        emit_agent_status_update(
+            &self.app_handle,
+            &self.session_id,
+            &self.run_id,
+            status,
+            message,
+            step,
+            None,
         );
     }
 }
@@ -3366,6 +3389,31 @@ async fn inspect_mcp_call(
     let reg = state.mcp_registry.lock().await;
     Ok(reg.inspect_call_arguments(&name, &arguments))
 }
+
+fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> tauri::Result<()> {
+    let window = if let Some(window) = manager.get_webview_window("main") {
+        window
+    } else {
+        tauri::WebviewWindowBuilder::new(
+            manager,
+            "main",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("OpenLife")
+        .inner_size(1280.0, 800.0)
+        .resizable(true)
+        .center()
+        .visible(true)
+        .focused(true)
+        .build()?
+    };
+
+    let _ = window.show();
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = app_data_dir();
@@ -3534,26 +3582,9 @@ pub fn run() {
         .plugin(tauri_plugin_http::init())
         .manage(app_state.clone())
         .setup(move |app| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            } else {
-                let _ = tauri::WebviewWindowBuilder::new(
-                    app,
-                    "main",
-                    tauri::WebviewUrl::App("index.html".into()),
-                )
-                .title("OpenLife")
-                .inner_size(1280.0, 800.0)
-                .resizable(true)
-                .center()
-                .visible(true)
-                .focused(true)
-                .build()
-                .map_err(|e| {
-                    eprintln!("[setup] failed to create main window: {} - lib.rs:1768", e);
-                    e
-                })?;
+            if let Err(e) = ensure_main_window_visible(app) {
+                eprintln!("[setup] failed to show main window: {}", e);
+                return Err(Box::new(e));
             }
             println!("[setup] launching a2a sidecar");
             let a2a_sidecar = app_state_for_setup.a2a_sidecar.clone();
@@ -3733,6 +3764,14 @@ pub fn run() {
             enable_plugin,
             disable_plugin,
         ])
-        .run(tauri::generate_context!())
-        .unwrap_or_else(|e| eprintln!("Tauri runtime exited with error: {}", e));
+        .build(tauri::generate_context!())
+        .unwrap_or_else(|e| panic!("Tauri build failed: {}", e))
+        .run(|app_handle, event| match event {
+            tauri::RunEvent::Ready | tauri::RunEvent::Reopen { .. } => {
+                if let Err(e) = ensure_main_window_visible(app_handle) {
+                    eprintln!("[runtime] failed to show main window: {}", e);
+                }
+            }
+            _ => {}
+        });
 }

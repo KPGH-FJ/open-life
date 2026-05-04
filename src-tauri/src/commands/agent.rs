@@ -151,6 +151,7 @@ pub async fn replay_agent_action(
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
+    let network_policy = cfg.system.network_policy.clone();
     drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
@@ -189,7 +190,7 @@ pub async fn replay_agent_action(
         memory_store: Some(&memory_store),
         proposal_store: proposal_store_guard.as_deref(),
         agent_run_store: agent_run_store_guard.as_deref(),
-        network_policy: None,
+        network_policy: Some(&network_policy),
     };
 
     let request = openlife_core::agent::AgentActionRequest {
