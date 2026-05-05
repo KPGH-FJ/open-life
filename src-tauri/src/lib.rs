@@ -1439,6 +1439,7 @@ async fn generate_non_stream_fallback(
 /// Handle AgentLoop failure: try non-stream fallback, create AgentRun with
 /// error context, persist the run. Returns (reply, agent_run) on success, or
 /// an error message string if both AgentLoop and fallback fail.
+#[allow(clippy::too_many_arguments)]
 async fn handle_agent_loop_fallback(
     scheduler: &InferenceScheduler,
     messages: Vec<ChatMessage>,
@@ -1469,7 +1470,7 @@ async fn handle_agent_loop_fallback(
         .push(format!("fallback: agent_loop_error: {}", original_error));
     agent_run.finished_at = Some(chrono::Utc::now());
 
-    if let Some(ref store_arc) = agent_run_store {
+    if let Some(store_arc) = agent_run_store {
         let store = store_arc.lock().await;
         let _ = store.create_run(&agent_run);
     }

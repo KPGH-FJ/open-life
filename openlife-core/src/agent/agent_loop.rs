@@ -1146,6 +1146,7 @@ impl AgentLoop {
 
     /// Handle step completion after tool batch execution:
     /// budget exceeded / partial failure / no observations / continue.
+    #[allow(clippy::too_many_arguments)]
     fn handle_step_completion(
         &self,
         budget_exceeded: bool,
