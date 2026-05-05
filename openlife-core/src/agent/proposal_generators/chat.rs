@@ -57,6 +57,7 @@ impl ChatProposalGenerator {
     }
 
     /// Generate proposals from a chat message.
+    /// Attempts LLM-based extraction first (Ollama), falls back to keyword-based.
     pub fn generate_proposals(
         &self,
         session_id: &str,
@@ -76,6 +77,15 @@ impl ChatProposalGenerator {
             return Ok(Vec::new());
         }
 
+        // Try LLM-based extraction first (Ollama), then fall back to keyword
+        if let Some(llm_proposals) = self.try_llm_extract(session_id, message, life_model) {
+            if !llm_proposals.is_empty() {
+                self.update_last_extraction(session_id);
+                return Ok(llm_proposals);
+            }
+        }
+
+        // Fallback: keyword-based extraction
         let mut proposals = Vec::new();
 
         let has_emphasis = Self::has_emphasis_markers(message);
@@ -203,12 +213,167 @@ impl ChatProposalGenerator {
     }
 
     fn get_last_extraction(&self, session_id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-        let map = self.last_extraction.lock().unwrap();
+        let map = self.last_extraction.lock().unwrap_or_else(|e| e.into_inner());
         map.get(session_id).copied()
     }
 
+    /// Attempt LLM-based signal extraction via Ollama.
+    /// Returns None if Ollama is unavailable or extraction fails (silent fallback).
+    fn try_llm_extract(
+        &self,
+        _session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+    ) -> Option<Vec<AgentProposal>> {
+        let prompt = format!(
+            "You are OpenLife's signal extractor. Analyze the user message and extract structured intent.\n\
+             Return ONLY valid JSON (no markdown, no explanation):\n\
+             {{\n\
+               \"explicit_memories\": [\"user: remembered fact\", ...],\n\
+               \"goal_signals\": [{{\"text\": \"...\", \"type\": \"short_term|medium_term|long_term\", \"priority\": \"low|medium|high\"}}, ...],\n\
+               \"capability_signals\": [{{\"name\": \"skill\", \"proficiency\": 1-10}}, ...],\n\
+               \"state_signals\": [{{\"field\": \"emotional_state|health_status|current_focus\", \"value\": \"...\"}}, ...]\n\
+             }}\n\
+             User message: {message}\n\
+             Current LifeModel summary: values={values:?}, goals_count={goal_count}, capabilities_count={cap_count}",
+            message = message,
+            values = &life_model.identity.values,
+            goal_count = life_model.goals.short_term.len()
+                + life_model.goals.medium_term.len()
+                + life_model.goals.long_term.len(),
+            cap_count = life_model.capabilities.skills.len(),
+        );
+
+        let life_model_clone = life_model.clone();
+        let message_owned = message.to_string();
+
+        let reply = std::thread::spawn(move || -> Result<String, String> {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+            rt.block_on(async {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::ollama::chat_with_ollama(
+                        "llama3.2:latest",
+                        vec![crate::llm::ChatMessage {
+                            role: "user".to_string(),
+                            content: prompt,
+                        }],
+                        &life_model_clone,
+                    ),
+                )
+                .await
+                .map_err(|_| anyhow::anyhow!("Ollama chat extraction timed out"))
+                .and_then(|r| r)
+            })
+            .map_err(|e| e.to_string())
+        })
+        .join()
+        .ok()
+        .unwrap_or_else(|| Err("Ollama extraction thread panicked".to_string()));
+
+        let reply = match reply {
+            Ok(r) => r,
+            Err(_) => return None,
+        };
+
+        // Parse JSON from reply
+        let json: serde_json::Value = match serde_json::from_str(&reply) {
+            Ok(v) => v,
+            Err(_) => {
+                // Try extracting JSON from markdown code fences
+                let extracted = crate::json_utils::extract_first_json_object(&reply);
+                match extracted {
+                    Some(v) => match serde_json::from_str::<serde_json::Value>(v) {
+                        Ok(val) => val,
+                        Err(_) => return None,
+                    },
+                    None => return None,
+                }
+            }
+        };
+
+        let mut proposals = Vec::new();
+        let msg_len = message_owned.len();
+        let has_emphasis = Self::has_emphasis_markers(&message_owned);
+
+        // Extract explicit memories
+        if let Some(memories) = json.get("explicit_memories").and_then(|v| v.as_array()) {
+            for m in memories {
+                if let Some(text) = m.as_str() {
+                    if !text.is_empty() && text.len() >= 10 {
+                        let confidence = Self::calculate_confidence(1, msg_len, has_emphasis);
+                        if confidence >= self.confidence_threshold {
+                            let proposal = AgentProposal::new(
+                                ProposalType::MemoryWrite,
+                                &format!("memory.chat.{}", uuid::Uuid::new_v4()),
+                                serde_json::json!({"content": text, "source": "chat_llm"}),
+                                &format!("Chat message indicates memory: {}", text),
+                                confidence,
+                                RiskLevel::Low,
+                                ProposalSource::Manual,
+                            );
+                            proposals.push(proposal);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract goals
+        if let Some(goals) = json.get("goal_signals").and_then(|v| v.as_array()) {
+            for g in goals {
+                if let Some(text) = g.get("text").and_then(|v| v.as_str()) {
+                    if text.len() >= 5 {
+                        let confidence = Self::calculate_confidence(2, msg_len, has_emphasis);
+                        if confidence >= self.confidence_threshold {
+                            proposals.push(AgentProposal::new(
+                                ProposalType::GoalUpdate,
+                                "goals",
+                                serde_json::json!({
+                                    "text": text,
+                                    "type": g.get("type").and_then(|v| v.as_str()).unwrap_or("short_term"),
+                                    "priority": g.get("priority").and_then(|v| v.as_str()).unwrap_or("medium"),
+                                }),
+                                &format!("Chat message suggests goal: {}", text),
+                                confidence,
+                                RiskLevel::Medium,
+                                ProposalSource::Manual,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Extract state changes
+        if let Some(states) = json.get("state_signals").and_then(|v| v.as_array()) {
+            for s in states {
+                if let (Some(field), Some(value)) = (
+                    s.get("field").and_then(|v| v.as_str()),
+                    s.get("value").and_then(|v| v.as_str()),
+                ) {
+                    let confidence = Self::calculate_confidence(1, msg_len, has_emphasis);
+                    if confidence >= self.confidence_threshold {
+                        proposals.push(AgentProposal::new(
+                            ProposalType::StateUpdate,
+                            &format!("state.{}", field),
+                            serde_json::json!({field: value}),
+                            &format!("Chat message suggests state change: {} = {}", field, value),
+                            confidence,
+                            RiskLevel::Low,
+                            ProposalSource::Manual,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Some(proposals)
+    }
+
     fn update_last_extraction(&self, session_id: &str) {
-        let mut map = self.last_extraction.lock().unwrap();
+        let mut map = self.last_extraction.lock().unwrap_or_else(|e| e.into_inner());
         map.insert(session_id.to_string(), chrono::Utc::now());
     }
 

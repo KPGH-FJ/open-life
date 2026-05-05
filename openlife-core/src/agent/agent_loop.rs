@@ -23,6 +23,20 @@ pub struct AgentLoopConfig {
     pub allow_writes: bool,
     pub allow_cloud: bool,
     pub shutdown_notify: Option<Arc<tokio::sync::Notify>>,
+    /// Specialized role for tool selection and system prompt tuning
+    pub role: AgentRole,
+    /// Optional restrict to specific tools (empty = all allowed)
+    pub toolset_allowlist: Vec<String>,
+}
+
+/// Specialization role for the agent loop.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AgentRole {
+    /// Full tool access, standard conversation
+    #[default]
+    Generalist,
+    /// Goal decomposition and weekly review focus
+    Planner,
 }
 
 impl Default for AgentLoopConfig {
@@ -34,8 +48,37 @@ impl Default for AgentLoopConfig {
             allow_writes: true,
             allow_cloud: true,
             shutdown_notify: None,
+            role: AgentRole::default(),
+            toolset_allowlist: Vec::new(),
         }
     }
+}
+
+impl AgentLoopConfig {
+    /// Get planner-specific system instruction appended to tools prompt.
+    pub fn role_system_instruction(&self) -> Option<&'static str> {
+        match self.role {
+            AgentRole::Generalist => None,
+            AgentRole::Planner => Some(
+                "You are in Planner mode. Focus on:\n\
+                 - Decomposing goals into actionable steps\n\
+                 - Identifying blockers and dependencies\n\
+                 - Proposing schedule adjustments\n\
+                 - Reading current goals before suggesting changes\n\
+                 Use goal.read, life_model.read, and proposal.create tools.",
+            ),
+        }
+    }
+}
+
+/// Bundles the 5 shared task/life-model/tools/privacy/memory parameters
+/// that flow through the entire agent loop, reducing argument counts below clippy limits.
+struct AgentLoopContext<'a> {
+    pub task: &'a AgentTask,
+    pub life_model: &'a LifeModel,
+    pub tools_prompt: &'a str,
+    pub memory_context: Option<String>,
+    pub privacy_engine: PrivacyEngine,
 }
 
 /// Boundary markers for prompt injection defense.
@@ -47,10 +90,16 @@ const USER_REQUEST_END: &str = "[END USER REQUEST]";
 /// Affects messages with role == "user" and the standalone user_text field.
 fn wrap_user_content(task: &mut AgentTask) {
     for msg in task.messages.iter_mut().filter(|m| m.role == "user") {
-        msg.content = format!("{}\n{}\n{}", USER_REQUEST_START, msg.content, USER_REQUEST_END);
+        msg.content = format!(
+            "{}\n{}\n{}",
+            USER_REQUEST_START, msg.content, USER_REQUEST_END
+        );
     }
     if !task.user_text.is_empty() && !task.user_text.starts_with(USER_REQUEST_START) {
-        task.user_text = format!("{}\n{}\n{}", USER_REQUEST_START, task.user_text, USER_REQUEST_END);
+        task.user_text = format!(
+            "{}\n{}\n{}",
+            USER_REQUEST_START, task.user_text, USER_REQUEST_END
+        );
     }
 }
 
@@ -158,34 +207,28 @@ impl AgentLoop {
     /// Records warnings on the run for observability.
     /// Returns a fresh ParsedAgentReply from the regenerated response, or the
     /// original `failed_parsed` (with `json_parse_failed: true`) if repair also fails.
-    #[allow(clippy::too_many_arguments)]
     async fn try_json_self_repair(
         &self,
-        task: &AgentTask,
-        life_model: &LifeModel,
-        tools_prompt: &str,
-        memory_ctx: Option<String>,
-        privacy_engine: PrivacyEngine,
+        actx: &AgentLoopContext<'_>,
         action_ctx: &ActionExecutionContext<'_>,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<ParsedAgentReply> {
-        let mut repair_task = task.clone();
+        let mut repair_task = actx.task.clone();
         repair_task.messages.push(ChatMessage {
             role: "system".into(),
-            content: format!("{}{}", SELF_REPAIR_PROMPT, task.user_text),
+            content: format!("{}{}", SELF_REPAIR_PROMPT, actx.task.user_text),
         });
 
-        match self
-            .generate_response(
-                &repair_task,
-                life_model,
-                tools_prompt,
-                memory_ctx,
-                privacy_engine,
-            )
-            .await
-        {
+        let repair_actx = AgentLoopContext {
+            task: &repair_task,
+            life_model: actx.life_model,
+            tools_prompt: actx.tools_prompt,
+            memory_context: actx.memory_context.clone(),
+            privacy_engine: actx.privacy_engine.clone(),
+        };
+
+        match self.generate_response(&repair_actx).await {
             Ok(repaired_gen) => {
                 let parsed =
                     self.parse_agent_reply(&repaired_gen.reply, action_ctx, run, tool_call_count)?;
@@ -213,33 +256,35 @@ impl AgentLoop {
 
     /// Core agent loop implementation shared by `run` and `run_streaming`.
     /// Differences are handled via the optional `callback`.
-    #[allow(clippy::too_many_arguments)]
     async fn run_loop_core(
         &self,
-        task: &AgentTask,
-        life_model: &LifeModel,
-        tools_prompt: &str,
-        memory_context: Option<String>,
-        privacy_engine: PrivacyEngine,
+        actx: &AgentLoopContext<'_>,
         action_ctx: &ActionExecutionContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
-        let mut run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
-        run.user_input = Some(task.user_text.clone());
+        let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
+        run.user_input = Some(actx.task.user_text.clone());
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
         let mut final_response = String::new();
-        let mut current_task = task.clone();
+        let mut current_task = actx.task.clone();
         wrap_user_content(&mut current_task);
-        let current_tools_prompt = tools_prompt.to_string();
-        let current_memory_context = memory_context;
-        let current_privacy_engine = privacy_engine;
+        let mut current_tools_prompt = actx.tools_prompt.to_string();
+        // Append role-specific instruction if applicable
+        if let Some(role_instruction) = self.config.role_system_instruction() {
+            if !current_tools_prompt.is_empty() {
+                current_tools_prompt.push_str("\n\n");
+            }
+            current_tools_prompt.push_str(role_instruction);
+        }
+        let current_memory_context = actx.memory_context.clone();
+        let current_privacy_engine = actx.privacy_engine.clone();
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
         // Set reasoning strategy
-        run.reasoning_strategy = Some(if task.layer == Layer::L3 {
+        run.reasoning_strategy = Some(if actx.task.layer == Layer::L3 {
             "layered".into()
         } else {
             "direct".into()
@@ -288,21 +333,25 @@ impl AgentLoop {
 
             // Search memory for relevant context
             let memory_context = if let Some(memory_store) = action_ctx.memory_store {
-                search_memory_for_context(memory_store, &current_task.user_text, &task.session_id)
-                    .unwrap_or_else(|e| {
-                        eprintln!("[AgentLoop] Memory search failed: {}", e);
-                        current_memory_context.clone()
-                    })
+                search_memory_for_context(
+                    memory_store,
+                    &current_task.user_text,
+                    &actx.task.session_id,
+                )
+                .unwrap_or_else(|e| {
+                    eprintln!("[AgentLoop] Memory search failed: {}", e);
+                    current_memory_context.clone()
+                })
             } else {
                 current_memory_context.clone()
             };
 
-            // Execute single step
-            let step_result = self
+            // Execute single step (catch parse errors to preserve run.actions)
+            let step_result = match self
                 .run_single_step(
                     StepContext {
                         task: &current_task,
-                        life_model,
+                        life_model: actx.life_model,
                         tools_prompt: &current_tools_prompt,
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
@@ -312,7 +361,24 @@ impl AgentLoop {
                     },
                     callback.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(sr) => sr,
+                Err(e) => {
+                    run.status = AgentRunStatus::Failed;
+                    // Always overwrite — latest error is most relevant to the user.
+                    run.error = Some(AgentRunError {
+                        message: e.to_string(),
+                        phase: "parse".into(),
+                        recoverable: false,
+                    });
+                    stop_reason = "parse_error".into();
+                    if final_response.is_empty() {
+                        final_response = format!("内部执行错误：{}", e);
+                    }
+                    break;
+                }
+            };
 
             step_count += 1;
             tool_call_count += step_result.tool_call_count_delta;
@@ -384,20 +450,19 @@ impl AgentLoop {
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
-        self.run_loop_core(
+        let actx = AgentLoopContext {
             task,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            action_ctx,
-            None,
-        )
-        .await
+        };
+        self.run_loop_core(&actx, action_ctx, None).await
     }
 
     /// Streaming variant of run(). Same logic but forwards token chunks
     /// through the callback as they arrive from the model.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_streaming(
         &self,
         task: &AgentTask,
@@ -408,16 +473,14 @@ impl AgentLoop {
         action_ctx: &ActionExecutionContext<'_>,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
-        self.run_loop_core(
+        let actx = AgentLoopContext {
             task,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            action_ctx,
-            Some(callback),
-        )
-        .await
+        };
+        self.run_loop_core(&actx, action_ctx, Some(callback)).await
     }
 
     /// Execute a single step of the agent loop.
@@ -435,25 +498,19 @@ impl AgentLoop {
         let privacy = ctx.privacy_engine.clone();
 
         // Generate model response (streaming if callback provided)
-        let generated = if let Some(ref cb) = callback {
-            self.generate_response_streaming(
-                ctx.task,
-                ctx.life_model,
-                ctx.tools_prompt,
-                ctx.memory_context,
-                ctx.privacy_engine,
-                cb.clone(),
-            )
-            .await
-        } else {
-            self.generate_response(
-                ctx.task,
-                ctx.life_model,
-                ctx.tools_prompt,
-                ctx.memory_context,
-                ctx.privacy_engine,
-            )
-            .await
+        let generated = {
+            let actx = AgentLoopContext {
+                task: ctx.task,
+                life_model: ctx.life_model,
+                tools_prompt: ctx.tools_prompt,
+                memory_context: ctx.memory_context.clone(),
+                privacy_engine: ctx.privacy_engine.clone(),
+            };
+            if let Some(ref cb) = callback {
+                self.generate_response_streaming(&actx, cb.clone()).await
+            } else {
+                self.generate_response(&actx).await
+            }
         };
 
         match generated {
@@ -485,15 +542,22 @@ impl AgentLoop {
                         None,
                     );
                     if let Some(ref cb) = callback {
-                        cb.on_status("thinking", "JSON parse failed, attempting one-shot repair...", 0).await;
+                        cb.on_status(
+                            "thinking",
+                            "JSON parse failed, attempting one-shot repair...",
+                            0,
+                        )
+                        .await;
                     }
                     parsed = self
                         .try_json_self_repair(
-                            ctx.task,
-                            ctx.life_model,
-                            ctx.tools_prompt,
-                            memory_ctx.clone(),
-                            privacy.clone(),
+                            &AgentLoopContext {
+                                task: ctx.task,
+                                life_model: ctx.life_model,
+                                tools_prompt: ctx.tools_prompt,
+                                memory_context: memory_ctx.clone(),
+                                privacy_engine: privacy.clone(),
+                            },
                             ctx.action_ctx,
                             ctx.run,
                             &mut ctx.tool_call_count,
@@ -502,10 +566,9 @@ impl AgentLoop {
                 }
 
                 let final_text = parsed.final_text;
-                let tool_actions = parsed.actions;
+                let tool_actions = self.filter_tools_by_allowlist(parsed.actions);
 
                 if tool_actions.is_empty() {
-                    // No tool calls - this is the final answer
                     self.emit_status(
                         &mut status_updates,
                         crate::agent::types::AgentLoopPhase::GeneratingFinal,
@@ -514,7 +577,12 @@ impl AgentLoop {
                         None,
                     );
                     if let Some(ref cb) = callback {
-                        cb.on_status("generating_final", "No tools needed, generating final answer", 0).await;
+                        cb.on_status(
+                            "generating_final",
+                            "No tools needed, generating final answer",
+                            0,
+                        )
+                        .await;
                     }
                     return Ok(StepResult {
                         stop_reason: "no_tools".into(),
@@ -535,194 +603,34 @@ impl AgentLoop {
                     None,
                 );
                 if let Some(ref cb) = callback {
-                    cb.on_status("planning_tool", &format!("Planning to execute {} tool(s)", tool_actions.len()), 0).await;
-                }
-
-                // Execute tools and build observations
-                let mut observations = Vec::new();
-                let mut all_succeeded = true;
-                let mut executed_this_step = 0;
-                let mut budget_exceeded = false;
-
-                for (idx, action_request) in tool_actions.iter().enumerate() {
-                    if ctx.tool_call_count + executed_this_step >= self.config.max_tool_calls {
-                        let obs =
-                            self.create_budget_exceeded_observation(ctx.run, ctx.tool_call_count);
-                        observations.push(obs.clone());
-                        ctx.run.observations.push(obs);
-                        all_succeeded = false;
-                        budget_exceeded = true;
-                        break;
-                    }
-
-                    self.emit_status(
-                        &mut status_updates,
-                        crate::agent::types::AgentLoopPhase::ExecutingTool,
-                        format!("Executing tool: {}", action_request.target),
+                    cb.on_status(
+                        "planning_tool",
+                        &format!("Planning to execute {} tool(s)", tool_actions.len()),
                         0,
-                        Some(idx as u32),
-                    );
-                    if let Some(ref cb) = callback {
-                        cb.on_status("executing_tool", &format!("Executing tool: {}", action_request.target), 0).await;
-                    }
+                    )
+                    .await;
+                }
 
-                    if let Some(ref cb) = callback {
-                        cb.on_tool_start(&action_request.target, 0).await;
-                    }
-
-                    let exec_result = self
-                        .action_executor
-                        .execute(action_request.clone(), ctx.action_ctx)?;
-
-                    // Collect proposal_id from action output if present
-                    if let Some(ref output) = exec_result.action.output {
-                        let proposal_id = output
-                            .get("proposal_id")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                // Action output may be wrapped as { "text": "...json string..." }
-                                output
-                                    .get("text")
-                                    .and_then(|v| v.as_str())
-                                    .and_then(|text| {
-                                        serde_json::from_str::<serde_json::Value>(text)
-                                            .ok()
-                                            .and_then(|json| {
-                                                json.get("proposal_id")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|s| s.to_string())
-                                            })
-                                    })
-                            });
-                        if let Some(id) = proposal_id {
-                            if let Some(ref cb) = callback {
-                                cb.on_proposal("external_write_action", &id).await;
-                            }
-                            ctx.run.add_generated_proposal(&id);
-                        }
-                    }
-
-                    ctx.run.actions.push(exec_result.action.clone());
-                    observations.push(exec_result.observation.clone());
-                    ctx.run.observations.push(exec_result.observation.clone());
-
-                    if let Some(ref cb) = callback {
-                        cb.on_tool_result(
-                            &action_request.target,
-                            exec_result.status == ActionExecutionStatus::Succeeded,
-                            0,
-                        )
-                        .await;
-                    }
-
-                    self.emit_status(
+                let (all_succeeded, executed_this_step, budget_exceeded, observations) = self
+                    .execute_tool_batch(
+                        &tool_actions,
+                        ctx.action_ctx,
+                        ctx.run,
+                        &mut ctx.tool_call_count,
+                        &callback,
                         &mut status_updates,
-                        crate::agent::types::AgentLoopPhase::Observing,
-                        format!(
-                            "Tool {} result: {}",
-                            action_request.target,
-                            if exec_result.status == ActionExecutionStatus::Succeeded {
-                                "success"
-                            } else {
-                                "failed"
-                            }
-                        ),
-                        0,
-                        Some(idx as u32),
-                    );
-                    if let Some(ref cb) = callback {
-                        let result_str = if exec_result.status == ActionExecutionStatus::Succeeded { "success" } else { "failed" };
-                        cb.on_status("observing", &format!("Tool {} result: {}", action_request.target, result_str), 0).await;
-                    }
+                    )
+                    .await?;
 
-                    if exec_result.status != ActionExecutionStatus::Succeeded {
-                        all_succeeded = false;
-                    }
-
-                    ctx.tool_call_count += 1;
-                    executed_this_step += 1;
-                }
-
-                if budget_exceeded {
-                    let final_response = format!(
-                        "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
-                        self.config.max_tool_calls,
-                        observations
-                            .iter()
-                            .map(|o| format!("- {}", o.content))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    );
-                    return Ok(StepResult {
-                        stop_reason: "max_tool_calls_reached".into(),
-                        final_response,
-                        should_continue: false,
-                        tool_call_count_delta: executed_this_step,
-                        observations,
-                        status_updates,
-                    });
-                }
-
-                if !all_succeeded {
-                    // Some tools failed or need confirmation
-                    let pending_count = ctx
-                        .run
-                        .actions
-                        .iter()
-                        .filter(|a| a.status == "needs_confirmation")
-                        .count();
-                    let final_response = if pending_count > 0 {
-                        ctx.run.status = AgentRunStatus::WaitingPermission;
-                        self.emit_status(
-                            &mut status_updates,
-                            crate::agent::types::AgentLoopPhase::WaitingPermission,
-                            "Waiting for user permission to continue",
-                            0,
-                            None,
-                        );
-                        if let Some(ref cb) = callback {
-                            cb.on_status("waiting_permission", "Waiting for user permission to continue", 0).await;
-                        }
-                        "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
-                            .into()
-                    } else {
-                        "工具执行过程中出现错误，请检查配置或稍后重试。".into()
-                    };
-                    return Ok(StepResult {
-                        stop_reason: if pending_count > 0 {
-                            "needs_confirmation".into()
-                        } else {
-                            "tool_execution_failed".into()
-                        },
-                        final_response,
-                        should_continue: false,
-                        tool_call_count_delta: executed_this_step,
-                        observations,
-                        status_updates,
-                    });
-                }
-
-                if observations.is_empty() {
-                    return Ok(StepResult {
-                        stop_reason: "no_observations".into(),
-                        final_response: final_text,
-                        should_continue: false,
-                        tool_call_count_delta: 0,
-                        observations: vec![],
-                        status_updates,
-                    });
-                }
-
-                // Continue to next iteration
-                Ok(StepResult {
-                    stop_reason: String::new(), // Will be set by caller if this is the last step
-                    final_response: final_text,
-                    should_continue: true,
-                    tool_call_count_delta: executed_this_step,
+                Ok(self.handle_step_completion(
+                    budget_exceeded,
+                    all_succeeded,
                     observations,
-                    status_updates,
-                })
+                    executed_this_step,
+                    final_text,
+                    ctx.run,
+                    &mut status_updates,
+                ))
             }
             Err(e) => {
                 ctx.run.status = AgentRunStatus::Failed;
@@ -739,7 +647,8 @@ impl AgentLoop {
                     None,
                 );
                 if let Some(ref cb) = callback {
-                    cb.on_status("failed", &format!("Model generation failed: {}", e), 0).await;
+                    cb.on_status("failed", &format!("Model generation failed: {}", e), 0)
+                        .await;
                 }
                 Ok(StepResult {
                     stop_reason: "model_error".into(),
@@ -755,36 +664,32 @@ impl AgentLoop {
 
     async fn generate_response(
         &self,
-        task: &AgentTask,
-        life_model: &LifeModel,
-        tools_prompt: &str,
-        memory_context: Option<String>,
-        privacy_engine: PrivacyEngine,
+        actx: &AgentLoopContext<'_>,
     ) -> Result<GeneratedAgentResponse> {
-        let memory_hits = Vec::new(); // Simplified for Beta MVP
+        let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
             .execute_task(
-                task,
-                life_model,
-                tools_prompt,
-                memory_context,
+                actx.task,
+                actx.life_model,
+                actx.tools_prompt,
+                actx.memory_context.clone(),
                 memory_hits,
-                privacy_engine,
+                actx.privacy_engine.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
 
-        let tools_prompt = if tools_prompt.trim().is_empty() {
+        let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
         } else {
-            Some(tools_prompt)
+            Some(actx.tools_prompt)
         };
         let reply = self
             .scheduler
             .generate(
                 runtime_output.final_messages.clone(),
-                life_model,
+                actx.life_model,
                 tools_prompt,
             )
             .await
@@ -800,39 +705,34 @@ impl AgentLoop {
     /// and forwards each chunk through the callback.
     async fn generate_response_streaming(
         &self,
-        task: &AgentTask,
-        life_model: &LifeModel,
-        tools_prompt: &str,
-        memory_context: Option<String>,
-        privacy_engine: PrivacyEngine,
+        actx: &AgentLoopContext<'_>,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<GeneratedAgentResponse> {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
             .execute_task(
-                task,
-                life_model,
-                tools_prompt,
-                memory_context,
+                actx.task,
+                actx.life_model,
+                actx.tools_prompt,
+                actx.memory_context.clone(),
                 memory_hits,
-                privacy_engine,
+                actx.privacy_engine.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
 
-        let tools_prompt = if tools_prompt.trim().is_empty() {
+        let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
         } else {
-            Some(tools_prompt)
+            Some(actx.tools_prompt)
         };
 
-        // Use streaming generation
         let mut stream = self
             .scheduler
             .generate_stream(
                 runtime_output.final_messages.clone(),
-                life_model,
+                actx.life_model,
                 tools_prompt,
             )
             .await
@@ -847,7 +747,6 @@ impl AgentLoop {
                 }
                 Some(Err(e)) => {
                     eprintln!("[AgentLoop] Stream chunk error: {}", e);
-                    // Fallback: use partial reply, don't fail entirely
                     break;
                 }
                 None => break,
@@ -1051,6 +950,275 @@ impl AgentLoop {
         messages
     }
 
+    /// Filter tool actions by the configured allowlist.
+    /// Returns the filtered list (empty if allowlist is not configured).
+    fn filter_tools_by_allowlist(&self, actions: Vec<AgentActionRequest>) -> Vec<AgentActionRequest> {
+        if self.config.toolset_allowlist.is_empty() {
+            return actions;
+        }
+        actions
+            .into_iter()
+            .filter(|a| {
+                self.config.toolset_allowlist.iter().any(|allowed| {
+                    a.target == *allowed || a.target.starts_with(&format!("{}.", allowed))
+                })
+            })
+            .collect()
+    }
+
+    /// Execute a batch of tool actions, collecting observations and status updates.
+    /// Returns (all_succeeded, executed_count, budget_exceeded, observations).
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tool_batch(
+        &self,
+        tool_actions: &[AgentActionRequest],
+        action_ctx: &ActionExecutionContext<'_>,
+        run: &mut AgentRun,
+        tool_call_count: &mut u32,
+        callback: &Option<Arc<dyn StreamingCallback>>,
+        status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+    ) -> Result<(bool, u32, bool, Vec<AgentObservation>)> {
+        let mut observations = Vec::new();
+        let mut all_succeeded = true;
+        let mut executed_this_step: u32 = 0;
+        let mut budget_exceeded = false;
+
+        for (idx, action_request) in tool_actions.iter().enumerate() {
+            if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
+                let obs =
+                    self.create_budget_exceeded_observation(run, *tool_call_count);
+                observations.push(obs.clone());
+                run.observations.push(obs);
+                all_succeeded = false;
+                budget_exceeded = true;
+                break;
+            }
+
+            self.emit_status(
+                status_updates,
+                crate::agent::types::AgentLoopPhase::ExecutingTool,
+                format!("Executing tool: {}", action_request.target),
+                0,
+                Some(idx as u32),
+            );
+            if let Some(ref cb) = callback {
+                cb.on_status(
+                    "executing_tool",
+                    &format!("Executing tool: {}", action_request.target),
+                    0,
+                ).await;
+            }
+
+            if let Some(ref cb) = callback {
+                cb.on_tool_start(&action_request.target, 0).await;
+            }
+
+            let exec_result = match self
+                .action_executor
+                .execute(action_request.clone(), action_ctx)
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let now = chrono::Utc::now();
+                    let fail_action = crate::agent::types::AgentAction {
+                        id: format!("action-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
+                        action_type: action_request.action_type.clone(),
+                        target: Some(action_request.target.clone()),
+                        input: action_request.input.clone(),
+                        output: None,
+                        status: "failed".into(),
+                        error: Some(e.to_string()),
+                        permission_decision: None,
+                        started_at: None,
+                        finished_at: Some(now),
+                        timestamp: now,
+                        tool_scope: None,
+                    };
+                    let obs = AgentObservation {
+                        id: format!("obs-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
+                        action_id: Some(fail_action.id.clone()),
+                        content: format!("工具 {} 执行失败: {}", action_request.target, e),
+                        source: "action_executor".into(),
+                        structured_result: Some(serde_json::json!({"error": e.to_string()})),
+                        timestamp: now,
+                    };
+                    run.actions.push(fail_action.clone());
+                    observations.push(obs.clone());
+                    run.observations.push(obs);
+                    all_succeeded = false;
+                    *tool_call_count += 1;
+                    executed_this_step += 1;
+                    continue;
+                }
+            };
+
+            // Collect proposal_id from action output if present
+            if let Some(ref output) = exec_result.action.output {
+                let proposal_id = output
+                    .get("proposal_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .or_else(|| {
+                        output
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .and_then(|text| {
+                                serde_json::from_str::<serde_json::Value>(text)
+                                    .ok()
+                                    .and_then(|json| {
+                                        json.get("proposal_id")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                            })
+                    });
+                if let Some(id) = proposal_id {
+                    if let Some(ref cb) = callback {
+                        cb.on_proposal("external_write_action", &id).await;
+                    }
+                    run.add_generated_proposal(&id);
+                }
+            }
+
+            run.actions.push(exec_result.action.clone());
+            observations.push(exec_result.observation.clone());
+            run.observations.push(exec_result.observation.clone());
+
+            if let Some(ref cb) = callback {
+                cb.on_tool_result(
+                    &action_request.target,
+                    exec_result.status == ActionExecutionStatus::Succeeded,
+                    0,
+                ).await;
+            }
+
+            self.emit_status(
+                status_updates,
+                crate::agent::types::AgentLoopPhase::Observing,
+                format!(
+                    "Tool {} result: {}",
+                    action_request.target,
+                    if exec_result.status == ActionExecutionStatus::Succeeded {
+                        "success"
+                    } else {
+                        "failed"
+                    }
+                ),
+                0,
+                Some(idx as u32),
+            );
+            if let Some(ref cb) = callback {
+                let result_str = if exec_result.status == ActionExecutionStatus::Succeeded {
+                    "success"
+                } else {
+                    "failed"
+                };
+                cb.on_status(
+                    "observing",
+                    &format!("Tool {} result: {}", action_request.target, result_str),
+                    0,
+                ).await;
+            }
+
+            if exec_result.status != ActionExecutionStatus::Succeeded {
+                all_succeeded = false;
+            }
+
+            *tool_call_count += 1;
+            executed_this_step += 1;
+        }
+
+        Ok((all_succeeded, executed_this_step, budget_exceeded, observations))
+    }
+
+    /// Handle step completion after tool batch execution:
+    /// budget exceeded / partial failure / no observations / continue.
+    fn handle_step_completion(
+        &self,
+        budget_exceeded: bool,
+        all_succeeded: bool,
+        observations: Vec<AgentObservation>,
+        executed_this_step: u32,
+        final_text: String,
+        run: &mut AgentRun,
+        status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+    ) -> StepResult {
+        if budget_exceeded {
+            let final_response = format!(
+                "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
+                self.config.max_tool_calls,
+                observations
+                    .iter()
+                    .map(|o| format!("- {}", o.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            return StepResult {
+                stop_reason: "max_tool_calls_reached".into(),
+                final_response,
+                should_continue: false,
+                tool_call_count_delta: executed_this_step,
+                observations,
+                status_updates: std::mem::take(status_updates),
+            };
+        }
+
+        if !all_succeeded {
+            let pending_count = run
+                .actions
+                .iter()
+                .filter(|a| a.status == "needs_confirmation")
+                .count();
+            let final_response = if pending_count > 0 {
+                run.status = AgentRunStatus::WaitingPermission;
+                self.emit_status(
+                    status_updates,
+                    crate::agent::types::AgentLoopPhase::WaitingPermission,
+                    "Waiting for user permission to continue",
+                    0,
+                    None,
+                );
+                "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
+                    .into()
+            } else {
+                "工具执行过程中出现错误，请检查配置或稍后重试。".into()
+            };
+            return StepResult {
+                stop_reason: if pending_count > 0 {
+                    "needs_confirmation".into()
+                } else {
+                    "tool_execution_failed".into()
+                },
+                final_response,
+                should_continue: false,
+                tool_call_count_delta: executed_this_step,
+                observations,
+                status_updates: std::mem::take(status_updates),
+            };
+        }
+
+        if observations.is_empty() {
+            return StepResult {
+                stop_reason: "no_observations".into(),
+                final_response: final_text,
+                should_continue: false,
+                tool_call_count_delta: 0,
+                observations: vec![],
+                status_updates: std::mem::take(status_updates),
+            };
+        }
+
+        // Continue to next iteration
+        StepResult {
+            stop_reason: String::new(),
+            final_response: final_text,
+            should_continue: true,
+            tool_call_count_delta: executed_this_step,
+            observations,
+            status_updates: std::mem::take(status_updates),
+        }
+    }
+
     fn create_budget_exceeded_observation(
         &self,
         _run: &AgentRun,
@@ -1135,7 +1303,354 @@ fn preview_text(text: &str, max_len: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::preview_text;
+    use super::*;
+    use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
+    use crate::agent::runtime::AgentRuntime;
+    use crate::agent::types::{AgentObservation, AgentRun};
+    use crate::config::AppConfig;
+    use crate::life_model::LifeModel;
+    use crate::llm::ChatMessage;
+    use crate::mcp::McpRegistry;
+    use crate::mcp_audit::McpAuditStore;
+    use crate::privacy::PrivacyEngine;
+    use crate::scheduler::InferenceScheduler;
+    use crate::tool_permissions::ToolPermissionStore;
+
+    /// Creates a minimal AgentLoop for testing parse_agent_reply and build_follow_up_messages.
+    /// Uses dummy scheduler credentials (no actual LLM calls are made).
+    fn make_test_agent_loop() -> AgentLoop {
+        let life_model = LifeModel::default();
+        let scheduler = InferenceScheduler::new(
+            "llama3".into(),
+            false,
+            "openrouter".into(),
+            "https://test.example.com/v1".into(),
+            "sk-test".into(),
+            "gpt-3.5-turbo".into(),
+            "text-embedding-ada-002".into(),
+            false,
+        );
+        let app_config = AppConfig::default();
+        let runtime = AgentRuntime::new(life_model, scheduler.clone(), &app_config);
+        let executor = ActionExecutor::new(ActionExecutorConfig::default());
+        let config = AgentLoopConfig::default();
+        AgentLoop::new(runtime, executor, scheduler, config)
+    }
+
+    /// Create a minimal ActionExecutionContext backed by tempfile-based stores.
+    struct TestCtx {
+        registry: McpRegistry,
+        permission_store: ToolPermissionStore,
+        audit_store: McpAuditStore,
+        privacy_engine: PrivacyEngine,
+        safe_paths: Vec<String>,
+    }
+
+    impl TestCtx {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            Self {
+                registry: McpRegistry::new(),
+                permission_store: ToolPermissionStore::new_in_memory().unwrap(),
+                audit_store: McpAuditStore::new(tmp.path().join("audit.db")),
+                privacy_engine: PrivacyEngine::new(),
+                safe_paths: vec!["/tmp/openlife-test".into()],
+            }
+        }
+
+        fn as_ctx(&self) -> ActionExecutionContext<'_> {
+            ActionExecutionContext {
+                registry: &self.registry,
+                permission_store: &self.permission_store,
+                audit_store: &self.audit_store,
+                privacy_engine: &self.privacy_engine,
+                safe_paths: &self.safe_paths,
+                life_model: None,
+                memory_store: None,
+                proposal_store: None,
+                agent_run_store: None,
+                network_policy: None,
+                calendar_ics_paths: &[],
+            }
+        }
+    }
+
+    // ── parse_agent_reply tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_final_only_no_json() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let result = agent
+            .parse_agent_reply("Hello, how can I help?", &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.final_text, "Hello, how can I help?");
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn parse_json_plain_final() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{"final": "Here is my answer"}"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.final_text, "Here is my answer");
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn parse_json_with_actions() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{
+            "final": "Let me check that for you",
+            "actions": [
+                {"name": "web.search", "arguments": {"query": "Rust async"}},
+                {"name": "file.read", "arguments": {"path": "/tmp/test.txt"}}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.final_text, "Let me check that for you");
+        assert_eq!(result.actions.len(), 2);
+        assert_eq!(result.actions[0].target, "web.search");
+        assert_eq!(result.actions[1].target, "file.read");
+        // step_index should start from tool_call_count (0)
+        assert_eq!(result.actions[0].step_index, 0);
+        assert_eq!(result.actions[1].step_index, 1);
+    }
+
+    #[test]
+    fn parse_json_legacy_tool_calls() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 5;
+
+        let reply = r#"{
+            "final": "Done",
+            "tool_calls": [
+                {"name": "echo", "args": {"msg": "hi"}}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(result.actions[0].target, "echo");
+        assert_eq!(result.actions[0].step_index, 5);
+    }
+
+    #[test]
+    fn parse_json_markdown_wrapped() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"```json
+{"final": "Answer from markdown", "actions": []}
+```"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.final_text, "Answer from markdown");
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn parse_malformed_json_signals_repair() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        // Missing closing brace
+        let reply = r#"{"final": "oops", "actions": [{"name": "x", "arguments": {}]"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(result.json_parse_failed, "should signal repair needed");
+        assert!(result.actions.is_empty());
+        assert!(!run.warnings.is_empty(), "should have recorded warning");
+    }
+
+    #[test]
+    fn parse_empty_actions_array_yields_final_only() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{"final": "done", "actions": []}"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn parse_thought_summary_and_warnings_recorded() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{
+            "final": "ok",
+            "thought_summary": "simple task",
+            "warnings": ["low confidence"]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert!(run.warnings.iter().any(|w| w.contains("thought")));
+        assert!(run.warnings.iter().any(|w| w.contains("low confidence")));
+    }
+
+    #[test]
+    fn parse_action_with_alternative_field_names() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        // Uses "tool" instead of "name" and "input" instead of "arguments"
+        let reply = r#"{"final":"ok","actions":[{"tool":"test_tool","input":{"key":"val"}}]}"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(result.actions[0].target, "test_tool");
+    }
+
+    // ── build_follow_up_messages tests ───────────────────────────────────
+
+    #[test]
+    fn build_follow_up_with_observations() {
+        let agent = make_test_agent_loop();
+        let task = crate::agent::types::AgentTask {
+            kind: crate::agent::types::AgentTaskKind::Conversation,
+            session_id: "s1".into(),
+            user_text: "帮我查天气".into(),
+            messages: vec![],
+            layer: crate::layer_router::Layer::L2,
+        };
+        let obs = vec![AgentObservation {
+            id: "obs-1".into(),
+            action_id: Some("act-1".into()),
+            content: "北京今天晴，25°C".into(),
+            source: "web.search".into(),
+            structured_result: None,
+            timestamp: chrono::Utc::now(),
+        }];
+        let tools_prompt = "可用工具: web.search, file.read";
+
+        let messages =
+            agent.build_follow_up_messages(&task, "正在查询...", &obs, tools_prompt);
+
+        assert_eq!(messages.len(), 2); // assistant + user (follow-up)
+        assert_eq!(messages[0].role, "assistant");
+        assert_eq!(messages[0].content, "正在查询...");
+        assert_eq!(messages[1].role, "user");
+        assert!(messages[1].content.contains("帮我查天气"));
+        assert!(messages[1].content.contains("北京今天晴"));
+        assert!(messages[1].content.contains("web.search"));
+    }
+
+    #[test]
+    fn build_follow_up_no_observations() {
+        let agent = make_test_agent_loop();
+        let task = crate::agent::types::AgentTask {
+            kind: crate::agent::types::AgentTaskKind::Conversation,
+            session_id: "s1".into(),
+            user_text: "hello".into(),
+            messages: vec![],
+            layer: crate::layer_router::Layer::L2,
+        };
+
+        let messages = agent.build_follow_up_messages(
+            &task,
+            "Hi there!",
+            &[],
+            "可用工具: echo",
+        );
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, "user");
+        assert!(!messages[1].content.contains("工具执行结果"));
+        assert!(messages[1].content.contains("可用工具"));
+    }
+
+    #[test]
+    fn build_follow_up_preserves_existing_messages() {
+        let agent = make_test_agent_loop();
+        let task = crate::agent::types::AgentTask {
+            kind: crate::agent::types::AgentTaskKind::Conversation,
+            session_id: "s1".into(),
+            user_text: "天气".into(),
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "你好".into() },
+                ChatMessage { role: "assistant".into(), content: "你好！有什么可以帮你的？".into() },
+            ],
+            layer: crate::layer_router::Layer::L2,
+        };
+
+        let obs = vec![AgentObservation {
+            id: "obs-1".into(),
+            action_id: None,
+            content: "上海25°C".into(),
+            source: "web.search".into(),
+            structured_result: None,
+            timestamp: chrono::Utc::now(),
+        }];
+
+        let messages = agent.build_follow_up_messages(
+            &task,
+            "查询天气中...",
+            &obs,
+            "工具: web",
+        );
+
+        // Original 2 + assistant + follow-up = 4
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content, "你好");
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[3].role, "user");
+    }
+
+    // ── preview_text tests (existing) ────────────────────────────────────
 
     #[test]
     fn preview_text_truncates_on_char_boundary() {

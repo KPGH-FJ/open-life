@@ -2,31 +2,24 @@ use futures::StreamExt;
 use openlife_core::agent::ContextAssembler;
 use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::StreamingCallback;
-use openlife_core::builder::BuilderSessionStore;
-use openlife_core::config::AppConfig;
-use openlife_core::feedback::FeedbackStore;
-use openlife_core::layer_router::{Layer, LayerRouter};
-use openlife_core::life_model::{LifeModel, LifeModelManager};
+use openlife_core::layer_router::Layer;
+use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
-use openlife_core::mcp::McpRegistry;
-use openlife_core::mcp_audit::McpAuditStore;
-use openlife_core::memory::{MemorySearchHit, MemoryStore};
-use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
-use openlife_core::privacy::PrivacyEngine;
-use openlife_core::router::{IntentRouter, RouterStatus};
+use openlife_core::memory::MemorySearchHit;
+use openlife_core::router::RouterStatus;
 use openlife_core::scheduler::InferenceScheduler;
-use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertItem, VectorStore};
-use openlife_core::versioning::VersionManager;
+use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertItem};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
-use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 pub mod a2a_server;
 pub mod a2a_sidecar;
+pub mod bootstrap;
 pub mod commands;
 pub mod errors;
+pub mod scheduler_runner;
 pub mod state;
 pub mod storage;
 
@@ -35,6 +28,7 @@ pub mod test_utils;
 
 pub use state::AppState;
 
+// Re-exports for test modules (imported as crate::...)
 use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
@@ -71,6 +65,9 @@ use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
 };
+pub use openlife_core::memory_cache::HotMemoryCache;
+pub use openlife_core::memory_cache::SharedHotCache;
+pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{get_life_model, save_life_model};
 use commands::mcp::{
@@ -84,6 +81,7 @@ use commands::memory::{
     run_memory_tier_maintenance, search_memory,
 };
 use commands::metrics::{get_rollout_errors, get_rollout_metrics, get_rollout_summary};
+use commands::proactive::get_proactive_suggestions;
 use commands::proposal::{
     accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_pending_proposals,
     list_proposals, postpone_proposal, reject_proposal,
@@ -100,10 +98,7 @@ use commands::state::{
     record_state, toggle_daily_goal, update_daily_goal,
 };
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
-use storage::{
-    app_data_dir, load_mcp_audit_keyring_from_path, load_privacy_policy_from_path,
-    mcp_audit_keyring_path, privacy_policy_path,
-};
+use storage::app_data_dir;
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -191,175 +186,6 @@ pub struct SystemDiagnostics {
     pub pending_proposal_count: usize,
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
-}
-
-fn recovery_db_path(file_name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir()
-        .join("openlife-recovery")
-        .join(std::process::id().to_string());
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!(
-            "failed to create OpenLife recovery database directory {}: {}",
-            dir.display(),
-            e
-        );
-    }
-    dir.join(file_name)
-}
-
-fn init_memory_store(
-    db_path: &std::path::Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<MemoryStore, String> {
-    match MemoryStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            let fallback = recovery_db_path("memory.db");
-            startup_warnings.borrow_mut().push(format!(
-                "memory.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match MemoryStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 memory.db 初始化也失败，已降级为内存数据库；本次会话聊天记录不会持久化：{}",
-                        fallback_err
-                    ));
-                    MemoryStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 memory store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
-fn init_feedback_store(
-    db_path: &std::path::Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<FeedbackStore, String> {
-    match FeedbackStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            let fallback = recovery_db_path("feedback.db");
-            startup_warnings.borrow_mut().push(format!(
-                "feedback.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match FeedbackStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 feedback.db 初始化也失败，已降级为内存数据库；本次会话反馈记录不会持久化：{}",
-                        fallback_err
-                    ));
-                    FeedbackStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 feedback store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
-fn init_vector_store(
-    db_path: &std::path::Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<VectorStore, String> {
-    match VectorStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            let fallback = recovery_db_path("vectors.db");
-            startup_warnings.borrow_mut().push(format!(
-                "vectors.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match VectorStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 vectors.db 初始化也失败，已降级为内存数据库；本次会话向量记录不会持久化：{}",
-                        fallback_err
-                    ));
-                    VectorStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 vector store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
-fn init_agent_run_store(
-    db_path: &std::path::Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<openlife_core::agent::AgentRunStore, String> {
-    match openlife_core::agent::AgentRunStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            let fallback = recovery_db_path("agent_runs.db");
-            startup_warnings.borrow_mut().push(format!(
-                "agent_runs.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match openlife_core::agent::AgentRunStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 agent_runs.db 初始化也失败，已降级为内存数据库；本次会话运行记录不会持久化：{}",
-                        fallback_err
-                    ));
-                    openlife_core::agent::AgentRunStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 agent run store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
-fn init_proposal_store(
-    db_path: &std::path::Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<openlife_core::agent::ProposalStore, String> {
-    match openlife_core::agent::ProposalStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            let fallback = recovery_db_path("proposals.db");
-            startup_warnings.borrow_mut().push(format!(
-                "proposals.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match openlife_core::agent::ProposalStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 proposals.db 初始化也失败，已降级为内存数据库；本次会话提案记录不会持久化：{}",
-                        fallback_err
-                    ));
-                    openlife_core::agent::ProposalStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 proposal store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
 }
 
 async fn generate_and_persist_chat_proposals(
@@ -1374,12 +1200,13 @@ async fn send_message_with_agent_loop(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: 4,
-        max_tool_calls: 6,
-        timeout_seconds: 90,
+        max_steps: cfg.system.agent_loop_max_steps,
+        max_tool_calls: cfg.system.agent_loop_max_tool_calls,
+        timeout_seconds: cfg.system.agent_loop_timeout_seconds,
         allow_writes: true,
         allow_cloud: true,
         shutdown_notify: Some(state.inner().shutdown_notify.clone()),
+        ..Default::default()
     };
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
@@ -1415,19 +1242,23 @@ async fn send_message_with_agent_loop(
         } else {
             None
         };
-        let action_ctx = openlife_core::agent::ActionExecutionContext {
-            registry: &reg,
-            permission_store: &permission_store,
-            audit_store: &audit,
-            privacy_engine: &privacy_engine,
-            safe_paths: &safe_paths,
-            calendar_ics_paths: &calendar_ics_paths,
-            life_model: Some(&life_model),
-            memory_store: Some(&memory_store),
-            proposal_store: proposal_store_guard.as_deref(),
-            agent_run_store: agent_run_store_guard.as_deref(),
-            network_policy: Some(&network_policy),
-        };
+        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
+            &reg,
+            &permission_store,
+            &audit,
+            &privacy_engine,
+            &safe_paths,
+        )
+        .with_life_model(&life_model)
+        .with_memory_store(&memory_store)
+        .with_calendar_ics_paths(&calendar_ics_paths)
+        .with_network_policy(&network_policy);
+        if let Some(ref store) = proposal_store_guard {
+            action_ctx = action_ctx.with_proposal_store(store);
+        }
+        if let Some(ref store) = agent_run_store_guard {
+            action_ctx = action_ctx.with_agent_run_store(store);
+        }
 
         agent_loop
             .run(
@@ -1462,38 +1293,21 @@ async fn send_message_with_agent_loop(
                 "[warn] AgentLoop failed in send_message, falling back to legacy: {}",
                 e
             );
-            let fallback_reply = generate_non_stream_fallback(
+            let user_input_text = user_msg
+                .as_ref()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let (fallback_reply, agent_run) = handle_agent_loop_fallback(
                 &scheduler,
                 desensitized_messages.clone(),
                 &life_model,
                 &tools_prompt,
-            )
-            .await
-            .map_err(|fallback_err| {
-                format!(
-                    "AgentLoop failed: {}. Fallback also failed: {}",
-                    e, fallback_err
-                )
-            })?;
-
-            let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
                 &session_id,
-                &user_msg
-                    .as_ref()
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default(),
-            );
-            agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-            agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
-            agent_run
-                .warnings
-                .push(format!("fallback: agent_loop_error: {}", e));
-            agent_run.finished_at = Some(chrono::Utc::now());
-
-            if let Some(ref store_arc) = state.agent_run_store {
-                let store = store_arc.lock().await;
-                let _ = store.create_run(&agent_run);
-            }
+                &user_input_text,
+                state.agent_run_store.as_ref(),
+                &e.to_string(),
+            )
+            .await?;
 
             return Ok(SendMessageResult {
                 reply: fallback_reply,
@@ -1620,6 +1434,49 @@ async fn generate_non_stream_fallback(
         )
     })?
     .map_err(|e| e.to_string())
+}
+
+/// Handle AgentLoop failure: try non-stream fallback, create AgentRun with
+/// error context, persist the run. Returns (reply, agent_run) on success, or
+/// an error message string if both AgentLoop and fallback fail.
+async fn handle_agent_loop_fallback(
+    scheduler: &InferenceScheduler,
+    messages: Vec<ChatMessage>,
+    life_model: &LifeModel,
+    tools_prompt: &str,
+    session_id: &str,
+    user_input_text: &str,
+    agent_run_store: Option<&std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>>,
+    original_error: &str,
+) -> Result<(String, openlife_core::agent::AgentRun), String> {
+    let fallback_reply = generate_non_stream_fallback(
+        scheduler,
+        messages,
+        life_model,
+        tools_prompt,
+    )
+    .await
+    .map_err(|fallback_err| {
+        format!(
+            "AgentLoop failed: {}. Fallback also failed: {}",
+            original_error, fallback_err
+        )
+    })?;
+
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
+    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
+    agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
+    agent_run
+        .warnings
+        .push(format!("fallback: agent_loop_error: {}", original_error));
+    agent_run.finished_at = Some(chrono::Utc::now());
+
+    if let Some(ref store_arc) = agent_run_store {
+        let store = store_arc.lock().await;
+        let _ = store.create_run(&agent_run);
+    }
+
+    Ok((fallback_reply, agent_run))
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
@@ -1809,12 +1666,13 @@ async fn start_stream_message_with_agent_loop(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
     let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: 4,
-        max_tool_calls: 6,
-        timeout_seconds: 90,
+        max_steps: cfg.system.agent_loop_max_steps,
+        max_tool_calls: cfg.system.agent_loop_max_tool_calls,
+        timeout_seconds: cfg.system.agent_loop_timeout_seconds,
         allow_writes: true,
         allow_cloud: true,
         shutdown_notify: Some(state.inner().shutdown_notify.clone()),
+        ..Default::default()
     };
     let agent_loop = openlife_core::agent::AgentLoop::new(
         agent_runtime,
@@ -1868,19 +1726,23 @@ async fn start_stream_message_with_agent_loop(
         } else {
             None
         };
-        let action_ctx = openlife_core::agent::ActionExecutionContext {
-            registry: &reg,
-            permission_store: &permission_store,
-            audit_store: &audit,
-            privacy_engine: &privacy_engine,
-            safe_paths: &safe_paths,
-            calendar_ics_paths: &calendar_ics_paths,
-            life_model: Some(&life_model),
-            memory_store: Some(&memory_store),
-            proposal_store: proposal_store_guard.as_deref(),
-            agent_run_store: agent_run_store_guard.as_deref(),
-            network_policy: Some(&network_policy),
-        };
+        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
+            &reg,
+            &permission_store,
+            &audit,
+            &privacy_engine,
+            &safe_paths,
+        )
+        .with_life_model(&life_model)
+        .with_memory_store(&memory_store)
+        .with_calendar_ics_paths(&calendar_ics_paths)
+        .with_network_policy(&network_policy);
+        if let Some(ref store) = proposal_store_guard {
+            action_ctx = action_ctx.with_proposal_store(store);
+        }
+        if let Some(ref store) = agent_run_store_guard {
+            action_ctx = action_ctx.with_agent_run_store(store);
+        }
 
         agent_loop
             .run_streaming(
@@ -1902,20 +1764,24 @@ async fn start_stream_message_with_agent_loop(
                 "[warn] AgentLoop streaming failed, falling back to legacy: {}",
                 e
             );
-            let fallback_reply = match generate_non_stream_fallback(
+            let user_input_txt = user_msg
+                .as_ref()
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let (fallback_reply, agent_run) = match handle_agent_loop_fallback(
                 &scheduler,
                 desensitized_messages.clone(),
                 &life_model,
                 &tools_prompt,
+                &session_id,
+                &user_input_txt,
+                state.agent_run_store.as_ref(),
+                &e.to_string(),
             )
             .await
             {
-                Ok(reply) => reply,
-                Err(fallback_err) => {
-                    let error_msg = format!(
-                        "AgentLoop failed: {}. Fallback also failed: {}",
-                        e, fallback_err
-                    );
+                Ok(result) => result,
+                Err(error_msg) => {
                     let _ = app_handle.emit(
                         "stream-message-error",
                         serde_json::json!({
@@ -1927,20 +1793,6 @@ async fn start_stream_message_with_agent_loop(
                     return Err(error_msg);
                 }
             };
-
-            let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(
-                &session_id,
-                &user_msg
-                    .as_ref()
-                    .map(|m| m.content.clone())
-                    .unwrap_or_default(),
-            );
-            agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-            agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
-            agent_run
-                .warnings
-                .push(format!("fallback: agent_loop_error: {}", e));
-            agent_run.finished_at = Some(chrono::Utc::now());
 
             // Emit fallback reply as a single chunk
             let _ = app_handle.emit(
@@ -2674,18 +2526,17 @@ async fn execute_tool_call(
     let executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
-    let ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: agent_run_store_guard.as_deref(),
-        network_policy: None,
+    let ctx = openlife_core::agent::ActionExecutionContext::new(
+        &reg,
+        &permission_store,
+        &audit,
+        &privacy_engine,
+        &safe_paths,
+    );
+    let ctx = if let Some(ref store) = agent_run_store_guard {
+        ctx.with_agent_run_store(store)
+    } else {
+        ctx
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -2784,236 +2635,11 @@ fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
     Ok(())
 }
 
-/// Helper to initialize a store with file-based fallback to in-memory.
-/// Eliminates `.expect()` panics by returning a Result and logging warnings.
-/// Uses RefCell to avoid borrow checker issues with closures.
-fn init_store<T, F, G>(
-    file_init: F,
-    memory_init: G,
-    name: &str,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<T, String>
-where
-    F: FnOnce() -> Result<T, String>,
-    G: FnOnce() -> Result<T, String>,
-{
-    match file_init() {
-        Ok(store) => Ok(store),
-        Err(e) => {
-            startup_warnings.borrow_mut().push(format!("{} file init failed: {}", name, e));
-            memory_init().map_err(|e| {
-                let msg = format!(
-                    "CRITICAL: {} in-memory fallback also failed: {}. \
-                     System resources may be exhausted.",
-                    name, e
-                );
-                log::warn!("[startup] {}", msg);
-                msg
-            })
-        }
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = app_data_dir();
-    let startup_warnings = std::cell::RefCell::new(Vec::new());
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        startup_warnings.borrow_mut().push(format!(
-            "应用数据目录创建失败：{} ({})",
-            data_dir.display(),
-            e
-        ));
-    }
-    let config_path = data_dir.join("config.yaml");
-    let (config, config_warning) = AppConfig::load_or_default_with_warning(&config_path);
-    if let Some(warning) = config_warning {
-        startup_warnings.borrow_mut().push(warning);
-    }
-    // Apply system configuration
-    openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
-    let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
-
-    let db_path = data_dir.join("memory.db");
-    let memory_store = init_store(
-        || init_memory_store(&db_path, &startup_warnings),
-        || MemoryStore::new_in_memory().map_err(|e| e.to_string()),
-        "MemoryStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let feedback_db_path = data_dir.join("feedback.db");
-    let feedback_store = init_store(
-        || init_feedback_store(&feedback_db_path, &startup_warnings),
-        || FeedbackStore::new_in_memory().map_err(|e| e.to_string()),
-        "FeedbackStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let vector_db_path = data_dir.join("vectors.db");
-    let vector_store = init_store(
-        || init_vector_store(&vector_db_path, &startup_warnings),
-        || VectorStore::new_in_memory().map_err(|e| e.to_string()),
-        "VectorStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let agent_runs_db_path = data_dir.join("agent_runs.db");
-    let agent_run_store = init_store(
-        || init_agent_run_store(&agent_runs_db_path, &startup_warnings),
-        || openlife_core::agent::AgentRunStore::new_in_memory().map_err(|e| e.to_string()),
-        "AgentRunStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let proposals_db_path = data_dir.join("proposals.db");
-    let proposal_store = init_store(
-        || init_proposal_store(&proposals_db_path, &startup_warnings),
-        || openlife_core::agent::ProposalStore::new_in_memory().map_err(|e| e.to_string()),
-        "ProposalStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let patches_db_path = data_dir.join("patches.db");
-    let patch_store = init_store(
-        || openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
-            .map_err(|e| e.to_string()),
-        || openlife_core::life_model::patch_store::PatchStore::new_in_memory()
-            .map_err(|e| e.to_string()),
-        "PatchStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-
-    let model_dir = data_dir.join("models");
-    let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
-    let layer_router = LayerRouter::new();
-    let scheduler = InferenceScheduler::new(
-        config.local_model.clone(),
-        config.prefer_local_model,
-        config.llm.provider.clone(),
-        config.llm.openai_base.clone(),
-        config.llm.openai_key.clone(),
-        config.llm.chat_model.clone(),
-        config.llm.embedding_model.clone(),
-        config.llm.embedding_enabled,
-    );
-    let privacy_engine =
-        PrivacyEngine::with_policy(load_privacy_policy_from_path(&privacy_policy_path()));
-    let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
-    let mcp_audit_store = McpAuditStore::with_keyring(
-        data_dir.join("mcp_audit.db"),
-        load_mcp_audit_keyring_from_path(&mcp_audit_keyring_path()),
-    );
-
-    // Initialize hot cache from current life model
-    let hot_cache: SharedHotCache = {
-        let manager = &life_model_manager;
-        let initial_cache = match manager.load() {
-            Ok(model) => HotMemoryCache::from_life_model(&model),
-            Err(_) => HotMemoryCache::default(),
-        };
-        Arc::new(tokio::sync::RwLock::new(initial_cache))
-    };
-
-    let mcp_registry = McpRegistry::new();
-    let tool_permission_store = init_store(
-        || {
-            openlife_core::tool_permissions::ToolPermissionStore::new(data_dir.join("tool_permissions.db"))
-                .map_err(|e| e.to_string())
-        },
-        || openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().map_err(|e| e.to_string()),
-        "ToolPermissionStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
-    let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
-    if let Err(e) = plugin_registry.reload() {
-        startup_warnings.borrow_mut().push(format!("plugins manifest reload failed: {}", e));
-    }
-
-    let rollout_metrics_store = {
-        let store_path = data_dir.join("rollout_metrics.db");
-        match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
-            Ok(store) => Some(Arc::new(Mutex::new(store))),
-            Err(e) => {
-                startup_warnings.borrow_mut().push(format!("rollout_metrics.db 初始化失败: {}", e));
-                None
-            }
-        }
-    };
-
-    let app_state = Arc::new(AppState {
-        config: Arc::new(Mutex::new(config)),
-        life_model_manager: Arc::new(Mutex::new(life_model_manager)),
-        memory_store: Arc::new(Mutex::new(memory_store)),
-        mcp_registry: Arc::new(Mutex::new(mcp_registry)),
-        intent_router: Arc::new(Mutex::new(intent_router)),
-        layer_router: Arc::new(Mutex::new(layer_router)),
-        scheduler: Arc::new(Mutex::new(scheduler)),
-        privacy_engine: Arc::new(Mutex::new(privacy_engine)),
-        version_manager: Arc::new(Mutex::new(version_manager)),
-        feedback_store: Arc::new(Mutex::new(feedback_store)),
-        vector_store: Arc::new(Mutex::new(vector_store)),
-        builder_sessions: Arc::new(Mutex::new(HashMap::new())),
-        builder_session_store: Arc::new(Mutex::new(BuilderSessionStore::new(
-            data_dir.join("builder_sessions.json"),
-        ))),
-        a2a_sidecar: Arc::new(Mutex::new(a2a_sidecar::A2ASidecar::new(8765))),
-        last_snapshot_date: Arc::new(Mutex::new(None)),
-        mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
-        agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
-        proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
-        patch_store: Some(Arc::new(Mutex::new(patch_store))),
-        rollout_metrics_store,
-        tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
-        skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
-        plugin_registry: Arc::new(Mutex::new(plugin_registry)),
-        hot_cache,
-        proposal_engine: Arc::new(tokio::sync::Mutex::new({
-            let mut engine = openlife_core::agent::ProposalEngine::new();
-            engine.register(Box::new(
-                openlife_core::agent::ChatProposalGeneratorAdapter::new(),
-            ));
-            engine.register(Box::new(
-                openlife_core::agent::FeedbackProposalGenerator::new(None),
-            ));
-            engine.register(Box::new(openlife_core::agent::MemoryProposalGenerator));
-            engine.register(Box::new(openlife_core::agent::ToolProposalGenerator));
-            engine
-        })),
-        startup_warnings: startup_warnings.into_inner(),
-        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
-        scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
-    });
-
+    let bootstrap = bootstrap::bootstrap(data_dir.clone());
+    let app_state = bootstrap.state;
     let app_state_for_setup = app_state.clone();
 
     tauri::Builder::default()
@@ -3081,6 +2707,8 @@ pub fn run() {
                     }
                 }
             });
+            // Start scheduled task runner
+            scheduler_runner::start_scheduler_runner(app_state_for_setup.clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -3194,6 +2822,7 @@ pub fn run() {
             get_rollout_metrics,
             get_rollout_summary,
             get_rollout_errors,
+            get_proactive_suggestions,
             list_tool_permissions,
             grant_tool_permission,
             revoke_tool_permission,

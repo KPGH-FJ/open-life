@@ -2,8 +2,6 @@ pub mod core_os_tools;
 pub mod declarative_stubs;
 pub mod execution_tools;
 pub mod helpers;
-pub mod life_model_ops;
-pub mod memory_ops;
 pub mod tool_executor;
 
 // Re-export commonly used helpers
@@ -69,6 +67,10 @@ pub enum ActionExecutionStatus {
 }
 
 /// Dependencies required for action execution.
+///
+/// Essential fields (registry, permission_store, audit_store, privacy_engine,
+/// safe_paths) are set via the constructor. Optional fields are set via builder
+/// methods.
 pub struct ActionExecutionContext<'a> {
     pub registry: &'a McpRegistry,
     pub permission_store: &'a ToolPermissionStore,
@@ -82,6 +84,62 @@ pub struct ActionExecutionContext<'a> {
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     /// ICS calendar file paths for calendar.read tool
     pub calendar_ics_paths: &'a [String],
+}
+
+impl<'a> ActionExecutionContext<'a> {
+    /// Create a context with the essential dependencies.
+    /// Optional fields default to None / empty.
+    pub fn new(
+        registry: &'a McpRegistry,
+        permission_store: &'a ToolPermissionStore,
+        audit_store: &'a McpAuditStore,
+        privacy_engine: &'a PrivacyEngine,
+        safe_paths: &'a [String],
+    ) -> Self {
+        Self {
+            registry,
+            permission_store,
+            audit_store,
+            privacy_engine,
+            safe_paths,
+            life_model: None,
+            memory_store: None,
+            proposal_store: None,
+            agent_run_store: None,
+            network_policy: None,
+            calendar_ics_paths: &[],
+        }
+    }
+
+    pub fn with_life_model(mut self, life_model: &'a crate::life_model::LifeModel) -> Self {
+        self.life_model = Some(life_model);
+        self
+    }
+
+    pub fn with_memory_store(mut self, memory_store: &'a crate::memory::MemoryStore) -> Self {
+        self.memory_store = Some(memory_store);
+        self
+    }
+
+    pub fn with_proposal_store(mut self, proposal_store: &'a crate::agent::ProposalStore) -> Self {
+        self.proposal_store = Some(proposal_store);
+        self
+    }
+
+    pub fn with_agent_run_store(mut self, agent_run_store: &'a crate::agent::AgentRunStore) -> Self {
+        self.agent_run_store = Some(agent_run_store);
+        self
+    }
+
+    pub fn with_network_policy(mut self, network_policy: &'a crate::config::NetworkPolicy) -> Self {
+        self.network_policy = Some(network_policy);
+        self
+    }
+
+    pub fn with_calendar_ics_paths(mut self, paths: &'a [String]) -> Self {
+        self.calendar_ics_paths = paths;
+        self
+    }
 }
 
 /// Centralized action executor for all agent actions.
@@ -114,5 +172,35 @@ impl ActionExecutor {
                 request.action_type
             )),
         }
+    }
+
+    pub fn execute_life_model_patch(
+        &self,
+        request: AgentActionRequest,
+    ) -> Result<ActionExecutionResult> {
+        Ok(self.build_proposal_required_action(
+            request,
+            "life_model_patch must be submitted as a LifeModel proposal before persistence",
+        ))
+    }
+
+    pub fn execute_memory_write(
+        &self,
+        request: AgentActionRequest,
+    ) -> Result<ActionExecutionResult> {
+        Ok(self.build_proposal_required_action(
+            request,
+            "memory_write must be submitted as a MemoryWrite proposal before persistence",
+        ))
+    }
+
+    pub fn execute_memory_archive(
+        &self,
+        request: AgentActionRequest,
+    ) -> Result<ActionExecutionResult> {
+        Ok(self.build_proposal_required_action(
+            request,
+            "memory_archive must be submitted as a MemoryArchive proposal before persistence",
+        ))
     }
 }
