@@ -952,7 +952,10 @@ impl AgentLoop {
 
     /// Filter tool actions by the configured allowlist.
     /// Returns the filtered list (empty if allowlist is not configured).
-    fn filter_tools_by_allowlist(&self, actions: Vec<AgentActionRequest>) -> Vec<AgentActionRequest> {
+    fn filter_tools_by_allowlist(
+        &self,
+        actions: Vec<AgentActionRequest>,
+    ) -> Vec<AgentActionRequest> {
         if self.config.toolset_allowlist.is_empty() {
             return actions;
         }
@@ -985,8 +988,7 @@ impl AgentLoop {
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
             if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
-                let obs =
-                    self.create_budget_exceeded_observation(run, *tool_call_count);
+                let obs = self.create_budget_exceeded_observation(run, *tool_call_count);
                 observations.push(obs.clone());
                 run.observations.push(obs);
                 all_succeeded = false;
@@ -1006,7 +1008,8 @@ impl AgentLoop {
                     "executing_tool",
                     &format!("Executing tool: {}", action_request.target),
                     0,
-                ).await;
+                )
+                .await;
             }
 
             if let Some(ref cb) = callback {
@@ -1021,7 +1024,10 @@ impl AgentLoop {
                 Err(e) => {
                     let now = chrono::Utc::now();
                     let fail_action = crate::agent::types::AgentAction {
-                        id: format!("action-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
+                        id: format!(
+                            "action-fail-{}",
+                            now.timestamp_nanos_opt().unwrap_or_default()
+                        ),
                         action_type: action_request.action_type.clone(),
                         target: Some(action_request.target.clone()),
                         input: action_request.input.clone(),
@@ -1089,7 +1095,8 @@ impl AgentLoop {
                     &action_request.target,
                     exec_result.status == ActionExecutionStatus::Succeeded,
                     0,
-                ).await;
+                )
+                .await;
             }
 
             self.emit_status(
@@ -1117,7 +1124,8 @@ impl AgentLoop {
                     "observing",
                     &format!("Tool {} result: {}", action_request.target, result_str),
                     0,
-                ).await;
+                )
+                .await;
             }
 
             if exec_result.status != ActionExecutionStatus::Succeeded {
@@ -1128,7 +1136,12 @@ impl AgentLoop {
             executed_this_step += 1;
         }
 
-        Ok((all_succeeded, executed_this_step, budget_exceeded, observations))
+        Ok((
+            all_succeeded,
+            executed_this_step,
+            budget_exceeded,
+            observations,
+        ))
     }
 
     /// Handle step completion after tool batch execution:
@@ -1178,8 +1191,7 @@ impl AgentLoop {
                     0,
                     None,
                 );
-                "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
-                    .into()
+                "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。".into()
             } else {
                 "工具执行过程中出现错误，请检查配置或稍后重试。".into()
             };
@@ -1575,8 +1587,7 @@ mod tests {
         }];
         let tools_prompt = "可用工具: web.search, file.read";
 
-        let messages =
-            agent.build_follow_up_messages(&task, "正在查询...", &obs, tools_prompt);
+        let messages = agent.build_follow_up_messages(&task, "正在查询...", &obs, tools_prompt);
 
         assert_eq!(messages.len(), 2); // assistant + user (follow-up)
         assert_eq!(messages[0].role, "assistant");
@@ -1598,12 +1609,7 @@ mod tests {
             layer: crate::layer_router::Layer::L2,
         };
 
-        let messages = agent.build_follow_up_messages(
-            &task,
-            "Hi there!",
-            &[],
-            "可用工具: echo",
-        );
+        let messages = agent.build_follow_up_messages(&task, "Hi there!", &[], "可用工具: echo");
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[1].role, "user");
@@ -1619,8 +1625,14 @@ mod tests {
             session_id: "s1".into(),
             user_text: "天气".into(),
             messages: vec![
-                ChatMessage { role: "user".into(), content: "你好".into() },
-                ChatMessage { role: "assistant".into(), content: "你好！有什么可以帮你的？".into() },
+                ChatMessage {
+                    role: "user".into(),
+                    content: "你好".into(),
+                },
+                ChatMessage {
+                    role: "assistant".into(),
+                    content: "你好！有什么可以帮你的？".into(),
+                },
             ],
             layer: crate::layer_router::Layer::L2,
         };
@@ -1634,12 +1646,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
         }];
 
-        let messages = agent.build_follow_up_messages(
-            &task,
-            "查询天气中...",
-            &obs,
-            "工具: web",
-        );
+        let messages = agent.build_follow_up_messages(&task, "查询天气中...", &obs, "工具: web");
 
         // Original 2 + assistant + follow-up = 4
         assert_eq!(messages.len(), 4);

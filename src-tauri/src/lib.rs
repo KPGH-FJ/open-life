@@ -1446,22 +1446,20 @@ async fn handle_agent_loop_fallback(
     tools_prompt: &str,
     session_id: &str,
     user_input_text: &str,
-    agent_run_store: Option<&std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>>,
+    agent_run_store: Option<
+        &std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>,
+    >,
     original_error: &str,
 ) -> Result<(String, openlife_core::agent::AgentRun), String> {
-    let fallback_reply = generate_non_stream_fallback(
-        scheduler,
-        messages,
-        life_model,
-        tools_prompt,
-    )
-    .await
-    .map_err(|fallback_err| {
-        format!(
-            "AgentLoop failed: {}. Fallback also failed: {}",
-            original_error, fallback_err
-        )
-    })?;
+    let fallback_reply =
+        generate_non_stream_fallback(scheduler, messages, life_model, tools_prompt)
+            .await
+            .map_err(|fallback_err| {
+                format!(
+                    "AgentLoop failed: {}. Fallback also failed: {}",
+                    original_error, fallback_err
+                )
+            })?;
 
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
     agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
