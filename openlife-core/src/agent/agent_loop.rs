@@ -22,6 +22,7 @@ pub struct AgentLoopConfig {
     pub timeout_seconds: u64,
     pub allow_writes: bool,
     pub allow_cloud: bool,
+    pub shutdown_notify: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl Default for AgentLoopConfig {
@@ -32,6 +33,7 @@ impl Default for AgentLoopConfig {
             timeout_seconds: 90,
             allow_writes: true,
             allow_cloud: true,
+            shutdown_notify: None,
         }
     }
 }
