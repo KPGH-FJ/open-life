@@ -18,7 +18,7 @@ use tauri::{Emitter, State};
 use tokio::time::{timeout, Duration};
 
 // ── Orchestration functions ──
-async fn generate_and_persist_chat_proposals(
+pub(crate) async fn generate_and_persist_chat_proposals(
     state: &Arc<AppState>,
     agent_run: &openlife_core::agent::AgentRun,
     reply: &str,
@@ -101,7 +101,7 @@ pub(crate) async fn persist_life_model(
     }
     Ok(life_model)
 }
-fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Option<String> {
+pub(crate) fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Option<String> {
     let lower = content.to_lowercase();
     let triggers = [
         "我今天完成了",
@@ -134,7 +134,7 @@ fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Op
     }
 }
 
-async fn persist_chat_message_if_needed(
+pub(crate) async fn persist_chat_message_if_needed(
     session_id: &str,
     msg: &ChatMessage,
     state: &State<'_, Arc<AppState>>,
@@ -157,7 +157,7 @@ async fn persist_chat_message_if_needed(
     Ok(true)
 }
 
-async fn persist_vector_memory_for_message(
+pub(crate) async fn persist_vector_memory_for_message(
     session_id: &str,
     msg: &ChatMessage,
     state: &State<'_, Arc<AppState>>,
@@ -215,7 +215,7 @@ async fn persist_vector_memory_for_message(
     }
 }
 
-async fn finalize_chat_agent_run(
+pub(crate) async fn finalize_chat_agent_run(
     session_id: &str,
     assistant_message: &ChatMessage,
     reply: &str,
@@ -487,7 +487,7 @@ async fn preprocess_chat_input(
 /// V2 preprocessing using ContextAssembler.
 /// This is functionally equivalent to preprocess_chat_input but uses
 /// the modular ContextAssembler trait for better testability and extensibility.
-async fn preprocess_chat_input_v2(
+pub(crate) async fn preprocess_chat_input_v2(
     session_id: &str,
     messages: &[ChatMessage],
     state: &State<'_, Arc<AppState>>,
@@ -667,7 +667,7 @@ async fn preprocess_chat_input_v2(
 }
 
 #[allow(dead_code)]
-fn build_reasoning_trace_prompt(trace: &ReasoningTrace) -> String {
+pub(crate) fn build_reasoning_trace_prompt(trace: &ReasoningTrace) -> String {
     let mut prompt = String::new();
     if let Some(ref m) = trace.meaning_result {
         if let Some(text) = m.get("text").and_then(|t| t.as_str()) {
@@ -703,7 +703,7 @@ fn build_reasoning_trace_prompt(trace: &ReasoningTrace) -> String {
     }
     prompt
 }
-async fn capture_conversation_signals(
+pub(crate) async fn capture_conversation_signals(
     session_id: &str,
     user_text: &str,
     life_model: &LifeModel,
@@ -1005,7 +1005,7 @@ pub(crate) async fn send_message_impl(
 
 /// AgentLoop-based chat execution (primary path).
 #[allow(clippy::too_many_arguments)]
-async fn send_message_with_agent_loop(
+pub(crate) async fn send_message_with_agent_loop(
     session_id: String,
     _messages: Vec<ChatMessage>,
     user_msg: Option<ChatMessage>,
@@ -1217,7 +1217,7 @@ const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
 const CHAT_VECTOR_PERSIST_TIMEOUT_SECS: u64 = 8;
 const CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS: u64 = 5;
 
-async fn generate_non_stream_fallback(
+pub(crate) async fn generate_non_stream_fallback(
     scheduler: &InferenceScheduler,
     messages: Vec<ChatMessage>,
     life_model: &LifeModel,
@@ -1241,7 +1241,7 @@ pub(crate) fn preview_text(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
+pub(crate) fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     if life_model.is_effectively_empty() {
         Vec::new()
     } else {
@@ -1254,7 +1254,7 @@ fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     }
 }
 
-fn agent_actions_to_tool_call_results(
+pub(crate) fn agent_actions_to_tool_call_results(
     actions: &[openlife_core::agent::AgentAction],
     run_id: &str,
 ) -> Vec<ToolCallResult> {
@@ -1302,7 +1302,7 @@ fn agent_actions_to_tool_call_results(
 
 /// Stream-mode AgentLoop execution: runs AgentLoop and emits real token-level stream events.
 /// This provides consistency when use_agent_loop=true in stream mode.
-async fn start_stream_message_with_agent_loop(
+pub(crate) async fn start_stream_message_with_agent_loop(
     session_id: String,
     messages: Vec<ChatMessage>,
     user_msg: Option<ChatMessage>,

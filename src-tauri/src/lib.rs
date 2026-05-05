@@ -26,7 +26,11 @@ use tokio::time::{timeout, Duration};
 pub mod a2a_server;
 pub mod a2a_sidecar;
 pub mod commands;
+pub mod errors;
+pub mod orchestrator;
+pub mod state;
 pub mod storage;
+pub mod streaming;
 
 use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,

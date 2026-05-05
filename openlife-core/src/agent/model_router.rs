@@ -253,10 +253,12 @@ impl ModelRouter {
 
         // Cloud providers are only considered available when a key is configured and
         // lightweight probing succeeds. Without a key, they are explicitly unavailable.
-        for provider in &["deepseek", "openrouter", "openai"] {
+        // Probes run in parallel via tokio::join! to reduce latency.
+        let cloud_providers = vec!["deepseek", "openrouter", "openai"];
+        let probes = cloud_providers.into_iter().map(|provider| async move {
             let has_key = Self::provider_env_key(provider).is_some();
-            let (available, latency_ms, last_error, estimated) = if has_key {
-                match self.probe_provider_lightweight(provider).await {
+            let result = if has_key {
+                match Self::probe_provider_lightweight(provider).await {
                     Ok(latency) => (true, Some(latency), None, false),
                     Err(e) => (false, None, Some(e.to_string()), false),
                 }
@@ -268,10 +270,15 @@ impl ModelRouter {
                     false,
                 )
             };
+            (provider.to_string(), result)
+        });
+
+        let results = futures::future::join_all(probes).await;
+        for (provider, (available, latency_ms, last_error, estimated)) in results {
             self.providers.insert(
-                provider.to_string(),
+                provider.clone(),
                 ProviderAvailability {
-                    provider: provider.to_string(),
+                    provider,
                     available,
                     latency_ms,
                     models: vec![],
@@ -294,35 +301,34 @@ impl ModelRouter {
             }
         }
 
-        for provider in &["deepseek", "openrouter"] {
-            match self.probe_provider_lightweight(provider).await {
-                Ok(latency) => {
-                    let entry = self
-                        .provider_health
-                        .entry(provider.to_string())
-                        .or_default();
-                    entry.available = true;
-                    entry.latency_ms = Some(latency);
-                    entry.last_error = None;
-                    entry.last_check_at = std::time::Instant::now();
-                    entry.consecutive_failures = 0;
-                }
-                Err(e) => {
-                    let entry = self
-                        .provider_health
-                        .entry(provider.to_string())
-                        .or_default();
+        // Run health probes in parallel, then update state sequentially.
+        let providers = vec!["deepseek", "openrouter"];
+        let probes = providers.into_iter().map(|provider| async move {
+            match ModelRouter::probe_provider_lightweight(provider).await {
+                Ok(latency) => (provider.to_string(), true, Some(latency), None),
+                Err(e) => (provider.to_string(), false, None, Some(e.to_string())),
+            }
+        });
+
+        let results = futures::future::join_all(probes).await;
+        for (provider, available, latency_ms, last_error) in results {
+            let entry = self.provider_health.entry(provider).or_default();
+            if available {
+                entry.available = true;
+                entry.latency_ms = latency_ms;
+                entry.last_error = None;
+                entry.consecutive_failures = 0;
+            } else {
+                entry.available = false;
+                entry.latency_ms = None;
+                entry.last_error = last_error;
+                entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
+                // Mark as unavailable after 3 consecutive failures
+                if entry.consecutive_failures >= 3 {
                     entry.available = false;
-                    entry.latency_ms = None;
-                    entry.last_error = Some(e.to_string());
-                    entry.last_check_at = std::time::Instant::now();
-                    entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                    // Mark as unavailable after 3 consecutive failures
-                    if entry.consecutive_failures >= 3 {
-                        entry.available = false;
-                    }
                 }
             }
+            entry.last_check_at = std::time::Instant::now();
         }
 
         self.last_health_check = Some(std::time::Instant::now());
@@ -330,7 +336,7 @@ impl ModelRouter {
     }
 
     /// Lightweight probe using HEAD request to provider's model list API.
-    async fn probe_provider_lightweight(&self, provider: &str) -> Result<u64> {
+    async fn probe_provider_lightweight(provider: &str) -> Result<u64> {
         let url = match provider {
             "deepseek" => "https://api.deepseek.com/models",
             "openrouter" => "https://openrouter.ai/api/v1/models",

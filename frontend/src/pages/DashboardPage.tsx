@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -565,27 +565,32 @@ export default function DashboardPage() {
   const goals = model?.goals ?? null;
   const capabilities = model?.capabilities ?? null;
 
-  const allGoals = [
+  const allGoals = useMemo(() => [
     ...(goals?.short_term ?? []),
     ...(goals?.medium_term ?? []),
     ...(goals?.long_term ?? []),
     ...(goals?.life_goals ?? []),
-  ];
+  ], [goals]);
 
-  const completedGoals = allGoals.filter(g => g.status === "completed").length;
-  const goalProgress = allGoals.length ? (completedGoals / allGoals.length) * 100 : 0;
+  const completedGoals = useMemo(() => allGoals.filter(g => g.status === "completed").length, [allGoals]);
+  const goalProgress = useMemo(
+    () => (allGoals.length ? (completedGoals / allGoals.length) * 100 : 0),
+    [allGoals, completedGoals]
+  );
 
-  const skillData = (capabilities?.skills ?? []).slice(0, 6).map(s => ({
-    name: s.name,
-    value: s.proficiency ?? 3,
-  }));
+  const skillData = useMemo(
+    () => (capabilities?.skills ?? []).slice(0, 6).map(s => ({
+      name: s.name,
+      value: s.proficiency ?? 3,
+    })),
+    [capabilities]
+  );
 
-  const completedDaily = dailyGoals.filter(g => g.done).length;
+  const completedDaily = useMemo(() => dailyGoals.filter(g => g.done).length, [dailyGoals]);
   const selectedDimensionModel = dimensions.find(dim => dim.name === selectedDimension) ?? null;
-  const trendSummary = summarizeStateDimension(
-    selectedDimensionModel,
-    dimensionHistory,
-    stateAlerts
+  const trendSummary = useMemo(
+    () => summarizeStateDimension(selectedDimensionModel, dimensionHistory, stateAlerts),
+    [selectedDimensionModel, dimensionHistory, stateAlerts]
   );
   // Build recommendations based on model completion
   const builderCompletion = diagnostics?.builder_completion;
@@ -601,7 +606,7 @@ export default function DashboardPage() {
     ? (builderCompletion[lowestDimension as keyof typeof builderCompletion] as number)
     : 100;
 
-  const builderRecommendations = (() => {
+  const builderRecommendations = useMemo(() => {
     if (!builderCompletion || getModelEmptyState(model, diagnostics)) return [];
 
     const recs: Array<{ title: string; detail: string; to: string }> = [];
@@ -626,9 +631,9 @@ export default function DashboardPage() {
     }
 
     return recs;
-  })();
+  }, [builderCompletion, lowestDimension, lowestDimensionValue, model, diagnostics]);
 
-  const nextActions = [
+  const nextActions = useMemo(() => [
     diagnostics && diagnostics.model_empty && (diagnostics.pending_builder_review_sessions ?? 0) > 0
       ? {
           title: "先审阅待确认的构建建议",
@@ -671,9 +676,10 @@ export default function DashboardPage() {
           to: "/versions",
         }
       : null,
-  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>;
+  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
+  [diagnostics, model, builderRecommendations, calibrationPrompt, latestVersion]);
 
-  const trialRoute = [
+  const trialRoute = useMemo(() => [
     !diagnostics?.chat_ready
       ? {
           title: "先完成模型与 API 配置",
@@ -725,7 +731,8 @@ export default function DashboardPage() {
           to: "/versions",
         }
       : null,
-  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>;
+  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
+  [diagnostics, model, builderCompletion, lowestDimension, calibrationPrompt, latestVersion]);
 
   const overallCompletion = diagnostics?.builder_completion?.overall ?? 0;
   const actionSignals = [

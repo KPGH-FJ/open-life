@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::{persist_life_model, AppState};
 use openlife_core::agent::{
     AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
@@ -29,7 +30,7 @@ async fn builder_start_with_state(
     session_id: String,
     state: &Arc<AppState>,
     target_dimension: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let mode = match mode.as_str() {
         "quick" => BuilderMode::Quick,
         "incremental" => BuilderMode::Incremental,
@@ -40,19 +41,19 @@ async fn builder_start_with_state(
     if let Some(dim) = target_dimension {
         session.target_dimension = Some(
             dim.parse::<openlife_core::builder::BuilderDimension>()
-                .map_err(|e| e.to_string())?,
+                .map_err(AppError::from)?,
         );
     }
     // Check if there's a persisted session to resume
     {
         let store = state.builder_session_store.lock().await;
-        if let Some(existing) = store.get_session(&session_id).map_err(|e| e.to_string())? {
+        if let Some(existing) = store.get_session(&session_id).map_err(AppError::from)? {
             session = existing;
         }
     }
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     if session.finished && !session.pending_signals.is_empty() {
         let analysis = session
@@ -83,7 +84,7 @@ async fn builder_start_with_state(
         }
         {
             let store = state.builder_session_store.lock().await;
-            store.save_session(&session).map_err(|e| e.to_string())?;
+            store.save_session(&session).map_err(AppError::from)?;
         }
         return Ok(serde_json::json!({
             "prompt": session.current_prompt,
@@ -108,7 +109,7 @@ async fn builder_start_with_state(
         }
         {
             let store = state.builder_session_store.lock().await;
-            store.save_session(&session).map_err(|e| e.to_string())?;
+            store.save_session(&session).map_err(AppError::from)?;
         }
         return Ok(serde_json::json!({
             "prompt": session.current_prompt,
@@ -122,7 +123,7 @@ async fn builder_start_with_state(
     }
     {
         let store = state.builder_session_store.lock().await;
-        store.save_session(&session).map_err(|e| e.to_string())?;
+        store.save_session(&session).map_err(AppError::from)?;
     }
     let scheduler = {
         let scheduler = state.scheduler.lock().await;
@@ -132,7 +133,7 @@ async fn builder_start_with_state(
         let mut sessions = state.builder_sessions.lock().await;
         sessions
             .remove(&session_id)
-            .ok_or_else(|| "Session not found".to_string())?
+            .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     let engine = BuilderEngine::new(&scheduler);
     let (prompt, _) = engine.next_prompt(&mut session, "", &model).await;
@@ -147,7 +148,7 @@ async fn builder_start_with_state(
     }
     {
         let store = state.builder_session_store.lock().await;
-        store.save_session(&session).map_err(|e| e.to_string())?;
+        store.save_session(&session).map_err(AppError::from)?;
     }
     Ok(serde_json::json!({
         "prompt": prompt,
@@ -162,7 +163,7 @@ pub async fn builder_start(
     session_id: String,
     state: State<'_, Arc<AppState>>,
     target_dimension: Option<String>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     builder_start_with_state(mode, session_id, state.inner(), target_dimension).await
 }
 
@@ -171,7 +172,7 @@ pub async fn builder_step(
     session_id: String,
     user_reply: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     builder_step_with_state(session_id, user_reply, state.inner()).await
 }
 
@@ -179,7 +180,7 @@ async fn builder_step_with_state(
     session_id: String,
     user_reply: String,
     state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     // Create AgentRun for Builder tracking
     let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
 
@@ -187,11 +188,11 @@ async fn builder_step_with_state(
         let mut sessions = state.builder_sessions.lock().await;
         sessions
             .remove(&session_id)
-            .ok_or_else(|| "Session not found".to_string())?
+            .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     let scheduler = {
         let scheduler = state.scheduler.lock().await;
@@ -236,7 +237,7 @@ async fn builder_step_with_state(
             sessions.insert(session_id.clone(), session.clone());
         }
         let store = state.builder_session_store.lock().await;
-        store.save_session(&session).map_err(|e| e.to_string())?;
+        store.save_session(&session).map_err(AppError::from)?;
     } else {
         if let Some(new_model) = updated_model {
             persist_life_model(state, new_model.clone(), true).await?;
@@ -244,7 +245,7 @@ async fn builder_step_with_state(
         let store = state.builder_session_store.lock().await;
         store
             .remove_session(&session_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
     }
     // Complete AgentRun
     agent_run.output_preview = Some(prompt.clone());
@@ -270,22 +271,22 @@ async fn builder_step_with_state(
 #[tauri::command]
 pub async fn builder_list_unfinished(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<BuilderSession>, String> {
+) -> Result<Vec<BuilderSession>, AppError> {
     let store = state.builder_session_store.lock().await;
-    store.list_unfinished_sessions().map_err(|e| e.to_string())
+    store.list_unfinished_sessions().map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn builder_delete_session(
     session_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     {
         let mut sessions = state.builder_sessions.lock().await;
         sessions.remove(&session_id);
     }
     let store = state.builder_session_store.lock().await;
-    store.remove_session(&session_id).map_err(|e| e.to_string())
+    store.remove_session(&session_id).map_err(AppError::from)
 }
 
 /// Get pending signals for a Quick Build session
@@ -293,7 +294,7 @@ pub async fn builder_delete_session(
 pub async fn builder_get_pending_signals(
     session_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let in_memory = {
         let sessions = state.builder_sessions.lock().await;
         sessions.get(&session_id).cloned()
@@ -304,8 +305,8 @@ pub async fn builder_get_pending_signals(
         let store = state.builder_session_store.lock().await;
         store
             .get_session(&session_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Session not found".to_string())?
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::not_found("Session not found"))?
     };
 
     let pending_signals: Vec<serde_json::Value> = session
@@ -384,7 +385,7 @@ async fn builder_apply_signals_with_state(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     eprintln!(
         "[Builder] legacy builder_apply_signals invoked for session {}; normal flow should use builder_create_proposals",
         session_id
@@ -407,14 +408,14 @@ async fn builder_apply_signals_with_state(
         let store = state.builder_session_store.lock().await;
         store
             .get_session(&session_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Session not found".to_string())?
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::not_found("Session not found"))?
     };
 
     // Load current model
     let mut model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
 
     let mut edited_count = 0usize;
@@ -538,7 +539,7 @@ pub async fn builder_apply_signals(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     builder_apply_signals_with_state(session_id, decisions, state.inner()).await
 }
 
@@ -546,7 +547,7 @@ async fn builder_create_proposals_with_state(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     // Create AgentRun for this builder session
     let mut agent_run = openlife_core::agent::AgentRun::new_builder_run(&session_id);
     let run_id = agent_run.id.clone();
@@ -565,18 +566,18 @@ async fn builder_create_proposals_with_state(
         let store = state.builder_session_store.lock().await;
         store
             .get_session(&session_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Session not found".to_string())?
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     if session.pending_signals.is_empty() {
-        return Err("当前构建会话没有待确认信号，无法创建 Proposal。".to_string());
+        return Err(AppError::not_found("当前构建会话没有待确认信号，无法创建 Proposal。"));
     }
 
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
-    let model_value = serde_json::to_value(&model).map_err(|e| e.to_string())?;
+    let model_value = serde_json::to_value(&model).map_err(AppError::from)?;
     let decision_map: std::collections::HashMap<
         String,
         &openlife_core::builder::BuilderSignalDecision,
@@ -617,18 +618,18 @@ async fn builder_create_proposals_with_state(
     }
 
     if proposals.is_empty() {
-        return Err("没有被接受或编辑的信号可转为 Proposal。".to_string());
+        return Err(AppError::not_found("没有被接受或编辑的信号可转为 Proposal。"));
     }
 
     {
         let store = state
             .proposal_store
             .as_ref()
-            .ok_or_else(|| "Proposal store is unavailable.".to_string())?
+            .ok_or_else(|| AppError::db("Proposal store is unavailable."))?
             .lock()
             .await;
         for proposal in &proposals {
-            store.create_proposal(proposal).map_err(|e| e.to_string())?;
+            store.create_proposal(proposal).map_err(AppError::from)?;
         }
     }
 
@@ -666,29 +667,29 @@ pub async fn builder_create_proposals(
     session_id: String,
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     builder_create_proposals_with_state(session_id, decisions, state.inner()).await
 }
 
 #[tauri::command]
 pub async fn get_model_4d_completion(
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     let completion = model.calculate_4d_completion();
-    serde_json::to_value(completion).map_err(|e| e.to_string())
+    serde_json::to_value(completion).map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn goal_capability_gap_analysis(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     Ok(model.goal_capability_gap_analysis())
 }
@@ -696,10 +697,10 @@ pub async fn goal_capability_gap_analysis(
 #[tauri::command]
 pub async fn goal_capability_gap_report(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::life_model::CapabilityGap>, String> {
+) -> Result<Vec<openlife_core::life_model::CapabilityGap>, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     Ok(model.goal_capability_gap_report())
 }
@@ -707,10 +708,10 @@ pub async fn goal_capability_gap_report(
 #[tauri::command]
 pub async fn identity_goal_alignment_check(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     Ok(model.identity_goal_alignment_check())
 }
@@ -718,10 +719,10 @@ pub async fn identity_goal_alignment_check(
 #[tauri::command]
 pub async fn identity_goal_alignment_report(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::life_model::AlignmentIssue>, String> {
+) -> Result<Vec<openlife_core::life_model::AlignmentIssue>, AppError> {
     let model = {
         let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(|e| e.to_string())?
+        manager.load().map_err(AppError::from)?
     };
     Ok(model.identity_goal_alignment_report())
 }

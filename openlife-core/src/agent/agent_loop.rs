@@ -38,6 +38,22 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Boundary markers for prompt injection defense.
+/// Wrapped around user content to clearly delimit untrusted input from system instructions.
+const USER_REQUEST_START: &str = "[BEGIN USER REQUEST]";
+const USER_REQUEST_END: &str = "[END USER REQUEST]";
+
+/// Wrap user content in boundary markers to mitigate prompt injection.
+/// Affects messages with role == "user" and the standalone user_text field.
+fn wrap_user_content(task: &mut AgentTask) {
+    for msg in task.messages.iter_mut().filter(|m| m.role == "user") {
+        msg.content = format!("{}\n{}\n{}", USER_REQUEST_START, msg.content, USER_REQUEST_END);
+    }
+    if !task.user_text.is_empty() && !task.user_text.starts_with(USER_REQUEST_START) {
+        task.user_text = format!("{}\n{}\n{}", USER_REQUEST_START, task.user_text, USER_REQUEST_END);
+    }
+}
+
 /// Callback trait for streaming agent loop execution.
 /// Allows callers (e.g., Tauri shell) to receive real-time token chunks,
 /// tool execution notifications, and status updates during AgentLoop execution.
@@ -195,9 +211,10 @@ impl AgentLoop {
         }
     }
 
-    /// Run the iterative agent loop for a given task.
-    /// Supports multi-step ReAct: generate -> parse tools -> execute -> observe -> repeat.
-    pub async fn run(
+    /// Core agent loop implementation shared by `run` and `run_streaming`.
+    /// Differences are handled via the optional `callback`.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_core(
         &self,
         task: &AgentTask,
         life_model: &LifeModel,
@@ -205,6 +222,7 @@ impl AgentLoop {
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
         action_ctx: &ActionExecutionContext<'_>,
+        callback: Option<Arc<dyn StreamingCallback>>,
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
@@ -214,6 +232,7 @@ impl AgentLoop {
         let mut tool_call_count: u32 = 0;
         let mut final_response = String::new();
         let mut current_task = task.clone();
+        wrap_user_content(&mut current_task);
         let current_tools_prompt = tools_prompt.to_string();
         let current_memory_context = memory_context;
         let current_privacy_engine = privacy_engine;
@@ -241,6 +260,15 @@ impl AgentLoop {
                 step_count,
                 None,
             );
+
+            if let Some(ref cb) = callback {
+                cb.on_status(
+                    "thinking",
+                    &format!("Step {}: analyzing task", step_count + 1),
+                    step_count,
+                )
+                .await;
+            }
 
             // Check step budget
             if step_count >= self.config.max_steps {
@@ -280,16 +308,19 @@ impl AgentLoop {
 
             // Execute single step
             let step_result = self
-                .run_single_step(StepContext {
-                    task: &current_task,
-                    life_model,
-                    tools_prompt: &current_tools_prompt,
-                    memory_context,
-                    privacy_engine: current_privacy_engine.clone(),
-                    action_ctx,
-                    run: &mut run,
-                    tool_call_count,
-                })
+                .run_single_step(
+                    StepContext {
+                        task: &current_task,
+                        life_model,
+                        tools_prompt: &current_tools_prompt,
+                        memory_context,
+                        privacy_engine: current_privacy_engine.clone(),
+                        action_ctx,
+                        run: &mut run,
+                        tool_call_count,
+                    },
+                    callback.clone(),
+                )
                 .await?;
 
             step_count += 1;
@@ -336,6 +367,11 @@ impl AgentLoop {
             );
         }
 
+        if let Some(ref cb) = callback {
+            cb.on_status("completed", &format!("Done: {}", stop_reason), step_count)
+                .await;
+        }
+
         if run.status == AgentRunStatus::Running {
             run.status = AgentRunStatus::Completed;
         }
@@ -352,9 +388,30 @@ impl AgentLoop {
         ))
     }
 
+    /// Run the iterative agent loop for a given task.
+    pub async fn run(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+    ) -> Result<AgentLoopResult> {
+        self.run_loop_core(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
+            action_ctx,
+            None,
+        )
+        .await
+    }
+
     /// Streaming variant of run(). Same logic but forwards token chunks
     /// through the callback as they arrive from the model.
-    #[allow(clippy::too_many_arguments)]
     pub async fn run_streaming(
         &self,
         task: &AgentTask,
@@ -365,149 +422,25 @@ impl AgentLoop {
         action_ctx: &ActionExecutionContext<'_>,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
-        let start_time = Instant::now();
-        let mut run = AgentRun::new_chat_run(&task.session_id, &task.user_text);
-        run.user_input = Some(task.user_text.clone());
-
-        let mut step_count: u32 = 0;
-        let mut tool_call_count: u32 = 0;
-        let mut final_response = String::new();
-        let mut current_task = task.clone();
-        let current_tools_prompt = tools_prompt.to_string();
-        let current_memory_context = memory_context;
-        let current_privacy_engine = privacy_engine;
-        let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
-
-        run.reasoning_strategy = Some(if task.layer == Layer::L3 {
-            "layered".into()
-        } else {
-            "direct".into()
-        });
-
-        #[allow(unused_assignments)]
-        let mut stop_reason = String::new();
-
-        loop {
-            callback
-                .on_status(
-                    "thinking",
-                    &format!("Step {}: analyzing task", step_count + 1),
-                    step_count,
-                )
-                .await;
-
-            if step_count >= self.config.max_steps {
-                stop_reason = "max_steps_reached".into();
-                if final_response.is_empty() {
-                    final_response = format!(
-                        "已达到最大执行步数 ({})。当前结果：{}",
-                        self.config.max_steps, final_response
-                    );
-                }
-                break;
-            }
-
-            if start_time.elapsed().as_secs() >= self.config.timeout_seconds {
-                run.status = AgentRunStatus::Failed;
-                run.error = Some(AgentRunError {
-                    message: "Agent loop timeout exceeded".into(),
-                    phase: "execution".into(),
-                    recoverable: false,
-                });
-                stop_reason = "timeout".into();
-                final_response = "执行超时，请稍后重试。".into();
-                break;
-            }
-
-            let memory_context = if let Some(memory_store) = action_ctx.memory_store {
-                search_memory_for_context(memory_store, &current_task.user_text, &task.session_id)
-                    .unwrap_or_else(|e| {
-                        eprintln!("[AgentLoop] Memory search failed: {}", e);
-                        current_memory_context.clone()
-                    })
-            } else {
-                current_memory_context.clone()
-            };
-
-            // streaming step: generate with real token streaming
-            let step_result = self
-                .run_single_step_streaming(
-                    StepContext {
-                        task: &current_task,
-                        life_model,
-                        tools_prompt: &current_tools_prompt,
-                        memory_context,
-                        privacy_engine: current_privacy_engine.clone(),
-                        action_ctx,
-                        run: &mut run,
-                        tool_call_count,
-                    },
-                    callback.clone(),
-                )
-                .await?;
-
-            step_count += 1;
-            tool_call_count += step_result.tool_call_count_delta;
-            final_response = step_result.final_response;
-            stop_reason = step_result.stop_reason;
-            status_updates.extend(step_result.status_updates);
-
-            if !step_result.should_continue {
-                break;
-            }
-
-            let follow_up_messages = self.build_follow_up_messages(
-                &current_task,
-                &final_response,
-                &step_result.observations,
-                &current_tools_prompt,
-            );
-            current_task = AgentTask {
-                messages: follow_up_messages,
-                ..current_task.clone()
-            };
-        }
-
-        if run.status == AgentRunStatus::Failed {
-            self.emit_status(
-                &mut status_updates,
-                crate::agent::types::AgentLoopPhase::Failed,
-                format!("Execution failed: {}", stop_reason),
-                step_count,
-                None,
-            );
-        } else {
-            self.emit_status(
-                &mut status_updates,
-                crate::agent::types::AgentLoopPhase::Completed,
-                format!("Execution completed: {}", stop_reason),
-                step_count,
-                None,
-            );
-        }
-
-        callback
-            .on_status("completed", &format!("Done: {}", stop_reason), step_count)
-            .await;
-
-        if run.status == AgentRunStatus::Running {
-            run.status = AgentRunStatus::Completed;
-        }
-        run.output_preview = Some(preview_text(&final_response, 200));
-        run.finished_at = Some(chrono::Utc::now());
-
-        Ok(self.build_result(
-            run,
-            final_response,
-            stop_reason,
-            tool_call_count,
-            step_count,
-            status_updates,
-        ))
+        self.run_loop_core(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            privacy_engine,
+            action_ctx,
+            Some(callback),
+        )
+        .await
     }
 
-    /// Execute a single step of the agent loop with streaming output.
-    async fn run_single_step(&self, mut ctx: StepContext<'_>) -> Result<StepResult> {
+    /// Execute a single step of the agent loop.
+    /// If `callback` is provided, uses streaming generation and emits tool events.
+    async fn run_single_step(
+        &self,
+        mut ctx: StepContext<'_>,
+        callback: Option<Arc<dyn StreamingCallback>>,
+    ) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
         // Clone values that will be consumed by generate_response so we can
@@ -515,16 +448,27 @@ impl AgentLoop {
         let memory_ctx = ctx.memory_context.clone();
         let privacy = ctx.privacy_engine.clone();
 
-        // Generate model response
-        let generated = self
-            .generate_response(
+        // Generate model response (streaming if callback provided)
+        let generated = if let Some(ref cb) = callback {
+            self.generate_response_streaming(
+                ctx.task,
+                ctx.life_model,
+                ctx.tools_prompt,
+                ctx.memory_context,
+                ctx.privacy_engine,
+                cb.clone(),
+            )
+            .await
+        } else {
+            self.generate_response(
                 ctx.task,
                 ctx.life_model,
                 ctx.tools_prompt,
                 ctx.memory_context,
                 ctx.privacy_engine,
             )
-            .await;
+            .await
+        };
 
         match generated {
             Ok(gen) => {
@@ -606,7 +550,7 @@ impl AgentLoop {
                 let mut budget_exceeded = false;
 
                 for (idx, action_request) in tool_actions.iter().enumerate() {
-                    if ctx.tool_call_count >= self.config.max_tool_calls {
+                    if ctx.tool_call_count + executed_this_step >= self.config.max_tool_calls {
                         let obs =
                             self.create_budget_exceeded_observation(ctx.run, ctx.tool_call_count);
                         observations.push(obs.clone());
@@ -623,6 +567,10 @@ impl AgentLoop {
                         0,
                         Some(idx as u32),
                     );
+
+                    if let Some(ref cb) = callback {
+                        cb.on_tool_start(&action_request.target, 0).await;
+                    }
 
                     let exec_result = self
                         .action_executor
@@ -650,6 +598,9 @@ impl AgentLoop {
                                     })
                             });
                         if let Some(id) = proposal_id {
+                            if let Some(ref cb) = callback {
+                                cb.on_proposal("external_write_action", &id).await;
+                            }
                             ctx.run.add_generated_proposal(&id);
                         }
                     }
@@ -657,6 +608,15 @@ impl AgentLoop {
                     ctx.run.actions.push(exec_result.action.clone());
                     observations.push(exec_result.observation.clone());
                     ctx.run.observations.push(exec_result.observation.clone());
+
+                    if let Some(ref cb) = callback {
+                        cb.on_tool_result(
+                            &action_request.target,
+                            exec_result.status == ActionExecutionStatus::Succeeded,
+                            0,
+                        )
+                        .await;
+                    }
 
                     self.emit_status(
                         &mut status_updates,
@@ -752,255 +712,6 @@ impl AgentLoop {
                 // Continue to next iteration
                 Ok(StepResult {
                     stop_reason: String::new(), // Will be set by caller if this is the last step
-                    final_response: final_text,
-                    should_continue: true,
-                    tool_call_count_delta: executed_this_step,
-                    observations,
-                    status_updates,
-                })
-            }
-            Err(e) => {
-                ctx.run.status = AgentRunStatus::Failed;
-                ctx.run.error = Some(AgentRunError {
-                    message: e.to_string(),
-                    phase: "model".into(),
-                    recoverable: false,
-                });
-                self.emit_status(
-                    &mut status_updates,
-                    crate::agent::types::AgentLoopPhase::Failed,
-                    format!("Model generation failed: {}", e),
-                    0,
-                    None,
-                );
-                Ok(StepResult {
-                    stop_reason: "model_error".into(),
-                    final_response: format!("模型生成失败: {}", e),
-                    should_continue: false,
-                    tool_call_count_delta: 0,
-                    observations: vec![],
-                    status_updates,
-                })
-            }
-        }
-    }
-
-    /// Streaming variant of run_single_step. Forwards token chunks through the callback.
-    async fn run_single_step_streaming(
-        &self,
-        mut ctx: StepContext<'_>,
-        callback: Arc<dyn StreamingCallback>,
-    ) -> Result<StepResult> {
-        let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
-
-        // Clone values for potential JSON self-repair round
-        let memory_ctx = ctx.memory_context.clone();
-        let privacy = ctx.privacy_engine.clone();
-
-        // Generate model response with streaming
-        let generated = self
-            .generate_response_streaming(
-                ctx.task,
-                ctx.life_model,
-                ctx.tools_prompt,
-                ctx.memory_context,
-                ctx.privacy_engine,
-                callback.clone(),
-            )
-            .await;
-
-        match generated {
-            Ok(gen) => {
-                if ctx.run.context_summary.is_none() {
-                    ctx.run.context_summary = Some(gen.runtime_output.context_summary.clone());
-                }
-                if ctx.run.reasoning_trace.is_none() {
-                    ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
-                }
-
-                let reply = gen.reply;
-
-                // Check for tool calls in the reply
-                let mut parsed = self.parse_agent_reply(
-                    &reply,
-                    ctx.action_ctx,
-                    ctx.run,
-                    &mut ctx.tool_call_count,
-                )?;
-
-                // One-shot JSON self-repair for streaming variant
-                if parsed.json_parse_failed {
-                    self.emit_status(
-                        &mut status_updates,
-                        crate::agent::types::AgentLoopPhase::Thinking,
-                        "JSON parse failed, attempting one-shot repair...",
-                        0,
-                        None,
-                    );
-                    parsed = self
-                        .try_json_self_repair(
-                            ctx.task,
-                            ctx.life_model,
-                            ctx.tools_prompt,
-                            memory_ctx.clone(),
-                            privacy.clone(),
-                            ctx.action_ctx,
-                            ctx.run,
-                            &mut ctx.tool_call_count,
-                        )
-                        .await?;
-                }
-
-                let final_text = parsed.final_text;
-                if parsed.actions.is_empty() {
-                    return Ok(StepResult {
-                        stop_reason: "done".into(),
-                        final_response: final_text,
-                        should_continue: false,
-                        tool_call_count_delta: 0,
-                        observations: vec![],
-                        status_updates,
-                    });
-                }
-
-                // Execute actions
-                let mut observations = Vec::new();
-                let mut all_succeeded = true;
-                let mut budget_exceeded = false;
-                let mut executed_this_step: u32 = 0;
-
-                for (idx, action_request) in parsed.actions.iter().enumerate() {
-                    if ctx.tool_call_count + executed_this_step >= self.config.max_tool_calls {
-                        let obs =
-                            self.create_budget_exceeded_observation(ctx.run, ctx.tool_call_count);
-                        ctx.run.observations.push(obs.clone());
-                        observations.push(obs);
-                        budget_exceeded = true;
-                        break;
-                    }
-
-                    callback.on_tool_start(&action_request.target, 0).await;
-
-                    let exec_result = self
-                        .action_executor
-                        .execute(action_request.clone(), ctx.action_ctx)?;
-
-                    // Collect proposal_id from action output
-                    if let Some(ref output) = exec_result.action.output {
-                        let proposal_id = output
-                            .get("proposal_id")
-                            .and_then(|v: &Value| v.as_str())
-                            .map(|s| s.to_string())
-                            .or_else(|| {
-                                output
-                                    .get("text")
-                                    .and_then(|v: &Value| v.as_str())
-                                    .and_then(|text| {
-                                        serde_json::from_str::<serde_json::Value>(text)
-                                            .ok()
-                                            .and_then(|json| {
-                                                json.get("proposal_id")
-                                                    .and_then(|v: &Value| v.as_str())
-                                                    .map(|s| s.to_string())
-                                            })
-                                    })
-                            });
-                        if let Some(id) = proposal_id {
-                            callback.on_proposal("external_write_action", &id).await;
-                            ctx.run.add_generated_proposal(&id);
-                        }
-                    }
-
-                    callback
-                        .on_tool_result(
-                            &action_request.target,
-                            exec_result.status == ActionExecutionStatus::Succeeded,
-                            0,
-                        )
-                        .await;
-
-                    ctx.run.actions.push(exec_result.action.clone());
-                    observations.push(exec_result.observation.clone());
-                    ctx.run.observations.push(exec_result.observation.clone());
-
-                    self.emit_status(
-                        &mut status_updates,
-                        crate::agent::types::AgentLoopPhase::Observing,
-                        format!(
-                            "Tool {} result: {}",
-                            action_request.target,
-                            if exec_result.status == ActionExecutionStatus::Succeeded {
-                                "success"
-                            } else {
-                                "failed"
-                            }
-                        ),
-                        0,
-                        Some(idx as u32),
-                    );
-
-                    if exec_result.status != ActionExecutionStatus::Succeeded {
-                        all_succeeded = false;
-                    }
-
-                    ctx.tool_call_count += 1;
-                    executed_this_step += 1;
-                }
-
-                // (Same budget/confirmation/no_observations logic as run_single_step)
-                if budget_exceeded {
-                    let final_response =
-                        format!("已达到最大工具调用次数 ({})。", self.config.max_tool_calls);
-                    return Ok(StepResult {
-                        stop_reason: "max_tool_calls_reached".into(),
-                        final_response,
-                        should_continue: false,
-                        tool_call_count_delta: executed_this_step,
-                        observations,
-                        status_updates,
-                    });
-                }
-
-                if !all_succeeded {
-                    let pending_count = ctx
-                        .run
-                        .actions
-                        .iter()
-                        .filter(|a| a.status == "needs_confirmation")
-                        .count();
-                    let final_response = if pending_count > 0 {
-                        ctx.run.status = AgentRunStatus::WaitingPermission;
-                        "需要用户确认部分操作才能继续。".into()
-                    } else {
-                        "部分工具执行出错。".into()
-                    };
-                    return Ok(StepResult {
-                        stop_reason: if pending_count > 0 {
-                            "needs_confirmation".into()
-                        } else {
-                            "tool_execution_failed".into()
-                        },
-                        final_response,
-                        should_continue: false,
-                        tool_call_count_delta: executed_this_step,
-                        observations,
-                        status_updates,
-                    });
-                }
-
-                if observations.is_empty() {
-                    return Ok(StepResult {
-                        stop_reason: "no_observations".into(),
-                        final_response: final_text,
-                        should_continue: false,
-                        tool_call_count_delta: 0,
-                        observations: vec![],
-                        status_updates,
-                    });
-                }
-
-                Ok(StepResult {
-                    stop_reason: String::new(),
                     final_response: final_text,
                     should_continue: true,
                     tool_call_count_delta: executed_this_step,
@@ -1294,10 +1005,16 @@ impl AgentLoop {
         // Build structured follow-up with: task goal, available tools, observations
         let mut follow_up = String::new();
 
-        // Remind the model of the original task
+        // Remind the model of the original task (strip boundary markers if present)
+        let clean_user_text = task
+            .user_text
+            .replace(USER_REQUEST_START, "")
+            .replace(USER_REQUEST_END, "")
+            .trim()
+            .to_string();
         follow_up.push_str(&format!(
             "[系统] 继续完成用户的原始请求：\"{}\"\n\n",
-            task.user_text
+            clean_user_text
         ));
 
         // Include observations from tool executions

@@ -158,7 +158,13 @@ impl PrivacyPolicy {
             .iter()
             .find(|r| r.ptype == *ptype && r.enabled)
             .map(|r| r.action)
-            .unwrap_or(PrivacyAction::Allow)
+            .unwrap_or_else(|| {
+                log::warn!(
+                    "[PrivacyEngine] No rule matched for privacy type {:?}, defaulting to Mask (fail-closed)",
+                    ptype
+                );
+                PrivacyAction::Mask
+            })
     }
 }
 

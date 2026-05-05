@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
@@ -6,18 +7,18 @@ use tauri::State;
 pub(crate) async fn get_chat_history_with_state(
     session_id: &str,
     state: &Arc<AppState>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<Vec<ChatMessage>, AppError> {
     let store = state.memory_store.lock().await;
     store
         .load_recent_messages(session_id, 200)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn get_chat_history(
     session_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ChatMessage>, String> {
+) -> Result<Vec<ChatMessage>, AppError> {
     get_chat_history_with_state(&session_id, &state.inner().clone()).await
 }
 
@@ -25,14 +26,14 @@ pub(crate) async fn save_chat_message_with_state(
     session_id: &str,
     message: &ChatMessage,
     state: &Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let store = state.memory_store.lock().await;
     store
         .save_message(session_id, message)
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     store
         .touch_chat_session(session_id)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -40,7 +41,7 @@ pub async fn save_chat_message(
     session_id: String,
     message: ChatMessage,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     save_chat_message_with_state(&session_id, &message, &state.inner().clone()).await
 }
 
@@ -48,11 +49,11 @@ pub(crate) async fn create_chat_session_with_state(
     session_id: &str,
     title: &str,
     state: &Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let store = state.memory_store.lock().await;
     store
         .create_chat_session(session_id, title)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -60,7 +61,7 @@ pub async fn create_chat_session(
     session_id: String,
     title: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     create_chat_session_with_state(&session_id, &title, &state.inner().clone()).await
 }
 
@@ -69,35 +70,35 @@ pub async fn rename_chat_session(
     session_id: String,
     title: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let store = state.memory_store.lock().await;
     store
         .rename_chat_session(&session_id, &title)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn delete_chat_session(
     session_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let store = state.memory_store.lock().await;
     store
         .delete_chat_session(&session_id)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 pub(crate) async fn list_chat_sessions_with_state(
     state: &Arc<AppState>,
-) -> Result<Vec<openlife_core::memory::ChatSession>, String> {
+) -> Result<Vec<openlife_core::memory::ChatSession>, AppError> {
     let store = state.memory_store.lock().await;
-    store.list_chat_sessions(200).map_err(|e| e.to_string())
+    store.list_chat_sessions(200).map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn list_chat_sessions(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::memory::ChatSession>, String> {
+) -> Result<Vec<openlife_core::memory::ChatSession>, AppError> {
     list_chat_sessions_with_state(&state.inner().clone()).await
 }
 
