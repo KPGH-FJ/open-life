@@ -2,6 +2,157 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+// ── vNext AgentRunEvent ──────────────────────────────────────────────
+
+/// Append-only event kinds for every meaningful runtime transition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRunEventType {
+    RunCreated,
+    ContextAssembled,
+    ModelRouteSelected,
+    ModelCallStarted,
+    ModelCallCompleted,
+    ModelCallFailed,
+    ToolCallStarted,
+    ToolCallBlocked,
+    ToolCallCompleted,
+    ToolCallFailed,
+    ObservationCreated,
+    ProposalCreated,
+    FallbackStarted,
+    FallbackCompleted,
+    JsonRepairStarted,
+    JsonRepairCompleted,
+    RunCompleted,
+    RunFailed,
+}
+
+impl std::fmt::Display for AgentRunEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentRunEventType::RunCreated => write!(f, "run.created"),
+            AgentRunEventType::ContextAssembled => write!(f, "context.assembled"),
+            AgentRunEventType::ModelRouteSelected => write!(f, "model.route_selected"),
+            AgentRunEventType::ModelCallStarted => write!(f, "model.call_started"),
+            AgentRunEventType::ModelCallCompleted => write!(f, "model.call_completed"),
+            AgentRunEventType::ModelCallFailed => write!(f, "model.call_failed"),
+            AgentRunEventType::ToolCallStarted => write!(f, "tool.call_started"),
+            AgentRunEventType::ToolCallBlocked => write!(f, "tool.call_blocked"),
+            AgentRunEventType::ToolCallCompleted => write!(f, "tool.call_completed"),
+            AgentRunEventType::ToolCallFailed => write!(f, "tool.call_failed"),
+            AgentRunEventType::ObservationCreated => write!(f, "observation.created"),
+            AgentRunEventType::ProposalCreated => write!(f, "proposal.created"),
+            AgentRunEventType::FallbackStarted => write!(f, "fallback.started"),
+            AgentRunEventType::FallbackCompleted => write!(f, "fallback.completed"),
+            AgentRunEventType::JsonRepairStarted => write!(f, "json_repair.started"),
+            AgentRunEventType::JsonRepairCompleted => write!(f, "json_repair.completed"),
+            AgentRunEventType::RunCompleted => write!(f, "run.completed"),
+            AgentRunEventType::RunFailed => write!(f, "run.failed"),
+        }
+    }
+}
+
+/// Who or what originated an event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEventActor {
+    User,
+    Agent,
+    SubAgent(String),
+    Tool(String),
+    Runtime,
+    System,
+}
+
+impl std::fmt::Display for AgentEventActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentEventActor::User => write!(f, "user"),
+            AgentEventActor::Agent => write!(f, "agent"),
+            AgentEventActor::SubAgent(name) => write!(f, "sub_agent:{}", name),
+            AgentEventActor::Tool(name) => write!(f, "tool:{}", name),
+            AgentEventActor::Runtime => write!(f, "runtime"),
+            AgentEventActor::System => write!(f, "system"),
+        }
+    }
+}
+
+/// Optional redaction summary for events with sensitive payloads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactionSummary {
+    pub redacted: bool,
+    pub reason: String,
+    pub fields_removed: Vec<String>,
+}
+
+/// A single append-only trace event belonging to an AgentRun.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunEvent {
+    pub id: String,
+    pub run_id: String,
+    pub parent_event_id: Option<String>,
+    pub event_type: AgentRunEventType,
+    pub phase: Option<String>,
+    pub actor: AgentEventActor,
+    pub summary: String,
+    pub payload: serde_json::Value,
+    pub redaction: Option<RedactionSummary>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl AgentRunEvent {
+    /// Create a new event with a UUID id and current timestamp.
+    pub fn new(
+        run_id: &str,
+        event_type: AgentRunEventType,
+        actor: AgentEventActor,
+        summary: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            parent_event_id: None,
+            event_type,
+            phase: None,
+            actor,
+            summary: summary.into(),
+            payload,
+            redaction: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Set parent event linkage (e.g., for JSON repair after model failure).
+    pub fn with_parent(mut self, parent_event_id: &str) -> Self {
+        self.parent_event_id = Some(parent_event_id.to_string());
+        self
+    }
+
+    /// Set execution phase label.
+    pub fn with_phase(mut self, phase: impl Into<String>) -> Self {
+        self.phase = Some(phase.into());
+        self
+    }
+
+    /// Mark this event as redacted with the given summary.
+    pub fn with_redaction(
+        mut self,
+        reason: impl Into<String>,
+        fields_removed: Vec<String>,
+    ) -> Self {
+        self.redaction = Some(RedactionSummary {
+            redacted: true,
+            reason: reason.into(),
+            fields_removed,
+        });
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskKind {

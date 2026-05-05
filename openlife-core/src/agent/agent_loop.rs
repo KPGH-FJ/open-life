@@ -1,8 +1,12 @@
 use crate::agent::action_executor::{
     ActionExecutionContext, ActionExecutionStatus, ActionExecutor, AgentActionRequest,
 };
+use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
-use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
+use crate::agent::types::{
+    AgentEventActor, AgentObservation, AgentRun, AgentRunError, AgentRunEvent, AgentRunEventType,
+    AgentRunStatus, AgentTask,
+};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -68,6 +72,21 @@ impl AgentLoopConfig {
                  Use goal.read, life_model.read, and proposal.create tools.",
             ),
         }
+    }
+
+    /// vNext: get the role instruction as a versioned PromptBlock.
+    pub fn role_prompt_block(&self) -> Option<crate::agent::prompt_stack::PromptBlock> {
+        use crate::agent::prompt_stack::{PromptBlock, PromptPrivacyLevel, PromptPurpose};
+        self.role_system_instruction().map(|content| {
+            PromptBlock::new(
+                format!("role.{}", format!("{:?}", self.role).to_lowercase()),
+                "1.0.0",
+                PromptPurpose::BaseSystem,
+                content,
+            )
+            .with_privacy(PromptPrivacyLevel::Internal)
+            .with_applies_to(vec![format!("{:?}", self.role)])
+        })
     }
 }
 
@@ -168,6 +187,9 @@ pub struct AgentLoop {
     action_executor: ActionExecutor,
     scheduler: InferenceScheduler,
     config: AgentLoopConfig,
+    /// Optional vNext event store for runtime trace recording.
+    /// When None, no events are recorded (backward compatible).
+    event_store: Option<Arc<AgentRunEventStore>>,
 }
 
 impl AgentLoop {
@@ -182,6 +204,30 @@ impl AgentLoop {
             action_executor,
             scheduler,
             config,
+            event_store: None,
+        }
+    }
+
+    /// Set an event store for runtime trace recording.
+    pub fn with_event_store(mut self, store: Arc<AgentRunEventStore>) -> Self {
+        self.event_store = Some(store);
+        self
+    }
+
+    /// Best-effort event recording. Silently drops on failure.
+    fn try_record_event(
+        &self,
+        run_id: &str,
+        event_type: AgentRunEventType,
+        actor: AgentEventActor,
+        summary: impl Into<String>,
+        payload: serde_json::Value,
+    ) {
+        if let Some(ref store) = self.event_store {
+            let event = AgentRunEvent::new(run_id, event_type, actor, summary, payload);
+            if let Err(e) = store.append_event(&event) {
+                eprintln!("[AgentLoop] Failed to record event: {}", e);
+            }
         }
     }
 
@@ -265,6 +311,18 @@ impl AgentLoop {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
+
+        self.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "Agent run created",
+            serde_json::json!({
+                "session_id": actx.task.session_id,
+                "kind": "conversation",
+                "role": format!("{:?}", self.config.role),
+            }),
+        );
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
@@ -430,6 +488,34 @@ impl AgentLoop {
         run.output_preview = Some(preview_text(&final_response, 200));
         run.finished_at = Some(chrono::Utc::now());
 
+        if run.status == AgentRunStatus::Failed {
+            self.try_record_event(
+                &run.id,
+                AgentRunEventType::RunFailed,
+                AgentEventActor::Runtime,
+                format!("Run failed: {}", stop_reason),
+                serde_json::json!({
+                    "stop_reason": stop_reason,
+                    "step_count": step_count,
+                    "tool_call_count": tool_call_count,
+                    "error": run.error.as_ref().map(|e| e.message.clone()),
+                }),
+            );
+        } else {
+            self.try_record_event(
+                &run.id,
+                AgentRunEventType::RunCompleted,
+                AgentEventActor::Runtime,
+                format!("Run completed: {}", stop_reason),
+                serde_json::json!({
+                    "stop_reason": stop_reason,
+                    "step_count": step_count,
+                    "tool_call_count": tool_call_count,
+                    "reply_len": final_response.len(),
+                }),
+            );
+        }
+
         Ok(self.build_result(
             run,
             final_response,
@@ -498,6 +584,15 @@ impl AgentLoop {
         let privacy = ctx.privacy_engine.clone();
 
         // Generate model response (streaming if callback provided)
+        let step_num = ctx.run.step_count;
+        self.try_record_event(
+            &ctx.run.id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            format!("Step {}: model call started", step_num + 1),
+            serde_json::json!({"step": step_num + 1}),
+        );
+
         let generated = {
             let actx = AgentLoopContext {
                 task: ctx.task,
@@ -515,6 +610,14 @@ impl AgentLoop {
 
         match generated {
             Ok(gen) => {
+                self.try_record_event(
+                    &ctx.run.id,
+                    AgentRunEventType::ModelCallCompleted,
+                    AgentEventActor::Agent,
+                    format!("Step {}: model call completed", step_num + 1),
+                    serde_json::json!({"step": step_num + 1, "reply_len": gen.reply.len()}),
+                );
+
                 if ctx.run.context_summary.is_none() {
                     ctx.run.context_summary = Some(gen.runtime_output.context_summary.clone());
                 }
@@ -534,6 +637,13 @@ impl AgentLoop {
 
                 // One-shot JSON self-repair
                 if parsed.json_parse_failed {
+                    self.try_record_event(
+                        &ctx.run.id,
+                        AgentRunEventType::JsonRepairStarted,
+                        AgentEventActor::Runtime,
+                        "JSON parse failed, attempting one-shot self-repair",
+                        serde_json::json!({"reply_len": reply.len()}),
+                    );
                     self.emit_status(
                         &mut status_updates,
                         crate::agent::types::AgentLoopPhase::Thinking,
@@ -563,6 +673,17 @@ impl AgentLoop {
                             &mut ctx.tool_call_count,
                         )
                         .await?;
+                    self.try_record_event(
+                        &ctx.run.id,
+                        AgentRunEventType::JsonRepairCompleted,
+                        AgentEventActor::Runtime,
+                        if parsed.json_parse_failed {
+                            "JSON self-repair also failed"
+                        } else {
+                            "JSON self-repair succeeded"
+                        },
+                        serde_json::json!({"repaired": !parsed.json_parse_failed}),
+                    );
                 }
 
                 let final_text = parsed.final_text;
@@ -633,6 +754,13 @@ impl AgentLoop {
                 ))
             }
             Err(e) => {
+                self.try_record_event(
+                    &ctx.run.id,
+                    AgentRunEventType::ModelCallFailed,
+                    AgentEventActor::Agent,
+                    format!("Model call failed: {}", e),
+                    serde_json::json!({"error": e.to_string()}),
+                );
                 ctx.run.status = AgentRunStatus::Failed;
                 ctx.run.error = Some(AgentRunError {
                     message: e.to_string(),
@@ -988,6 +1116,16 @@ impl AgentLoop {
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
             if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
+                self.try_record_event(
+                    &run.id,
+                    AgentRunEventType::ToolCallBlocked,
+                    AgentEventActor::Runtime,
+                    "Tool call budget exceeded",
+                    serde_json::json!({
+                        "max_tool_calls": self.config.max_tool_calls,
+                        "current_count": *tool_call_count + executed_this_step,
+                    }),
+                );
                 let obs = self.create_budget_exceeded_observation(run, *tool_call_count);
                 observations.push(obs.clone());
                 run.observations.push(obs);
@@ -1016,12 +1154,48 @@ impl AgentLoop {
                 cb.on_tool_start(&action_request.target, 0).await;
             }
 
+            self.try_record_event(
+                &run.id,
+                AgentRunEventType::ToolCallStarted,
+                AgentEventActor::Tool(action_request.target.clone()),
+                format!("Executing tool: {}", action_request.target),
+                serde_json::json!({"tool": action_request.target}),
+            );
+
             let exec_result = match self
                 .action_executor
                 .execute(action_request.clone(), action_ctx)
             {
-                Ok(r) => r,
+                Ok(r) => {
+                    let is_success = r.status == ActionExecutionStatus::Succeeded
+                        || r.status == ActionExecutionStatus::NeedsConfirmation;
+                    if is_success {
+                        self.try_record_event(
+                            &run.id,
+                            AgentRunEventType::ToolCallCompleted,
+                            AgentEventActor::Tool(action_request.target.clone()),
+                            format!("Tool '{}' completed: {:?}", action_request.target, r.status),
+                            serde_json::json!({"tool": action_request.target, "status": format!("{:?}", r.status)}),
+                        );
+                    } else {
+                        self.try_record_event(
+                            &run.id,
+                            AgentRunEventType::ToolCallFailed,
+                            AgentEventActor::Tool(action_request.target.clone()),
+                            format!("Tool '{}' failed: {:?}", action_request.target, r.status),
+                            serde_json::json!({"tool": action_request.target, "status": format!("{:?}", r.status)}),
+                        );
+                    }
+                    r
+                }
                 Err(e) => {
+                    self.try_record_event(
+                        &run.id,
+                        AgentRunEventType::ToolCallFailed,
+                        AgentEventActor::Tool(action_request.target.clone()),
+                        format!("Tool '{}' execution error: {}", action_request.target, e),
+                        serde_json::json!({"tool": action_request.target, "error": e.to_string()}),
+                    );
                     let now = chrono::Utc::now();
                     let fail_action = crate::agent::types::AgentAction {
                         id: format!(
@@ -1384,6 +1558,7 @@ mod tests {
                 agent_run_store: None,
                 network_policy: None,
                 calendar_ics_paths: &[],
+                event_store: None,
             }
         }
     }
@@ -1675,6 +1850,318 @@ mod tests {
         let text = format!("{}😀more", "a".repeat(199));
         let preview = preview_text(&text, 200);
         assert!(preview.ends_with("😀..."));
+    }
+
+    // ── P0-2: AgentRunEvent recording tests ──────────────────────────────
+
+    fn make_test_agent_loop_with_events() -> (AgentLoop, Arc<AgentRunEventStore>) {
+        let agent = make_test_agent_loop();
+        let event_store = Arc::new(AgentRunEventStore::new_in_memory().unwrap());
+        let agent = agent.with_event_store(event_store.clone());
+        (agent, event_store)
+    }
+
+    #[test]
+    fn test_no_tool_response_event_sequence() {
+        let (agent, _store) = make_test_agent_loop_with_events();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("no-tool-1", "hello");
+        let mut tc: u32 = 0;
+
+        // Record run.created
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "run created",
+            serde_json::json!({}),
+        );
+        // Record model.call_started
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            "model call started",
+            serde_json::json!({}),
+        );
+
+        // Simulate no-tool response
+        let result = agent
+            .parse_agent_reply("Hello, how can I help?", &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert!(result.actions.is_empty());
+
+        // Record model.call_completed
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallCompleted,
+            AgentEventActor::Agent,
+            "model call completed",
+            serde_json::json!({"reply_len": 24}),
+        );
+        // Record run.completed
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "run completed",
+            serde_json::json!({"stop_reason": "no_tools"}),
+        );
+
+        let events = agent
+            .event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run.id)
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].event_type, AgentRunEventType::RunCreated);
+        assert_eq!(events[1].event_type, AgentRunEventType::ModelCallStarted);
+        assert_eq!(events[2].event_type, AgentRunEventType::ModelCallCompleted);
+        assert_eq!(events[3].event_type, AgentRunEventType::RunCompleted);
+    }
+
+    #[test]
+    fn test_malformed_json_repair_event_sequence() {
+        let (agent, _store) = make_test_agent_loop_with_events();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("malformed-json-1", "hello");
+        let mut tc: u32 = 0;
+
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "run created",
+            serde_json::json!({}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            "model call started",
+            serde_json::json!({}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallCompleted,
+            AgentEventActor::Agent,
+            "model call completed",
+            serde_json::json!({}),
+        );
+
+        // Simulate malformed JSON response (contains '{' but not valid JSON)
+        let result = agent
+            .parse_agent_reply(
+                r#"{"final": "almost valid but missing bracket"#,
+                &action_ctx,
+                &mut run,
+                &mut tc,
+            )
+            .unwrap();
+        assert!(result.json_parse_failed); // Should signal repair needed
+
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::JsonRepairStarted,
+            AgentEventActor::Runtime,
+            "json repair started",
+            serde_json::json!({}),
+        );
+        // Simulate repair succeeded (valid JSON after repair)
+        let repair_reply = r#"{"final": "repaired response"}"#;
+        let repair_result = agent
+            .parse_agent_reply(repair_reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!repair_result.json_parse_failed);
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::JsonRepairCompleted,
+            AgentEventActor::Runtime,
+            "json repair succeeded",
+            serde_json::json!({"repaired": true}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "run completed",
+            serde_json::json!({}),
+        );
+
+        let events = agent
+            .event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run.id)
+            .unwrap();
+        assert_eq!(events.len(), 6);
+        // Verify repair events exist in sequence
+        let repair_start_ids: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.event_type == AgentRunEventType::JsonRepairStarted)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(repair_start_ids.len(), 1);
+        let repair_complete_ids: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.event_type == AgentRunEventType::JsonRepairCompleted)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(repair_complete_ids.len(), 1);
+        assert!(
+            repair_complete_ids[0] > repair_start_ids[0],
+            "repair completed should come after repair started"
+        );
+    }
+
+    #[test]
+    fn test_blocked_tool_call_event_sequence() {
+        let (agent, _store) = make_test_agent_loop_with_events();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("blocked-tool-1", "do many things");
+        let mut tc: u32 = 0;
+
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "run created",
+            serde_json::json!({}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            "model call started",
+            serde_json::json!({}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ModelCallCompleted,
+            AgentEventActor::Agent,
+            "model call completed",
+            serde_json::json!({}),
+        );
+
+        // Parse tool-call reply
+        let reply = r#"{"final":"ok","actions":[{"name":"tool1","arguments":{"key":"v1"}}]}"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+        assert!(!result.json_parse_failed);
+        assert_eq!(result.actions.len(), 1);
+
+        // Simulate tool blocked (budget exceeded or permission denied)
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ToolCallStarted,
+            AgentEventActor::Tool("tool1".to_string()),
+            "executing tool1",
+            serde_json::json!({"tool": "tool1"}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Runtime,
+            "tool1 blocked: budget exceeded",
+            serde_json::json!({"tool": "tool1", "reason": "budget"}),
+        );
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "run completed",
+            serde_json::json!({"stop_reason": "max_tool_calls_reached"}),
+        );
+
+        let events = agent
+            .event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run.id)
+            .unwrap();
+        // Verify blocked event exists
+        let blocked = events
+            .iter()
+            .find(|e| e.event_type == AgentRunEventType::ToolCallBlocked);
+        assert!(blocked.is_some());
+        assert!(blocked.unwrap().summary.contains("budget exceeded"));
+    }
+
+    #[test]
+    fn test_events_not_recorded_when_store_is_none() {
+        let agent = make_test_agent_loop(); // no event store
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("no-store-1", "test");
+        let mut tc: u32 = 0;
+
+        // These should not crash
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "should not persist",
+            serde_json::json!({}),
+        );
+        let _ = agent.parse_agent_reply("hello", &action_ctx, &mut run, &mut tc);
+        agent.try_record_event(
+            &run.id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "should not persist",
+            serde_json::json!({}),
+        );
+
+        // No events should be stored
+        assert!(agent.event_store.is_none());
+    }
+
+    #[test]
+    fn test_model_failed_event_recorded() {
+        let (agent, store) = make_test_agent_loop_with_events();
+        let run_id = "model-fail-1";
+
+        agent.try_record_event(
+            run_id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "run created",
+            serde_json::json!({}),
+        );
+        agent.try_record_event(
+            run_id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            "model call started",
+            serde_json::json!({"step": 1}),
+        );
+        agent.try_record_event(
+            run_id,
+            AgentRunEventType::ModelCallFailed,
+            AgentEventActor::Agent,
+            "model timeout",
+            serde_json::json!({"error": "timeout", "step": 1}),
+        );
+        agent.try_record_event(
+            run_id,
+            AgentRunEventType::RunFailed,
+            AgentEventActor::Runtime,
+            "run failed due to model error",
+            serde_json::json!({}),
+        );
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[2].event_type, AgentRunEventType::ModelCallFailed);
+        assert_eq!(events[3].event_type, AgentRunEventType::RunFailed);
     }
 }
 

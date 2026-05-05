@@ -157,6 +157,13 @@ P0 tests should prove:
 ## Open Questions
 
 1. Should event persistence be best-effort for low-risk read-only runs?
+   → **Resolved (P0-5):** Yes for P0. `try_record_event` silently drops on failure. Side-effecting ops should require persistence post-P1.
+
 2. Should event IDs be UUIDs or deterministic monotonic IDs per run?
+   → **Resolved (P0-1):** UUIDs (`Uuid::new_v4()`) for P0. Monotonic IDs can be added later.
+
 3. Which payload fields are stored raw, summarized, or redacted?
+   → **Resolved (P0-5):** Raw by default for P0. Redaction is opt-in via `AgentRunEvent.with_redaction()`. Full redaction policy governed by ADR 0006.
+
 4. Should existing AgentRun status updates be migrated or merely bridged going forward?
+   → **Resolved (P0-5):** Bridge only future runs. No migration. See `plans/openlife_vnext_agentrun_event_data_bridge.md` for full analysis.

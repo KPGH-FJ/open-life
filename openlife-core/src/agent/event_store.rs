@@ -1,0 +1,418 @@
+use crate::agent::types::{AgentRunEvent, AgentRunEventType};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection};
+use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Append-only event store for AgentRunEvent records.
+/// Colocated with AgentRunStore; uses a separate `agent_run_events` table
+/// in the same database (or a dedicated events database).
+pub struct AgentRunEventStore {
+    conn: Mutex<Connection>,
+}
+
+impl AgentRunEventStore {
+    /// Open an event store at the given path. Creates the database and table
+    /// if they do not exist.
+    pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
+        let db_path: PathBuf = db_path.into();
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(&db_path)
+            .with_context(|| format!("failed to open event store at {:?}", db_path))?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
+    /// Open an in-memory event store (for tests).
+    pub fn new_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory().context("failed to open in-memory event store")?;
+        let store = Self {
+            conn: Mutex::new(conn),
+        };
+        store.init_tables()?;
+        Ok(store)
+    }
+
+    fn init_tables(&self) -> Result<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS agent_run_events (
+                id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                parent_event_id TEXT,
+                event_type TEXT NOT NULL,
+                phase TEXT,
+                actor TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                redaction_json TEXT,
+                created_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_events_run_id ON agent_run_events(run_id, created_at ASC)",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_agent_run_events_type ON agent_run_events(event_type)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Append a single event. Returns the event id.
+    pub fn append_event(&self, event: &AgentRunEvent) -> Result<String> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        conn.execute(
+            "INSERT INTO agent_run_events (
+                id, run_id, parent_event_id, event_type, phase, actor,
+                summary, payload_json, redaction_json, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                event.id,
+                event.run_id,
+                event.parent_event_id,
+                event.event_type.to_string(),
+                event.phase,
+                event.actor.to_string(),
+                event.summary,
+                serde_json::to_string(&event.payload).unwrap_or_default(),
+                event
+                    .redaction
+                    .as_ref()
+                    .map(|r| serde_json::to_string(r).unwrap_or_default()),
+                event.created_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(event.id.clone())
+    }
+
+    /// List events for a run, ordered by creation time ascending.
+    pub fn list_events_by_run(&self, run_id: &str) -> Result<Vec<AgentRunEvent>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, parent_event_id, event_type, phase, actor,
+                    summary, payload_json, redaction_json, created_at
+             FROM agent_run_events
+             WHERE run_id = ?1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([run_id], |row| {
+            let event_type_str: String = row.get(3)?;
+            let actor_str: String = row.get(5)?;
+            let created_at_str: String = row.get(9)?;
+            let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?
+                .with_timezone(&chrono::Utc);
+
+            Ok(AgentRunEvent {
+                id: row.get(0)?,
+                run_id: row.get(1)?,
+                parent_event_id: row.get(2)?,
+                event_type: parse_event_type(&event_type_str),
+                phase: row.get(4)?,
+                actor: parse_event_actor(&actor_str),
+                summary: row.get(6)?,
+                payload: row
+                    .get::<_, String>(7)
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or(serde_json::json!({})),
+                redaction: row
+                    .get::<_, Option<String>>(8)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                created_at,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Count events for a run.
+    pub fn count_events_by_run(&self, run_id: &str) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM agent_run_events WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+}
+
+fn parse_event_type(s: &str) -> AgentRunEventType {
+    match s {
+        "run.created" => AgentRunEventType::RunCreated,
+        "context.assembled" => AgentRunEventType::ContextAssembled,
+        "model.route_selected" => AgentRunEventType::ModelRouteSelected,
+        "model.call_started" => AgentRunEventType::ModelCallStarted,
+        "model.call_completed" => AgentRunEventType::ModelCallCompleted,
+        "model.call_failed" => AgentRunEventType::ModelCallFailed,
+        "tool.call_started" => AgentRunEventType::ToolCallStarted,
+        "tool.call_blocked" => AgentRunEventType::ToolCallBlocked,
+        "tool.call_completed" => AgentRunEventType::ToolCallCompleted,
+        "tool.call_failed" => AgentRunEventType::ToolCallFailed,
+        "observation.created" => AgentRunEventType::ObservationCreated,
+        "proposal.created" => AgentRunEventType::ProposalCreated,
+        "fallback.started" => AgentRunEventType::FallbackStarted,
+        "fallback.completed" => AgentRunEventType::FallbackCompleted,
+        "json_repair.started" => AgentRunEventType::JsonRepairStarted,
+        "json_repair.completed" => AgentRunEventType::JsonRepairCompleted,
+        "run.completed" => AgentRunEventType::RunCompleted,
+        "run.failed" => AgentRunEventType::RunFailed,
+        _ => AgentRunEventType::RunCreated, // safe fallback
+    }
+}
+
+fn parse_event_actor(s: &str) -> crate::agent::types::AgentEventActor {
+    if s == "user" {
+        crate::agent::types::AgentEventActor::User
+    } else if s == "agent" {
+        crate::agent::types::AgentEventActor::Agent
+    } else if s == "runtime" {
+        crate::agent::types::AgentEventActor::Runtime
+    } else if s == "system" {
+        crate::agent::types::AgentEventActor::System
+    } else if let Some(name) = s.strip_prefix("sub_agent:") {
+        crate::agent::types::AgentEventActor::SubAgent(name.to_string())
+    } else if let Some(name) = s.strip_prefix("tool:") {
+        crate::agent::types::AgentEventActor::Tool(name.to_string())
+    } else {
+        crate::agent::types::AgentEventActor::System
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::types::{AgentEventActor, AgentRunEventType};
+
+    #[test]
+    fn test_append_and_list_events() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-run-001";
+
+        let e1 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "Run created by chat",
+            serde_json::json!({"task_kind": "conversation"}),
+        );
+        let e2 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::Agent,
+            "Calling deepseek-chat",
+            serde_json::json!({"provider": "openrouter", "model": "deepseek-chat"}),
+        );
+        let e3 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelCallCompleted,
+            AgentEventActor::Agent,
+            "Model call completed",
+            serde_json::json!({"latency_ms": 1234}),
+        );
+        let e4 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "Run completed successfully",
+            serde_json::json!({"stop_reason": "no_tools"}),
+        );
+
+        let id1 = store.append_event(&e1).unwrap();
+        let id2 = store.append_event(&e2).unwrap();
+        let id3 = store.append_event(&e3).unwrap();
+        let id4 = store.append_event(&e4).unwrap();
+
+        assert_eq!(id1, e1.id);
+        assert_eq!(id2, e2.id);
+        assert_eq!(id3, e3.id);
+        assert_eq!(id4, e4.id);
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].event_type, AgentRunEventType::RunCreated);
+        assert_eq!(events[1].event_type, AgentRunEventType::ModelCallStarted);
+        assert_eq!(events[2].event_type, AgentRunEventType::ModelCallCompleted);
+        assert_eq!(events[3].event_type, AgentRunEventType::RunCompleted);
+
+        assert_eq!(store.count_events_by_run(run_id).unwrap(), 4);
+    }
+
+    #[test]
+    fn test_events_are_appended_in_order() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-run-002";
+
+        for i in 0..10 {
+            let e = AgentRunEvent::new(
+                run_id,
+                AgentRunEventType::ModelCallStarted,
+                AgentEventActor::Agent,
+                format!("call {}", i),
+                serde_json::json!({"index": i}),
+            );
+            store.append_event(&e).unwrap();
+        }
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 10);
+        for (idx, event) in events.iter().enumerate() {
+            let payload: i32 = event.payload.get("index").unwrap().as_i64().unwrap() as i32;
+            assert_eq!(payload, idx as i32);
+        }
+    }
+
+    #[test]
+    fn test_different_runs_isolated() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+
+        let e_a = AgentRunEvent::new(
+            "run-a",
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "A",
+            serde_json::json!({}),
+        );
+        let e_b = AgentRunEvent::new(
+            "run-b",
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "B",
+            serde_json::json!({}),
+        );
+
+        store.append_event(&e_a).unwrap();
+        store.append_event(&e_b).unwrap();
+
+        assert_eq!(store.list_events_by_run("run-a").unwrap().len(), 1);
+        assert_eq!(store.list_events_by_run("run-b").unwrap().len(), 1);
+        assert_eq!(
+            store.list_events_by_run("run-nonexistent").unwrap().len(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_event_with_parent_linkage() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-run-parent";
+
+        let model_failed = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelCallFailed,
+            AgentEventActor::Agent,
+            "Model returned malformed JSON",
+            serde_json::json!({"error": "parse error"}),
+        );
+        store.append_event(&model_failed).unwrap();
+
+        let repair_started = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::JsonRepairStarted,
+            AgentEventActor::Runtime,
+            "Attempting JSON self-repair",
+            serde_json::json!({}),
+        )
+        .with_parent(&model_failed.id);
+
+        store.append_event(&repair_started).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[1].parent_event_id.as_deref(),
+            Some(model_failed.id.as_str())
+        );
+    }
+
+    #[test]
+    fn test_events_payload_preserves_data() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-run-payload";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallCompleted,
+            AgentEventActor::Tool("file.read".to_string()),
+            "Read file successfully",
+            serde_json::json!({
+                "tool": "file.read",
+                "path": "/tmp/test.txt",
+                "size_bytes": 42,
+                "lines": 3
+            }),
+        )
+        .with_phase("execution");
+
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let stored = &events[0];
+        assert_eq!(stored.actor, AgentEventActor::Tool("file.read".to_string()));
+        assert_eq!(stored.phase.as_deref(), Some("execution"));
+        assert_eq!(
+            stored.payload.get("path").unwrap().as_str().unwrap(),
+            "/tmp/test.txt"
+        );
+        assert_eq!(
+            stored.payload.get("size_bytes").unwrap().as_i64().unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn test_events_with_redaction() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-run-redacted";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelCallStarted,
+            AgentEventActor::System,
+            "Cloud model call started",
+            serde_json::json!({"model": "deepseek-chat"}),
+        )
+        .with_redaction(
+            "life_model fields redacted",
+            vec!["life_model.identity".to_string()],
+        );
+
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let redaction = events[0].redaction.as_ref().unwrap();
+        assert!(redaction.redacted);
+        assert_eq!(redaction.reason, "life_model fields redacted");
+        assert_eq!(redaction.fields_removed, vec!["life_model.identity"]);
+    }
+}

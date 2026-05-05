@@ -1247,6 +1247,7 @@ impl LifeModelManager {
 
 pub mod patch;
 pub mod patch_store;
+pub mod risk;
 
 #[cfg(test)]
 mod tests {

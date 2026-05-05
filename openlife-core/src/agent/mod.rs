@@ -1,9 +1,13 @@
 pub mod action_executor;
 pub mod agent_loop;
 pub mod context_assembler;
+pub mod event_store;
+pub mod execution_facade;
+pub mod memory_evidence;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
+pub mod prompt_stack;
 pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_store;

@@ -15,8 +15,8 @@ use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
 use crate::agent::types::{
-    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
-    ToolActionScope,
+    AgentAction, AgentEventActor, AgentObservation, AgentProposal, AgentRunEvent,
+    AgentRunEventType, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
 };
 
 /// Returns true if the tool name indicates a proposal-generation tool that
@@ -209,6 +209,25 @@ impl super::ActionExecutor {
             } else {
                 ActionExecutionStatus::Blocked
             };
+
+            // Record tool.call_blocked event
+            if let (Some(event_store), Some(ref run_id)) = (ctx.event_store, &request.source_run_id)
+            {
+                let event = AgentRunEvent::new(
+                    run_id,
+                    AgentRunEventType::ToolCallBlocked,
+                    AgentEventActor::Tool(tool_name.to_string()),
+                    format!("Tool '{}' blocked: {}", tool_name, decision.reason),
+                    serde_json::json!({
+                        "tool": tool_name,
+                        "reason": decision.reason,
+                        "declarative_only": manifest.as_ref().is_some_and(|m| m.declarative_only),
+                        "needs_confirmation": needs_confirmation,
+                    }),
+                );
+                let _ = event_store.append_event(&event);
+            }
+
             return Ok(ActionExecutionResult {
                 action,
                 observation,

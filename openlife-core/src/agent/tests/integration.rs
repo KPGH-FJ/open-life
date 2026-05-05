@@ -7,13 +7,16 @@
 //! 4. Step/tool budget stops execution
 //! 5. Tool failure still records observation
 
+use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
-    AgentLoopConfig, AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
+    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentEventActor,
+    AgentExecutionBudget, AgentLoop, AgentLoopConfig, AgentObservation, AgentRun,
+    AgentRunEventType, AgentRunStatus, AgentTask, AgentTaskKind,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
+use crate::mcp::McpRegistry;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
 
@@ -133,6 +136,7 @@ fn test_action_parser_final_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -164,6 +168,7 @@ fn test_action_parser_actions_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -197,6 +202,7 @@ fn test_action_parser_legacy_tool_calls() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -228,6 +234,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let reply = "{broken json";
@@ -260,6 +267,7 @@ fn test_action_parser_no_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -291,6 +299,7 @@ fn test_action_parser_final_with_actions() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     // Model returns both final text and tool calls
@@ -368,6 +377,7 @@ fn test_max_tool_calls_stop_reason() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     // Simulate model returning actions when budget is already exceeded
@@ -401,6 +411,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     // Malformed JSON: missing closing brace
@@ -437,6 +448,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
@@ -476,6 +488,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -544,6 +557,7 @@ fn test_permission_check_tool() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -596,6 +610,7 @@ fn test_memory_propose_write_creates_proposal() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        event_store: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -648,6 +663,29 @@ fn test_agent_loop_config_role_planner_instruction() {
     assert!(instruction.contains("goal.read"));
 }
 
+/// P1-3: Role prompt is available as a versioned PromptBlock.
+#[test]
+fn test_agent_role_prompt_block_traceable() {
+    let config = AgentLoopConfig {
+        role: crate::agent::agent_loop::AgentRole::Planner,
+        ..Default::default()
+    };
+    let block = config.role_prompt_block().unwrap();
+    assert_eq!(block.id, "role.planner");
+    assert_eq!(block.version, "1.0.0");
+    assert!(block.content.contains("Planner mode"));
+    assert!(block.content.contains("goal.read"));
+    assert!(block.applies_to.contains(&"Planner".to_string()));
+    assert!(block.is_cloud_safe());
+}
+
+/// P1-3: Generalist role produces no prompt block.
+#[test]
+fn test_agent_role_generalist_no_block() {
+    let config = AgentLoopConfig::default();
+    assert!(config.role_prompt_block().is_none());
+}
+
 #[test]
 fn test_agent_loop_config_toolset_allowlist() {
     let config = AgentLoopConfig {
@@ -657,4 +695,179 @@ fn test_agent_loop_config_toolset_allowlist() {
     };
     assert_eq!(config.toolset_allowlist.len(), 2);
     assert!(config.toolset_allowlist.contains(&"goal.read".to_string()));
+}
+
+// ── P1-1: Declarative-Only Enforcement tests ──────────────────────────
+
+/// Test that declarative-only tools are filtered from the tools prompt.
+#[test]
+fn test_declarative_only_tools_filtered_from_prompt() {
+    let mut registry = McpRegistry::new();
+    registry.register_default_builtins();
+
+    let prompt = registry.tools_prompt();
+    // email.read is declarative_only
+    assert!(
+        !prompt.contains("email.read"),
+        "declarative-only email.read should NOT be in tools prompt"
+    );
+    // snapshot.create is declarative_only
+    assert!(
+        !prompt.contains("snapshot.create"),
+        "declarative-only snapshot.create should NOT be in tools prompt"
+    );
+    // life_model.read is executable
+    assert!(
+        prompt.contains("life_model.read"),
+        "executable life_model.read SHOULD be in tools prompt"
+    );
+    // web.search is executable
+    assert!(
+        prompt.contains("web.search"),
+        "executable web.search SHOULD be in tools prompt"
+    );
+}
+
+/// Test that declarative-only tools are blocked at runtime by ActionExecutor.
+#[test]
+fn test_declarative_only_tool_blocked_at_runtime() {
+    let mut registry = McpRegistry::new();
+    registry.register_default_builtins();
+    // Verify email.read is declarative_only
+    let email_manifest = registry
+        .list_manifests()
+        .into_iter()
+        .find(|m| m.name == "email.read")
+        .expect("email.read should exist");
+    assert!(email_manifest.declarative_only);
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        event_store: None,
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "email.read".into(),
+        input: serde_json::json!({"arguments": {}}),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
+    assert_eq!(result.action.status, "blocked");
+    assert!(result.observation.content.contains("declarative-only"));
+}
+
+/// Test that blocked tool execution records an AgentRunEvent.
+#[test]
+fn test_blocked_tool_records_event() {
+    let mut registry = McpRegistry::new();
+    registry.register_default_builtins();
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let event_store = AgentRunEventStore::new_in_memory().unwrap();
+    let run_id = "test-blocked-event-001";
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        event_store: Some(&event_store),
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "email.read".into(),
+        input: serde_json::json!({"arguments": {}}),
+        source_run_id: Some(run_id.to_string()),
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
+
+    // Verify event was recorded
+    let events = event_store.list_events_by_run(run_id).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event_type, AgentRunEventType::ToolCallBlocked);
+    assert_eq!(
+        events[0].actor,
+        AgentEventActor::Tool("email.read".to_string())
+    );
+    assert!(events[0].summary.contains("blocked"));
+}
+
+/// Test that proposal-generating tools remain callable (not blocked).
+#[test]
+fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
+    let mut registry = McpRegistry::new();
+    registry.register_default_builtins();
+
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[safe_path.clone()],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: Some(&prop_store),
+        agent_run_store: None,
+        event_store: None,
+        network_policy: None,
+    };
+
+    let executor = ActionExecutor::new(ActionExecutorConfig::default());
+
+    // memory.propose_write is a proposal-generating tool
+    let request = crate::agent::AgentActionRequest {
+        action_type: "mcp_tool".into(),
+        target: "memory.propose_write".into(),
+        input: serde_json::json!({"arguments": {"content": "test memory"}}),
+        source_run_id: None,
+        step_index: 0,
+    };
+
+    let result = executor.execute(request, &ctx).unwrap();
+    // Should succeed or need confirmation, not be blocked
+    assert!(result.status != crate::agent::ActionExecutionStatus::Blocked);
+    assert!(result.action.status == "succeeded" || result.action.status == "needs_confirmation");
 }
