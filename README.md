@@ -16,16 +16,33 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **Execution Tools 分层落地**：P1（file.read、web.fetch）真实注册，P2（calendar、email）declarative-only stub。
+- **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
+- **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
-- **`make ci` 为发布门控**：258 测试全绿，前端生产构建通过。
+- **`make ci` 为发布门控**：Rust、前端测试与生产构建共同作为发布门控。
+
+下一大阶段是 **vNext Agent Framework Upgrade**。目标不是继续堆页面或工具，而是把 OpenLife 升级为：
+
+```text
+LifeModel-governed Personal Agent Framework
+```
+
+vNext 的重点包括：
+
+- `AgentRunEvent`：append-only runtime trace。
+- `ToolRuntime`：工具元数据、权限、declarative-only 过滤和执行审计。
+- `PromptStack`：system prompt / planning prompt / tool prompt / privacy prompt 的一等架构。
+- `MemoryEvidence`：让记忆成为 LifeModel 进化的证据层，而不只是检索上下文。
+- `AgentSpec / AgentPlan`：为 PlanMode 和 SubAgentRuntime 奠定结构。
+- AI coding governance：高风险边界采用 ADR-first 流程。
 
 新的架构基准文档见：
 
 - [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 - [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
+- [OpenLife vNext Architecture Principles](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_architecture_principles.md)
+- [OpenLife vNext Migration Plan](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_migration_plan.md)
 
 ## 核心能力
 
@@ -92,6 +109,20 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 ```
 
 ## 推荐阅读顺序
+
+### vNext 大阶段开发
+
+1. [Current Agent Runtime Audit](/Users/fujing/Desktop/偶来福/plans/current_agent_runtime_audit.md)
+2. [OpenLife vNext Architecture Principles](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_architecture_principles.md)
+3. [OpenLife vNext Architecture Diagrams](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_architecture_diagrams.md)
+4. [OpenLife vNext Core Primitives and Boundaries](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_core_primitives_and_boundaries.md)
+5. [OpenLife vNext Migration Plan](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_migration_plan.md)
+6. [OpenLife vNext P0/P1 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p0_p1_task_specs.md)
+7. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
+8. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
+9. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
+
+### 现有架构背景
 
 1. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 2. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
@@ -216,11 +247,14 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 
 ## 当前重要开发方向
 
-1. 灰度测试 ContextAssembler V2 和 ModelRouter，收集反馈。
-2. 建立 RolloutMetrics 监控和自动回滚机制。
-3. 实现 Proactive Agent 的安全 MVP。
-4. 将 MemoryAssembler 接入真实的 VectorStore。
-5. 完善 E2E 测试覆盖和性能基准。
+当前开发重心已转向 vNext Agent Framework Upgrade：
+
+1. 审阅并接受首批 ADR：AgentRunEvent、PromptStack、ToolRuntime、LifeModel risk、MemoryEvidence、Cloud privacy。
+2. 按 [P0/P1 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p0_p1_task_specs.md) 执行第一批小步迁移。
+3. 先做 runtime trace 和 execution path convergence，不急于实现 SubAgent 或 Bash。
+4. 建立 PromptStack/system prompt 架构，避免新增散落 prompt。
+5. 将 Memory 升级为 LifeModel evolution 的证据层，但所有 evolution 只生成 Proposal，不直接改 LifeModel。
+6. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为每个阶段设置门控。
 
 ## 常见问题
 
