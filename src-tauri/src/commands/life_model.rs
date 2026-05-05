@@ -1,24 +1,26 @@
+use crate::errors::AppError;
 use crate::{persist_life_model, AppState};
 use openlife_core::life_model::LifeModel;
 use std::sync::Arc;
 use tauri::State;
 
-pub(crate) async fn get_life_model_with_state(state: &Arc<AppState>) -> Result<LifeModel, String> {
+pub(crate) async fn get_life_model_with_state(state: &Arc<AppState>) -> Result<LifeModel, AppError> {
     let manager = state.life_model_manager.lock().await;
-    manager.load().map_err(|e| e.to_string())
+    manager.load().map_err(AppError::from)
 }
 
 #[tauri::command]
-pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel, String> {
+pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel, AppError> {
     get_life_model_with_state(&state.inner().clone()).await
 }
 
 pub(crate) async fn save_life_model_with_state(
     life_model: LifeModel,
     state: &Arc<AppState>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     persist_life_model(&state.clone(), life_model, true)
         .await
+        .map_err(AppError::from)
         .map(|_| ())
 }
 
@@ -26,7 +28,7 @@ pub(crate) async fn save_life_model_with_state(
 pub async fn save_life_model(
     life_model: LifeModel,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     save_life_model_with_state(life_model, &state.inner().clone()).await
 }
 

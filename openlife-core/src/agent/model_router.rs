@@ -523,7 +523,11 @@ impl ModelRouter {
         }
 
         // Sort by score descending
-        scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        scores.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let best = &scores[0];
         let fallback = scores.get(1);

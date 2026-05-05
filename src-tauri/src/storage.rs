@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
 
@@ -26,12 +27,12 @@ pub(crate) fn load_mcp_audit_keyring_from_path(path: &std::path::Path) -> Vec<Au
 pub(crate) fn save_mcp_audit_keyring_to_path(
     path: &std::path::Path,
     configs: &[AuditKeyConfig],
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
     }
-    let text = serde_json::to_string_pretty(configs).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(configs).map_err(AppError::from)?;
+    std::fs::write(path, text).map_err(AppError::from)
 }
 
 pub(crate) fn load_privacy_policy_from_path(path: &std::path::Path) -> PrivacyPolicy {
@@ -44,12 +45,12 @@ pub(crate) fn load_privacy_policy_from_path(path: &std::path::Path) -> PrivacyPo
 pub(crate) fn save_privacy_policy_to_path(
     path: &std::path::Path,
     policy: &PrivacyPolicy,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
     }
-    let text = policy.to_yaml()?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    let text = policy.to_yaml().map_err(AppError::from)?;
+    std::fs::write(path, text).map_err(AppError::from)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default)]
@@ -72,12 +73,12 @@ pub(crate) fn load_onboarding_status_from_path(path: &std::path::Path) -> Onboar
 pub(crate) fn save_onboarding_status_to_path(
     path: &std::path::Path,
     status: &OnboardingStatus,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
     }
-    let text = serde_json::to_string_pretty(status).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(status).map_err(AppError::from)?;
+    std::fs::write(path, text).map_err(AppError::from)
 }
 
 #[cfg(test)]

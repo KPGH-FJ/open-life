@@ -1,6 +1,12 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global counter for privacy warn log sampling.
+/// Fires 1 in every 100 unmatched rule warnings to prevent log flooding.
+static PRIVACY_WARN_COUNT: AtomicUsize = AtomicUsize::new(0);
+const PRIVACY_WARN_SAMPLE_RATE: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrivacyType {
@@ -159,10 +165,16 @@ impl PrivacyPolicy {
             .find(|r| r.ptype == *ptype && r.enabled)
             .map(|r| r.action)
             .unwrap_or_else(|| {
-                log::warn!(
-                    "[PrivacyEngine] No rule matched for privacy type {:?}, defaulting to Mask (fail-closed)",
-                    ptype
-                );
+                let count = PRIVACY_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
+                if count % PRIVACY_WARN_SAMPLE_RATE == 0 {
+                    log::warn!(
+                        "[PrivacyEngine] No rule matched for privacy type {:?}, defaulting to Mask (fail-closed). \
+                         This warning is sampled (1/{}). Total unmatched: {}",
+                        ptype,
+                        PRIVACY_WARN_SAMPLE_RATE,
+                        count + 1
+                    );
+                }
                 PrivacyAction::Mask
             })
     }

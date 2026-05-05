@@ -261,15 +261,6 @@ impl AgentLoop {
                 None,
             );
 
-            if let Some(ref cb) = callback {
-                cb.on_status(
-                    "thinking",
-                    &format!("Step {}: analyzing task", step_count + 1),
-                    step_count,
-                )
-                .await;
-            }
-
             // Check step budget
             if step_count >= self.config.max_steps {
                 stop_reason = "max_steps_reached".into();
@@ -365,11 +356,6 @@ impl AgentLoop {
                 step_count,
                 None,
             );
-        }
-
-        if let Some(ref cb) = callback {
-            cb.on_status("completed", &format!("Done: {}", stop_reason), step_count)
-                .await;
         }
 
         if run.status == AgentRunStatus::Running {
@@ -498,6 +484,9 @@ impl AgentLoop {
                         0,
                         None,
                     );
+                    if let Some(ref cb) = callback {
+                        cb.on_status("thinking", "JSON parse failed, attempting one-shot repair...", 0).await;
+                    }
                     parsed = self
                         .try_json_self_repair(
                             ctx.task,
@@ -524,6 +513,9 @@ impl AgentLoop {
                         0,
                         None,
                     );
+                    if let Some(ref cb) = callback {
+                        cb.on_status("generating_final", "No tools needed, generating final answer", 0).await;
+                    }
                     return Ok(StepResult {
                         stop_reason: "no_tools".into(),
                         final_response: final_text,
@@ -542,6 +534,9 @@ impl AgentLoop {
                     0,
                     None,
                 );
+                if let Some(ref cb) = callback {
+                    cb.on_status("planning_tool", &format!("Planning to execute {} tool(s)", tool_actions.len()), 0).await;
+                }
 
                 // Execute tools and build observations
                 let mut observations = Vec::new();
@@ -567,6 +562,9 @@ impl AgentLoop {
                         0,
                         Some(idx as u32),
                     );
+                    if let Some(ref cb) = callback {
+                        cb.on_status("executing_tool", &format!("Executing tool: {}", action_request.target), 0).await;
+                    }
 
                     if let Some(ref cb) = callback {
                         cb.on_tool_start(&action_request.target, 0).await;
@@ -633,6 +631,10 @@ impl AgentLoop {
                         0,
                         Some(idx as u32),
                     );
+                    if let Some(ref cb) = callback {
+                        let result_str = if exec_result.status == ActionExecutionStatus::Succeeded { "success" } else { "failed" };
+                        cb.on_status("observing", &format!("Tool {} result: {}", action_request.target, result_str), 0).await;
+                    }
 
                     if exec_result.status != ActionExecutionStatus::Succeeded {
                         all_succeeded = false;
@@ -679,6 +681,9 @@ impl AgentLoop {
                             0,
                             None,
                         );
+                        if let Some(ref cb) = callback {
+                            cb.on_status("waiting_permission", "Waiting for user permission to continue", 0).await;
+                        }
                         "我需要先执行一些高风险或含敏感参数的工具操作，确认后才能继续给你结果。"
                             .into()
                     } else {
@@ -733,6 +738,9 @@ impl AgentLoop {
                     0,
                     None,
                 );
+                if let Some(ref cb) = callback {
+                    cb.on_status("failed", &format!("Model generation failed: {}", e), 0).await;
+                }
                 Ok(StepResult {
                     stop_reason: "model_error".into(),
                     final_response: format!("模型生成失败: {}", e),
@@ -1178,41 +1186,5 @@ fn search_memory_for_context(
 
 /// Extract JSON object from text.
 fn try_extract_json(text: &str) -> Option<&str> {
-    if let Some(start) = text.find('{') {
-        let mut depth = 0;
-        let mut in_string = false;
-        let mut escape = false;
-        for (idx, b) in text[start..].bytes().enumerate() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if in_string {
-                if b == b'\\' {
-                    escape = true;
-                    continue;
-                }
-                if b == b'"' {
-                    in_string = false;
-                }
-                continue;
-            }
-            if b == b'"' {
-                in_string = true;
-                continue;
-            }
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                if depth == 0 {
-                    continue;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&text[start..=start + idx]);
-                }
-            }
-        }
-    }
-    None
+    crate::json_utils::extract_first_json_object(text)
 }

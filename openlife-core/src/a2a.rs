@@ -451,13 +451,13 @@ impl A2AServerHandler {
         };
 
         let assemble_output = AssembleOutput {
-            life_model: self.life_model.clone(),
+            life_model: std::sync::Arc::new(self.life_model.clone()),
             tools_prompt: String::new(),
             privacy_map: HashMap::new(),
-            desensitized_messages: vec![ChatMessage {
+            desensitized_messages: std::sync::Arc::new(vec![ChatMessage {
                 role: "user".to_string(),
                 content: user_text,
-            }],
+            }]),
             memory_context: String::new(),
             context_summary: ContextSummary {
                 life_model_empty: self.life_model.is_effectively_empty(),

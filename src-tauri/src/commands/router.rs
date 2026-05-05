@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::State;
 
-use crate::{AppState, ProviderHealthCache};
+use crate::state::{AppState, ProviderHealthCache};
 
 #[derive(serde::Serialize, Clone)]
 pub struct ProviderStatus {

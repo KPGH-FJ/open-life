@@ -370,40 +370,7 @@ fn extract_json_from_fenced_block(text: &str) -> Option<&str> {
 }
 
 fn extract_first_json_object(text: &str) -> Option<&str> {
-    let start = text.find('{')?;
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escape = false;
-
-    for (idx, b) in text[start..].bytes().enumerate() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            if b == b'\\' {
-                escape = true;
-                continue;
-            }
-            if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        if b == b'"' {
-            in_string = true;
-            continue;
-        }
-        if b == b'{' {
-            depth += 1;
-        } else if b == b'}' {
-            depth -= 1;
-            if depth == 0 {
-                return Some(&text[start..=start + idx]);
-            }
-        }
-    }
-    None
+    crate::json_utils::extract_first_json_object(text)
 }
 
 impl Default for SkillRegistry {

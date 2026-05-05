@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::storage::{app_data_dir, load_onboarding_status_from_path, onboarding_status_path};
 use crate::{AppState, BuilderCompletion, SystemDiagnostics};
 use openlife_core::ollama::resolve_ollama_model;
@@ -15,7 +16,7 @@ pub struct SchedulerConfigResponse {
 #[tauri::command]
 pub async fn get_system_diagnostics(
     state: State<'_, Arc<AppState>>,
-) -> Result<SystemDiagnostics, String> {
+) -> Result<SystemDiagnostics, AppError> {
     let router = {
         let status = state.intent_router.lock().await.status();
         status
@@ -29,13 +30,13 @@ pub async fn get_system_diagnostics(
     };
     let (mcp_recent_audit_count, mcp_recent_pii_count) = {
         let audit = state.mcp_audit_store.lock().await;
-        let logs = audit.list_logs(50).map_err(|e| e.to_string())?;
+        let logs = audit.list_logs(50).map_err(AppError::from)?;
         let pii_count = logs.iter().filter(|log| log.pii_found).count();
         (logs.len(), pii_count)
     };
     let (memory_chunk_count, vector_corrupt_embedding_count) = {
         let store = state.vector_store.lock().await;
-        let report = store.integrity_report().map_err(|e| e.to_string())?;
+        let report = store.integrity_report().map_err(AppError::from)?;
         (
             report.total_chunks as usize,
             report.corrupt_embedding_count as usize,
@@ -45,7 +46,7 @@ pub async fn get_system_diagnostics(
         let store = state.builder_session_store.lock().await;
         let sessions = store
             .list_unfinished_sessions()
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
         let pending_review = sessions
             .iter()
             .filter(|session| session.finished && !session.pending_signals.is_empty())
@@ -346,13 +347,13 @@ pub async fn get_system_diagnostics(
 }
 
 #[tauri::command]
-pub async fn check_ollama_status(state: State<'_, Arc<AppState>>) -> Result<bool, String> {
+pub async fn check_ollama_status(state: State<'_, Arc<AppState>>) -> Result<bool, AppError> {
     let local_model = { state.scheduler.lock().await.local_model.clone() };
     Ok(openlife_core::ollama::is_ollama_available(&local_model).await)
 }
 
 #[tauri::command]
-pub async fn get_router_status(state: State<'_, Arc<AppState>>) -> Result<RouterStatus, String> {
+pub async fn get_router_status(state: State<'_, Arc<AppState>>) -> Result<RouterStatus, AppError> {
     let router = state.intent_router.lock().await;
     Ok(router.status())
 }
@@ -360,7 +361,7 @@ pub async fn get_router_status(state: State<'_, Arc<AppState>>) -> Result<Router
 #[tauri::command]
 pub async fn get_scheduler_config(
     state: State<'_, Arc<AppState>>,
-) -> Result<SchedulerConfigResponse, String> {
+) -> Result<SchedulerConfigResponse, AppError> {
     let cfg = state.config.lock().await;
     Ok(SchedulerConfigResponse {
         local_model: cfg.local_model.clone(),
@@ -373,7 +374,7 @@ pub async fn set_scheduler_config(
     local_model: String,
     prefer_local: bool,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let mut scheduler = state.scheduler.lock().await;
     scheduler.local_model = local_model.clone();
     scheduler.prefer_local = prefer_local;
@@ -384,6 +385,6 @@ pub async fn set_scheduler_config(
     let mut cfg = state.config.lock().await;
     cfg.local_model = local_model;
     cfg.prefer_local_model = prefer_local;
-    cfg.save(&config_path).map_err(|e| e.to_string())?;
+    cfg.save(&config_path).map_err(AppError::from)?;
     Ok(())
 }

@@ -4,6 +4,7 @@ use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Assembles context for an AgentRun by combining LifeModel, Memory, Privacy, and Tools.
 pub trait ContextAssembler: Send + Sync {
@@ -22,10 +23,11 @@ pub struct MemoryHit {
 }
 
 /// Input to context assembly.
+/// Uses `Arc` for large structures to avoid deep clones during assembly chain.
 pub struct AssembleInput {
     pub session_id: String,
-    pub messages: Vec<ChatMessage>,
-    pub life_model: LifeModel,
+    pub messages: Arc<Vec<ChatMessage>>,
+    pub life_model: Arc<LifeModel>,
     pub tools_prompt: String,
     pub privacy_engine: PrivacyEngine,
     // Memory prefetch data (async-retrieved, passed in for sync assembly)
@@ -36,10 +38,10 @@ pub struct AssembleInput {
 
 /// Output from context assembly.
 pub struct AssembleOutput {
-    pub life_model: LifeModel,
+    pub life_model: Arc<LifeModel>,
     pub tools_prompt: String,
     pub privacy_map: HashMap<String, String>,
-    pub desensitized_messages: Vec<ChatMessage>,
+    pub desensitized_messages: Arc<Vec<ChatMessage>>,
     pub memory_context: String,
     pub context_summary: ContextSummary,
     pub embed_error: Option<String>,
@@ -142,7 +144,7 @@ impl ContextAssembler for PrivacyAssembler {
         let mut desensitized = Vec::new();
         let mut privacy_map = HashMap::new();
 
-        for msg in &input.messages {
+        for msg in input.messages.iter() {
             if msg.role == "user" {
                 let (masked, map) = input.privacy_engine.desensitize(&msg.content);
                 privacy_map.extend(map);
@@ -165,7 +167,7 @@ impl ContextAssembler for PrivacyAssembler {
             life_model: input.life_model.clone(),
             tools_prompt: input.tools_prompt.clone(),
             privacy_map: privacy_map.clone(),
-            desensitized_messages: desensitized,
+            desensitized_messages: Arc::new(desensitized),
             memory_context: String::new(),
             context_summary: ContextSummary {
                 life_model_empty: input.life_model.is_effectively_empty(),
@@ -303,11 +305,11 @@ mod tests {
     fn create_test_input() -> AssembleInput {
         AssembleInput {
             session_id: "test-session".to_string(),
-            messages: vec![ChatMessage {
+            messages: Arc::new(vec![ChatMessage {
                 role: "user".to_string(),
                 content: "Hello world".to_string(),
-            }],
-            life_model: LifeModel::default(),
+            }]),
+            life_model: Arc::new(LifeModel::default()),
             tools_prompt: String::new(),
             privacy_engine: PrivacyEngine::default(),
             memory_context: None,
@@ -329,8 +331,13 @@ mod tests {
     #[test]
     fn test_privacy_assembler() {
         let assembler = PrivacyAssembler;
-        let mut input = create_test_input();
-        input.messages[0].content = "我的电话是 13800138000".to_string();
+        let input = AssembleInput {
+            messages: Arc::new(vec![ChatMessage {
+                role: "user".to_string(),
+                content: "我的电话是 13800138000".to_string(),
+            }]),
+            ..create_test_input()
+        };
 
         let output = assembler.assemble(&input).unwrap();
 
@@ -351,25 +358,27 @@ mod tests {
     #[test]
     fn test_memory_assembler_with_hits() {
         let assembler = MemoryAssembler;
-        let mut input = create_test_input();
-        input.memory_context = Some("最近讨论了三体问题".to_string());
-        input.memory_hits = vec![
-            MemoryHit {
-                id: 1,
-                content: "三体问题讨论".to_string(),
-                source: "chat".to_string(),
-                score: 0.92,
-                tier: 1,
-            },
-            MemoryHit {
-                id: 2,
-                content: "时间管理技巧".to_string(),
-                source: "note".to_string(),
-                score: 0.85,
-                tier: 2,
-            },
-        ];
-        input.memory_retrieval_time_ms = 45;
+        let input = AssembleInput {
+            memory_context: Some("最近讨论了三体问题".to_string()),
+            memory_hits: vec![
+                MemoryHit {
+                    id: 1,
+                    content: "三体问题讨论".to_string(),
+                    source: "chat".to_string(),
+                    score: 0.92,
+                    tier: 1,
+                },
+                MemoryHit {
+                    id: 2,
+                    content: "时间管理技巧".to_string(),
+                    source: "note".to_string(),
+                    score: 0.85,
+                    tier: 2,
+                },
+            ],
+            memory_retrieval_time_ms: 45,
+            ..create_test_input()
+        };
 
         let output = assembler.assemble(&input).unwrap();
 

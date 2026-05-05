@@ -424,7 +424,7 @@ impl LayeredReasoner {
             system_parts.join("\n")
         };
 
-        let mut messages = context.desensitized_messages.clone();
+        let mut messages = context.desensitized_messages.to_vec();
         if _input.task_kind != crate::agent::types::AgentTaskKind::Conversation {
             messages.push(ChatMessage {
                 role: "system".to_string(),
@@ -434,7 +434,7 @@ impl LayeredReasoner {
 
         let result = match self
             .scheduler
-            .generate_raw(messages, Some(&system_prompt))
+            .generate_raw(messages.to_vec(), Some(&system_prompt))
             .await
         {
             Ok(text) => json!({

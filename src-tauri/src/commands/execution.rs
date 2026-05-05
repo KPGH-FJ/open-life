@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::agent::{
     AgentAction, AgentObservation, AgentProposal, AgentRun, AgentTaskKind, ProposalSource,
@@ -31,9 +32,9 @@ pub struct SkillRunResponse {
 #[tauri::command]
 pub async fn list_tool_permissions(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ToolPermissionRecord>, String> {
+) -> Result<Vec<ToolPermissionRecord>, AppError> {
     let store = state.tool_permission_store.lock().await;
-    store.list().map_err(|e| e.to_string())
+    store.list().map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -44,23 +45,23 @@ pub async fn grant_tool_permission(
     action_type: String,
     policy: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<ToolPermissionRecord, String> {
+) -> Result<ToolPermissionRecord, AppError> {
     let policy = policy
         .parse::<ToolPermissionPolicy>()
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     let store = state.tool_permission_store.lock().await;
     store
         .grant(&tool_name, &source, &risk_level, &action_type, policy, None)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn revoke_tool_permission(
     permission_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     let store = state.tool_permission_store.lock().await;
-    store.revoke(&permission_id).map_err(|e| e.to_string())
+    store.revoke(&permission_id).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -71,7 +72,7 @@ pub async fn check_tool_permission(
     action_type: String,
     capabilities: Vec<String>,
     state: State<'_, Arc<AppState>>,
-) -> Result<ToolPermissionDecision, String> {
+) -> Result<ToolPermissionDecision, AppError> {
     let store = state.tool_permission_store.lock().await;
     store
         .check(
@@ -81,13 +82,13 @@ pub async fn check_tool_permission(
             &action_type,
             &capabilities,
         )
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
 pub async fn list_skills(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::skills::SkillManifest>, String> {
+) -> Result<Vec<openlife_core::skills::SkillManifest>, AppError> {
     let registry = state.skill_registry.lock().await;
     let mut skills = registry.list();
     let plugins = state.plugin_registry.lock().await;
@@ -100,11 +101,11 @@ pub async fn run_skill(
     skill_id: String,
     input: Value,
     state: State<'_, Arc<AppState>>,
-) -> Result<SkillRunResponse, String> {
+) -> Result<SkillRunResponse, AppError> {
     // 1. Build enhanced SkillContext and load LifeModel
     let (life_model, skill_context) = {
         let manager = state.life_model_manager.lock().await;
-        let lm = manager.load().map_err(|e| e.to_string())?;
+        let lm = manager.load().map_err(AppError::from)?;
 
         // Build enhanced SkillContext
         let mut ctx = openlife_core::skills::SkillContext {
@@ -131,10 +132,10 @@ pub async fn run_skill(
             .ok_or_else(|| format!("未知技能: {}", skill_id))?;
         let system = registry
             .build_system_prompt(&skill_id)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
         let prompt = registry
             .build_skill_prompt(&skill_id, &input, &skill_context)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
         (system, prompt)
     };
 
@@ -173,13 +174,13 @@ pub async fn run_skill(
             openlife_core::privacy::PrivacyEngine::default(),
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
 
     // 5. Generate skill response from model
     let model_output = scheduler
         .generate(runtime_output.final_messages.clone(), &life_model, None)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
 
     // 6. Parse JSON envelope
     let (mut envelope, parse_error) = match openlife_core::skills::parse_skill_json(&model_output) {
@@ -317,7 +318,7 @@ pub async fn run_skill(
                 let proposal_id = proposal.id.clone();
                 store
                     .create_proposal(&proposal)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(AppError::from)?;
                 generated.push(proposal_id.clone());
                 run.add_generated_proposal(&proposal_id);
             }
@@ -326,7 +327,7 @@ pub async fn run_skill(
 
     if let Some(ref run_store_arc) = state.agent_run_store {
         let store = run_store_arc.lock().await;
-        store.create_run(&run).map_err(|e| e.to_string())?;
+        store.create_run(&run).map_err(AppError::from)?;
     }
 
     Ok(SkillRunResponse {
@@ -345,10 +346,10 @@ pub async fn run_skill(
 pub async fn get_skill_run_status(
     run_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<Option<AgentRun>, String> {
+) -> Result<Option<AgentRun>, AppError> {
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        store.get_run(&run_id).map_err(|e| e.to_string())
+        store.get_run(&run_id).map_err(AppError::from)
     } else {
         Ok(None)
     }
@@ -357,7 +358,7 @@ pub async fn get_skill_run_status(
 #[tauri::command]
 pub async fn list_plugins(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::plugins::PluginRecord>, String> {
+) -> Result<Vec<openlife_core::plugins::PluginRecord>, AppError> {
     let registry = state.plugin_registry.lock().await;
     Ok(registry.list())
 }
@@ -365,9 +366,9 @@ pub async fn list_plugins(
 #[tauri::command]
 pub async fn reload_plugins(
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::plugins::PluginRecord>, String> {
+) -> Result<Vec<openlife_core::plugins::PluginRecord>, AppError> {
     let mut registry = state.plugin_registry.lock().await;
-    let records = registry.reload().map_err(|e| e.to_string())?;
+    let records = registry.reload().map_err(AppError::from)?;
 
     // Plugin tools are declarative-only in Beta; do not register them to McpRegistry.
     // They remain visible in PluginRegistry for manifest inspection only.
@@ -403,12 +404,12 @@ pub async fn reload_plugins(
 pub async fn enable_plugin(
     plugin_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     {
         let mut registry = state.plugin_registry.lock().await;
         registry
             .enable(&plugin_id, true)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
     }
 
     // Sync to registries
@@ -439,12 +440,12 @@ pub async fn enable_plugin(
 pub async fn disable_plugin(
     plugin_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     {
         let mut registry = state.plugin_registry.lock().await;
         registry
             .enable(&plugin_id, false)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
     }
 
     // Remove from registries

@@ -159,12 +159,14 @@ pub async fn replay_agent_action(
         manager.load().map_err(AppError::from)?
     };
     let memory_store = state.memory_store.lock().await;
-    let proposal_store_guard = if let Some(ref store) = state.proposal_store {
+    let proposal_store_opt = state.proposal_store.clone();
+    let proposal_store_guard = if let Some(ref store) = proposal_store_opt {
         Some(store.lock().await)
     } else {
         None
     };
-    let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
+    let agent_run_store_opt = state.agent_run_store.clone();
+    let agent_run_store_guard = if let Some(ref store) = agent_run_store_opt {
         Some(store.lock().await)
     } else {
         None

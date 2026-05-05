@@ -191,3 +191,11 @@ impl From<openlife_core::life_model::patch::PatchError> for AppError {
         }
     }
 }
+
+impl From<openlife_core::agent::AgentRuntimeError> for AppError {
+    fn from(e: openlife_core::agent::AgentRuntimeError) -> Self {
+        AppError::Internal {
+            message: e.to_string(),
+        }
+    }
+}

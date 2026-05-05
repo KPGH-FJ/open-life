@@ -29,4 +29,9 @@ ring = "0.17"
 log = "0.4"
 
 [dev-dependencies]
+criterion = "0.8.2"
 tempfile = "3.14"
+
+[[bench]]
+name = "vector_benchmark"
+harness = false

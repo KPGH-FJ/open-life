@@ -114,12 +114,43 @@ impl AgentRunStore {
         Ok(())
     }
 
+    fn is_valid_sqlite_identifier(ident: &str) -> bool {
+        if ident.is_empty() {
+            return false;
+        }
+        let bytes = ident.as_bytes();
+        // Must start with letter or underscore
+        if !bytes[0].is_ascii_alphabetic() && bytes[0] != b'_' {
+            return false;
+        }
+        // Rest must be alphanumeric or underscore
+        bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+    }
+
     fn add_column_if_missing(
         conn: &Connection,
         table: &str,
         column: &str,
         definition: &str,
     ) -> Result<()> {
+        if !Self::is_valid_sqlite_identifier(table) {
+            return Err(anyhow::anyhow!(
+                "Invalid table name for migration: {}",
+                table
+            ));
+        }
+        if !Self::is_valid_sqlite_identifier(column) {
+            return Err(anyhow::anyhow!(
+                "Invalid column name for migration: {}",
+                column
+            ));
+        }
+        // Definition is validated to be a simple type definition (e.g., "TEXT NOT NULL DEFAULT ''")
+        // We allow spaces, commas, parentheses for type definitions
+        if definition.is_empty() {
+            return Err(anyhow::anyhow!("Column definition cannot be empty"));
+        }
+
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
         let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
         for col in columns {

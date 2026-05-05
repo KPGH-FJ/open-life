@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::{persist_life_model, AppState};
 use openlife_core::life_model::{
     AlertLevel, CustomStateDimension, DailyGoal, StateAlert, TimeBlock,
@@ -16,13 +17,13 @@ pub(crate) async fn record_state_with_state(
     max_threshold: Option<f32>,
     alert_days: Option<u32>,
     state: &Arc<AppState>,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     let store = state.memory_store.lock().await;
     let id = store
         .record_state_entry(&dimension_name, value, &unit, note.as_deref())
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
     if let Some(dim) = model
         .state
         .custom_dimensions
@@ -50,7 +51,7 @@ pub(crate) async fn record_state_with_state(
         });
     }
     drop(manager);
-    let _ = persist_life_model(&state.clone(), model, true).await?;
+    persist_life_model(&state.clone(), model, true).await.map_err(AppError::from)?;
     Ok(id)
 }
 
@@ -65,7 +66,7 @@ pub async fn record_state(
     max_threshold: Option<f32>,
     alert_days: Option<u32>,
     state: State<'_, Arc<AppState>>,
-) -> Result<i64, String> {
+) -> Result<i64, AppError> {
     record_state_with_state(
         dimension_name,
         value,
@@ -84,23 +85,23 @@ pub async fn get_state_history(
     dimension_name: String,
     limit: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<StateHistoryEntry>, String> {
+) -> Result<Vec<StateHistoryEntry>, AppError> {
     let store = state.memory_store.lock().await;
     store
         .get_state_history(&dimension_name, limit)
-        .map_err(|e| e.to_string())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
-pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<StateAlert>, String> {
+pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<StateAlert>, AppError> {
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     let store = state.memory_store.lock().await;
     let mut alerts = Vec::new();
     for dim in &model.state.custom_dimensions {
         let entries = store
             .get_state_history(&dim.name, (dim.alert_days.max(1) as usize) * 2)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
         if entries.len() < dim.alert_days.max(1) as usize {
             continue;
         }
@@ -153,14 +154,14 @@ pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<Sta
 
 pub(crate) async fn get_daily_goals_with_state(
     state: &Arc<AppState>,
-) -> Result<Vec<DailyGoal>, String> {
+) -> Result<Vec<DailyGoal>, AppError> {
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     Ok(model.goals.daily)
 }
 
 #[tauri::command]
-pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, String> {
+pub async fn get_daily_goals(state: State<'_, Arc<AppState>>) -> Result<Vec<DailyGoal>, AppError> {
     get_daily_goals_with_state(&state.inner().clone()).await
 }
 
@@ -169,9 +170,9 @@ pub async fn add_daily_goal(
     name: String,
     time_block: Option<TimeBlock>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
     model.goals.daily.push(DailyGoal {
         name,
         done: false,
@@ -180,6 +181,7 @@ pub async fn add_daily_goal(
     drop(manager);
     persist_life_model(&state.inner().clone(), model, true)
         .await
+        .map_err(AppError::from)
         .map(|_| ())
 }
 
@@ -189,18 +191,19 @@ pub async fn update_daily_goal(
     name: String,
     time_block: Option<TimeBlock>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
     if let Some(goal) = model.goals.daily.get_mut(index) {
         goal.name = name;
         goal.time_block = time_block;
         drop(manager);
         persist_life_model(&state.inner().clone(), model, true)
             .await
+            .map_err(AppError::from)
             .map(|_| ())
     } else {
-        Err("invalid index".to_string())
+        Err(AppError::not_found("invalid index"))
     }
 }
 
@@ -208,33 +211,34 @@ pub async fn update_daily_goal(
 pub async fn delete_daily_goal(
     index: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
     if index < model.goals.daily.len() {
         model.goals.daily.remove(index);
         drop(manager);
         persist_life_model(&state.inner().clone(), model, true)
             .await
+            .map_err(AppError::from)
             .map(|_| ())
     } else {
-        Err("invalid index".to_string())
+        Err(AppError::not_found("invalid index"))
     }
 }
 
 pub(crate) async fn toggle_daily_goal_with_state(
     index: usize,
     state: &Arc<AppState>,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
     if index >= model.goals.daily.len() {
-        return Err("invalid index".to_string());
+        return Err(AppError::not_found("invalid index"));
     }
     model.goals.daily[index].done = !model.goals.daily[index].done;
     let completed = model.goals.daily[index].done;
     drop(manager);
-    let _ = persist_life_model(&state.clone(), model, true).await?;
+    persist_life_model(&state.clone(), model, true).await.map_err(AppError::from)?;
     Ok(completed)
 }
 
@@ -242,7 +246,7 @@ pub(crate) async fn toggle_daily_goal_with_state(
 pub async fn toggle_daily_goal(
     index: usize,
     state: State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
+) -> Result<bool, AppError> {
     toggle_daily_goal_with_state(index, &state.inner().clone()).await
 }
 

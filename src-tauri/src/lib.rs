@@ -2,7 +2,7 @@ use futures::StreamExt;
 use openlife_core::agent::ContextAssembler;
 use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::StreamingCallback;
-use openlife_core::builder::{BuilderSession, BuilderSessionStore};
+use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::layer_router::{Layer, LayerRouter};
@@ -27,10 +27,13 @@ pub mod a2a_server;
 pub mod a2a_sidecar;
 pub mod commands;
 pub mod errors;
-pub mod orchestrator;
 pub mod state;
 pub mod storage;
-pub mod streaming;
+
+#[cfg(test)]
+pub mod test_utils;
+
+pub use state::AppState;
 
 use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
@@ -206,20 +209,20 @@ fn recovery_db_path(file_name: &str) -> std::path::PathBuf {
 
 fn init_memory_store(
     db_path: &std::path::Path,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
 ) -> Result<MemoryStore, String> {
     match MemoryStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("memory.db");
-            startup_warnings.push(format!(
+            startup_warnings.borrow_mut().push(format!(
                 "memory.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
             match MemoryStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
-                    startup_warnings.push(format!(
+                    startup_warnings.borrow_mut().push(format!(
                         "临时 memory.db 初始化也失败，已降级为内存数据库；本次会话聊天记录不会持久化：{}",
                         fallback_err
                     ));
@@ -237,21 +240,21 @@ fn init_memory_store(
 
 fn init_feedback_store(
     db_path: &std::path::Path,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
 ) -> Result<FeedbackStore, String> {
     match FeedbackStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("feedback.db");
-            startup_warnings.push(format!(
+            startup_warnings.borrow_mut().push(format!(
                 "feedback.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
             match FeedbackStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
-                    startup_warnings.push(format!(
-                        "临时 feedback.db 初始化也失败，已降级为内存数据库；本次会话反馈不会持久化：{}",
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 feedback.db 初始化也失败，已降级为内存数据库；本次会话反馈记录不会持久化：{}",
                         fallback_err
                     ));
                     FeedbackStore::new_in_memory().map_err(|memory_err| {
@@ -268,21 +271,21 @@ fn init_feedback_store(
 
 fn init_vector_store(
     db_path: &std::path::Path,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
 ) -> Result<VectorStore, String> {
     match VectorStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("vectors.db");
-            startup_warnings.push(format!(
+            startup_warnings.borrow_mut().push(format!(
                 "vectors.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
             match VectorStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
-                    startup_warnings.push(format!(
-                        "临时 vectors.db 初始化也失败，已降级为内存数据库；本次会话向量记忆不会持久化：{}",
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 vectors.db 初始化也失败，已降级为内存数据库；本次会话向量记录不会持久化：{}",
                         fallback_err
                     ));
                     VectorStore::new_in_memory().map_err(|memory_err| {
@@ -299,21 +302,21 @@ fn init_vector_store(
 
 fn init_agent_run_store(
     db_path: &std::path::Path,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
 ) -> Result<openlife_core::agent::AgentRunStore, String> {
     match openlife_core::agent::AgentRunStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("agent_runs.db");
-            startup_warnings.push(format!(
+            startup_warnings.borrow_mut().push(format!(
                 "agent_runs.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
             match openlife_core::agent::AgentRunStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
-                    startup_warnings.push(format!(
-                        "临时 agent_runs.db 初始化也失败，已降级为内存数据库；本次会话 AgentRun 记录不会持久化：{}",
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 agent_runs.db 初始化也失败，已降级为内存数据库；本次会话运行记录不会持久化：{}",
                         fallback_err
                     ));
                     openlife_core::agent::AgentRunStore::new_in_memory().map_err(|memory_err| {
@@ -330,21 +333,21 @@ fn init_agent_run_store(
 
 fn init_proposal_store(
     db_path: &std::path::Path,
-    startup_warnings: &mut Vec<String>,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
 ) -> Result<openlife_core::agent::ProposalStore, String> {
     match openlife_core::agent::ProposalStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             let fallback = recovery_db_path("proposals.db");
-            startup_warnings.push(format!(
+            startup_warnings.borrow_mut().push(format!(
                 "proposals.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
             match openlife_core::agent::ProposalStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
-                    startup_warnings.push(format!(
-                        "临时 proposals.db 初始化也失败，已降级为内存数据库；本次会话 Proposal 记录不会持久化：{}",
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 proposals.db 初始化也失败，已降级为内存数据库；本次会话提案记录不会持久化：{}",
                         fallback_err
                     ));
                     openlife_core::agent::ProposalStore::new_in_memory().map_err(|memory_err| {
@@ -356,74 +359,6 @@ fn init_proposal_store(
                 }
             }
         }
-    }
-}
-
-/// Cached provider health data to avoid probing on every Settings open.
-#[derive(Clone)]
-pub struct ProviderHealthCache {
-    pub providers: Vec<crate::commands::router::ProviderStatus>,
-    pub checked_at: String,
-}
-
-impl ProviderHealthCache {
-    pub fn is_fresh(&self) -> bool {
-        if let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&self.checked_at) {
-            let elapsed =
-                chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
-            elapsed.num_seconds() < 30 // Cache for 30 seconds
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct AppState {
-    pub config: Arc<Mutex<AppConfig>>,
-    pub life_model_manager: Arc<Mutex<LifeModelManager>>,
-    pub memory_store: Arc<Mutex<MemoryStore>>,
-    pub mcp_registry: Arc<Mutex<McpRegistry>>,
-    pub intent_router: Arc<Mutex<IntentRouter>>,
-    pub layer_router: Arc<Mutex<LayerRouter>>,
-    pub scheduler: Arc<Mutex<InferenceScheduler>>,
-    pub privacy_engine: Arc<Mutex<PrivacyEngine>>,
-    pub version_manager: Arc<Mutex<VersionManager>>,
-    pub feedback_store: Arc<Mutex<FeedbackStore>>,
-    pub vector_store: Arc<Mutex<VectorStore>>,
-    pub builder_sessions: Arc<Mutex<HashMap<String, BuilderSession>>>,
-    pub builder_session_store: Arc<Mutex<BuilderSessionStore>>,
-    pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
-    pub last_snapshot_date: Arc<Mutex<Option<String>>>,
-    pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
-    pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
-    pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
-    pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
-    pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
-    pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
-    pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
-    pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
-    pub hot_cache: SharedHotCache,
-    pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
-    pub startup_warnings: Vec<String>,
-    pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
-    /// Guards concurrent access to scheduled_tasks.json
-    pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,
-    pub shutdown_notify: Arc<tokio::sync::Notify>,
-}
-
-impl AppState {
-    /// 按固定顺序获取 MCP 相关锁，避免死锁
-    /// 顺序：mcp_registry → mcp_audit_store
-    pub async fn get_mcp_state(
-        &self,
-    ) -> (
-        tokio::sync::MutexGuard<'_, McpRegistry>,
-        tokio::sync::MutexGuard<'_, McpAuditStore>,
-    ) {
-        let reg = self.mcp_registry.lock().await;
-        let audit = self.mcp_audit_store.lock().await;
-        (reg, audit)
     }
 }
 
@@ -442,7 +377,7 @@ async fn generate_and_persist_chat_proposals(
         match engine.generate_from_run(agent_run, reply, life_model) {
             Ok(proposals) => proposals,
             Err(e) => {
-                eprintln!("[ChatProposal] Proposal generation failed: {}", e);
+                log::warn!("[ChatProposal] Proposal generation failed: {}", e);
                 return;
             }
         }
@@ -458,7 +393,7 @@ async fn generate_and_persist_chat_proposals(
         for proposal in proposals {
             let proposal_id = proposal.id.clone();
             if let Err(e) = store.create_proposal(&proposal) {
-                eprintln!("[ChatProposal] Failed to save proposal: {}", e);
+                log::warn!("[ChatProposal] Failed to save proposal: {}", e);
             } else {
                 created_proposal_ids.push(proposal_id);
             }
@@ -473,7 +408,7 @@ async fn generate_and_persist_chat_proposals(
         let run_store = run_store_arc.lock().await;
         for proposal_id in created_proposal_ids {
             if let Err(e) = run_store.add_generated_proposal(&agent_run.id, &proposal_id) {
-                eprintln!("[AgentRun] 关联 Chat Proposal 失败: {}", e);
+                log::warn!("[AgentRun] 关联 Chat Proposal 失败: {}", e);
             }
         }
     }
@@ -648,18 +583,18 @@ async fn finalize_chat_agent_run(
         match store.get_run(&agent_run.id) {
             Ok(Some(_)) => {
                 if let Err(e) = store.update_run(agent_run) {
-                    eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                 }
             }
             Ok(None) => {
                 if let Err(e) = store.create_run(agent_run) {
-                    eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+                    log::warn!("[AgentRun] 保存运行记录失败: {}", e);
                 }
             }
             Err(e) => {
-                eprintln!("[AgentRun] 查询运行记录失败: {}", e);
+                log::warn!("[AgentRun] 查询运行记录失败: {}", e);
                 if let Err(e) = store.create_run(agent_run) {
-                    eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+                    log::warn!("[AgentRun] 保存运行记录失败: {}", e);
                 }
             }
         }
@@ -987,7 +922,7 @@ async fn preprocess_chat_input_v2(
                         (Some(ctx.context), ctx.hits, ctx.retrieval_time_ms)
                     }
                     Err(e) => {
-                        eprintln!("[MemoryService] Failed: {}, falling back to no context", e);
+                        log::warn!("[MemoryService] Failed: {}, falling back to no context", e);
                         (None, vec![], 0)
                     }
                 }
@@ -1004,8 +939,8 @@ async fn preprocess_chat_input_v2(
     // Step 7: Assemble using ContextAssembler
     let input = openlife_core::agent::AssembleInput {
         session_id: session_id.to_string(),
-        messages: messages.to_vec(),
-        life_model,
+        messages: std::sync::Arc::new(messages.to_vec()),
+        life_model: std::sync::Arc::new(life_model),
         tools_prompt: tools_prompt.clone(),
         privacy_engine: privacy_engine.clone(),
         memory_context: memory_context_opt,
@@ -1022,7 +957,7 @@ async fn preprocess_chat_input_v2(
     let output = assembler.assemble(&input).map_err(|e| e.to_string())?;
 
     // Step 8: Apply hot cache (same as v1)
-    let mut desensitized_messages = output.desensitized_messages;
+    let mut desensitized_messages = output.desensitized_messages.to_vec();
     let hot_context = {
         let cache = state.hot_cache.read().await;
         cache.to_context_string()
@@ -1065,11 +1000,11 @@ async fn preprocess_chat_input_v2(
     }
 
     Ok((
-        output.life_model,
+        output.life_model.as_ref().clone(),
         output.tools_prompt,
         privacy_engine,
         output.privacy_map,
-        desensitized_messages,
+        desensitized_messages.to_vec(),
         embed_err,
         output.context_summary,
     ))
@@ -1169,7 +1104,7 @@ async fn capture_conversation_signals(
                 Some(session_id),
                 Some("chat_match"),
             ) {
-                eprintln!("[Memory] 记录价值观焦点事件失败: {}", e);
+                log::warn!("[Memory] 记录价值观焦点事件失败: {}", e);
             }
             if let Err(e) = store.save_conversation_inference(
                 Some(session_id),
@@ -1179,7 +1114,7 @@ async fn capture_conversation_signals(
                 confidence,
                 "用户在对话中主动提及或强化了该价值观",
             ) {
-                eprintln!("[Memory] 保存价值观推断失败: {}", e);
+                log::warn!("[Memory] 保存价值观推断失败: {}", e);
             }
         }
     }
@@ -1201,7 +1136,7 @@ async fn capture_conversation_signals(
                 (confidence - 0.05).max(0.2),
                 "用户在对话中直接提到该目标，表明关注度发生变化",
             ) {
-                eprintln!("[Memory] 保存目标推断失败: {}", e);
+                log::warn!("[Memory] 保存目标推断失败: {}", e);
             }
         }
     }
@@ -1224,7 +1159,7 @@ async fn capture_conversation_signals(
                 0.55,
                 "用户在对话中主动提及技能投入或受阻情况",
             ) {
-                eprintln!("[Memory] 保存技能推断失败: {}", e);
+                log::warn!("[Memory] 保存技能推断失败: {}", e);
             }
         }
     }
@@ -2136,7 +2071,7 @@ async fn start_stream_message(
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         if let Err(e) = store.create_run(&agent_run) {
-            eprintln!("[AgentRun] 保存运行记录失败: {}", e);
+            log::warn!("[AgentRun] 保存运行记录失败: {}", e);
         }
     }
 
@@ -2222,7 +2157,7 @@ async fn start_stream_message(
                 )
                 .await
                 {
-                    eprintln!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
+                    log::warn!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
                     let _ = app_handle.emit(
                         "stream-message-error",
                         serde_json::json!({
@@ -2279,7 +2214,7 @@ async fn start_stream_message(
             if let Some(ref store_arc) = state.agent_run_store {
                 let store = store_arc.lock().await;
                 if let Err(e) = store.update_run(&agent_run) {
-                    eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                    log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                 }
             }
             return Err(message);
@@ -2302,7 +2237,7 @@ async fn start_stream_message(
                 if let Some(ref store_arc) = state.agent_run_store {
                     let store = store_arc.lock().await;
                     if let Err(e) = store.update_run(&agent_run) {
-                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                     }
                 }
                 return Err(message);
@@ -2357,7 +2292,7 @@ async fn start_stream_message(
                 Layer::L3
             }
             Err(e) => {
-                eprintln!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
+                log::warn!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
                 agent_run.reasoning_strategy = Some("direct".to_string());
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
@@ -2467,7 +2402,7 @@ async fn start_stream_message(
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
                                     if let Err(e) = store.update_run(&agent_run) {
-                                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                                     }
                                 }
                                 return Err(message);
@@ -2544,7 +2479,7 @@ async fn start_stream_message(
                                 if let Some(ref store_arc) = state.agent_run_store {
                                     let store = store_arc.lock().await;
                                     if let Err(e) = store.update_run(&agent_run) {
-                                        eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                                     }
                                 }
                                 return Err(message);
@@ -2592,7 +2527,7 @@ async fn start_stream_message(
                         if let Some(ref store_arc) = state.agent_run_store {
                             let store = store_arc.lock().await;
                             if let Err(e) = store.update_run(&agent_run) {
-                                eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                                log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                             }
                         }
                         return Err(message);
@@ -2639,7 +2574,7 @@ async fn start_stream_message(
                     if let Some(ref store_arc) = state.agent_run_store {
                         let store = store_arc.lock().await;
                         if let Err(e) = store.update_run(&agent_run) {
-                            eprintln!("[AgentRun] 更新运行记录失败: {}", e);
+                            log::warn!("[AgentRun] 更新运行记录失败: {}", e);
                         }
                     }
                     return Err(message);
@@ -2689,7 +2624,7 @@ async fn start_stream_message(
     )
     .await
     {
-        eprintln!("[Stream] finalize_chat_agent_run failed: {}", e);
+        log::warn!("[Stream] finalize_chat_agent_run failed: {}", e);
         let _ = app_handle.emit(
             "stream-message-error",
             serde_json::json!({
@@ -2849,12 +2784,42 @@ fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
     Ok(())
 }
 
+/// Helper to initialize a store with file-based fallback to in-memory.
+/// Eliminates `.expect()` panics by returning a Result and logging warnings.
+/// Uses RefCell to avoid borrow checker issues with closures.
+fn init_store<T, F, G>(
+    file_init: F,
+    memory_init: G,
+    name: &str,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String>,
+    G: FnOnce() -> Result<T, String>,
+{
+    match file_init() {
+        Ok(store) => Ok(store),
+        Err(e) => {
+            startup_warnings.borrow_mut().push(format!("{} file init failed: {}", name, e));
+            memory_init().map_err(|e| {
+                let msg = format!(
+                    "CRITICAL: {} in-memory fallback also failed: {}. \
+                     System resources may be exhausted.",
+                    name, e
+                );
+                log::warn!("[startup] {}", msg);
+                msg
+            })
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = app_data_dir();
-    let mut startup_warnings = Vec::new();
+    let startup_warnings = std::cell::RefCell::new(Vec::new());
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        startup_warnings.push(format!(
+        startup_warnings.borrow_mut().push(format!(
             "应用数据目录创建失败：{} ({})",
             data_dir.display(),
             e
@@ -2863,51 +2828,85 @@ pub fn run() {
     let config_path = data_dir.join("config.yaml");
     let (config, config_warning) = AppConfig::load_or_default_with_warning(&config_path);
     if let Some(warning) = config_warning {
-        startup_warnings.push(warning);
+        startup_warnings.borrow_mut().push(warning);
     }
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
     let db_path = data_dir.join("memory.db");
-    let memory_store = init_memory_store(&db_path, &mut startup_warnings).unwrap_or_else(|e| {
-        startup_warnings.push(e);
-        MemoryStore::new_in_memory().expect("致命错误：无法初始化 memory store，系统资源耗尽")
+    let memory_store = init_store(
+        || init_memory_store(&db_path, &startup_warnings),
+        || MemoryStore::new_in_memory().map_err(|e| e.to_string()),
+        "MemoryStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
     });
+
     let feedback_db_path = data_dir.join("feedback.db");
-    let feedback_store = init_feedback_store(&feedback_db_path, &mut startup_warnings)
-        .unwrap_or_else(|e| {
-            startup_warnings.push(e);
-            FeedbackStore::new_in_memory()
-                .expect("致命错误：无法初始化 feedback store，系统资源耗尽")
-        });
+    let feedback_store = init_store(
+        || init_feedback_store(&feedback_db_path, &startup_warnings),
+        || FeedbackStore::new_in_memory().map_err(|e| e.to_string()),
+        "FeedbackStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let vector_db_path = data_dir.join("vectors.db");
-    let vector_store =
-        init_vector_store(&vector_db_path, &mut startup_warnings).unwrap_or_else(|e| {
-            startup_warnings.push(e);
-            VectorStore::new_in_memory().expect("致命错误：无法初始化 vector store，系统资源耗尽")
-        });
+    let vector_store = init_store(
+        || init_vector_store(&vector_db_path, &startup_warnings),
+        || VectorStore::new_in_memory().map_err(|e| e.to_string()),
+        "VectorStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let agent_runs_db_path = data_dir.join("agent_runs.db");
-    let agent_run_store = init_agent_run_store(&agent_runs_db_path, &mut startup_warnings)
-        .unwrap_or_else(|e| {
-            startup_warnings.push(e);
-            openlife_core::agent::AgentRunStore::new_in_memory()
-                .expect("致命错误：无法初始化 agent run store，系统资源耗尽")
-        });
+    let agent_run_store = init_store(
+        || init_agent_run_store(&agent_runs_db_path, &startup_warnings),
+        || openlife_core::agent::AgentRunStore::new_in_memory().map_err(|e| e.to_string()),
+        "AgentRunStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let proposals_db_path = data_dir.join("proposals.db");
-    let proposal_store = init_proposal_store(&proposals_db_path, &mut startup_warnings)
-        .unwrap_or_else(|e| {
-            startup_warnings.push(e);
-            openlife_core::agent::ProposalStore::new_in_memory()
-                .expect("致命错误：无法初始化 proposal store，系统资源耗尽")
-        });
+    let proposal_store = init_store(
+        || init_proposal_store(&proposals_db_path, &startup_warnings),
+        || openlife_core::agent::ProposalStore::new_in_memory().map_err(|e| e.to_string()),
+        "ProposalStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let patches_db_path = data_dir.join("patches.db");
-    let patch_store = openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
-        .unwrap_or_else(|e| {
-            startup_warnings.push(format!("PatchStore 初始化失败: {}", e));
-            openlife_core::life_model::patch_store::PatchStore::new_in_memory()
-                .expect("致命错误：无法初始化 patch store，系统资源耗尽")
-        });
+    let patch_store = init_store(
+        || openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
+            .map_err(|e| e.to_string()),
+        || openlife_core::life_model::patch_store::PatchStore::new_in_memory()
+            .map_err(|e| e.to_string()),
+        "PatchStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
 
     let model_dir = data_dir.join("models");
     let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
@@ -2941,18 +2940,34 @@ pub fn run() {
     };
 
     let mcp_registry = McpRegistry::new();
-    let tool_permission_store = openlife_core::tool_permissions::ToolPermissionStore::new(
-        data_dir.join("tool_permissions.db"),
+    let tool_permission_store = init_store(
+        || {
+            openlife_core::tool_permissions::ToolPermissionStore::new(data_dir.join("tool_permissions.db"))
+                .map_err(|e| e.to_string())
+        },
+        || openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().map_err(|e| e.to_string()),
+        "ToolPermissionStore",
+        &startup_warnings,
     )
     .unwrap_or_else(|e| {
-        startup_warnings.push(format!("tool_permissions.db 初始化失败: {}", e));
-        openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
-            .expect("致命错误：无法初始化 tool permission store，系统资源耗尽")
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
     });
     let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
     if let Err(e) = plugin_registry.reload() {
-        startup_warnings.push(format!("plugins manifest reload failed: {}", e));
+        startup_warnings.borrow_mut().push(format!("plugins manifest reload failed: {}", e));
     }
+
+    let rollout_metrics_store = {
+        let store_path = data_dir.join("rollout_metrics.db");
+        match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
+            Ok(store) => Some(Arc::new(Mutex::new(store))),
+            Err(e) => {
+                startup_warnings.borrow_mut().push(format!("rollout_metrics.db 初始化失败: {}", e));
+                None
+            }
+        }
+    };
 
     let app_state = Arc::new(AppState {
         config: Arc::new(Mutex::new(config)),
@@ -2976,16 +2991,7 @@ pub fn run() {
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
-        rollout_metrics_store: {
-            let store_path = data_dir.join("rollout_metrics.db");
-            match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
-                Ok(store) => Some(Arc::new(Mutex::new(store))),
-                Err(e) => {
-                    startup_warnings.push(format!("rollout_metrics.db 初始化失败: {}", e));
-                    None
-                }
-            }
-        },
+        rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
         skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
         plugin_registry: Arc::new(Mutex::new(plugin_registry)),
@@ -3002,7 +3008,7 @@ pub fn run() {
             engine.register(Box::new(openlife_core::agent::ToolProposalGenerator));
             engine
         })),
-        startup_warnings,
+        startup_warnings: startup_warnings.into_inner(),
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
@@ -3019,16 +3025,16 @@ pub fn run() {
         .manage(app_state.clone())
         .setup(move |app| {
             if let Err(e) = ensure_main_window_visible(app) {
-                eprintln!("[setup] failed to show main window: {}", e);
+                log::warn!("[setup] failed to show main window: {}", e);
                 return Err(Box::new(e));
             }
-            println!("[setup] launching a2a sidecar");
+            log::info!("[setup] launching a2a sidecar");
             let a2a_sidecar = app_state_for_setup.a2a_sidecar.clone();
             let state = app_state_for_setup.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = a2a_sidecar.lock().await.start().await {
-                    eprintln!("[setup] a2a sidecar start failed: {}", e);
-                    eprintln!("[setup] falling back to embedded a2a server");
+                    log::warn!("[setup] a2a sidecar start failed: {}", e);
+                    log::warn!("[setup] falling back to embedded a2a server");
                     a2a_server::start(state).await;
                 }
             });
@@ -3054,10 +3060,10 @@ pub fn run() {
                     let store = vs.lock().await;
                     match store.run_tier_maintenance() {
                         Ok((upgraded, downgraded)) => {
-                            println!("[tier] initial maintenance done: upgraded={} downgraded={} - lib.rs:2255", upgraded, downgraded);
+                            log::info!("[tier] initial maintenance done: upgraded={} downgraded={} - lib.rs:2255", upgraded, downgraded);
                         }
                         Err(e) => {
-                            eprintln!("[tier] initial maintenance failed: {} - lib.rs:2258", e);
+                            log::warn!("[tier] initial maintenance failed: {} - lib.rs:2258", e);
                         }
                     }
                 }
@@ -3067,10 +3073,10 @@ pub fn run() {
                     let store = vs.lock().await;
                     match store.run_tier_maintenance() {
                         Ok((upgraded, downgraded)) => {
-                            println!("[tier] periodic maintenance done: upgraded={} downgraded={} - lib.rs:2268", upgraded, downgraded);
+                            log::info!("[tier] periodic maintenance done: upgraded={} downgraded={} - lib.rs:2268", upgraded, downgraded);
                         }
                         Err(e) => {
-                            eprintln!("[tier] periodic maintenance failed: {} - lib.rs:2271", e);
+                            log::warn!("[tier] periodic maintenance failed: {} - lib.rs:2271", e);
                         }
                     }
                 }
@@ -3205,7 +3211,7 @@ pub fn run() {
         .run(|app_handle, event| match event {
             tauri::RunEvent::Ready | tauri::RunEvent::Reopen { .. } => {
                 if let Err(e) = ensure_main_window_visible(app_handle) {
-                    eprintln!("[runtime] failed to show main window: {}", e);
+                    log::warn!("[runtime] failed to show main window: {}", e);
                 }
             }
             _ => {}

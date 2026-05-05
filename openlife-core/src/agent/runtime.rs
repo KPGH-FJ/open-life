@@ -8,8 +8,8 @@ use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::scheduler::InferenceScheduler;
-// use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Runtime configuration.
@@ -114,8 +114,8 @@ impl AgentRuntime {
         // 1. Build AssembleInput
         let input = AssembleInput {
             session_id: task.session_id.clone(),
-            messages: task.messages.clone(),
-            life_model: life_model.clone(),
+            messages: Arc::new(task.messages.clone()),
+            life_model: Arc::new(life_model.clone()),
             tools_prompt: tools_prompt.to_string(),
             privacy_engine,
             memory_context,
@@ -161,7 +161,7 @@ impl AgentRuntime {
             .map_err(AgentRuntimeError::Reasoning)?;
 
         // 6. Build final messages with system prompt
-        let mut final_messages = context.desensitized_messages.clone();
+        let mut final_messages = context.desensitized_messages.to_vec();
         if !reasoning_output.system_prompt.is_empty() {
             final_messages.insert(
                 0,
@@ -193,8 +193,8 @@ impl AgentRuntime {
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         let input = AssembleInput {
             session_id: task.session_id.clone(),
-            messages: task.messages.clone(),
-            life_model: life_model.clone(),
+            messages: Arc::new(task.messages.clone()),
+            life_model: Arc::new(life_model.clone()),
             tools_prompt: tools_prompt.to_string(),
             privacy_engine,
             memory_context,
@@ -208,7 +208,7 @@ impl AgentRuntime {
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
         Ok(AgentRuntimeOutput {
-            final_messages: context.desensitized_messages.clone(),
+            final_messages: context.desensitized_messages.to_vec(),
             reasoning_trace: ReasoningTrace::default(),
             suggested_tools: vec![],
             plan_steps: vec![],

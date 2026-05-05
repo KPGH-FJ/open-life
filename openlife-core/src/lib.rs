@@ -6,6 +6,7 @@ pub mod config;
 pub mod evolution;
 pub mod feedback;
 // Hermes module removed: replaced by agent::reasoning module
+pub mod json_utils;
 pub mod layer_router;
 pub mod life_model;
 pub mod llm;

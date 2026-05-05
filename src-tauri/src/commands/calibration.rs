@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use crate::{persist_life_model, AppState};
 use chrono::Datelike;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
@@ -34,7 +35,7 @@ fn change_to_proposal(
     change: &EvolutionChange,
     source: ProposalSource,
     before_model: &openlife_core::life_model::LifeModel,
-) -> Result<AgentProposal, String> {
+) -> Result<AgentProposal, AppError> {
     let risk_level = assess_change_risk(change);
     let proposal_type = if change.dimension.starts_with("goals.") {
         ProposalType::GoalUpdate
@@ -50,7 +51,7 @@ fn change_to_proposal(
 
     // 提取 before 值
     let before_value = {
-        let model_json = serde_json::to_value(before_model).map_err(|e| e.to_string())?;
+        let model_json = serde_json::to_value(before_model).map_err(AppError::from)?;
         let parts: Vec<&str> = change.dimension.split('.').collect();
         let mut current = &model_json;
         for part in parts.iter() {
@@ -94,18 +95,18 @@ fn change_to_proposal(
 #[tauri::command]
 pub async fn run_micro_evolution(
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let engine = MicroEvolutionEngine::new(&store);
-    let (result, signals) = engine.run_with_signals(&model).map_err(|e| e.to_string())?;
+    let (result, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
     let signal_summary = signals.summary();
     let mut snapshot_version = None;
     if result.applied {
         let mut new_model = model.clone();
         MicroEvolutionEngine::apply_changes(&mut new_model, &result.changes)
-            .map_err(|e| e.to_string())?;
+            .map_err(AppError::from)?;
         drop(manager);
         let new_model = persist_life_model(&state.inner().clone(), new_model, false).await?;
         // auto snapshot after evolution
@@ -127,13 +128,13 @@ pub async fn run_micro_evolution(
 pub async fn generate_calibration_report(
     period_days: u64,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let report = store
         .generate_calibration_report(&model, period_days as i64)
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     Ok(serde_json::json!({
         "period_days": report.period_days,
         "feedback_up": report.feedback_up,
@@ -149,14 +150,14 @@ pub async fn generate_calibration_report(
 #[tauri::command]
 pub async fn generate_micro_evolution_changes(
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
 
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let engine = MicroEvolutionEngine::new(&store);
-    let (result, signals) = engine.run_with_signals(&model).map_err(|e| e.to_string())?;
+    let (result, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
     let signal_summary = signals.summary();
     let mut after_model = model.clone();
     let _ = MicroEvolutionEngine::apply_changes(&mut after_model, &result.changes);
@@ -186,7 +187,7 @@ pub async fn apply_calibration(
     changes: Vec<EvolutionChange>,
     mode: Option<String>,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let mode = mode.as_deref().unwrap_or("direct");
 
     if mode == "proposal" {
@@ -198,14 +199,14 @@ pub async fn apply_calibration(
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
 
     let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(|e| e.to_string())?;
-    MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(|e| e.to_string())?;
+    let mut model = manager.load().map_err(AppError::from)?;
+    MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
     drop(manager);
     let model = persist_life_model(&state.inner().clone(), model, false).await?;
     let vm = state.version_manager.lock().await;
     let snap = vm
         .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let _ = store.log_event(
         "calibration_applied",
@@ -233,7 +234,7 @@ pub async fn apply_calibration(
 #[tauri::command]
 pub async fn should_show_calibration(
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     let now = chrono::Local::now();
     let is_monday = now.weekday() == chrono::Weekday::Mon;
     let is_first_day = now.day() == 1;
@@ -256,7 +257,7 @@ pub async fn should_show_calibration(
 pub async fn calibration_create_proposals(
     changes: Vec<EvolutionChange>,
     state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, AppError> {
     // Create AgentRun for this calibration
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
     let run_id = agent_run.id.clone();
@@ -266,11 +267,11 @@ pub async fn calibration_create_proposals(
     }
 
     let manager = state.life_model_manager.lock().await;
-    let model = manager.load().map_err(|e| e.to_string())?;
+    let model = manager.load().map_err(AppError::from)?;
     drop(manager);
 
-    let store = state
-        .proposal_store
+    let proposal_store_opt = state.proposal_store.clone();
+    let store = proposal_store_opt
         .as_ref()
         .ok_or_else(|| "Proposal store 不可用".to_string())?;
     let store = store.lock().await;
@@ -321,11 +322,11 @@ pub async fn calibration_create_proposals(
 pub async fn mark_calibration_shown(
     period: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), String> {
+) -> Result<(), AppError> {
     let store = state.feedback_store.lock().await;
     let event = format!("calibration_prompt_{}", period);
     store
         .log_event(&event, None, None)
-        .map_err(|e| e.to_string())?;
+        .map_err(AppError::from)?;
     Ok(())
 }

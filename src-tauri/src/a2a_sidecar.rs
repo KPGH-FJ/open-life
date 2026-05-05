@@ -1,3 +1,4 @@
+use crate::errors::AppError;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
@@ -14,9 +15,9 @@ impl A2ASidecar {
         }
     }
 
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<(), AppError> {
         {
-            let child_lock = self.child.lock().map_err(|e| e.to_string())?;
+            let child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
             if child_lock.is_some() {
                 println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
                 return Ok(());
@@ -42,9 +43,9 @@ impl A2ASidecar {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|e| format!("Failed to spawn A2A sidecar: {}", e))?;
+            .map_err(|e| AppError::internal(format!("Failed to spawn A2A sidecar: {}", e)))?;
 
-        let mut child_lock = self.child.lock().map_err(|e| e.to_string())?;
+        let mut child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
         *child_lock = Some(child);
         println!(
             "[A2A Sidecar] spawned on port {} - a2a_sidecar.rs:43",
@@ -53,8 +54,8 @@ impl A2ASidecar {
         Ok(())
     }
 
-    pub fn stop(&self) -> Result<(), String> {
-        let mut child_lock = self.child.lock().map_err(|e| e.to_string())?;
+    pub fn stop(&self) -> Result<(), AppError> {
+        let mut child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
         if let Some(mut child) = child_lock.take() {
             let _ = child.kill();
             println!("[A2A Sidecar] stopped - a2a_sidecar.rs:43");
@@ -69,7 +70,7 @@ impl Drop for A2ASidecar {
     }
 }
 
-fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, String> {
+fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, AppError> {
     // 1. env override
     if let Ok(path) = std::env::var("A2A_SERVER_PATH") {
         let p = std::path::PathBuf::from(path);
@@ -80,7 +81,7 @@ fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, String> {
 
     // 2. development path (workspace target/debug)
     let dev_path = std::env::current_dir()
-        .map_err(|e| e.to_string())?
+        .map_err(|e| AppError::internal(format!("current_dir failed: {}", e)))?
         .join("target")
         .join("debug")
         .join("openlife-a2a-server");
@@ -102,8 +103,7 @@ fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, String> {
         }
     }
 
-    Err(
-        "A2A server binary not found. Set A2A_SERVER_PATH or ensure openlife-a2a-server is built."
-            .to_string(),
-    )
+    Err(AppError::internal(
+        "A2A server binary not found. Set A2A_SERVER_PATH or ensure openlife-a2a-server is built.",
+    ))
 }

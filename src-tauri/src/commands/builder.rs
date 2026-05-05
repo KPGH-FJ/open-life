@@ -622,8 +622,8 @@ async fn builder_create_proposals_with_state(
     }
 
     {
-        let store = state
-            .proposal_store
+        let proposal_store_opt = state.proposal_store.clone();
+        let store = proposal_store_opt
             .as_ref()
             .ok_or_else(|| AppError::db("Proposal store is unavailable."))?
             .lock()
