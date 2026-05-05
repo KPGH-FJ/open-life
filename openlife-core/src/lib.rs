@@ -17,6 +17,7 @@ pub mod memory_cache;
 pub mod ollama;
 pub mod plugins;
 pub mod privacy;
+pub mod proactive;
 pub mod reflex_engine;
 pub mod router;
 pub mod scheduler;

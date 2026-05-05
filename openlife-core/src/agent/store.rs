@@ -124,7 +124,9 @@ impl AgentRunStore {
             return false;
         }
         // Rest must be alphanumeric or underscore
-        bytes.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
     }
 
     fn add_column_if_missing(

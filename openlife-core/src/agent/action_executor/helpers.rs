@@ -4,6 +4,43 @@ use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use std::net::ToSocketAddrs;
+use std::sync::Mutex;
+use std::time::Instant;
+
+/// Cooldown between web.search calls (5 seconds) to avoid rate limiting.
+static LAST_SEARCH_AT: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Search provider configuration (set at startup from SystemConfig).
+pub struct SearchProviderConfig {
+    pub provider: String,
+    pub brave_api_key: String,
+    pub searxng_url: String,
+}
+
+impl Default for SearchProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider: "duckduckgo".to_string(),
+            brave_api_key: String::new(),
+            searxng_url: String::new(),
+        }
+    }
+}
+
+static SEARCH_CONFIG: Mutex<SearchProviderConfig> = Mutex::new(SearchProviderConfig {
+    provider: String::new(),
+    brave_api_key: String::new(),
+    searxng_url: String::new(),
+});
+
+/// Initialize search provider configuration from SystemConfig values.
+pub fn set_search_config(provider: &str, brave_key: &str, searxng_url: &str) {
+    if let Ok(mut cfg) = SEARCH_CONFIG.lock() {
+        cfg.provider = provider.to_string();
+        cfg.brave_api_key = brave_key.to_string();
+        cfg.searxng_url = searxng_url.to_string();
+    }
+}
 
 #[derive(Debug)]
 pub struct ToolCallInternalResult {
@@ -85,6 +122,45 @@ pub fn search_web_on_worker_thread(
 }
 
 fn search_web_blocking(query: &str, max_results: usize) -> Result<ToolCallInternalResult> {
+    // Rate limiting
+    {
+        let mut last = LAST_SEARCH_AT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(last_at) = *last {
+            let elapsed = last_at.elapsed().as_secs();
+            if elapsed < 5 {
+                return Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!(
+                        "Search rate limit exceeded. Please wait {} second(s).",
+                        5 - elapsed
+                    )),
+                });
+            }
+        }
+        *last = Some(Instant::now());
+    }
+
+    // Determine search provider
+    let cfg = SEARCH_CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    let provider = if cfg.provider.is_empty() {
+        "duckduckgo"
+    } else {
+        &cfg.provider
+    };
+
+    match provider {
+        "brave" if !cfg.brave_api_key.is_empty() => {
+            search_brave_blocking(query, max_results, &cfg.brave_api_key)
+        }
+        "searxng" if !cfg.searxng_url.is_empty() => {
+            search_searxng_blocking(query, max_results, &cfg.searxng_url)
+        }
+        _ => search_duckduckgo_blocking(query, max_results),
+    }
+}
+
+fn search_duckduckgo_blocking(query: &str, max_results: usize) -> Result<ToolCallInternalResult> {
     let url = reqwest::Url::parse_with_params(
         "https://duckduckgo.com/html/",
         &[("q", query), ("kl", "wt-wt")],
@@ -214,6 +290,7 @@ struct SearchResult {
 }
 
 fn extract_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    // Primary regex: DuckDuckGo HTML layout (class="result__a", class="result__snippet")
     let block_regex = regex::Regex::new(
         r#"(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>(?P<body>.*?)(?:<a[^>]*class=["'][^"']*result__a|</body>|$)"#,
     )
@@ -249,6 +326,51 @@ fn extract_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResul
             });
         }
     }
+
+    // Fallback: try broader link extraction if primary regex found nothing
+    if results.is_empty() {
+        results = extract_fallback_results(html, max_results);
+    }
+
+    results
+}
+
+/// Broader extraction: any link with a title-looking inner text and a nearby text fragment.
+fn extract_fallback_results(html: &str, max_results: usize) -> Vec<SearchResult> {
+    // Match any <a href="...">text</a> followed by some content
+    let link_regex =
+        regex::Regex::new(r#"(?is)<a[^>]*href=["'](https?://[^"'\s]+)["'][^>]*>([^<]{3,200})</a>"#)
+            .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+
+    let mut results = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
+
+    for caps in link_regex.captures_iter(html) {
+        if results.len() >= max_results {
+            break;
+        }
+        let url = caps.get(1).map(|m| m.as_str()).unwrap_or_default();
+        let title = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
+        let title = html_to_text(title);
+
+        // Skip duckduckgo internal links and duplicates
+        if url.contains("duckduckgo.com") || title.is_empty() || !seen_urls.insert(url.to_string())
+        {
+            continue;
+        }
+
+        // Find nearby text (up to 300 chars after the link)
+        let link_end = caps.get(0).map(|m| m.end()).unwrap_or(0);
+        let nearby = &html[link_end..std::cmp::min(link_end + 500, html.len())];
+        let snippet = html_to_text(nearby);
+        let snippet = truncate_text(&snippet, 200);
+
+        results.push(SearchResult {
+            title,
+            url: url.to_string(),
+            snippet,
+        });
+    }
     results
 }
 
@@ -283,6 +405,149 @@ fn format_search_results(query: &str, results: &[SearchResult]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Brave Search API backend.
+fn search_brave_blocking(
+    query: &str,
+    max_results: usize,
+    api_key: &str,
+) -> Result<ToolCallInternalResult> {
+    let url = reqwest::Url::parse_with_params(
+        "https://api.search.brave.com/res/v1/web/search",
+        &[("q", query), ("count", &max_results.to_string())],
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to build Brave search URL: {}", e))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("OpenLife/0.1")
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+    let response = client
+        .get(url)
+        .header("Accept", "application/json")
+        .header("Accept-Encoding", "gzip")
+        .header("X-Subscription-Token", api_key)
+        .send()
+        .map_err(|e| anyhow::anyhow!("Brave search request failed: {}", e))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .map_err(|e| anyhow::anyhow!("Failed to parse Brave search response: {}", e))?;
+
+    let results: Vec<SearchResult> = json
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .take(max_results)
+                .map(|item| SearchResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    url: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    snippet: item
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        return Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("Brave search returned no results".to_string()),
+        });
+    }
+
+    Ok(ToolCallInternalResult {
+        success: true,
+        output: Some(format_search_results(query, &results)),
+        error: None,
+    })
+}
+
+/// SearXNG API backend.
+fn search_searxng_blocking(
+    query: &str,
+    max_results: usize,
+    base_url: &str,
+) -> Result<ToolCallInternalResult> {
+    let url = reqwest::Url::parse_with_params(
+        &format!("{}/search", base_url.trim_end_matches('/')),
+        &[("q", query), ("format", "json"), ("categories", "general")],
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to build SearXNG URL: {}", e))?;
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("OpenLife/0.1")
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| anyhow::anyhow!("SearXNG request failed: {}", e))?;
+
+    let json: serde_json::Value = response
+        .json()
+        .map_err(|e| anyhow::anyhow!("Failed to parse SearXNG response: {}", e))?;
+
+    let results: Vec<SearchResult> = json
+        .get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .take(max_results)
+                .map(|item| SearchResult {
+                    title: item
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    url: item
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    snippet: item
+                        .get("content")
+                        .or_else(|| item.get("snippet"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        return Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("SearXNG search returned no results".to_string()),
+        });
+    }
+
+    Ok(ToolCallInternalResult {
+        success: true,
+        output: Some(format_search_results(query, &results)),
+        error: None,
+    })
 }
 
 pub fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -501,4 +766,138 @@ fn html_to_text(html: &str) -> String {
     text = text.replace("  ", " ");
 
     text.trim().to_string()
+}
+
+/// Synchronous A2A agent call (runs on a worker thread via std::thread::spawn).
+pub fn call_a2a_agent_blocking(
+    agent_url: &str,
+    task_text: &str,
+    session_id: Option<&str>,
+) -> Result<ToolCallInternalResult> {
+    let agent_url = agent_url.to_string();
+    let task_text = task_text.to_string();
+    let session_id = session_id.map(|s| s.to_string());
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime for A2A call: {}", e))?;
+        rt.block_on(async {
+            let a2a_client = crate::a2a::A2AClient::new();
+            let task = crate::a2a::A2AClient::build_text_task(session_id, &task_text);
+            let timeout = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                a2a_client.send_task(&agent_url, &task),
+            )
+            .await;
+
+            match timeout {
+                Ok(Ok(resp)) => {
+                    // Extract text from response
+                    let text = match &resp.artifacts {
+                        Some(artifacts) if !artifacts.is_empty() => artifacts
+                            .iter()
+                            .flat_map(|a| &a.parts)
+                            .filter_map(|p| match p {
+                                crate::a2a::Part::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        _ => resp
+                            .status
+                            .message
+                            .as_ref()
+                            .and_then(|m| m.parts.first())
+                            .and_then(|p| match p {
+                                crate::a2a::Part::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default(),
+                    };
+                    Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(text),
+                        error: None,
+                    })
+                }
+                Ok(Err(e)) => Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some(format!("A2A agent call failed: {}", e)),
+                }),
+                Err(_) => Ok(ToolCallInternalResult {
+                    success: false,
+                    output: None,
+                    error: Some("A2A agent call timed out after 30 seconds".to_string()),
+                }),
+            }
+        })
+    })
+    .join()
+    .unwrap_or_else(|_| {
+        Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("A2A worker thread panicked".to_string()),
+        })
+    })
+}
+
+/// Summarize fetched web content via Ollama on a blocking thread.
+pub fn summarize_content_blocking(content: &str, source_url: &str) -> Result<String> {
+    let max_input = 8000;
+    let text: String = content.chars().take(max_input).collect();
+    let source_url = source_url.to_string();
+    let content_len = content.len();
+
+    let fallback_url = source_url.clone();
+    let fallback_text = content.chars().take(500).collect::<String>();
+
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
+        rt.block_on(async {
+            let system_prompt = format!(
+                "You are a web content summarizer. Summarize the following web page content in 3-5 bullet points in Chinese. Source URL: {}",
+                source_url
+            );
+            let messages = vec![
+                crate::llm::ChatMessage {
+                    role: "system".to_string(),
+                    content: system_prompt,
+                },
+                crate::llm::ChatMessage {
+                    role: "user".to_string(),
+                    content: format!("Summarize:\n\n{}", text),
+                },
+            ];
+
+            match crate::ollama::chat_with_ollama_raw(
+                "llama3.2:latest",
+                messages,
+                None,
+            )
+            .await
+            {
+                Ok(summary) => Ok(format!(
+                    "Summary of {} ({} chars):\n{}",
+                    source_url, content_len, summary
+                )),
+                Err(_) => Ok(format!(
+                    "[Content from {} ({} chars total, {} shown)]\n\n{}...",
+                    source_url,
+                    content_len,
+                    max_input.min(content_len),
+                    text.chars().take(500).collect::<String>(),
+                )),
+            }
+        })
+    })
+    .join()
+    .unwrap_or_else(move |_| {
+        Ok(format!(
+            "[Content from {} - summarization failed]\n\n{}...",
+            fallback_url, fallback_text
+        ))
+    })
 }

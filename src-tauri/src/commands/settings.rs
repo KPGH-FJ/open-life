@@ -111,7 +111,9 @@ pub async fn save_config(
 }
 
 #[tauri::command]
-pub async fn export_all_data(state: State<'_, Arc<AppState>>) -> Result<serde_json::Value, AppError> {
+pub async fn export_all_data(
+    state: State<'_, Arc<AppState>>,
+) -> Result<serde_json::Value, AppError> {
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
@@ -214,9 +216,7 @@ async fn apply_import_payload(
     }
     {
         let store = state.vector_store.lock().await;
-        store
-            .replace_all_chunks(&vectors)
-            .map_err(AppError::from)?;
+        store.replace_all_chunks(&vectors).map_err(AppError::from)?;
     }
     Ok(())
 }
@@ -370,7 +370,9 @@ pub async fn rotate_mcp_audit_key(state: State<'_, Arc<AppState>>) -> Result<(),
 }
 
 #[tauri::command]
-pub async fn get_privacy_policy(state: State<'_, Arc<AppState>>) -> Result<PrivacyPolicy, AppError> {
+pub async fn get_privacy_policy(
+    state: State<'_, Arc<AppState>>,
+) -> Result<PrivacyPolicy, AppError> {
     let engine = state.privacy_engine.lock().await;
     Ok(engine.policy().clone())
 }

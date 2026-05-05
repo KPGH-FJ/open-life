@@ -243,9 +243,7 @@ async fn builder_step_with_state(
             persist_life_model(state, new_model.clone(), true).await?;
         }
         let store = state.builder_session_store.lock().await;
-        store
-            .remove_session(&session_id)
-            .map_err(AppError::from)?;
+        store.remove_session(&session_id).map_err(AppError::from)?;
     }
     // Complete AgentRun
     agent_run.output_preview = Some(prompt.clone());
@@ -570,7 +568,9 @@ async fn builder_create_proposals_with_state(
             .ok_or_else(|| AppError::not_found("Session not found"))?
     };
     if session.pending_signals.is_empty() {
-        return Err(AppError::not_found("当前构建会话没有待确认信号，无法创建 Proposal。"));
+        return Err(AppError::not_found(
+            "当前构建会话没有待确认信号，无法创建 Proposal。",
+        ));
     }
 
     let model = {
@@ -618,7 +618,9 @@ async fn builder_create_proposals_with_state(
     }
 
     if proposals.is_empty() {
-        return Err(AppError::not_found("没有被接受或编辑的信号可转为 Proposal。"));
+        return Err(AppError::not_found(
+            "没有被接受或编辑的信号可转为 Proposal。",
+        ));
     }
 
     {

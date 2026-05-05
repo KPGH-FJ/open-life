@@ -44,9 +44,7 @@ pub async fn get_system_diagnostics(
     };
     let (unfinished_builder_sessions, pending_builder_review_sessions) = {
         let store = state.builder_session_store.lock().await;
-        let sessions = store
-            .list_unfinished_sessions()
-            .map_err(AppError::from)?;
+        let sessions = store.list_unfinished_sessions().map_err(AppError::from)?;
         let pending_review = sessions
             .iter()
             .filter(|session| session.finished && !session.pending_signals.is_empty())

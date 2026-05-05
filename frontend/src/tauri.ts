@@ -1518,3 +1518,17 @@ export async function editProposal(
 export async function postponeProposal(proposalId: string): Promise<void> {
   return safeInvoke("postpone_proposal", { proposalId, proposal_id: proposalId });
 }
+
+export interface ProactiveSuggestion {
+  id: string;
+  category: "daily_brief" | "weekly_review" | "stale_goal" | "pending_proposal" | "state_checkin";
+  title: string;
+  prompt: string;
+  priority: "low" | "medium" | "high";
+  seen: boolean;
+  created_at: string;
+}
+
+export async function getProactiveSuggestions(): Promise<ProactiveSuggestion[]> {
+  return safeInvoke("get_proactive_suggestions");
+}

@@ -100,11 +100,11 @@ pub async fn get_hot_cache(state: State<'_, Arc<AppState>>) -> Result<HotMemoryC
 }
 
 #[tauri::command]
-pub async fn archive_low_access_memories(state: State<'_, Arc<AppState>>) -> Result<usize, AppError> {
+pub async fn archive_low_access_memories(
+    state: State<'_, Arc<AppState>>,
+) -> Result<usize, AppError> {
     let store = state.vector_store.lock().await;
-    store
-        .archive_low_access_memories()
-        .map_err(AppError::from)
+    store.archive_low_access_memories().map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -113,9 +113,7 @@ pub async fn restore_archived_chunks(
     state: State<'_, Arc<AppState>>,
 ) -> Result<usize, AppError> {
     let store = state.vector_store.lock().await;
-    store
-        .restore_archived(&chunk_ids)
-        .map_err(AppError::from)
+    store.restore_archived(&chunk_ids).map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -199,12 +197,15 @@ pub async fn rebuild_memory_index(
         if let Err(rebuild_error) = store.replace_all_chunks(&rebuilt) {
             let rollback_error = store.replace_all_chunks(&previous_vectors).err();
             if let Some(rollback_error) = rollback_error {
-            return Err(AppError::internal(format!(
-                "重建向量索引失败，且回滚失败。重建错误: {}; 回滚错误: {}",
-                rebuild_error, rollback_error
-            )));
+                return Err(AppError::internal(format!(
+                    "重建向量索引失败，且回滚失败。重建错误: {}; 回滚错误: {}",
+                    rebuild_error, rollback_error
+                )));
             }
-            return Err(AppError::internal(format!("重建向量索引失败，已回滚: {}", rebuild_error)));
+            return Err(AppError::internal(format!(
+                "重建向量索引失败，已回滚: {}",
+                rebuild_error
+            )));
         }
     }
 

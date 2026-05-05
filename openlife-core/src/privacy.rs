@@ -166,7 +166,7 @@ impl PrivacyPolicy {
             .map(|r| r.action)
             .unwrap_or_else(|| {
                 let count = PRIVACY_WARN_COUNT.fetch_add(1, Ordering::Relaxed);
-                if count % PRIVACY_WARN_SAMPLE_RATE == 0 {
+                if count.is_multiple_of(PRIVACY_WARN_SAMPLE_RATE) {
                     log::warn!(
                         "[PrivacyEngine] No rule matched for privacy type {:?}, defaulting to Mask (fail-closed). \
                          This warning is sampled (1/{}). Total unmatched: {}",

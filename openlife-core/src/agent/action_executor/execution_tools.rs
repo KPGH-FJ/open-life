@@ -1,8 +1,8 @@
 use crate::agent::action_executor::helpers::is_private_url;
 use crate::agent::action_executor::helpers::{
-    canonical_tool_source, extract_host_from_url, fetch_url_on_worker_thread,
-    filesystem_access_error, is_path_in_safe_paths, search_web_on_worker_thread,
-    ToolCallInternalResult,
+    call_a2a_agent_blocking, canonical_tool_source, extract_host_from_url,
+    fetch_url_on_worker_thread, filesystem_access_error, is_path_in_safe_paths,
+    search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::tool_manifest::ToolSource;
@@ -256,7 +256,34 @@ impl super::ActionExecutor {
                     });
                 }
 
-                fetch_url_on_worker_thread(url)
+                let result = fetch_url_on_worker_thread(url)?;
+                // Optional summarization via Ollama
+                let summarize = args
+                    .get("summarize")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if summarize && result.success && result.output.is_some() {
+                    let content = result.output.clone().unwrap_or_default();
+                    match summarize_content_blocking(&content, url) {
+                        Ok(summary) => Ok(ToolCallInternalResult {
+                            success: true,
+                            output: Some(summary),
+                            error: None,
+                        }),
+                        Err(_) => {
+                            // Summarization failed, return original content
+                            Ok(ToolCallInternalResult {
+                                success: true,
+                                output: Some(content),
+                                error: Some(
+                                    "Content summarization failed, showing raw content".to_string(),
+                                ),
+                            })
+                        }
+                    }
+                } else {
+                    Ok(result)
+                }
             }
             "web.search" => {
                 let query = args
@@ -556,6 +583,42 @@ impl super::ActionExecutor {
                         error: Some("ProposalStore not available in execution context".to_string()),
                     })
                 }
+            }
+            "a2a.call_agent" => {
+                let agent_url = args
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for a2a.call_agent"))?;
+                let task_text = args
+                    .get("task")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Perform the requested task");
+                let session_id = args
+                    .get("session_id")
+                    .and_then(|v| v.as_str())
+                    .or(request.source_run_id.as_deref());
+
+                // Validate URL scheme and block private IPs
+                if !agent_url.starts_with("http://") && !agent_url.starts_with("https://") {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!("Invalid A2A URL scheme: {}", agent_url)),
+                    });
+                }
+                if is_private_url(agent_url) {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "A2A agent URL '{}' points to a private address and is blocked",
+                            agent_url
+                        )),
+                    });
+                }
+
+                // Run A2A call on blocking thread
+                call_a2a_agent_blocking(agent_url, task_text, session_id)
             }
             _ => Ok(ToolCallInternalResult {
                 success: false,

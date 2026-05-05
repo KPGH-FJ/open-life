@@ -31,9 +31,7 @@ pub(crate) async fn save_chat_message_with_state(
     store
         .save_message(session_id, message)
         .map_err(AppError::from)?;
-    store
-        .touch_chat_session(session_id)
-        .map_err(AppError::from)
+    store.touch_chat_session(session_id).map_err(AppError::from)
 }
 
 #[tauri::command]

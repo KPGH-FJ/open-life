@@ -47,7 +47,9 @@ pub async fn apply_feedback_evolution(state: State<'_, Arc<AppState>>) -> Result
         .apply_feedback_to_model(&mut model)
         .map_err(AppError::from)?;
     drop(manager);
-    let _ = persist_life_model(&state.inner().clone(), model, true).await.map_err(AppError::from)?;
+    let _ = persist_life_model(&state.inner().clone(), model, true)
+        .await
+        .map_err(AppError::from)?;
     Ok(result)
 }
 
@@ -58,12 +60,12 @@ pub async fn generate_evolution_report(
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
-    let report = store
-        .generate_evolution_report()
-        .map_err(AppError::from)?;
+    let report = store.generate_evolution_report().map_err(AppError::from)?;
     model.evolution_rules = report.suggested_rules.clone();
     drop(manager);
-    let _ = persist_life_model(&state.inner().clone(), model, true).await.map_err(AppError::from)?;
+    let _ = persist_life_model(&state.inner().clone(), model, true)
+        .await
+        .map_err(AppError::from)?;
     Ok(serde_json::json!({
         "summary": report.summary_text,
         "liked_patterns": report.liked_patterns,

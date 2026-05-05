@@ -232,6 +232,95 @@ fn validate_export_filename(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Minimal URL-encoding (only encodes space, newline, and special chars).
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            ' ' => "%20".to_string(),
+            '\n' => "%0A".to_string(),
+            '\r' => "%0D".to_string(),
+            '&' => "%26".to_string(),
+            '=' => "%3D".to_string(),
+            '+' => "%2B".to_string(),
+            '%' => "%25".to_string(),
+            '#' => "%23".to_string(),
+            c if c.is_ascii_alphanumeric()
+                || c == '-'
+                || c == '_'
+                || c == '.'
+                || c == '!'
+                || c == '~'
+                || c == '*'
+                || c == '\''
+                || c == '('
+                || c == ')' =>
+            {
+                c.to_string()
+            }
+            c => format!("%{:02X}", c as u8),
+        })
+        .collect()
+}
+
+/// Build a minimal ICS (iCalendar) VEVENT string from proposal after data.
+fn build_ics_event(after: &Value) -> String {
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let uid = uuid::Uuid::new_v4().to_string();
+    let title = after
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled Event");
+    let description = after
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let scheduled_at = after
+        .get("scheduled_at")
+        .or_else(|| after.get("date"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    // Use scheduled_at as DTSTART; default end to +1h
+    let dtend = if !scheduled_at.is_empty() {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(scheduled_at, "%Y-%m-%dT%H:%M:%S") {
+            (dt + chrono::Duration::hours(1))
+                .format("%Y%m%dT%H%M%SZ")
+                .to_string()
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    format!(
+        "BEGIN:VCALENDAR\r\n\
+         VERSION:2.0\r\n\
+         PRODID:-//OpenLife//Calendar//EN\r\n\
+         BEGIN:VEVENT\r\n\
+         DTSTAMP:{now}\r\n\
+         UID:{uid}\r\n\
+         DTSTART:{scheduled_at}\r\n\
+         DTEND:{dtend}\r\n\
+         SUMMARY:{title}\r\n\
+         DESCRIPTION:{description}\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n"
+    )
+}
+
+/// Replace path-unsafe characters in a filename.
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn memory_content(after: &Value) -> Result<String, String> {
     if let Some(content) = after.get("content").and_then(Value::as_str) {
         let content = content.trim();
@@ -802,7 +891,7 @@ async fn apply_proposal_to_state(
             } else {
                 vec![]
             };
-            tasks.push(task);
+            tasks.push(task.clone());
 
             let temp_path = tasks_path.with_extension("tmp");
             if let Err(e) = std::fs::write(
@@ -826,6 +915,27 @@ async fn apply_proposal_to_state(
                 ));
             }
 
+            // For calendar.propose_event, also write an .ics file if safe_paths allow
+            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
+            if tool == "calendar.propose_event" {
+                let safe_paths = {
+                    let cfg = state.config.lock().await;
+                    cfg.system.safe_paths.clone()
+                };
+                if !safe_paths.is_empty() {
+                    let ics_content = build_ics_event(&after);
+                    let ics_filename = format!("{}.ics", sanitize_filename(title));
+                    let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
+                    if let Err(e) = std::fs::write(&ics_path, &ics_content) {
+                        log::warn!(
+                            "[proposal] Failed to write ICS file '{}': {}",
+                            ics_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+
             Ok(patch_result_for_proposal(
                 proposal,
                 true,
@@ -839,55 +949,82 @@ async fn apply_proposal_to_state(
                 .get("filename")
                 .and_then(Value::as_str)
                 .unwrap_or("export.txt");
+            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
 
-            if let Err(e) = validate_export_filename(filename) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "data_export",
-                    Some(e),
-                ));
-            }
-
-            // Use first safe path or fallback to data_dir/exports
-            let safe_paths = {
-                let cfg = state.config.lock().await;
-                cfg.system.safe_paths.clone()
-            };
-            let export_dir = if !safe_paths.is_empty() {
-                std::path::PathBuf::from(&safe_paths[0])
-            } else {
-                app_data_dir().join("exports")
-            };
-
-            if let Err(e) = std::fs::create_dir_all(&export_dir) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "data_export",
-                    Some(format!("Failed to create export directory: {}", e)),
-                ));
-            }
-
-            let export_path = export_dir.join(filename);
-            match std::fs::write(&export_path, content) {
-                Ok(_) => Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "data_export",
-                    None,
-                )),
-                Err(e) => Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "data_export",
-                    Some(format!(
-                        "Failed to write export file '{}': {}",
-                        export_path.display(),
-                        e
+            // email.propose_draft: open system mail client via mailto: URI
+            if tool == "email.propose_draft" {
+                let to = after.get("to").and_then(Value::as_str).unwrap_or("");
+                let subject = after.get("subject").and_then(Value::as_str).unwrap_or("");
+                let body = after.get("body").and_then(Value::as_str).unwrap_or(content);
+                let mailto = format!(
+                    "mailto:{}?subject={}&body={}",
+                    to,
+                    urlencoding(subject),
+                    urlencoding(body)
+                );
+                match open::that(&mailto) {
+                    Ok(_) => Ok(patch_result_for_proposal(
+                        proposal,
+                        true,
+                        "data_export",
+                        None,
                     )),
-                )),
-            }
+                    Err(e) => Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "data_export",
+                        Some(format!("Failed to open mail client: {}", e)),
+                    )),
+                }
+            } else {
+                // Default: write to file
+                if let Err(e) = validate_export_filename(filename) {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "data_export",
+                        Some(e),
+                    ));
+                }
+                let safe_paths = {
+                    let cfg = state.config.lock().await;
+                    cfg.system.safe_paths.clone()
+                };
+                let export_dir = if !safe_paths.is_empty() {
+                    std::path::PathBuf::from(&safe_paths[0])
+                } else {
+                    app_data_dir().join("exports")
+                };
+
+                if let Err(e) = std::fs::create_dir_all(&export_dir) {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "data_export",
+                        Some(format!("Failed to create export directory: {}", e)),
+                    ));
+                }
+
+                let export_path = export_dir.join(filename);
+                match std::fs::write(&export_path, content) {
+                    Ok(_) => Ok(patch_result_for_proposal(
+                        proposal,
+                        true,
+                        "data_export",
+                        None,
+                    )),
+                    Err(e) => Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "data_export",
+                        Some(format!(
+                            "Failed to write export file '{}': {}",
+                            export_path.display(),
+                            e
+                        )),
+                    )),
+                }
+            } // end else (non-email DataExport)
         }
         ProposalType::PluginPermission
         | ProposalType::ModelPolicyChange

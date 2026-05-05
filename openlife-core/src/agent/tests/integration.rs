@@ -628,3 +628,33 @@ fn test_memory_propose_write_creates_proposal() {
         output
     );
 }
+
+#[test]
+fn test_agent_loop_config_role_generalist_default() {
+    let config = AgentLoopConfig::default();
+    assert_eq!(config.role, crate::agent::agent_loop::AgentRole::Generalist);
+    assert!(config.toolset_allowlist.is_empty());
+    assert!(config.role_system_instruction().is_none());
+}
+
+#[test]
+fn test_agent_loop_config_role_planner_instruction() {
+    let config = AgentLoopConfig {
+        role: crate::agent::agent_loop::AgentRole::Planner,
+        ..Default::default()
+    };
+    let instruction = config.role_system_instruction().unwrap();
+    assert!(instruction.contains("Planner mode"));
+    assert!(instruction.contains("goal.read"));
+}
+
+#[test]
+fn test_agent_loop_config_toolset_allowlist() {
+    let config = AgentLoopConfig {
+        role: crate::agent::agent_loop::AgentRole::Planner,
+        toolset_allowlist: vec!["goal.read".into(), "life_model.read".into()],
+        ..Default::default()
+    };
+    assert_eq!(config.toolset_allowlist.len(), 2);
+    assert!(config.toolset_allowlist.contains(&"goal.read".to_string()));
+}

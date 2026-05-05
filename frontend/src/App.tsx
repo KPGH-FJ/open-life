@@ -43,6 +43,9 @@ class ErrorBoundary extends Component<
     this.setState({ hasError: false, error: "", errorInfo: "" });
     window.location.reload();
   };
+  handleDismiss = () => {
+    this.setState({ hasError: false, error: "", errorInfo: "" });
+  };
   handleCopyError = () => {
     const errorText = `Error: ${this.state.error}\n\nComponent Stack:\n${this.state.errorInfo}`;
     navigator.clipboard.writeText(errorText).catch(() => {
@@ -110,7 +113,13 @@ class ErrorBoundary extends Component<
                       d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
                     />
                   </svg>
-                  重试
+                  重启应用
+                </button>
+                <button
+                  onClick={this.handleDismiss}
+                  className="flex-1 bg-white text-stone-600 border border-stone-300 px-4 py-2.5 rounded-lg text-sm font-medium hover:bg-stone-50 transition-colors"
+                >
+                  继续使用
                 </button>
                 <button
                   onClick={() => (window.location.href = "#/")}

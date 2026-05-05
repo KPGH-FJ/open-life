@@ -316,9 +316,7 @@ pub async fn run_skill(
                     ProposalSource::SkillRuntime,
                 );
                 let proposal_id = proposal.id.clone();
-                store
-                    .create_proposal(&proposal)
-                    .map_err(AppError::from)?;
+                store.create_proposal(&proposal).map_err(AppError::from)?;
                 generated.push(proposal_id.clone());
                 run.add_generated_proposal(&proposal_id);
             }
@@ -407,9 +405,7 @@ pub async fn enable_plugin(
 ) -> Result<(), AppError> {
     {
         let mut registry = state.plugin_registry.lock().await;
-        registry
-            .enable(&plugin_id, true)
-            .map_err(AppError::from)?;
+        registry.enable(&plugin_id, true).map_err(AppError::from)?;
     }
 
     // Sync to registries
@@ -443,9 +439,7 @@ pub async fn disable_plugin(
 ) -> Result<(), AppError> {
     {
         let mut registry = state.plugin_registry.lock().await;
-        registry
-            .enable(&plugin_id, false)
-            .map_err(AppError::from)?;
+        registry.enable(&plugin_id, false).map_err(AppError::from)?;
     }
 
     // Remove from registries

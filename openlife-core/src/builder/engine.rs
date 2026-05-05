@@ -1915,6 +1915,7 @@ impl<'a> BuilderEngine<'a> {
                 .map(|s| s.to_string()),
             milestones,
             related_memories,
+            updated_at: None,
         })
     }
 
@@ -2304,6 +2305,7 @@ JSON 结构如下：
                                         progress: 0.0,
                                         related_memories: vec![],
                                         deadline: None,
+                                        updated_at: None,
                                     })
                                 })
                                 .collect();
@@ -2766,6 +2768,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         }];
         let signals = vec![BuilderSignal {
             id: "sig5".into(),
@@ -3016,6 +3019,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         }];
 
         let signals = vec![
@@ -3156,6 +3160,7 @@ mod tests {
                 date: Some("2026-04-30".into()),
             }],
             related_memories: vec!["mem-1".into()],
+            updated_at: None,
         }];
         let signals = vec![BuilderSignal {
             id: "s_goal_merge".into(),

@@ -21,10 +21,7 @@ pub async fn a2a_discover_agent(url: String) -> Result<AgentCard, AppError> {
 pub async fn a2a_send_task(url: String, request_json: String) -> Result<String, AppError> {
     let req: SendTaskRequest = serde_json::from_str(&request_json).map_err(AppError::from)?;
     let client = A2AClient::new();
-    let resp = client
-        .send_task(&url, &req)
-        .await
-        .map_err(AppError::from)?;
+    let resp = client.send_task(&url, &req).await.map_err(AppError::from)?;
     serde_json::to_string(&resp).map_err(AppError::from)
 }
 

@@ -319,9 +319,9 @@ Every major development round should verify:
 7. Open Workspace/Dashboard and confirm next action.
 8. Open Memory and VersionControl to confirm traceability and recovery.
 
-## 7. Completed Work Summary (2026-05-02)
+## 7. Completed Work Summary (2026-05-05)
 
-### Phase 1-5 全部完成
+### Phase 1-6 全部完成
 
 | Phase | 状态 | 关键交付 |
 |-------|------|----------|
@@ -330,31 +330,46 @@ Every major development round should verify:
 | Phase 3: Unified Proposal Layer | ✅ | ProposalEngine/ProposalStore/全类型 Proposal/Builder+Calibration+Chat 接入 |
 | Phase 4: ModelRouter Upgrade | ✅ | Provider registry/health diagnostics/privacy routing/route trace |
 | Phase 5: Workspace Frontend Restructure | ✅ | Workspace/Agent/LifeModel/Memory/Runs/Settings 导航收敛 |
+| Phase 6: Proactive Agent MVP | ✅ | ProactiveEngine, scheduler runner, Dashboard proactive card, State check-in |
 
-### Beta Execution Tools 落地
+### Sprint 10-12: Beta Hardening (2026-05-05)
 
-- **P1 真实可执行**: `file.read`, `file.write_proposal`, `web.fetch`, `mcp.call_tool`, `permission.*`, Core OS Tools
-- **P2 declarative-only**: `web.search`, `a2a.call_agent`, `calendar.*`, `email.*`, `task.create_proposal`
-- **安全加固**: safe_paths strict canonical parent, web.fetch DNS 私网拦截, ExternalWriteAction 二次校验
+| Sprint | 内容 | 状态 |
+|--------|------|------|
+| **10: CI修复 + 技术债务** | P0 clippy修复, AgentLoopContext重构, web.search加固+rate limit, AgentLoop参数配置化 (SystemConfig), lib.rs bootstrap提取 (3234→2821行) | ✅ |
+| **11: 执行工具闭环** | email.propose_draft P2→P1 (mailto:), a2a.call_agent P2→P1 (真实A2A执行器), calendar ICS写入, ChatProposalGenerator LLM升级 (Ollama信号提取) | ✅ |
+| **12: Agent深度能力** | AgentRole (Generalist/Planner) + role_system_instruction, scheduler_runner (定时任务执行器), E2E integration tests | ✅ |
+
+### Beta Execution Tools 落地（更新）
+
+- **P1 真实可执行**: `file.read`, `file.write_proposal`, `web.fetch`, `web.search` (DuckDuckGo+fallback), `calendar.read` (ICS parser), `calendar.propose_event` (ICS写入), `mcp.call_tool`, `a2a.call_agent` (30s超时+私网拦截), `email.propose_draft` (mailto:), `task.create_proposal`, `permission.*`, Core OS Tools
+- **P2 declarative-only**: `email.read` (需IMAP配置)
+- **安全加固**: safe_paths strict canonical parent, web.fetch DNS 私网拦截, ExternalWriteAction 二次校验, web.search 5秒rate limit
 - **权限闭环**: peek() + check(), replay 预检查, ToolPermission Proposal, Review Center 授权
 
 ### 测试覆盖
 
-- Rust: 270 passed (openlife-core) + 25 passed (openlife-tauri)
-- Frontend: 133 passed
-- `make ci`: 通过
+- Rust: 262 passed (openlife-core) + 32 passed (openlife-tauri)
+- Frontend: 148 passed
+- `make ci`: ✅ 通过（format-check + lint + test + build-front）
 
 ## 8. Current Next Step
 
 The next concrete development task is:
 
 ```text
-Phase 6: Proactive Agent MVP
+Phase 6: Proactive Agent MVP (complete)
+Sprint 13: Engineering Consolidation + multi-provider search
 ```
 
-Let OpenLife safely initiate useful check-ins without becoming intrusive.
+Let OpenLife safely initiate useful check-ins without becoming intrusive. Now entering Phase 6 implementation with Sprint 13:
+- Proactive check-in generator (daily brief, weekly review)
+- Stale goal detection
+- Pending proposal aging alerts
+- Dashboard proactive card
+- Toolset allowlist enforcement in AgentLoop
 
-## 8. Historical Plans
+## 9. Historical Plans
 
 Older Alpha/Beta plans are still useful for context, but they are no longer the primary source of truth.
 

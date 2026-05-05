@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import ProviderTab from "./ProviderTab";
@@ -37,40 +37,44 @@ describe("ProviderTab", () => {
     resolved_local_model: "llama3",
   } as any;
 
-  it("renders model router status notice", () => {
-    render(
-      <MemoryRouter>
-        <ProviderTab
-          config={mockConfig}
-          setConfig={vi.fn()}
-          diagnostics={mockDiagnostics}
-          routerStatus={null}
-          modelRouterStatus={null}
-        />
-      </MemoryRouter>
-    );
+  it("renders model router status notice", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={mockDiagnostics}
+            routerStatus={null}
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
     expect(screen.getAllByText(/ModelRouter/).length).toBeGreaterThan(0);
   });
 
-  it("renders layer 1 router status section", () => {
-    render(
-      <MemoryRouter>
-        <ProviderTab
-          config={mockConfig}
-          setConfig={vi.fn()}
-          diagnostics={mockDiagnostics}
-          routerStatus={
-            {
-              onnx_available: true,
-              onnx_disabled: false,
-              active_backend: "regex",
-              latency_threshold_us: 50000,
-            } as any
-          }
-          modelRouterStatus={null}
-        />
-      </MemoryRouter>
-    );
+  it("renders layer 1 router status section", async () => {
+    await act(async () => {
+      render(
+        <MemoryRouter>
+          <ProviderTab
+            config={mockConfig}
+            setConfig={vi.fn()}
+            diagnostics={mockDiagnostics}
+            routerStatus={
+              {
+                onnx_available: true,
+                onnx_disabled: false,
+                active_backend: "regex",
+                latency_threshold_us: 50000,
+              } as any
+            }
+            modelRouterStatus={null}
+          />
+        </MemoryRouter>
+      );
+    });
     expect(screen.getByText(/Layer 1 路由状态/)).toBeInTheDocument();
   });
 });

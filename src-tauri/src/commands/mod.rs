@@ -11,6 +11,7 @@ pub mod life_model;
 pub mod mcp;
 pub mod memory;
 pub mod metrics;
+pub mod proactive;
 pub mod proposal;
 pub mod router;
 pub mod settings;

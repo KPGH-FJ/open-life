@@ -454,15 +454,15 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 |------|------|----------|------|
 | `file.read` | 读取本地文件 | low/medium | ✅ P1（受 safe_paths 限制） |
 | `file.write_proposal` | 提议文件写入 | high | ✅ P1（生成 ExternalWriteAction Proposal） |
-| `web.search` | 搜索网页 | medium | ⚠️ P2（declarative-only stub，需配置 search provider） |
-| `web.fetch` | 获取 URL | medium | ✅ P1（受私网拦截限制） |
+| `web.search` | 搜索网页 | medium | ✅ P1（DuckDuckGo/Brave/SearXNG 三后端 + rate limit） |
+| `web.fetch` | 获取 URL | medium | ✅ P1（受私网拦截 + summarize Ollama 支持） |
 | `mcp.call_tool` | 调用 MCP 工具 | 取决于目标 | ✅ P1（wrapper，权限落在目标 tool scope） |
-| `a2a.call_agent` | 调用 A2A Agent | medium | ⚠️ P2（declarative-only，执行适配未接入） |
-| `calendar.read` | 读取日历 | low | ⚠️ P2（declarative-only，需配置 ICS source） |
-| `calendar.propose_event` | 提议日历事件 | medium | ⚠️ P2（declarative-only） |
+| `a2a.call_agent` | 调用 A2A Agent | medium | ✅ P1（30s超时+私网拦截） |
+| `calendar.read` | 读取日历 | low | ✅ P1（ICS parser） |
+| `calendar.propose_event` | 提议日历事件 | medium | ✅ P1（ScheduledTask Proposal + ICS 文件写入） |
 | `email.read` | 读取邮件 | low | ⚠️ P2（declarative-only，需配置 IMAP account） |
-| `email.propose_draft` | 提议邮件草稿 | medium | ⚠️ P2（declarative-only） |
-| `task.create_proposal` | 提议创建任务 | medium | ⚠️ P2（declarative-only） |
+| `email.propose_draft` | 提议邮件草稿 | medium | ✅ P1（生成 Proposal + mailto: 链接） |
+| `task.create_proposal` | 提议创建任务 | medium | ✅ P1（ScheduledTask Proposal + TaskStore） |
 
 > **P1 / P2 判定标准**：P1 工具具备真实 executor 并通过集成测试；P2 工具仅有 manifest 声明，无真实执行能力，标记为 `declarative_only: true`。P2 工具不会进入模型的 tools prompt，前端 Tool Registry 中显示为 "⚠️ 声明-only"。
 
@@ -728,6 +728,12 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-08 | **Week 7: 测试补齐 + AgentLoop 默认启用**：新增 ExternalWriteAction/ScheduledTask/DataExport apply 测试；AgentLoop 生产环境默认启用 | AI Agent |
 | 2026-05-08 | **Week 8: 收口回归**：文档更新；连续 8 周 `make ci` 通过 | AI Agent |
 | 2026-05-03 | **Sprint 9: 架构优化**：action_executor.rs 拆分为 8 个模块 (core_os_tools/execution_tools/memory_ops/life_model_ops/declarative_stubs/helpers/tool_executor/mod.rs)；AgentLoop 实现真实 token 级流式输出（StreamingCallback trait + run_streaming + TauriStreamingCallback 适配）；P2 工具升级：calendar.read 从 P2→P1（ICS 文件解析器），task.create_proposal 从 P2→P1（TaskStore + ScheduledTask 本地持久化）；移除 sentence-based 伪流式（split_into_sentences）；config.rs 新增 calendar_ics_paths | AI Agent |
+| 2026-05-05 | **Sprint 10: CI修复 + 技术债务**：P0 clippy 修复（AgentLoopContext 重构消除 too_many_arguments、privacy.rs manual_is_multiple_of、dead_code test_app_state）；web.search DuckDuckGo 双正则 fallback + 5s rate limit；AgentLoop 参数配置化（max_steps/tool_calls/timeout 进 SystemConfig）；lib.rs bootstrap 提取到 src-tauri/src/bootstrap.rs（3234→2821 行） | AI Agent |
+| 2026-05-05 | **Sprint 11: 执行工具闭环**：email.propose_draft P2→P1（mailto: 打开系统邮件客户端，依赖 open crate）；a2a.call_agent P2→P1（30s超时+私网拦截+真实 A2AClient 调用）；calendar.propose_event P2→P1（接受后生成 .ics 文件写入 safe_paths）；ChatProposalGenerator LLM 升级（Ollama 信号提取优先，静默降级关键词匹配） | AI Agent |
+| 2026-05-05 | **Sprint 12: Agent 深度能力**：AgentRole（Generalist/Planner）+ role_system_instruction 注入 tools prompt；scheduler_runner.rs（60s 轮询 scheduled_tasks.json + AgentLoop 自动执行）；E2E integration tests（AgentRole config 验证）；LifeModel 字段 GoalItem.updated_at、State.last_updated | AI Agent |
+| 2026-05-05 | **Sprint 13: Proactive Agent MVP（Phase 6）**：ProactiveEngine（每日简报、每周复盘、目标陈旧检测、提案提醒、状态签到）；ProactiveConfig 集成 SystemConfig；Tauri 命令 get_proactive_suggestions；record_state 自动更新 last_updated；toolset_allowlist 过滤 AgentLoop 执行 | AI Agent |
+| 2026-05-05 | **Sprint 14: Dashboard + 搜索增强**：Dashboard 主动建议卡片前端集成；web.search 多Provider支持（DuckDuckGo 默认/Brave API/SearXNG）；web.fetch 新增 summarize 参数 → Ollama 中文摘要；search_provider 配置入 SystemConfig | AI Agent |
+| 2026-05-05 | **Sprint 15: Engineering Consolidation**：AGENTS.md、development_plan.md 文档同步；工具 Taxonomy 表更新（P2→P1 标记校正）；ProviderTab act() 测试警告修复；Email Settings 配置区；前端 ErrorBoundary 完善（重试+错误详情） | AI Agent |
 
 ---
 

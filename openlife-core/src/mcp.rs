@@ -503,14 +503,28 @@ impl McpRegistry {
             "read",
         );
 
-        // Execution Tools: P2 (declarative-only stubs)
-        self.register_declarative_stub("calendar.propose_event", "提议创建日历事件（Beta stub）");
+        // Execution Tools: P1 (real executors)
+        self.register_execution_tool(
+            "calendar.propose_event",
+            "提议创建日历事件并生成 ICS 文件",
+            "medium",
+            vec!["write".into()],
+            "write",
+        );
 
+        // email.read remains P2 (requires IMAP config)
         self.register_declarative_stub(
             "email.read",
             "读取邮件（Beta stub：需要配置 IMAP account）",
         );
-        self.register_declarative_stub("email.propose_draft", "提议创建邮件草稿（Beta stub）");
+
+        self.register_execution_tool(
+            "email.propose_draft",
+            "提议邮件草稿并通过系统邮件客户端打开",
+            "medium",
+            vec!["write".into()],
+            "write",
+        );
 
         // P1 task.create_proposal: creates real local tasks via TaskStore
         self.register_execution_tool(
@@ -521,10 +535,13 @@ impl McpRegistry {
             "write",
         );
 
-        // A2A: declarative-only in Beta (execution adapter not yet wired)
-        self.register_declarative_stub(
+        // A2A: now P1 with real A2AClient executor
+        self.register_execution_tool(
             "a2a.call_agent",
-            "调用外部 A2A Agent（Beta declarative-only：执行适配未接入）",
+            "调用外部 A2A Agent（30s超时+私网拦截）",
+            "medium",
+            vec!["write".into(), "network".into()],
+            "write",
         );
     }
 

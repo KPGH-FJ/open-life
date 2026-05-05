@@ -110,6 +110,9 @@ pub struct GoalItem {
     pub deadline: Option<String>,
     pub milestones: Vec<Milestone>,
     pub related_memories: Vec<String>,
+    /// Last time this goal was updated (RFC 3339 timestamp)
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -197,6 +200,9 @@ pub struct State {
     pub habit_streaks: Vec<HabitStreak>,
     pub custom_dimensions: Vec<CustomStateDimension>,
     pub alerts: Vec<StateAlert>,
+    /// Last time the state was explicitly checked in (RFC 3339 timestamp)
+    #[serde(default)]
+    pub last_updated: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -445,6 +451,7 @@ impl LifeModel {
                 habit_streaks: vec![],
                 custom_dimensions: vec![],
                 alerts: vec![],
+                last_updated: None,
             },
             relationships: Relationships::default(),
             preferences: Preferences::default(),
@@ -1283,6 +1290,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         });
         assert!(!model.is_effectively_empty());
     }
@@ -1326,6 +1334,7 @@ mod tests {
             status: "active".into(),
             progress: 0.0,
             related_memories: vec![],
+            updated_at: None,
         });
         let issues = m.identity_goal_alignment_check();
         assert!(issues.is_empty());
@@ -1348,6 +1357,7 @@ mod tests {
             status: "active".into(),
             progress: 0.0,
             related_memories: vec![],
+            updated_at: None,
         });
         let issues = m.identity_goal_alignment_check();
         assert_eq!(issues.len(), 1);
@@ -1375,6 +1385,7 @@ mod tests {
             status: "active".into(),
             progress: 0.0,
             related_memories: vec![],
+            updated_at: None,
         });
         let gaps = m.goal_capability_gap_analysis();
         assert_eq!(gaps.len(), 1);

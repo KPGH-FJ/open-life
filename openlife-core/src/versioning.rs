@@ -339,6 +339,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         });
         assert_eq!(detect_version_bump(&before, &after), VersionBump::Minor);
     }
@@ -415,6 +416,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         });
         let bump = prepare_model_for_save(Some(&before), &mut after);
         assert_eq!(bump, VersionBump::Minor);

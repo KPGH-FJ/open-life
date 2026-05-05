@@ -50,8 +50,11 @@ pub(crate) async fn record_state_with_state(
             alert_days: alert_days.unwrap_or(3),
         });
     }
+    model.state.last_updated = Some(chrono::Utc::now().to_rfc3339());
     drop(manager);
-    persist_life_model(&state.clone(), model, true).await.map_err(AppError::from)?;
+    persist_life_model(&state.clone(), model, true)
+        .await
+        .map_err(AppError::from)?;
     Ok(id)
 }
 
@@ -93,7 +96,9 @@ pub async fn get_state_history(
 }
 
 #[tauri::command]
-pub async fn get_state_alerts(state: State<'_, Arc<AppState>>) -> Result<Vec<StateAlert>, AppError> {
+pub async fn get_state_alerts(
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<StateAlert>, AppError> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
     let store = state.memory_store.lock().await;
@@ -238,7 +243,9 @@ pub(crate) async fn toggle_daily_goal_with_state(
     model.goals.daily[index].done = !model.goals.daily[index].done;
     let completed = model.goals.daily[index].done;
     drop(manager);
-    persist_life_model(&state.clone(), model, true).await.map_err(AppError::from)?;
+    persist_life_model(&state.clone(), model, true)
+        .await
+        .map_err(AppError::from)?;
     Ok(completed)
 }
 

@@ -171,6 +171,30 @@ pub struct SystemConfig {
     /// ICS calendar file paths for calendar.read tool
     #[serde(default)]
     pub calendar_ics_paths: Vec<String>,
+    /// Maximum ReAct loop steps per agent execution
+    #[serde(default = "default_agent_loop_max_steps")]
+    pub agent_loop_max_steps: u32,
+    /// Maximum tool calls across all steps
+    #[serde(default = "default_agent_loop_max_tool_calls")]
+    pub agent_loop_max_tool_calls: u32,
+    /// Timeout for a single agent execution (seconds)
+    #[serde(default = "default_agent_loop_timeout_seconds")]
+    pub agent_loop_timeout_seconds: u64,
+    /// Proactive engine: days before a goal is considered stale
+    #[serde(default = "default_stale_goal_days")]
+    pub stale_goal_days: i64,
+    /// Proactive engine: days before a pending proposal triggers a reminder
+    #[serde(default = "default_proposal_reminder_days")]
+    pub proposal_reminder_days: i64,
+    /// Web search provider: "duckduckgo" (default), "brave", or "searxng"
+    #[serde(default = "default_search_provider")]
+    pub search_provider: String,
+    /// API key for the web search provider (Brave API key or empty)
+    #[serde(default)]
+    pub search_provider_key: String,
+    /// Base URL for SearXNG instance (e.g. "https://searx.example.com")
+    #[serde(default)]
+    pub searxng_url: String,
 }
 
 impl Default for SystemConfig {
@@ -182,6 +206,14 @@ impl Default for SystemConfig {
             use_agent_loop: None,
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
+            agent_loop_max_steps: default_agent_loop_max_steps(),
+            agent_loop_max_tool_calls: default_agent_loop_max_tool_calls(),
+            agent_loop_timeout_seconds: default_agent_loop_timeout_seconds(),
+            stale_goal_days: default_stale_goal_days(),
+            proposal_reminder_days: default_proposal_reminder_days(),
+            search_provider: default_search_provider(),
+            search_provider_key: String::new(),
+            searxng_url: String::new(),
         }
     }
 }
@@ -192,6 +224,30 @@ fn default_ollama_cache_ttl_seconds() -> u64 {
 
 fn default_memory_search_top_k() -> usize {
     3
+}
+
+fn default_agent_loop_max_steps() -> u32 {
+    4
+}
+
+fn default_agent_loop_max_tool_calls() -> u32 {
+    6
+}
+
+fn default_agent_loop_timeout_seconds() -> u64 {
+    90
+}
+
+fn default_stale_goal_days() -> i64 {
+    7
+}
+
+fn default_proposal_reminder_days() -> i64 {
+    3
+}
+
+fn default_search_provider() -> String {
+    "duckduckgo".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

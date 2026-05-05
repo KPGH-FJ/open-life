@@ -440,6 +440,7 @@ mod tests {
             deadline: None,
             milestones: vec![],
             related_memories: vec![],
+            updated_at: None,
         });
         model.capabilities.skills.push(Skill {
             name: "技能A".into(),

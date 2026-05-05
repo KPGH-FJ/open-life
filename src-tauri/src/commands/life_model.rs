@@ -4,7 +4,9 @@ use openlife_core::life_model::LifeModel;
 use std::sync::Arc;
 use tauri::State;
 
-pub(crate) async fn get_life_model_with_state(state: &Arc<AppState>) -> Result<LifeModel, AppError> {
+pub(crate) async fn get_life_model_with_state(
+    state: &Arc<AppState>,
+) -> Result<LifeModel, AppError> {
     let manager = state.life_model_manager.lock().await;
     manager.load().map_err(AppError::from)
 }

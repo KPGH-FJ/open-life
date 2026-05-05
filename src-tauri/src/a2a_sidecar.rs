@@ -17,7 +17,10 @@ impl A2ASidecar {
 
     pub async fn start(&self) -> Result<(), AppError> {
         {
-            let child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
+            let child_lock = self
+                .child
+                .lock()
+                .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
             if child_lock.is_some() {
                 println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
                 return Ok(());
@@ -45,7 +48,10 @@ impl A2ASidecar {
             .spawn()
             .map_err(|e| AppError::internal(format!("Failed to spawn A2A sidecar: {}", e)))?;
 
-        let mut child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
+        let mut child_lock = self
+            .child
+            .lock()
+            .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
         *child_lock = Some(child);
         println!(
             "[A2A Sidecar] spawned on port {} - a2a_sidecar.rs:43",
@@ -55,7 +61,10 @@ impl A2ASidecar {
     }
 
     pub fn stop(&self) -> Result<(), AppError> {
-        let mut child_lock = self.child.lock().map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
+        let mut child_lock = self
+            .child
+            .lock()
+            .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
         if let Some(mut child) = child_lock.take() {
             let _ = child.kill();
             println!("[A2A Sidecar] stopped - a2a_sidecar.rs:43");

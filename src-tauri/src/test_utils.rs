@@ -1,6 +1,9 @@
 //! Shared test utilities for Tauri command integration tests.
 //! Provides a minimal AppState builder backed by in-memory stores,
 //! avoiding filesystem dependencies for isolated unit tests.
+//!
+//! Note: Individual test modules define their own `test_app_state(temp_dir)`
+//! factory. The zero-arg version below is kept for potential shared use.
 
 use crate::AppState;
 use openlife_core::config::AppConfig;
@@ -9,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn test_app_state() -> Arc<AppState> {
     let config = AppConfig::default();
     let base = std::env::temp_dir().join("test-openlife");

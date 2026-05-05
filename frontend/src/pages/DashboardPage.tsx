@@ -51,11 +51,13 @@ import {
   getSystemDiagnostics,
   getPendingProposals,
   listAgentRuns,
+  getProactiveSuggestions,
   type CapabilityGap,
   type AlignmentIssue,
   type SystemDiagnostics,
   type AgentProposal,
   type AgentRun,
+  type ProactiveSuggestion,
 } from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import EmptyState from "../components/EmptyState";
@@ -311,6 +313,7 @@ export default function DashboardPage() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
+  const [proactiveSuggestions, setProactiveSuggestions] = useState<ProactiveSuggestion[]>([]);
   const navigate = useNavigate();
 
   const warningText = (label: string, error: unknown) =>
@@ -451,6 +454,12 @@ export default function DashboardPage() {
     } catch (e) {
       warnings.push(warningText("最近运行", e));
     }
+    try {
+      const suggestions = await getProactiveSuggestions();
+      setProactiveSuggestions(suggestions);
+    } catch (e) {
+      warnings.push(warningText("主动建议", e));
+    }
     setLoadWarnings(warnings);
   };
 
@@ -565,24 +574,31 @@ export default function DashboardPage() {
   const goals = model?.goals ?? null;
   const capabilities = model?.capabilities ?? null;
 
-  const allGoals = useMemo(() => [
-    ...(goals?.short_term ?? []),
-    ...(goals?.medium_term ?? []),
-    ...(goals?.long_term ?? []),
-    ...(goals?.life_goals ?? []),
-  ], [goals]);
+  const allGoals = useMemo(
+    () => [
+      ...(goals?.short_term ?? []),
+      ...(goals?.medium_term ?? []),
+      ...(goals?.long_term ?? []),
+      ...(goals?.life_goals ?? []),
+    ],
+    [goals]
+  );
 
-  const completedGoals = useMemo(() => allGoals.filter(g => g.status === "completed").length, [allGoals]);
+  const completedGoals = useMemo(
+    () => allGoals.filter(g => g.status === "completed").length,
+    [allGoals]
+  );
   const goalProgress = useMemo(
     () => (allGoals.length ? (completedGoals / allGoals.length) * 100 : 0),
     [allGoals, completedGoals]
   );
 
   const skillData = useMemo(
-    () => (capabilities?.skills ?? []).slice(0, 6).map(s => ({
-      name: s.name,
-      value: s.proficiency ?? 3,
-    })),
+    () =>
+      (capabilities?.skills ?? []).slice(0, 6).map(s => ({
+        name: s.name,
+        value: s.proficiency ?? 3,
+      })),
     [capabilities]
   );
 
@@ -633,106 +649,116 @@ export default function DashboardPage() {
     return recs;
   }, [builderCompletion, lowestDimension, lowestDimensionValue, model, diagnostics]);
 
-  const nextActions = useMemo(() => [
-    diagnostics && diagnostics.model_empty && (diagnostics.pending_builder_review_sessions ?? 0) > 0
-      ? {
-          title: "先审阅待确认的构建建议",
-          detail: `Builder 里还有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，后续对话才会真正个性化。`,
-          to: "/builder",
-        }
-      : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
-        ? {
-            title: "继续未完成的构建会话",
-            detail: `Builder 里还有 ${diagnostics.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，后续对话才会真正个性化。`,
-            to: "/builder",
-          }
-        : null,
-    getModelEmptyState(model, diagnostics)
-      ? {
-          title: "先构建人生模型",
-          detail: "模型为空时，Chat 和 Dashboard 都只能提供通用建议。",
-          to: "/builder",
-        }
-      : null,
-    ...builderRecommendations.map(r => r as { title: string; detail: string; to: string }),
-    diagnostics && !diagnostics.chat_ready
-      ? {
-          title: "修复聊天配置",
-          detail: diagnostics.readiness_issues[0] ?? "本地或云端模型尚未就绪。",
-          to: "/settings",
-        }
-      : null,
-    calibrationPrompt
-      ? {
-          title: "查看周期校准",
-          detail: "有新的模型校准提醒，建议确认后再应用变更。",
-          to: "/calibration",
-        }
-      : null,
-    latestVersion
-      ? {
-          title: "最近快照可回滚",
-          detail: `最近快照是 ${latestVersion.version}，可在版本控制中查看差异。`,
-          to: "/versions",
-        }
-      : null,
-  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
-  [diagnostics, model, builderRecommendations, calibrationPrompt, latestVersion]);
+  const nextActions = useMemo(
+    () =>
+      [
+        diagnostics &&
+        diagnostics.model_empty &&
+        (diagnostics.pending_builder_review_sessions ?? 0) > 0
+          ? {
+              title: "先审阅待确认的构建建议",
+              detail: `Builder 里还有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，后续对话才会真正个性化。`,
+              to: "/builder",
+            }
+          : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+            ? {
+                title: "继续未完成的构建会话",
+                detail: `Builder 里还有 ${diagnostics.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，后续对话才会真正个性化。`,
+                to: "/builder",
+              }
+            : null,
+        getModelEmptyState(model, diagnostics)
+          ? {
+              title: "先构建人生模型",
+              detail: "模型为空时，Chat 和 Dashboard 都只能提供通用建议。",
+              to: "/builder",
+            }
+          : null,
+        ...builderRecommendations.map(r => r as { title: string; detail: string; to: string }),
+        diagnostics && !diagnostics.chat_ready
+          ? {
+              title: "修复聊天配置",
+              detail: diagnostics.readiness_issues[0] ?? "本地或云端模型尚未就绪。",
+              to: "/settings",
+            }
+          : null,
+        calibrationPrompt
+          ? {
+              title: "查看周期校准",
+              detail: "有新的模型校准提醒，建议确认后再应用变更。",
+              to: "/calibration",
+            }
+          : null,
+        latestVersion
+          ? {
+              title: "最近快照可回滚",
+              detail: `最近快照是 ${latestVersion.version}，可在版本控制中查看差异。`,
+              to: "/versions",
+            }
+          : null,
+      ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
+    [diagnostics, model, builderRecommendations, calibrationPrompt, latestVersion]
+  );
 
-  const trialRoute = useMemo(() => [
-    !diagnostics?.chat_ready
-      ? {
-          title: "先完成模型与 API 配置",
-          detail: diagnostics?.readiness_issues?.[0] ?? "先让对话后端进入可用状态。",
-          to: "/settings",
-        }
-      : null,
-    diagnostics && diagnostics.model_empty && (diagnostics.pending_builder_review_sessions ?? 0) > 0
-      ? {
-          title: "继续 Builder 中待确认的 Review",
-          detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先回 Builder 审阅并应用它们，比重新开始更合适。`,
-          to: "/builder",
-        }
-      : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
-        ? {
-            title: "继续 Builder 中待确认的 Review",
-            detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.unfinished_builder_sessions} 个未完成构建会话。先回 Builder 应用它们，比重新开始更合适。`,
-            to: "/builder",
-          }
-        : null,
-    getModelEmptyState(model, diagnostics)
-      ? {
-          title: "完成第一次人生模型构建",
-          detail: "先用快速构建建立最小可用模型，再开始个性化对话。",
-          to: "/builder",
-        }
-      : builderCompletion && builderCompletion.overall < 60
-        ? {
-            title: `补强最弱维度：${dimensionLabels[lowestDimension || "state"] || "State"}`,
-            detail: `当前整体完成度 ${Math.round(builderCompletion.overall)}%，继续构建会明显提升后续对话质量。`,
-            to: "/builder",
-          }
-        : {
-            title: "开始一次个性化对话",
-            detail: "让 OpenLife 基于当前模型做今日规划、复盘或决策陪跑。",
-            to: "/chat",
-          },
-    calibrationPrompt
-      ? {
-          title: "查看周期校准建议",
-          detail: "有新的模型校准提醒，建议确认哪些变化值得吸收。",
-          to: "/calibration",
-        }
-      : null,
-    latestVersion
-      ? {
-          title: "检查最近模型变化",
-          detail: `最近快照 ${latestVersion.version} 已可查看差异和回滚。`,
-          to: "/versions",
-        }
-      : null,
-  ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
-  [diagnostics, model, builderCompletion, lowestDimension, calibrationPrompt, latestVersion]);
+  const trialRoute = useMemo(
+    () =>
+      [
+        !diagnostics?.chat_ready
+          ? {
+              title: "先完成模型与 API 配置",
+              detail: diagnostics?.readiness_issues?.[0] ?? "先让对话后端进入可用状态。",
+              to: "/settings",
+            }
+          : null,
+        diagnostics &&
+        diagnostics.model_empty &&
+        (diagnostics.pending_builder_review_sessions ?? 0) > 0
+          ? {
+              title: "继续 Builder 中待确认的 Review",
+              detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先回 Builder 审阅并应用它们，比重新开始更合适。`,
+              to: "/builder",
+            }
+          : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+            ? {
+                title: "继续 Builder 中待确认的 Review",
+                detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.unfinished_builder_sessions} 个未完成构建会话。先回 Builder 应用它们，比重新开始更合适。`,
+                to: "/builder",
+              }
+            : null,
+        getModelEmptyState(model, diagnostics)
+          ? {
+              title: "完成第一次人生模型构建",
+              detail: "先用快速构建建立最小可用模型，再开始个性化对话。",
+              to: "/builder",
+            }
+          : builderCompletion && builderCompletion.overall < 60
+            ? {
+                title: `补强最弱维度：${dimensionLabels[lowestDimension || "state"] || "State"}`,
+                detail: `当前整体完成度 ${Math.round(builderCompletion.overall)}%，继续构建会明显提升后续对话质量。`,
+                to: "/builder",
+              }
+            : {
+                title: "开始一次个性化对话",
+                detail: "让 OpenLife 基于当前模型做今日规划、复盘或决策陪跑。",
+                to: "/chat",
+              },
+        calibrationPrompt
+          ? {
+              title: "查看周期校准建议",
+              detail: "有新的模型校准提醒，建议确认哪些变化值得吸收。",
+              to: "/calibration",
+            }
+          : null,
+        latestVersion
+          ? {
+              title: "检查最近模型变化",
+              detail: `最近快照 ${latestVersion.version} 已可查看差异和回滚。`,
+              to: "/versions",
+            }
+          : null,
+      ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
+    [diagnostics, model, builderCompletion, lowestDimension, calibrationPrompt, latestVersion]
+  );
 
   const overallCompletion = diagnostics?.builder_completion?.overall ?? 0;
   const actionSignals = [
@@ -1197,6 +1223,65 @@ export default function DashboardPage() {
             </div>
           </Link>
         </div>
+
+        {/* Proactive Suggestions */}
+        {proactiveSuggestions.length > 0 && (
+          <div className="bg-gradient-to-r from-indigo-50 to-amber-50 border border-indigo-100 rounded-xl p-5">
+            <div className="flex items-center gap-2 mb-3">
+              <Sparkles size={18} className="text-indigo-500" />
+              <span className="font-semibold text-gray-800">OpenLife 建议</span>
+            </div>
+            <div className="grid gap-2">
+              {proactiveSuggestions.map(s => (
+                <Link
+                  key={s.id}
+                  to="/chat"
+                  className="flex items-center justify-between gap-2 bg-white rounded-lg px-4 py-3 border border-gray-100 hover:border-indigo-200 hover:shadow-sm transition-all group"
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-800 truncate">{s.title}</div>
+                    <div className="text-xs text-gray-500 mt-0.5 truncate">
+                      {s.prompt.slice(0, 80)}...
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {s.priority === "high" && (
+                      <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
+                        高
+                      </span>
+                    )}
+                    {s.category === "daily_brief" && (
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                        每日
+                      </span>
+                    )}
+                    {s.category === "weekly_review" && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">
+                        每周
+                      </span>
+                    )}
+                    {s.category === "stale_goal" && (
+                      <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                        目标
+                      </span>
+                    )}
+                    {s.category === "pending_proposal" && (
+                      <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full">
+                        待审
+                      </span>
+                    )}
+                    {s.category === "state_checkin" && (
+                      <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
+                        状态
+                      </span>
+                    )}
+                    <ArrowRight size={14} className="text-gray-300 group-hover:text-indigo-500" />
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Top: Daily Goals + Quick Stats */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
