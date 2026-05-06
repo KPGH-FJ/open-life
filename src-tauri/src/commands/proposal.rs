@@ -1363,6 +1363,7 @@ mod tests {
                 temp_dir.path().join("mcp_audit.db"),
             ))),
             agent_run_store: None,
+            agent_run_event_store: None,
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),

@@ -1208,12 +1208,18 @@ async fn send_message_with_agent_loop(
         shutdown_notify: Some(state.inner().shutdown_notify.clone()),
         ..Default::default()
     };
-    let agent_loop = openlife_core::agent::AgentLoop::new(
-        agent_runtime,
-        action_executor,
-        scheduler.clone(),
-        loop_config,
-    );
+    let agent_loop = {
+        let mut al = openlife_core::agent::AgentLoop::new(
+            agent_runtime,
+            action_executor,
+            scheduler.clone(),
+            loop_config,
+        );
+        if let Some(ref es) = state.agent_run_event_store {
+            al = al.with_event_store((**es).clone());
+        }
+        al
+    };
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
@@ -1258,6 +1264,9 @@ async fn send_message_with_agent_loop(
         }
         if let Some(ref store) = agent_run_store_guard {
             action_ctx = action_ctx.with_agent_run_store(store);
+        }
+        if let Some(ref es) = state.agent_run_event_store {
+            action_ctx = action_ctx.with_event_store((**es).clone());
         }
 
         agent_loop
@@ -1305,6 +1314,7 @@ async fn send_message_with_agent_loop(
                 &session_id,
                 &user_input_text,
                 state.agent_run_store.as_ref(),
+                state.agent_run_event_store.as_ref(),
                 &e.to_string(),
             )
             .await?;
@@ -1450,8 +1460,23 @@ async fn handle_agent_loop_fallback(
     agent_run_store: Option<
         &std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>,
     >,
+    event_store: Option<&std::sync::Arc<openlife_core::agent::event_store::AgentRunEventStore>>,
     original_error: &str,
 ) -> Result<(String, openlife_core::agent::AgentRun), String> {
+    // Create AgentRun first so fallback.started has a real run_id
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
+    let run_id = agent_run.id.clone();
+
+    if let Some(es) = event_store {
+        let ev = openlife_core::agent::AgentRunEvent::new(
+            &run_id,
+            openlife_core::agent::AgentRunEventType::FallbackStarted,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!("AgentLoop failed, attempting fallback: {}", original_error),
+            serde_json::json!({"error": original_error}),
+        );
+        let _ = es.append_event(&ev);
+    }
     let fallback_reply =
         generate_non_stream_fallback(scheduler, messages, life_model, tools_prompt)
             .await
@@ -1462,7 +1487,6 @@ async fn handle_agent_loop_fallback(
                 )
             })?;
 
-    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
     agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
     agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
     agent_run
@@ -1473,6 +1497,17 @@ async fn handle_agent_loop_fallback(
     if let Some(store_arc) = agent_run_store {
         let store = store_arc.lock().await;
         let _ = store.create_run(&agent_run);
+    }
+
+    if let Some(es) = event_store {
+        let ev = openlife_core::agent::AgentRunEvent::new(
+            &agent_run.id,
+            openlife_core::agent::AgentRunEventType::FallbackCompleted,
+            openlife_core::agent::AgentEventActor::Runtime,
+            "Fallback generation completed",
+            serde_json::json!({"reply_len": fallback_reply.len()}),
+        );
+        let _ = es.append_event(&ev);
     }
 
     Ok((fallback_reply, agent_run))
@@ -1673,12 +1708,18 @@ async fn start_stream_message_with_agent_loop(
         shutdown_notify: Some(state.inner().shutdown_notify.clone()),
         ..Default::default()
     };
-    let agent_loop = openlife_core::agent::AgentLoop::new(
-        agent_runtime,
-        action_executor,
-        scheduler.clone(),
-        loop_config,
-    );
+    let agent_loop = {
+        let mut al = openlife_core::agent::AgentLoop::new(
+            agent_runtime,
+            action_executor,
+            scheduler.clone(),
+            loop_config,
+        );
+        if let Some(ref es) = state.agent_run_event_store {
+            al = al.with_event_store((**es).clone());
+        }
+        al
+    };
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
@@ -1742,6 +1783,9 @@ async fn start_stream_message_with_agent_loop(
         if let Some(ref store) = agent_run_store_guard {
             action_ctx = action_ctx.with_agent_run_store(store);
         }
+        if let Some(ref es) = state.agent_run_event_store {
+            action_ctx = action_ctx.with_event_store((**es).clone());
+        }
 
         agent_loop
             .run_streaming(
@@ -1775,6 +1819,7 @@ async fn start_stream_message_with_agent_loop(
                 &session_id,
                 &user_input_txt,
                 state.agent_run_store.as_ref(),
+                state.agent_run_event_store.as_ref(),
                 &e.to_string(),
             )
             .await
@@ -2534,6 +2579,11 @@ async fn execute_tool_call(
     );
     let ctx = if let Some(ref store) = agent_run_store_guard {
         ctx.with_agent_run_store(store)
+    } else {
+        ctx
+    };
+    let ctx = if let Some(ref es) = state.agent_run_event_store {
+        ctx.with_event_store((**es).clone())
     } else {
         ctx
     };

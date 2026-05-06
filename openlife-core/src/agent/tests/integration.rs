@@ -799,7 +799,7 @@ fn test_blocked_tool_records_event() {
         memory_store: None,
         proposal_store: None,
         agent_run_store: None,
-        event_store: Some(&event_store),
+        event_store: Some(event_store.clone()),
         network_policy: None,
     };
 

@@ -26,6 +26,9 @@ pub enum AgentRunEventType {
     JsonRepairCompleted,
     RunCompleted,
     RunFailed,
+    PlanCreated,
+    PlanConfirmationRequested,
+    PlanConfirmationResolved,
 }
 
 impl std::fmt::Display for AgentRunEventType {
@@ -49,6 +52,13 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::JsonRepairCompleted => write!(f, "json_repair.completed"),
             AgentRunEventType::RunCompleted => write!(f, "run.completed"),
             AgentRunEventType::RunFailed => write!(f, "run.failed"),
+            AgentRunEventType::PlanCreated => write!(f, "plan.created"),
+            AgentRunEventType::PlanConfirmationRequested => {
+                write!(f, "plan.confirmation_requested")
+            }
+            AgentRunEventType::PlanConfirmationResolved => {
+                write!(f, "plan.confirmation_resolved")
+            }
         }
     }
 }
@@ -860,5 +870,795 @@ impl AgentProposal {
     pub fn postpone(&mut self) {
         self.status = ProposalStatus::Postponed;
         self.resolved_at = Some(Utc::now());
+    }
+}
+
+// ── AgentPlan types ───────────────────────────────────────────────────
+
+/// Status of an AgentPlan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanStatus {
+    Draft,
+    /// Plan has been published and may need confirmation
+    Published,
+    /// User has confirmed the plan
+    Confirmed,
+    /// Plan is being executed
+    Executing,
+    /// Plan execution completed
+    Completed,
+    /// Plan was rejected by user
+    Rejected,
+    /// Plan was cancelled
+    Cancelled,
+}
+
+impl std::fmt::Display for PlanStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanStatus::Draft => write!(f, "draft"),
+            PlanStatus::Published => write!(f, "published"),
+            PlanStatus::Confirmed => write!(f, "confirmed"),
+            PlanStatus::Executing => write!(f, "executing"),
+            PlanStatus::Completed => write!(f, "completed"),
+            PlanStatus::Rejected => write!(f, "rejected"),
+            PlanStatus::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+/// A single step in a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStep {
+    pub index: u32,
+    pub description: String,
+    pub tool_intent: Option<String>,
+    pub expected_output: Option<String>,
+    pub depends_on: Vec<u32>,
+}
+
+/// Intent to use a specific tool during plan execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolIntent {
+    pub tool_name: String,
+    pub purpose: String,
+    pub risk_level: RiskLevel,
+    pub is_write: bool,
+    pub parameters_summary: Option<String>,
+}
+
+/// Sub-agent assignment within a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAgentAssignment {
+    pub agent_role: String,
+    pub task: String,
+    pub delegation_mode: String,
+}
+
+/// Permission requirement declared in a plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionRequirement {
+    pub target: String,
+    pub reason: String,
+    pub risk_level: RiskLevel,
+}
+
+/// A structured plan for complex or risky agent tasks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPlan {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub session_id: Option<String>,
+    pub goal: String,
+    pub assumptions: Vec<String>,
+    pub missing_context: Vec<String>,
+    pub steps: Vec<PlanStep>,
+    pub tool_intents: Vec<ToolIntent>,
+    pub subagent_assignments: Vec<SubAgentAssignment>,
+    pub permission_requirements: Vec<PermissionRequirement>,
+    pub rollback_plan: Option<String>,
+    pub success_criteria: Vec<String>,
+    pub risk_level: RiskLevel,
+    pub requires_confirmation: bool,
+    pub status: PlanStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub confirmed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+impl AgentPlan {
+    pub fn new(goal: impl Into<String>, risk_level: RiskLevel) -> Self {
+        let now = Utc::now();
+        let requires_confirmation = !matches!(risk_level, RiskLevel::Low);
+        Self {
+            id: Uuid::new_v4().to_string(),
+            run_id: None,
+            session_id: None,
+            goal: goal.into(),
+            assumptions: Vec::new(),
+            missing_context: Vec::new(),
+            steps: Vec::new(),
+            tool_intents: Vec::new(),
+            subagent_assignments: Vec::new(),
+            permission_requirements: Vec::new(),
+            rollback_plan: None,
+            success_criteria: Vec::new(),
+            risk_level,
+            requires_confirmation,
+            status: PlanStatus::Draft,
+            created_at: now,
+            updated_at: now,
+            confirmed_at: None,
+            completed_at: None,
+        }
+    }
+
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn publish(&mut self) {
+        self.status = PlanStatus::Published;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn confirm(&mut self) {
+        self.status = PlanStatus::Confirmed;
+        self.confirmed_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    pub fn reject(&mut self) {
+        self.status = PlanStatus::Rejected;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn start_execution(&mut self) {
+        self.status = PlanStatus::Executing;
+        self.updated_at = Utc::now();
+    }
+
+    pub fn complete(&mut self) {
+        self.status = PlanStatus::Completed;
+        self.completed_at = Some(Utc::now());
+        self.updated_at = Utc::now();
+    }
+
+    /// Returns true if any tool intent involves write side effects.
+    pub fn has_write_intents(&self) -> bool {
+        self.tool_intents.iter().any(|t| t.is_write)
+    }
+
+    /// Returns true if any sub-agent assignment uses handoff mode.
+    pub fn has_handoff_assignments(&self) -> bool {
+        self.subagent_assignments
+            .iter()
+            .any(|a| a.delegation_mode == "handoff")
+    }
+}
+
+// ── CompactionSummary ─────────────────────────────────────────────────
+
+/// A compacted context summary used when conversation context grows beyond
+/// the token budget. Preserves critical state: active proposals, unresolved
+/// tool observations, and redaction metadata.
+///
+/// Sensitive content is summarized under the privacy policy and never stored
+/// in plain text within a cloud-safe summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionSummary {
+    /// Unique identifier for this compaction.
+    pub id: String,
+    /// The run this compaction belongs to.
+    pub run_id: String,
+    /// Compacted summary of the conversation so far.
+    pub conversation_summary: String,
+    /// IDs of proposals that were active (pending) at compaction time.
+    pub active_proposal_ids: Vec<String>,
+    /// Number of unresolved tool observations included.
+    pub unresolved_observation_count: u32,
+    /// Summarized tool observations that were unresolved.
+    pub unresolved_observation_summaries: Vec<CompactedObservation>,
+    /// Whether sensitive content was redacted or summarized.
+    pub sensitive_content_redacted: bool,
+    /// Which fields or categories were redacted/summarized.
+    pub redacted_fields: Vec<String>,
+    /// Human-readable description of the redaction policy applied.
+    pub redaction_policy: String,
+    /// Number of tokens in the original context before compaction.
+    pub original_token_estimate: usize,
+    /// Number of tokens in the compacted summary.
+    pub compacted_token_estimate: usize,
+    /// When the compaction was created.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// A compacted representation of an unresolved tool observation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactedObservation {
+    pub tool_name: String,
+    pub summary: String,
+    pub pending_action: String,
+    pub risk_level: String,
+}
+
+impl CompactionSummary {
+    pub fn new(
+        run_id: impl Into<String>,
+        conversation_summary: impl Into<String>,
+        original_tokens: usize,
+        compacted_tokens: usize,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            run_id: run_id.into(),
+            conversation_summary: conversation_summary.into(),
+            active_proposal_ids: Vec::new(),
+            unresolved_observation_count: 0,
+            unresolved_observation_summaries: Vec::new(),
+            sensitive_content_redacted: false,
+            redacted_fields: Vec::new(),
+            redaction_policy: String::new(),
+            original_token_estimate: original_tokens,
+            compacted_token_estimate: compacted_tokens,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// Add an active proposal ID that was preserved through compaction.
+    pub fn with_active_proposal(mut self, proposal_id: impl Into<String>) -> Self {
+        self.active_proposal_ids.push(proposal_id.into());
+        self
+    }
+
+    /// Add an unresolved observation summary.
+    pub fn with_observation(mut self, obs: CompactedObservation) -> Self {
+        self.unresolved_observation_count += 1;
+        self.unresolved_observation_summaries.push(obs);
+        self
+    }
+
+    /// Mark sensitive content as redacted with the given policy.
+    pub fn with_redaction(
+        mut self,
+        policy: impl Into<String>,
+        fields: Vec<String>,
+    ) -> Self {
+        self.sensitive_content_redacted = true;
+        self.redaction_policy = policy.into();
+        self.redacted_fields = fields;
+        self
+    }
+
+    /// Check whether this summary preserves active proposals.
+    pub fn has_active_proposals(&self) -> bool {
+        !self.active_proposal_ids.is_empty()
+    }
+
+    /// Check whether this summary preserves unresolved observations.
+    pub fn has_unresolved_observations(&self) -> bool {
+        self.unresolved_observation_count > 0
+    }
+}
+
+#[cfg(test)]
+mod compaction_tests {
+    use super::*;
+
+    #[test]
+    fn test_compaction_summary_preserves_active_proposals() {
+        let summary = CompactionSummary::new("run-001", "Conversation so far", 5000, 800)
+            .with_active_proposal("proposal-1")
+            .with_active_proposal("proposal-2");
+
+        assert!(summary.has_active_proposals());
+        assert_eq!(summary.active_proposal_ids.len(), 2);
+        assert_eq!(summary.active_proposal_ids[0], "proposal-1");
+        assert_eq!(summary.active_proposal_ids[1], "proposal-2");
+    }
+
+    #[test]
+    fn test_compaction_summary_preserves_unresolved_observations() {
+        let summary = CompactionSummary::new("run-001", "Summary", 5000, 800)
+            .with_observation(CompactedObservation {
+                tool_name: "web.search".into(),
+                summary: "Search returned 5 results".into(),
+                pending_action: "Needs user to select result".into(),
+                risk_level: "low".into(),
+            })
+            .with_observation(CompactedObservation {
+                tool_name: "file.read".into(),
+                summary: "File read partially".into(),
+                pending_action: "File too large, needs chunking".into(),
+                risk_level: "low".into(),
+            });
+
+        assert!(summary.has_unresolved_observations());
+        assert_eq!(summary.unresolved_observation_count, 2);
+        assert_eq!(summary.unresolved_observation_summaries.len(), 2);
+        assert_eq!(
+            summary.unresolved_observation_summaries[0].tool_name,
+            "web.search"
+        );
+        assert_eq!(
+            summary.unresolved_observation_summaries[1].tool_name,
+            "file.read"
+        );
+    }
+
+    #[test]
+    fn test_compaction_summary_redacts_sensitive_fields() {
+        let summary = CompactionSummary::new("run-001", "Summary with PII", 5000, 600)
+            .with_redaction(
+                "PII and LifeModel fields redacted",
+                vec![
+                    "life_model.identity.name".into(),
+                    "life_model.identity.values".into(),
+                    "memory.raw_content".into(),
+                ],
+            );
+
+        assert!(summary.sensitive_content_redacted);
+        assert_eq!(summary.redacted_fields.len(), 3);
+        assert!(summary.redacted_fields.contains(&"life_model.identity.name".into()));
+        assert!(summary.redaction_policy.contains("PII"));
+    }
+
+    #[test]
+    fn test_compaction_summary_token_estimates() {
+        let summary = CompactionSummary::new(
+            "run-001",
+            "Compacted context",
+            10000, // original tokens
+            1200,  // compacted tokens
+        );
+
+        assert_eq!(summary.original_token_estimate, 10000);
+        assert_eq!(summary.compacted_token_estimate, 1200);
+        assert!(
+            summary.compacted_token_estimate < summary.original_token_estimate,
+            "compacted should be smaller than original"
+        );
+    }
+
+    #[test]
+    fn test_compaction_summary_default_no_proposals_or_observations() {
+        let summary = CompactionSummary::new("run-001", "Plain summary", 3000, 500);
+
+        assert!(!summary.has_active_proposals());
+        assert!(!summary.has_unresolved_observations());
+        assert!(!summary.sensitive_content_redacted);
+        assert!(summary.redacted_fields.is_empty());
+    }
+
+    #[test]
+    fn test_compaction_summary_round_trip_serialization() {
+        let summary = CompactionSummary::new("run-001", "Test summary", 5000, 800)
+            .with_active_proposal("prop-1")
+            .with_observation(CompactedObservation {
+                tool_name: "web.search".into(),
+                summary: "Search done".into(),
+                pending_action: "Review results".into(),
+                risk_level: "low".into(),
+            })
+            .with_redaction(
+                "redacted for cloud",
+                vec!["life_model".into()],
+            );
+
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("run-001"));
+        assert!(json.contains("prop-1"));
+        assert!(json.contains("web.search"));
+        assert!(json.contains("life_model"));
+
+        let deserialized: CompactionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.id, summary.id);
+        assert_eq!(deserialized.active_proposal_ids, summary.active_proposal_ids);
+        assert_eq!(deserialized.unresolved_observation_count, 1);
+        assert!(deserialized.sensitive_content_redacted);
+    }
+}
+
+// ── AgentSpec & SubAgentSpec ───────────────────────────────────────────
+
+/// An agent's role in the framework.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRoleKind {
+    Main,
+    Planner,
+    CodebaseExplorer,
+    MemoryCurator,
+    LifeModelGuardian,
+    Reviewer,
+    Custom(String),
+}
+
+impl std::fmt::Display for AgentRoleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentRoleKind::Main => write!(f, "main"),
+            AgentRoleKind::Planner => write!(f, "planner"),
+            AgentRoleKind::CodebaseExplorer => write!(f, "codebase_explorer"),
+            AgentRoleKind::MemoryCurator => write!(f, "memory_curator"),
+            AgentRoleKind::LifeModelGuardian => write!(f, "lifemodel_guardian"),
+            AgentRoleKind::Reviewer => write!(f, "reviewer"),
+            AgentRoleKind::Custom(name) => write!(f, "{}", name),
+        }
+    }
+}
+
+/// Delegation mode for sub-agent dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DelegationMode {
+    /// Sub-agent is invoked as a tool from the main agent while the main
+    /// agent waits for the result. Tool policy applied.
+    CallAsTool,
+    /// Sub-agent reviews a plan/output/patch and returns structured feedback.
+    Review,
+    /// Multiple sub-agents dispatched in parallel (not in P3-1).
+    Parallel,
+    /// Sub-agent takes over control ownership (last to implement).
+    Handoff,
+}
+
+impl std::fmt::Display for DelegationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DelegationMode::CallAsTool => write!(f, "call_as_tool"),
+            DelegationMode::Review => write!(f, "review"),
+            DelegationMode::Parallel => write!(f, "parallel"),
+            DelegationMode::Handoff => write!(f, "handoff"),
+        }
+    }
+}
+
+/// Canonical specification of an agent's identity, permissions, and runtime
+/// constraints. Used for both the main agent and sub-agents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSpec {
+    /// Unique identifier for this spec.
+    pub id: String,
+    /// The agent's role in the framework.
+    pub role: AgentRoleKind,
+    /// Human-readable name.
+    pub name: String,
+    /// What this agent is designed to do.
+    pub purpose: String,
+    /// PromptBlock IDs that this agent uses (referenced from PromptStack).
+    pub prompt_block_ids: Vec<String>,
+    /// Tool names this agent is allowed to call. Empty means use role defaults.
+    pub allowed_tools: Vec<String>,
+    /// Tool names this agent is explicitly forbidden from calling.
+    pub denied_tools: Vec<String>,
+    /// Whether this agent can touch LifeModel context.
+    pub can_access_lifemodel: bool,
+    /// Whether this agent can access MemoryEvidence.
+    pub can_access_memory_evidence: bool,
+    /// Whether this agent can generate proposals.
+    pub can_generate_proposals: bool,
+    /// Maximum steps in the agent loop.
+    pub max_steps: u32,
+    /// Maximum tool calls.
+    pub max_tool_calls: u32,
+    /// Timeout in seconds.
+    pub timeout_seconds: u64,
+    /// ID of the output schema to enforce (referenced from PromptStack).
+    pub output_schema_id: Option<String>,
+    /// Whether this spec describes a read-only agent.
+    pub read_only: bool,
+    /// Whether this spec is active.
+    pub active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl AgentSpec {
+    pub fn new(role: AgentRoleKind, name: impl Into<String>, purpose: impl Into<String>) -> Self {
+        let now = chrono::Utc::now();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            role,
+            name: name.into(),
+            purpose: purpose.into(),
+            prompt_block_ids: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+            can_access_lifemodel: false,
+            can_access_memory_evidence: false,
+            can_generate_proposals: false,
+            max_steps: 5,
+            max_tool_calls: 3,
+            timeout_seconds: 60,
+            output_schema_id: None,
+            read_only: false,
+            active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    pub fn with_allowed_tools(mut self, tools: Vec<String>) -> Self {
+        self.allowed_tools = tools;
+        self
+    }
+
+    pub fn with_denied_tools(mut self, tools: Vec<String>) -> Self {
+        self.denied_tools = tools;
+        self
+    }
+
+    pub fn with_read_only(mut self) -> Self {
+        self.read_only = true;
+        self.can_generate_proposals = false;
+        self.denied_tools.extend(vec![
+            "memory.propose_write".into(),
+            "memory.propose_archive".into(),
+            "file.write_proposal".into(),
+            "life_model.propose_patch".into(),
+        ]);
+        self
+    }
+
+    pub fn with_lifemodel_access(mut self) -> Self {
+        self.can_access_lifemodel = true;
+        self
+    }
+
+    pub fn with_memory_evidence(mut self) -> Self {
+        self.can_access_memory_evidence = true;
+        self
+    }
+
+    pub fn with_output_schema(mut self, schema_id: impl Into<String>) -> Self {
+        self.output_schema_id = Some(schema_id.into());
+        self
+    }
+
+    /// Check if a tool is allowed by this spec.
+    pub fn is_tool_allowed(&self, tool_name: &str) -> bool {
+        if self.denied_tools.iter().any(|t| t == tool_name) {
+            return false;
+        }
+        if self.allowed_tools.is_empty() {
+            return true; // no allowlist = all non-denied tools allowed
+        }
+        self.allowed_tools.iter().any(|t| t == tool_name)
+    }
+
+    /// Check if a tool is denied by this spec.
+    pub fn is_tool_denied(&self, tool_name: &str) -> bool {
+        self.denied_tools.iter().any(|t| t == tool_name)
+    }
+}
+
+impl Default for AgentSpec {
+    fn default() -> Self {
+        Self::new(
+            AgentRoleKind::Main,
+            "OpenLife Main Agent",
+            "LifeModel-governed personal agent",
+        )
+        .with_lifemodel_access()
+        .with_memory_evidence()
+    }
+}
+
+/// A sub-agent specification that wraps an AgentSpec with delegation
+/// constraints and parent-child linkage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubAgentSpec {
+    /// Wrapped agent specification.
+    pub spec: AgentSpec,
+    /// How this sub-agent is invoked.
+    pub delegation_mode: DelegationMode,
+    /// ID of the parent run (for trace linkage).
+    pub parent_run_id: Option<String>,
+    /// Maximum time the parent will wait for this sub-agent.
+    pub deadline_seconds: u64,
+    /// Whether to inherit the parent's tool allowlist.
+    pub inherit_tool_policy: bool,
+    /// Whether to inherit the parent's context (LifeModel, memory, etc.).
+    pub inherit_context: bool,
+    /// Whether to apply isolated context policy (default: true).
+    pub isolated_context: bool,
+    /// Maximum output tokens for this sub-agent.
+    pub max_output_tokens: Option<u32>,
+}
+
+impl SubAgentSpec {
+    pub fn new(spec: AgentSpec, delegation_mode: DelegationMode) -> Self {
+        Self {
+            spec,
+            delegation_mode,
+            parent_run_id: None,
+            deadline_seconds: 120,
+            inherit_tool_policy: false,
+            inherit_context: false,
+            isolated_context: true,
+            max_output_tokens: None,
+        }
+    }
+
+    pub fn with_parent_run(mut self, run_id: impl Into<String>) -> Self {
+        self.parent_run_id = Some(run_id.into());
+        self
+    }
+
+    pub fn with_deadline(mut self, seconds: u64) -> Self {
+        self.deadline_seconds = seconds;
+        self
+    }
+
+    pub fn with_inherited_tools(mut self) -> Self {
+        self.inherit_tool_policy = true;
+        self
+    }
+
+    pub fn with_inherited_context(mut self) -> Self {
+        self.inherit_context = true;
+        self.isolated_context = false;
+        self
+    }
+}
+
+#[cfg(test)]
+mod agent_spec_tests {
+    use super::*;
+
+    #[test]
+    fn test_agent_spec_default_main() {
+        let spec = AgentSpec::default();
+        assert_eq!(spec.role, AgentRoleKind::Main);
+        assert!(spec.can_access_lifemodel);
+        assert!(spec.can_access_memory_evidence);
+        assert!(spec.active);
+    }
+
+    #[test]
+    fn test_agent_spec_read_only_blocks_writes() {
+        let spec = AgentSpec::new(
+            AgentRoleKind::Planner,
+            "Planner",
+            "Task decomposition",
+        )
+        .with_allowed_tools(vec![
+            "life_model.read".into(),
+            "web.search".into(),
+            "file.read".into(),
+        ])
+        .with_read_only();
+
+        assert!(spec.read_only);
+        assert!(!spec.can_generate_proposals);
+        assert!(spec.is_tool_allowed("life_model.read"));
+        assert!(spec.is_tool_allowed("web.search"));
+        assert!(spec.is_tool_denied("file.write_proposal"));
+        assert!(!spec.is_tool_allowed("file.write_proposal"));
+    }
+
+    #[test]
+    fn test_agent_spec_tool_allow_deny() {
+        let spec = AgentSpec::new(
+            AgentRoleKind::CodebaseExplorer,
+            "Explorer",
+            "Read files",
+        )
+        .with_allowed_tools(vec!["file.read".into(), "web.search".into()])
+        .with_denied_tools(vec!["life_model.propose_patch".into()]);
+
+        assert!(spec.is_tool_allowed("file.read"));
+        assert!(spec.is_tool_allowed("web.search"));
+        assert!(!spec.is_tool_allowed("memory.search")); // not in allowlist
+        assert!(spec.is_tool_denied("life_model.propose_patch"));
+        assert!(!spec.is_tool_allowed("life_model.propose_patch")); // denied takes precedence
+    }
+
+    #[test]
+    fn test_sub_agent_spec_serialization() {
+        let spec = AgentSpec::new(
+            AgentRoleKind::Planner,
+            "Planner",
+            "Plan complex tasks",
+        )
+        .with_read_only()
+        .with_output_schema("agent_plan_v1");
+
+        let sub = SubAgentSpec::new(spec, DelegationMode::CallAsTool)
+            .with_parent_run("parent-run-001")
+            .with_deadline(60);
+
+        let json = serde_json::to_string(&sub).unwrap();
+        assert!(json.contains("call_as_tool"));
+        assert!(json.contains("parent-run-001"));
+        assert!(json.contains("Planner"));
+        assert!(json.contains("agent_plan_v1"));
+
+        let deserialized: SubAgentSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized.delegation_mode,
+            DelegationMode::CallAsTool
+        );
+        assert_eq!(
+            deserialized.parent_run_id,
+            Some("parent-run-001".into())
+        );
+        assert_eq!(deserialized.spec.role, AgentRoleKind::Planner);
+        assert!(deserialized.isolated_context);
+    }
+
+    #[test]
+    fn test_delegation_modes_serialize_deserialize() {
+        let modes = [
+            DelegationMode::CallAsTool,
+            DelegationMode::Review,
+            DelegationMode::Parallel,
+            DelegationMode::Handoff,
+        ];
+
+        for mode in &modes {
+            let json = serde_json::to_string(mode).unwrap();
+            let parsed: DelegationMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(*mode, parsed);
+        }
+    }
+
+    #[test]
+    fn test_agent_role_kind_display() {
+        assert_eq!(AgentRoleKind::Main.to_string(), "main");
+        assert_eq!(AgentRoleKind::Planner.to_string(), "planner");
+        assert_eq!(AgentRoleKind::CodebaseExplorer.to_string(), "codebase_explorer");
+        assert_eq!(AgentRoleKind::MemoryCurator.to_string(), "memory_curator");
+        assert_eq!(AgentRoleKind::LifeModelGuardian.to_string(), "lifemodel_guardian");
+        assert_eq!(AgentRoleKind::Reviewer.to_string(), "reviewer");
+        assert_eq!(
+            AgentRoleKind::Custom("my-agent".into()).to_string(),
+            "my-agent"
+        );
+    }
+
+    #[test]
+    fn test_sub_agent_default_isolated_context() {
+        let spec = AgentSpec::new(
+            AgentRoleKind::Reviewer,
+            "Reviewer",
+            "Review outputs",
+        );
+        let sub = SubAgentSpec::new(spec, DelegationMode::Review);
+
+        assert!(sub.isolated_context);
+        assert!(!sub.inherit_context);
+        assert!(!sub.inherit_tool_policy);
+    }
+
+    #[test]
+    fn test_sub_agent_with_inherited_context() {
+        let spec = AgentSpec::default();
+        let sub = SubAgentSpec::new(spec, DelegationMode::CallAsTool)
+            .with_inherited_context()
+            .with_inherited_tools();
+
+        assert!(!sub.isolated_context);
+        assert!(sub.inherit_context);
+        assert!(sub.inherit_tool_policy);
     }
 }

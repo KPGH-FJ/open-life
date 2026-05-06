@@ -238,3 +238,61 @@ export interface LifeModelVersion {
   note: string;
   yaml_content: string;
 }
+
+// ── AgentRunEvent Timeline types ──────────────────────────────────────
+
+export type AgentRunEventType =
+  | "run.created"
+  | "context.assembled"
+  | "model.route_selected"
+  | "model.call_started"
+  | "model.call_completed"
+  | "model.call_failed"
+  | "tool.call_started"
+  | "tool.call_blocked"
+  | "tool.call_completed"
+  | "tool.call_failed"
+  | "observation.created"
+  | "proposal.created"
+  | "fallback.started"
+  | "fallback.completed"
+  | "json_repair.started"
+  | "json_repair.completed"
+  | "plan.created"
+  | "plan.confirmation_requested"
+  | "plan.confirmation_resolved"
+  | "run.completed"
+  | "run.failed";
+
+export type AgentEventActor =
+  | "user"
+  | "agent"
+  | "runtime"
+  | "system"
+  | { sub_agent: string }
+  | { tool: string };
+
+export interface RedactionSummary {
+  redacted: boolean;
+  reason: string;
+  fieldsRemoved: string[];
+}
+
+/** A single append-only trace event belonging to an AgentRun. */
+export interface AgentRunEvent {
+  id: string;
+  runId: string;
+  parentEventId?: string;
+  eventType: AgentRunEventType;
+  phase?: string;
+  actor: AgentEventActor;
+  summary: string;
+  payload: Record<string, unknown>;
+  redaction?: RedactionSummary;
+  createdAt: string;
+}
+
+export interface AgentRunEventTimelineProps {
+  events: AgentRunEvent[];
+  runId: string;
+}

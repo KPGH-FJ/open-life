@@ -6,6 +6,7 @@ import type {
   StateHistoryEntry,
   StateAlert,
   LifeModelVersion,
+  AgentRunEvent,
 } from "@/types";
 
 export const mockLifeModel: LifeModel = {
@@ -860,7 +861,98 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve(false as T);
     case "mark_onboarding_completed":
       return Promise.resolve(undefined as T);
+    case "list_agent_run_events":
+      return Promise.resolve(mockAgentRunEvents as T);
     default:
       return Promise.resolve({} as T);
   }
 });
+
+// ── AgentRunEvent mock data for timeline contract ─────────────────────
+
+export const mockAgentRunEvents: AgentRunEvent[] = [
+  {
+    id: "evt-run-created-001",
+    runId: "run-001",
+    eventType: "run.created",
+    actor: "runtime",
+    summary: "Agent run created",
+    payload: { session_id: "sess-1", kind: "conversation" },
+    createdAt: "2026-05-06T10:00:00Z",
+  },
+  {
+    id: "evt-context-001",
+    runId: "run-001",
+    eventType: "context.assembled",
+    actor: "agent",
+    summary: "Context assembled with 3 memory hits",
+    payload: { memory_hit_count: 3, life_model_sections: ["identity", "goals"] },
+    createdAt: "2026-05-06T10:00:01Z",
+  },
+  {
+    id: "evt-model-started-001",
+    runId: "run-001",
+    eventType: "model.call_started",
+    actor: "agent",
+    phase: "reasoning",
+    summary: "Calling deepseek-chat for step 1",
+    payload: { provider: "deepseek", model: "deepseek-chat", step: 1 },
+    createdAt: "2026-05-06T10:00:02Z",
+  },
+  {
+    id: "evt-model-completed-001",
+    runId: "run-001",
+    eventType: "model.call_completed",
+    actor: "agent",
+    phase: "reasoning",
+    summary: "Model call completed (1234ms)",
+    payload: { latency_ms: 1234, reply_len: 256 },
+    createdAt: "2026-05-06T10:00:03Z",
+  },
+  {
+    id: "evt-tool-blocked-001",
+    runId: "run-001",
+    eventType: "tool.call_blocked",
+    actor: "runtime",
+    summary: "email.read blocked: declarative-only stub",
+    payload: { tool: "email.read", reason: "declarative-only" },
+    createdAt: "2026-05-06T10:00:04Z",
+  },
+  {
+    id: "evt-plan-created-001",
+    runId: "run-001",
+    eventType: "plan.created",
+    actor: "agent",
+    summary: "Plan created: Analyze project structure",
+    payload: {
+      plan_id: "plan-001",
+      goal: "Analyze project structure",
+      risk_level: "low",
+      requires_confirmation: false,
+      step_count: 3,
+    },
+    createdAt: "2026-05-06T10:00:05Z",
+  },
+  {
+    id: "evt-plan-confirm-001",
+    runId: "run-001",
+    eventType: "plan.confirmation_requested",
+    actor: "agent",
+    summary: "Plan confirmation requested",
+    payload: {
+      plan_id: "plan-001",
+      requires_confirmation: false,
+      reasons: ["Plan is low-risk and read-only; no confirmation required"],
+    },
+    createdAt: "2026-05-06T10:00:06Z",
+  },
+  {
+    id: "evt-run-completed-001",
+    runId: "run-001",
+    eventType: "run.completed",
+    actor: "runtime",
+    summary: "Run completed: no_tools",
+    payload: { stop_reason: "no_tools", step_count: 1, tool_call_count: 0 },
+    createdAt: "2026-05-06T10:00:07Z",
+  },
+];

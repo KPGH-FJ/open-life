@@ -211,7 +211,7 @@ impl super::ActionExecutor {
             };
 
             // Record tool.call_blocked event
-            if let (Some(event_store), Some(ref run_id)) = (ctx.event_store, &request.source_run_id)
+            if let (Some(ref event_store), Some(ref run_id)) = (ctx.event_store.as_ref(), &request.source_run_id)
             {
                 let event = AgentRunEvent::new(
                     run_id,

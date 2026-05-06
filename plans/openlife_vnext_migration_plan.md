@@ -316,3 +316,9 @@ Task source:
 Verification source:
 
 - See `plans/openlife_vnext_test_and_acceptance_matrix.md`.
+
+Next planning source after P0/P1:
+
+- See `plans/openlife_vnext_p2_p3_task_specs.md`.
+- See `plans/openlife_vnext_agent_coding_prompts.md`.
+- ADR 0007-0010 must be reviewed before P2/P3 implementation.

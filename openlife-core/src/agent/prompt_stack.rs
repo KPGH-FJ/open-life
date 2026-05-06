@@ -101,6 +101,21 @@ impl PromptBlock {
         self
     }
 
+    /// Factory: create a PlanningPrompt block for PlanMode.
+    /// Includes planner role instructions, tool permissions, and output expectations.
+    pub fn planning() -> Self {
+        Self::new(
+            "planning_prompt",
+            "1.0.0",
+            PromptPurpose::Planning,
+            PLANNING_PROMPT_CONTENT,
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(800)
+        .with_applies_to(vec!["Planner".into(), "PlanMode".into()])
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -110,6 +125,166 @@ impl PromptBlock {
     pub fn is_cloud_safe(&self) -> bool {
         self.cloud_allowed && !matches!(self.privacy_level, PromptPrivacyLevel::StrictlyLocal)
     }
+}
+
+/// Planning prompt content: planner role, allowed/disallowed tools, output contract.
+const PLANNING_PROMPT_CONTENT: &str = "\
+You are in PlanMode. Your role is to explore, analyze, and produce a structured AgentPlan.
+
+You MAY:
+- Use read-only tools (file.read, web.search, web.fetch, goal.read, life_model.read, \
+state.read, memory.search, agent_run.lookup, tool.list_available, permission.check, \
+calendar.read) to gather context.
+- Inspect allowed context including LifeModel, goals, memory, and tool manifests.
+- Generate proposals for LifeModel, memory, or tool permission changes.
+
+You MUST NOT:
+- Write files, mutate LifeModel or Memory directly.
+- Call bash, shell, or execute external side effects.
+- Bypass Proposal, Permission, or Audit protocols.
+
+For complex, risky, or multi-step tasks, produce a structured AgentPlan as your output. \
+The plan must follow the AgentPlan output schema exactly. Include:
+- goal: what you aim to accomplish
+- assumptions: what you assume to be true
+- missing_context: what information you need but do not yet have
+- steps: ordered action steps with tool intents and dependencies
+- tool_intents: which tools each step intends to use, with risk and write classification
+- permission_requirements: any permissions needed
+- rollback_plan: how to undo if needed
+- success_criteria: how to know the task is done
+- risk_level: low, medium, high, or critical
+
+If the task is simple, read-only, and low risk, you may answer directly without a plan.";
+
+/// JSON Schema for AgentPlan output.
+/// Used as the output_schema on a PromptStack in planning mode.
+const AGENT_PLAN_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "description": "A structured plan for complex or risky agent tasks",
+  "properties": {
+    "plan": {
+      "type": "object",
+      "required": ["goal", "steps", "risk_level"],
+      "properties": {
+        "goal": {
+          "type": "string",
+          "description": "The overall goal of the plan"
+        },
+        "assumptions": {
+          "type": "array",
+          "description": "Facts or conditions assumed to be true",
+          "items": {"type": "string"}
+        },
+        "missing_context": {
+          "type": "array",
+          "description": "Information needed but not yet available",
+          "items": {"type": "string"}
+        },
+        "steps": {
+          "type": "array",
+          "description": "Ordered steps to execute the plan",
+          "items": {
+            "type": "object",
+            "required": ["index", "description"],
+            "properties": {
+              "index": {"type": "integer", "description": "Zero-based step index"},
+              "description": {"type": "string", "description": "What this step does"},
+              "tool_intent": {
+                "type": "string",
+                "description": "Tool intended for this step, if any"
+              },
+              "expected_output": {
+                "type": "string",
+                "description": "What this step should produce"
+              },
+              "depends_on": {
+                "type": "array",
+                "description": "Indices of steps this depends on",
+                "items": {"type": "integer"}
+              }
+            }
+          }
+        },
+        "tool_intents": {
+          "type": "array",
+          "description": "All tools intended for use across the plan",
+          "items": {
+            "type": "object",
+            "required": ["tool_name", "purpose", "risk_level", "is_write"],
+            "properties": {
+              "tool_name": {"type": "string", "description": "Name of the tool"},
+              "purpose": {"type": "string", "description": "Why this tool is needed"},
+              "risk_level": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "critical"],
+                "description": "Risk classification"
+              },
+              "is_write": {
+                "type": "boolean",
+                "description": "Whether this tool performs a write operation"
+              },
+              "parameters_summary": {
+                "type": "string",
+                "description": "Brief summary of parameters"
+              }
+            }
+          }
+        },
+        "subagent_assignments": {
+          "type": "array",
+          "description": "Sub-agent delegations needed",
+          "items": {
+            "type": "object",
+            "required": ["agent_role", "task", "delegation_mode"],
+            "properties": {
+              "agent_role": {"type": "string"},
+              "task": {"type": "string"},
+              "delegation_mode": {
+                "type": "string",
+                "enum": ["call_as_tool", "handoff", "review"]
+              }
+            }
+          }
+        },
+        "permission_requirements": {
+          "type": "array",
+          "description": "Permissions the plan requires",
+          "items": {
+            "type": "object",
+            "required": ["target", "reason", "risk_level"],
+            "properties": {
+              "target": {"type": "string", "description": "What requires permission"},
+              "reason": {"type": "string", "description": "Why permission is needed"},
+              "risk_level": {
+                "type": "string",
+                "enum": ["low", "medium", "high", "critical"]
+              }
+            }
+          }
+        },
+        "rollback_plan": {
+          "type": "string",
+          "description": "How to undo the plan if needed"
+        },
+        "success_criteria": {
+          "type": "array",
+          "description": "Metrics or conditions that indicate success",
+          "items": {"type": "string"}
+        },
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"],
+          "description": "Overall risk level of the plan"
+        }
+      }
+    }
+  }
+}"#;
+
+/// Return the AgentPlan output JSON Schema as a serde_json::Value.
+pub fn agent_plan_output_schema() -> serde_json::Value {
+    serde_json::from_str(AGENT_PLAN_OUTPUT_SCHEMA).unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// A stack of prompt blocks assembled for a single agent execution.
@@ -130,6 +305,14 @@ impl PromptStack {
             assembled_preview: String::new(),
             redaction_summary: None,
         }
+    }
+
+    /// Build a PromptStack for PlanMode with the planning prompt block
+    /// and the AgentPlan output schema.
+    pub fn plan_mode_stack() -> Self {
+        Self::new()
+            .with_block(PromptBlock::planning())
+            .with_output_schema(agent_plan_output_schema())
     }
 
     /// Push a block onto the stack.
@@ -403,5 +586,200 @@ mod tests {
         assert_eq!(block.applies_to, vec!["Generalist", "Planner"]);
         assert!(block.cloud_allowed); // Sensitive but not StrictlyLocal
         assert!(block.is_cloud_safe());
+    }
+
+    // ── PlanMode/Planning prompt tests ───────────────────────────────────
+
+    #[test]
+    fn test_planning_prompt_block_created() {
+        let block = PromptBlock::planning();
+        assert_eq!(block.id, "planning_prompt");
+        assert_eq!(block.version, "1.0.0");
+        assert_eq!(block.purpose, PromptPurpose::Planning);
+        assert_eq!(block.privacy_level, PromptPrivacyLevel::Internal);
+        assert!(block.cloud_allowed);
+        assert!(block.is_cloud_safe());
+        assert_eq!(block.token_budget, 800);
+        assert!(block.applies_to.contains(&"Planner".to_string()));
+        assert!(block.applies_to.contains(&"PlanMode".to_string()));
+        assert!(!block.content.is_empty());
+        // Must mention PlanMode and Planner contract
+        assert!(block.content.contains("PlanMode"));
+        assert!(block.content.contains("read-only tools"));
+        assert!(block.content.contains("MUST NOT"));
+        assert!(block.content.contains("Write files") || block.content.contains("write files"));
+        assert!(block.content.contains("AgentPlan"));
+        assert!(block.content.contains("risk_level"));
+    }
+
+    #[test]
+    fn test_plan_mode_stack_includes_block_and_schema() {
+        let mut stack = PromptStack::plan_mode_stack();
+        assert_eq!(stack.blocks.len(), 1);
+        assert_eq!(stack.blocks[0].id, "planning_prompt");
+        assert!(stack.output_schema.is_some());
+
+        // Output schema should describe AgentPlan structure
+        let schema = stack.output_schema.as_ref().unwrap();
+        let plan_props = schema
+            .get("properties")
+            .and_then(|p| p.get("plan"))
+            .and_then(|p| p.get("properties"));
+        assert!(plan_props.is_some(), "schema must have plan.properties");
+
+        let props = plan_props.unwrap();
+        assert!(props.get("goal").is_some());
+        assert!(props.get("steps").is_some());
+        assert!(props.get("risk_level").is_some());
+        assert!(props.get("assumptions").is_some());
+        assert!(props.get("tool_intents").is_some());
+        assert!(props.get("rollback_plan").is_some());
+        assert!(props.get("success_criteria").is_some());
+
+        // Required fields
+        let required = schema
+            .get("properties")
+            .and_then(|p| p.get("plan"))
+            .and_then(|p| p.get("required"));
+        let required: Vec<&str> = required
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(required.contains(&"goal"));
+        assert!(required.contains(&"steps"));
+        assert!(required.contains(&"risk_level"));
+
+        // Assembly
+        let assembled = stack.assemble();
+        assert!(assembled.contains("PlanMode"));
+        assert!(assembled.contains("AgentPlan"));
+    }
+
+    #[test]
+    fn test_plan_mode_stack_cloud_filtering() {
+        let stack = PromptStack::plan_mode_stack();
+        let cloud = stack.cloud_filtered();
+
+        // Planning prompt is cloud-safe (Internal privacy, cloud_allowed=true)
+        assert_eq!(cloud.blocks.len(), 1);
+        assert_eq!(cloud.blocks[0].id, "planning_prompt");
+
+        // Output schema persists after cloud filtering
+        assert!(cloud.output_schema.is_some());
+
+        // No redaction needed
+        assert!(cloud.redaction_summary.is_none());
+    }
+
+    #[test]
+    fn test_plan_mode_stack_with_sensitive_block_cloud_filtering() {
+        let mut stack = PromptStack::plan_mode_stack();
+        let private_block = PromptBlock::new(
+            "local_only",
+            "1.0.0",
+            PromptPurpose::Custom("sensitive_context".into()),
+            "This contains strictly local LifeModel data.",
+        )
+        .with_privacy(PromptPrivacyLevel::StrictlyLocal);
+        stack.push(private_block);
+
+        assert_eq!(stack.blocks.len(), 2);
+
+        let cloud = stack.cloud_filtered();
+        // Only planning prompt survives — strictly-local block is removed
+        assert_eq!(cloud.blocks.len(), 1);
+        assert_eq!(cloud.blocks[0].id, "planning_prompt");
+        assert!(cloud.output_schema.is_some());
+        assert!(cloud.redaction_summary.is_some());
+        assert!(cloud
+            .redaction_summary
+            .as_deref()
+            .unwrap()
+            .contains("1 block(s) removed"));
+    }
+
+    #[test]
+    fn test_plan_mode_block_trace() {
+        let mut stack = PromptStack::plan_mode_stack();
+        stack.push(
+            PromptBlock::new(
+                "task_prompt",
+                "1.0.0",
+                PromptPurpose::Task,
+                "Analyze project configuration.",
+            )
+            .with_cloud_allowed(true),
+        );
+
+        let trace = stack.block_trace();
+        assert_eq!(trace.len(), 2);
+        assert_eq!(trace[0].id, "planning_prompt");
+        assert_eq!(trace[0].purpose, "planning");
+        assert!(trace[0].cloud_allowed);
+        assert!(trace[0].estimated_tokens > 0);
+        assert_eq!(trace[1].id, "task_prompt");
+        assert_eq!(trace[1].purpose, "task");
+    }
+
+    #[test]
+    fn test_planning_prompt_content_conforms_to_adr0007() {
+        let block = PromptBlock::planning();
+        let content = &block.content;
+
+        // ADR 0007 Planner permissions: MAY use read-only tools
+        assert!(
+            content.contains("read-only tools"),
+            "planning prompt must mention read-only tools"
+        );
+
+        // ADR 0007: MUST NOT write/mutate
+        assert!(
+            content.to_lowercase().contains("write files")
+                || content.to_lowercase().contains("mutate"),
+            "planning prompt must forbid writes"
+        );
+
+        // ADR 0007: MUST NOT call bash/shell
+        assert!(
+            content.contains("bash") || content.contains("shell"),
+            "planning prompt must forbid bash/shell"
+        );
+
+        // ADR 0007: MUST NOT bypass Proposal/Permission/Audit
+        assert!(
+            content.contains("Proposal") || content.contains("Permission") || content.contains("Audit"),
+            "planning prompt must reference protocol checks"
+        );
+
+        // ADR 0007 AgentPlan required fields
+        assert!(content.contains("goal"), "must mention goal");
+        assert!(content.contains("steps"), "must mention steps");
+        assert!(content.contains("risk_level"), "must mention risk_level");
+    }
+
+    #[test]
+    fn test_agent_plan_output_schema_is_valid_json() {
+        let schema = agent_plan_output_schema();
+        assert!(schema.is_object());
+        assert_eq!(
+            schema.get("type").and_then(|t| t.as_str()),
+            Some("object")
+        );
+
+        // Verify schema can be serialized
+        let serialized = serde_json::to_string(&schema).unwrap();
+        assert!(serialized.contains("goal"));
+        assert!(serialized.contains("steps"));
+        assert!(serialized.contains("risk_level"));
+    }
+
+    #[test]
+    fn test_plan_mode_stack_assembly_not_empty() {
+        let mut stack = PromptStack::plan_mode_stack();
+        let assembled = stack.assemble();
+        assert!(!assembled.is_empty());
+        // preview is trimmed to 500 chars
+        assert!(!stack.assembled_preview.is_empty());
+        assert!(stack.assembled_preview.len() <= 500);
     }
 }

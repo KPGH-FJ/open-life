@@ -2,13 +2,14 @@ use crate::agent::types::{AgentRunEvent, AgentRunEventType};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Append-only event store for AgentRunEvent records.
-/// Colocated with AgentRunStore; uses a separate `agent_run_events` table
-/// in the same database (or a dedicated events database).
+/// Colocated with AgentRunStore; uses a separate `agent_run_events` table.
+/// Uses Arc<Mutex<Connection>> internally for cheap Clone.
+#[derive(Clone)]
 pub struct AgentRunEventStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl AgentRunEventStore {
@@ -22,7 +23,7 @@ impl AgentRunEventStore {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open event store at {:?}", db_path))?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
@@ -32,7 +33,7 @@ impl AgentRunEventStore {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory event store")?;
         let store = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         store.init_tables()?;
         Ok(store)
@@ -183,6 +184,9 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "fallback.completed" => AgentRunEventType::FallbackCompleted,
         "json_repair.started" => AgentRunEventType::JsonRepairStarted,
         "json_repair.completed" => AgentRunEventType::JsonRepairCompleted,
+        "plan.created" => AgentRunEventType::PlanCreated,
+        "plan.confirmation_requested" => AgentRunEventType::PlanConfirmationRequested,
+        "plan.confirmation_resolved" => AgentRunEventType::PlanConfirmationResolved,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
         _ => AgentRunEventType::RunCreated, // safe fallback
@@ -414,5 +418,36 @@ mod tests {
         assert!(redaction.redacted);
         assert_eq!(redaction.reason, "life_model fields redacted");
         assert_eq!(redaction.fields_removed, vec!["life_model.identity"]);
+    }
+
+    /// Verify that cloned stores share the same underlying connection.
+    #[test]
+    fn test_cloned_store_shares_connection() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let clone = store.clone();
+        let run_id = "test-clone-shared";
+
+        // Write via original
+        let e1 = AgentRunEvent::new(
+            run_id, AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime, "original write", serde_json::json!({}),
+        );
+        store.append_event(&e1).unwrap();
+
+        // Write via clone
+        let e2 = AgentRunEvent::new(
+            run_id, AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime, "clone write", serde_json::json!({}),
+        );
+        clone.append_event(&e2).unwrap();
+
+        // Both visible from either handle
+        let from_original = store.list_events_by_run(run_id).unwrap();
+        let from_clone = clone.list_events_by_run(run_id).unwrap();
+
+        assert_eq!(from_original.len(), 2);
+        assert_eq!(from_clone.len(), 2);
+        assert_eq!(from_original[0].summary, "original write");
+        assert_eq!(from_original[1].summary, "clone write");
     }
 }

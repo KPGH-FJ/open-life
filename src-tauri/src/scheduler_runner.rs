@@ -161,12 +161,18 @@ async fn execute_scheduled_task(
             "proposal.create".into(),
         ],
     };
-    let agent_loop = AgentLoop::new(
-        agent_runtime,
-        action_executor,
-        scheduler.clone(),
-        loop_config,
-    );
+    let agent_loop = {
+        let mut al = AgentLoop::new(
+            agent_runtime,
+            action_executor,
+            scheduler.clone(),
+            loop_config,
+        );
+        if let Some(ref es) = state.agent_run_event_store {
+            al = al.with_event_store((**es).clone());
+        }
+        al
+    };
 
     let task = AgentTask {
         kind: AgentTaskKind::Proactive,
@@ -207,7 +213,7 @@ async fn execute_scheduled_task(
             proposal_store: proposal_store_guard.as_deref(),
             agent_run_store: agent_run_store_guard.as_deref(),
             network_policy: Some(&network_policy),
-            event_store: None,
+            event_store: state.agent_run_event_store.as_ref().map(|es| (**es).clone()),
         };
 
         agent_loop

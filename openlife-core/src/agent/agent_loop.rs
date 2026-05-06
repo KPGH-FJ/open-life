@@ -81,7 +81,7 @@ impl AgentLoopConfig {
             PromptBlock::new(
                 format!("role.{}", format!("{:?}", self.role).to_lowercase()),
                 "1.0.0",
-                PromptPurpose::BaseSystem,
+                PromptPurpose::Planning,
                 content,
             )
             .with_privacy(PromptPrivacyLevel::Internal)
@@ -189,7 +189,7 @@ pub struct AgentLoop {
     config: AgentLoopConfig,
     /// Optional vNext event store for runtime trace recording.
     /// When None, no events are recorded (backward compatible).
-    event_store: Option<Arc<AgentRunEventStore>>,
+    event_store: Option<AgentRunEventStore>,
 }
 
 impl AgentLoop {
@@ -209,7 +209,7 @@ impl AgentLoop {
     }
 
     /// Set an event store for runtime trace recording.
-    pub fn with_event_store(mut self, store: Arc<AgentRunEventStore>) -> Self {
+    pub fn with_event_store(mut self, store: AgentRunEventStore) -> Self {
         self.event_store = Some(store);
         self
     }
@@ -1854,9 +1854,9 @@ mod tests {
 
     // ── P0-2: AgentRunEvent recording tests ──────────────────────────────
 
-    fn make_test_agent_loop_with_events() -> (AgentLoop, Arc<AgentRunEventStore>) {
+    fn make_test_agent_loop_with_events() -> (AgentLoop, AgentRunEventStore) {
         let agent = make_test_agent_loop();
-        let event_store = Arc::new(AgentRunEventStore::new_in_memory().unwrap());
+        let event_store = AgentRunEventStore::new_in_memory().unwrap();
         let agent = agent.with_event_store(event_store.clone());
         (agent, event_store)
     }

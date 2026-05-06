@@ -56,6 +56,8 @@ Suggested order:
 4. Draft and accept ADR 0007-0010 before Phase 6-10 implementation.
    - PlanMode, SubAgent permissions, ExecutionSandbox/Bash, and ChatPage migration remain blocked until then.
 
+ADR 0007-0010 drafts now exist and should be reviewed after P0/P1 code is committed and before P2/P3 implementation.
+
 ## Decision Backlog
 
 ### P0 Decisions

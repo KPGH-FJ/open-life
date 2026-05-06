@@ -81,7 +81,7 @@ pub struct ActionExecutionContext<'a> {
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
     pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
-    pub event_store: Option<&'a crate::agent::event_store::AgentRunEventStore>,
+    pub event_store: Option<crate::agent::event_store::AgentRunEventStore>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     /// ICS calendar file paths for calendar.read tool
     pub calendar_ics_paths: &'a [String],
@@ -138,7 +138,7 @@ impl<'a> ActionExecutionContext<'a> {
 
     pub fn with_event_store(
         mut self,
-        event_store: &'a crate::agent::event_store::AgentRunEventStore,
+        event_store: crate::agent::event_store::AgentRunEventStore,
     ) -> Self {
         self.event_store = Some(event_store);
         self

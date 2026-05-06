@@ -29,7 +29,7 @@ pub struct AgentExecutionDeps {
     pub scheduler: InferenceScheduler,
     pub app_config: AppConfig,
     pub agent_loop_config: AgentLoopConfig,
-    pub event_store: Option<Arc<AgentRunEventStore>>,
+    pub event_store: Option<AgentRunEventStore>,
 }
 
 /// Unified outcome of any agent execution.

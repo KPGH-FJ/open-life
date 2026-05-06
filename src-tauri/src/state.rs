@@ -59,6 +59,7 @@ pub struct AppState {
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
+    pub agent_run_event_store: Option<Arc<openlife_core::agent::event_store::AgentRunEventStore>>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
