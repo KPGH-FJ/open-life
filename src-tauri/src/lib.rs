@@ -766,8 +766,8 @@ async fn preprocess_chat_input_v2(
     // Step 6: Build privacy engine
     let privacy_engine = state.privacy_engine.lock().await.clone();
 
-    // Step 7: Assemble using ContextAssembler
-    let input = openlife_core::agent::AssembleInput {
+    // Step 7: Apply ContextPolicy and assemble
+    let mut input = openlife_core::agent::AssembleInput {
         session_id: session_id.to_string(),
         messages: std::sync::Arc::new(messages.to_vec()),
         life_model: std::sync::Arc::new(life_model),
@@ -777,6 +777,14 @@ async fn preprocess_chat_input_v2(
         memory_hits,
         memory_retrieval_time_ms,
     };
+
+    // Apply default governance policy before assembly.
+    let policy = openlife_core::agent::context_assembler::ContextPolicy::default();
+    let governed = policy.filter_input(&mut input);
+    log::info!(
+        "[preprocess] context policy applied: {}",
+        governed.event_summary
+    );
 
     let assembler = openlife_core::agent::CompositeAssembler::new()
         .with(Box::new(openlife_core::agent::LifeModelAssembler))

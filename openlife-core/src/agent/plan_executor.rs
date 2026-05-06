@@ -40,6 +40,7 @@ pub trait PlanReviewGate {
         &self,
         plan: &AgentPlan,
         outcome: &PlanExecutionOutcome,
+        agent_spec: &AgentSpec,
     ) -> Result<ReviewAgentOutput, PlanExecutionError>;
 }
 
@@ -54,6 +55,7 @@ impl PlanReviewGate for DefaultPlanReviewGate {
         &self,
         _plan: &AgentPlan,
         outcome: &PlanExecutionOutcome,
+        _agent_spec: &AgentSpec,
     ) -> Result<ReviewAgentOutput, PlanExecutionError> {
         if outcome.success {
             Ok(ReviewAgentOutput::approved(
@@ -93,6 +95,7 @@ impl PlanReviewGate for SubAgentReviewGate {
         &self,
         _plan: &AgentPlan,
         outcome: &PlanExecutionOutcome,
+        _agent_spec: &AgentSpec,
     ) -> Result<ReviewAgentOutput, PlanExecutionError> {
         if outcome.success {
             Ok(ReviewAgentOutput::approved(
@@ -250,27 +253,37 @@ impl PlanExecutor {
                 .as_ref()
                 .and_then(|tool_name| tool_intents.iter().find(|ti| ti.tool_name == *tool_name));
 
-            let mut result = execute_step(step, tool_intent);
-
-            // Enforce AgentSpec tool policy if attached.
-            if let Some(ref spec) = self.agent_spec {
-                if !spec.is_tool_allowed(&result.tool_name) {
-                    result.success = false;
-                    result.error = Some(format!(
-                        "tool '{}' blocked by AgentSpec policy",
-                        result.tool_name
-                    ));
+            // AgentSpec pre-check: reject denied tools BEFORE execution.
+            let result = if let Some(ref spec) = self.agent_spec {
+                let tool_name = tool_intent
+                    .map(|ti| ti.tool_name.as_str())
+                    .unwrap_or("unknown");
+                if !spec.is_tool_allowed(tool_name) {
+                    let blocked = PlanStepExecutionResult {
+                        step_index: step.index,
+                        tool_name: tool_name.to_string(),
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "tool '{}' blocked by AgentSpec {}",
+                            tool_name, spec.id
+                        )),
+                        duration_ms: 0,
+                        deviation: None,
+                    };
                     self.record_event(
                         run_id,
                         AgentRunEventType::ToolCallBlocked,
-                        format!(
-                            "tool '{}' blocked by AgentSpec {}",
-                            result.tool_name, spec.id
-                        ),
-                        json!({"tool_name": result.tool_name, "agentspec_id": spec.id}),
+                        format!("tool '{}' blocked by AgentSpec {}", tool_name, spec.id),
+                        json!({"tool_name": tool_name, "agentspec_id": spec.id}),
                     );
+                    blocked
+                } else {
+                    execute_step(step, tool_intent)
                 }
-            }
+            } else {
+                execute_step(step, tool_intent)
+            };
 
             // Detect deviation.
             if let Some(intent) = tool_intent {
@@ -439,7 +452,9 @@ impl PlanExecutor {
         }
 
         // Review gate for medium/high/critical plans.
-        let review = review_gate.review(&plan, &outcome)?;
+        let default_spec = AgentSpec::default();
+        let review_spec = self.agent_spec.as_ref().unwrap_or(&default_spec);
+        let review = review_gate.review(&plan, &outcome, review_spec)?;
 
         match self.review_execution(plan_id, run_id, &review) {
             Ok(()) => {
@@ -1174,6 +1189,7 @@ mod tests {
                 &self,
                 _plan: &AgentPlan,
                 _outcome: &PlanExecutionOutcome,
+                _agent_spec: &AgentSpec,
             ) -> Result<ReviewAgentOutput, PlanExecutionError> {
                 Ok(ReviewAgentOutput::needs_changes(
                     "critical data integrity violation".to_string(),
@@ -1536,18 +1552,19 @@ mod tests {
     }
 
     #[test]
-    fn test_agentspec_denied_tool_blocked_with_event() {
+    fn test_agentspec_denied_tool_blocked_before_execution() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
         ps.lock().unwrap().create_plan(&plan).unwrap();
 
-        // AgentSpec denies life_model.read
         let spec = AgentSpec::default().with_denied_tools(vec!["life_model.read".to_string()]);
         let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
 
+        let mut called = false;
         let outcome = executor
             .execute(&plan_id, &run_id, |_step, _intent| {
+                called = true;
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1560,7 +1577,8 @@ mod tests {
             })
             .unwrap();
 
-        // Step was blocked by AgentSpec — plan should not complete.
+        // AgentSpec blocked BEFORE execute_step should be called.
+        assert!(!called, "execute_step should NOT be called for denied tool");
         assert!(!outcome.success);
 
         let events = es.list_events_by_run(&run_id).unwrap();

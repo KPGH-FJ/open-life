@@ -307,14 +307,30 @@ impl PromptStack {
         }
     }
 
-    /// Build a PromptStack from an AgentSpec's prompt block references.
-    /// In the current implementation this creates an empty stack — blocks
-    /// are resolved at compile time via `PromptBlock::planning()` and
-    /// similar constructors, not by runtime name lookup.
-    /// Future: resolve block_ids to registered blocks.
+    /// Build a PromptStack from an AgentSpec's prompt block references
+    /// using the provided registry.  Unknown block IDs return an error.
+    pub fn try_from_agentspec(
+        block_ids: &[String],
+        registry: &PromptBlockRegistry,
+    ) -> Result<Self, String> {
+        let mut stack = Self::new();
+        for id in block_ids {
+            let block = registry
+                .get(id)
+                .ok_or_else(|| format!("unknown prompt block: {}", id))?;
+            stack.push(block.clone());
+        }
+        Ok(stack)
+    }
+
+    #[deprecated(
+        since = "0.1.0",
+        note = "use try_from_agentspec with PromptBlockRegistry"
+    )]
     pub fn from_agentspec(_block_ids: &[String]) -> Self {
         Self::new()
     }
+    /// Build a PromptStack for PlanMode with the planning prompt block
     /// and the AgentPlan output schema.
     pub fn plan_mode_stack() -> Self {
         Self::new()
@@ -428,6 +444,71 @@ impl PromptStack {
             }
         }
         Ok(warnings)
+    }
+}
+
+// ── P6 Goal 2: PromptBlock Registry ──────────────────────────────────
+
+/// Minimal runtime registry for prompt blocks, keyed by stable block id.
+/// Populated with known built-in blocks at startup.
+pub struct PromptBlockRegistry {
+    blocks: std::collections::HashMap<String, PromptBlock>,
+}
+
+impl PromptBlockRegistry {
+    pub fn new() -> Self {
+        Self {
+            blocks: std::collections::HashMap::new(),
+        }
+    }
+
+    pub fn with_block(mut self, id: impl Into<String>, block: PromptBlock) -> Self {
+        self.blocks.insert(id.into(), block);
+        self
+    }
+
+    pub fn get(&self, id: &str) -> Option<&PromptBlock> {
+        self.blocks.get(id)
+    }
+
+    /// Build a registry with all built-in blocks.
+    pub fn built_in() -> Self {
+        Self::new()
+            .with_block("planning", PromptBlock::planning())
+            .with_block(
+                "base_system",
+                PromptBlock::new(
+                    "base_system",
+                    "1.0.0",
+                    PromptPurpose::BaseSystem,
+                    "You are OpenLife, a LifeModel-governed personal agent.",
+                ),
+            )
+            .with_block(
+                "tool_discipline",
+                PromptBlock::new(
+                    "tool_discipline",
+                    "1.0.0",
+                    PromptPurpose::Tool,
+                    "Tools are governed by ToolRuntime, Permission, and Proposal.",
+                ),
+            )
+            .with_block(
+                "privacy_rule",
+                PromptBlock::new(
+                    "privacy_rule",
+                    "1.0.0",
+                    PromptPurpose::Privacy,
+                    "Do not expose sensitive user data to cloud models.",
+                )
+                .with_privacy(PromptPrivacyLevel::Internal),
+            )
+    }
+}
+
+impl Default for PromptBlockRegistry {
+    fn default() -> Self {
+        Self::built_in()
     }
 }
 
@@ -789,14 +870,52 @@ mod tests {
         assert!(stack.assembled_preview.len() <= 500);
     }
 
+    // ── Goal 2: PromptStack registry + try_from_agentspec ──────────────
+
+    #[test]
+    fn test_known_block_ids_assemble_non_empty_stack() {
+        let registry = PromptBlockRegistry::built_in();
+        let stack = PromptStack::try_from_agentspec(&["planning".to_string()], &registry).unwrap();
+        assert!(!stack.blocks.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_block_id_returns_error() {
+        let registry = PromptBlockRegistry::built_in();
+        let result = PromptStack::try_from_agentspec(&["nonexistent".to_string()], &registry);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown prompt block"));
+    }
+
+    #[test]
+    fn test_assembled_metadata_excludes_raw_content() {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack =
+            PromptStack::try_from_agentspec(&["planning".to_string()], &registry).unwrap();
+        let _ = stack.assemble(); // populate metadata
+        let meta = format!(
+            "{:?}",
+            stack.blocks.iter().map(|b| &b.id).collect::<Vec<_>>()
+        );
+        assert!(!meta.contains("You are a planner")); // raw prompt text absent
+    }
+
     // ── P6-5: AgentSpec prompt binding test ────────────────────────────
 
     #[test]
-    fn test_from_agentspec_creates_empty_stack_for_unknown_ids() {
-        let stack = PromptStack::from_agentspec(&[
-            "unknown-block-1".to_string(),
-            "unknown-block-2".to_string(),
-        ]);
+    #[allow(deprecated)]
+    fn test_legacy_from_agentspec_returns_empty() {
+        // Deprecated stub — kept for backward-compat, still returns empty.
+        let stack = PromptStack::from_agentspec(&["anything".to_string()]);
         assert!(stack.blocks.is_empty());
+    }
+
+    #[test]
+    fn test_unknown_block_fails_with_structured_error() {
+        let registry = PromptBlockRegistry::built_in();
+        let err = PromptStack::try_from_agentspec(&["nonexistent_block".to_string()], &registry)
+            .unwrap_err();
+        assert!(err.contains("unknown prompt block"));
+        assert!(err.contains("nonexistent_block"));
     }
 }

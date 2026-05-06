@@ -218,6 +218,7 @@ pub async fn execute_agent_plan(
         ctx,
         &app_handle,
         &openlife_core::agent::DefaultPlanReviewGate,
+        openlife_core::agent::AgentSpec::default(),
     )
     .await;
 
@@ -353,6 +354,7 @@ pub async fn retry_agent_plan(
         ctx,
         &app_handle,
         &openlife_core::agent::DefaultPlanReviewGate,
+        openlife_core::agent::AgentSpec::default(),
     )
     .await;
     result.operation = "retry".to_string();
@@ -447,6 +449,7 @@ pub async fn cancel_agent_plan(
 ///
 /// Both `execute_agent_plan` and `retry_agent_plan` route through this
 /// after their respective pre-checks are complete.
+#[allow(clippy::too_many_arguments)]
 async fn run_plan_execution(
     plan_id: &str,
     run_id: &str,
@@ -455,13 +458,15 @@ async fn run_plan_execution(
     ctx: openlife_core::agent::ActionExecutionContext<'_>,
     app_handle: &tauri::AppHandle,
     review_gate: &impl openlife_core::agent::PlanReviewGate,
+    agent_spec: openlife_core::agent::AgentSpec,
 ) -> PlanOperationResult {
     let executor_config = openlife_core::agent::ActionExecutorConfig {
         allow_writes: false,
         ..Default::default()
     };
     let action_executor = openlife_core::agent::ActionExecutor::new(executor_config);
-    let plan_executor = PlanExecutor::new(plan_store_arc.clone(), event_store);
+    let plan_executor =
+        PlanExecutor::new(plan_store_arc.clone(), event_store).with_agent_spec(agent_spec);
 
     let execution_result = plan_executor.execute_with_review(
         plan_id,

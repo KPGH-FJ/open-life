@@ -1,13 +1,15 @@
 use crate::router::Intent;
 
 /// Processing layer according to ARCH-004
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum Layer {
     /// Reflex layer: <50ms local direct response
     L1,
     /// Tactical layer: standard LLM with tools
     L2,
     /// Strategic layer: deep reasoning via LayeredReasoner
+    #[default]
     L3,
 }
 

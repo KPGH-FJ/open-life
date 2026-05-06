@@ -338,10 +338,6 @@ impl std::fmt::Display for AgentTaskStatus {
 /// Separated from `AgentRun` so that intent, policy, and constraints are
 /// captured before execution begins.  The runtime may use these fields to
 /// select models, assemble context, and enforce governance.
-fn default_layer() -> crate::layer_router::Layer {
-    crate::layer_router::Layer::L3
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTask {
@@ -353,7 +349,7 @@ pub struct AgentTask {
     /// User intent as raw text or structured description.
     pub user_text: String,
     pub messages: Vec<crate::llm::ChatMessage>,
-    #[serde(skip, default = "default_layer")]
+    #[serde(default)]
     pub layer: crate::layer_router::Layer,
     /// Who or what initiated this task.
     pub initiator: String,
@@ -2017,6 +2013,33 @@ mod agent_spec_tests {
         assert!(json.contains("agentSpecId"));
         assert!(json.contains("spec-2"));
         assert!(!json.contains("agent_spec_id"));
+    }
+
+    #[test]
+    fn test_agent_task_round_trips_layer_l1() {
+        let mut task = AgentTask::new(AgentTaskKind::Conversation, "sess-4");
+        task.layer = crate::layer_router::Layer::L1;
+        let json = serde_json::to_string(&task).unwrap();
+        let parsed: AgentTask = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.layer, crate::layer_router::Layer::L1));
+    }
+
+    #[test]
+    fn test_agent_task_round_trips_layer_l2() {
+        let mut task = AgentTask::new(AgentTaskKind::Conversation, "sess-5");
+        task.layer = crate::layer_router::Layer::L2;
+        let json = serde_json::to_string(&task).unwrap();
+        let parsed: AgentTask = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.layer, crate::layer_router::Layer::L2));
+    }
+
+    #[test]
+    fn test_agent_task_deserializes_missing_layer_as_l3() {
+        let json = r#"{"id":"t1","kind":"conversation","sessionId":"s",
+            "userText":"","messages":[],"initiator":"user",
+            "requiresPlan":false,"status":"pending"}"#;
+        let task: AgentTask = serde_json::from_str(json).unwrap();
+        assert!(matches!(task.layer, crate::layer_router::Layer::L3));
     }
 
     #[test]

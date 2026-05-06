@@ -335,9 +335,7 @@ pub struct GovernedAssembleOutput {
 }
 
 impl ContextPolicy {
-    /// Apply policy to an assembly input, producing a governed output.
-    /// Does NOT call LLMs — it reads the existing input and decides what
-    /// categories are safe to include based on the policy flags.
+    /// Report included/excluded categories (does not mutate).
     pub fn apply(&self, input: &AssembleInput) -> GovernedAssembleOutput {
         let mut included = Vec::new();
         let mut excluded = Vec::new();
@@ -393,6 +391,37 @@ impl ContextPolicy {
             privacy_notes,
             event_summary,
         }
+    }
+
+    /// Filter an `AssembleInput` in-place, clearing categories denied by
+    /// this policy.  Returns a `GovernedAssembleOutput` for trace/audit.
+    pub fn filter_input(&self, input: &mut AssembleInput) -> GovernedAssembleOutput {
+        let report = self.apply(input);
+
+        if !self.allow_memory {
+            input.memory_context = None;
+            input.memory_hits.clear();
+        }
+        if !self.allow_tool_observations {
+            input.tools_prompt.clear();
+        }
+        if !self.allow_session_summary {
+            input.messages = std::sync::Arc::new(vec![]);
+        }
+        if !self.allow_goals {
+            std::sync::Arc::make_mut(&mut input.life_model).goals =
+                crate::life_model::Goals::default();
+        }
+        if !self.allow_state {
+            std::sync::Arc::make_mut(&mut input.life_model).state =
+                crate::life_model::State::default();
+        }
+        if !self.allow_lifemodel_summary {
+            // Replace with an empty LifeModel to avoid leaking all details.
+            input.life_model = std::sync::Arc::new(crate::life_model::LifeModel::default_model());
+        }
+
+        report
     }
 }
 
