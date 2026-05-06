@@ -863,6 +863,24 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve(undefined as T);
     case "list_agent_run_events":
       return Promise.resolve(mockAgentRunEvents as T);
+    case "get_agent_plan":
+      return Promise.resolve(mockAgentPlan as T);
+    case "list_agent_plans_for_run":
+      return Promise.resolve([mockAgentPlan] as T);
+    case "list_agent_plans_for_session":
+      return Promise.resolve([mockAgentPlan] as T);
+    case "confirm_agent_plan":
+      return Promise.resolve({ ...mockAgentPlan, status: "confirmed" } as T);
+    case "reject_agent_plan":
+      return Promise.resolve({ ...mockAgentPlan, status: "rejected" } as T);
+    case "execute_agent_plan":
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        success: true,
+        stepsCompleted: 1,
+        stepsFailed: 0,
+        deviations: [],
+      } as T);
     default:
       return Promise.resolve({} as T);
   }
@@ -956,3 +974,43 @@ export const mockAgentRunEvents: AgentRunEvent[] = [
     createdAt: "2026-05-06T10:00:07Z",
   },
 ];
+
+// ── AgentPlan mock data ────────────────────────────────────────────────
+
+export const mockAgentPlan = {
+  id: "mock-plan-1",
+  runId: "run-001",
+  sessionId: "session-1",
+  goal: "Read user's life model",
+  assumptions: ["Life model exists"],
+  missingContext: [],
+  steps: [
+    {
+      index: 0,
+      description: "Read life model data",
+      toolIntent: "life_model.read",
+      expectedOutput: "life model fields",
+      dependsOn: [],
+    },
+  ],
+  toolIntents: [
+    {
+      toolName: "life_model.read",
+      purpose: "read",
+      riskLevel: "low" as const,
+      isWrite: false,
+      parametersSummary: undefined,
+    },
+  ],
+  subagentAssignments: [],
+  permissionRequirements: [],
+  rollbackPlan: undefined,
+  successCriteria: ["life model returned"],
+  riskLevel: "low" as const,
+  requiresConfirmation: false,
+  status: "confirmed" as const,
+  createdAt: "2026-05-06T10:00:00Z",
+  updatedAt: "2026-05-06T10:00:00Z",
+  confirmedAt: "2026-05-06T10:00:01Z",
+  completedAt: undefined,
+};

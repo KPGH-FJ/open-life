@@ -1,7 +1,7 @@
 # ADR 0007: PlanMode Confirmation Policy
 
 Date: 2026-05-06
-Status: proposed
+Status: accepted
 
 ## Context
 

@@ -747,7 +747,9 @@ mod tests {
 
         // ADR 0007: MUST NOT bypass Proposal/Permission/Audit
         assert!(
-            content.contains("Proposal") || content.contains("Permission") || content.contains("Audit"),
+            content.contains("Proposal")
+                || content.contains("Permission")
+                || content.contains("Audit"),
             "planning prompt must reference protocol checks"
         );
 
@@ -761,10 +763,7 @@ mod tests {
     fn test_agent_plan_output_schema_is_valid_json() {
         let schema = agent_plan_output_schema();
         assert!(schema.is_object());
-        assert_eq!(
-            schema.get("type").and_then(|t| t.as_str()),
-            Some("object")
-        );
+        assert_eq!(schema.get("type").and_then(|t| t.as_str()), Some("object"));
 
         // Verify schema can be serialized
         let serialized = serde_json::to_string(&schema).unwrap();

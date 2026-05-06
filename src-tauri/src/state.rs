@@ -60,6 +60,7 @@ pub struct AppState {
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
     pub agent_run_event_store: Option<Arc<openlife_core::agent::event_store::AgentRunEventStore>>,
+    pub plan_store: Option<Arc<std::sync::Mutex<openlife_core::agent::PlanStore>>>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,

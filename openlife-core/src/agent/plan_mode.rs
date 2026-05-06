@@ -96,16 +96,16 @@ impl PlanModeConfig {
                         }
                     })
                     .unwrap_or_default();
-                lines.push(format!(
-                    "- {}: {}{}",
-                    m.name, m.description, params
-                ));
+                lines.push(format!("- {}: {}{}", m.name, m.description, params));
             }
         }
         if lines.is_empty() {
             return String::new();
         }
-        format!("Available read-only tools for planning:\n{}", lines.join("\n"))
+        format!(
+            "Available read-only tools for planning:\n{}",
+            lines.join("\n")
+        )
     }
 }
 
@@ -579,11 +579,7 @@ mod tests {
         let config = PlanModeConfig::from_registry(&registry);
         let plan_store = PlanStore::new_in_memory().unwrap();
         let event_store = AgentRunEventStore::new_in_memory().unwrap();
-        let runner = PlanModeRunner::new(
-            config,
-            plan_store,
-            Some(event_store.clone()),
-        );
+        let runner = PlanModeRunner::new(config, plan_store, Some(event_store.clone()));
 
         let run_id = "test-plan-create-001";
         let plan = runner
@@ -596,11 +592,7 @@ mod tests {
             .unwrap();
 
         // Plan is persisted
-        let fetched = runner
-            .plan_store()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = runner.plan_store().get_plan(&plan.id).unwrap().unwrap();
         assert_eq!(fetched.goal, "Analyze workspace structure");
         assert_eq!(fetched.risk_level, RiskLevel::Low);
         assert_eq!(fetched.run_id.as_deref(), Some(run_id));
@@ -612,12 +604,7 @@ mod tests {
         assert_eq!(events[0].event_type, AgentRunEventType::PlanCreated);
         assert_eq!(events[0].actor, AgentEventActor::Agent);
         assert_eq!(
-            events[0]
-                .payload
-                .get("plan_id")
-                .unwrap()
-                .as_str()
-                .unwrap(),
+            events[0].payload.get("plan_id").unwrap().as_str().unwrap(),
             plan.id
         );
     }
@@ -643,9 +630,7 @@ mod tests {
         assert!(fetched.requires_confirmation);
 
         // Event recorded against the plan's run_id
-        let events = event_store
-            .list_events_by_run("external-run-001")
-            .unwrap();
+        let events = event_store.list_events_by_run("external-run-001").unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, AgentRunEventType::PlanCreated);
     }
@@ -708,8 +693,7 @@ mod tests {
             .get("required")
             .and_then(|r| r.as_array())
             .expect("plan must have required fields");
-        let required_fields: Vec<&str> =
-            required.iter().filter_map(|v| v.as_str()).collect();
+        let required_fields: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
 
         assert!(required_fields.contains(&"goal"));
         assert!(required_fields.contains(&"steps"));
@@ -784,10 +768,7 @@ mod tests {
         };
         let confirmation = check_confirmation_required(&plan);
         assert!(confirmation.requires_confirmation);
-        assert!(confirmation
-            .reasons
-            .iter()
-            .any(|r| r.contains("handoff")));
+        assert!(confirmation.reasons.iter().any(|r| r.contains("handoff")));
     }
 
     #[test]
@@ -804,10 +785,7 @@ mod tests {
         };
         let confirmation = check_confirmation_required(&plan);
         assert!(confirmation.requires_confirmation);
-        assert!(confirmation
-            .reasons
-            .iter()
-            .any(|r| r.contains("LifeModel")));
+        assert!(confirmation.reasons.iter().any(|r| r.contains("LifeModel")));
     }
 
     #[test]

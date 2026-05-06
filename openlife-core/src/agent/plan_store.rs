@@ -24,8 +24,7 @@ impl PlanStore {
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let conn =
-            Connection::open_in_memory().context("failed to open in-memory plans db")?;
+        let conn = Connection::open_in_memory().context("failed to open in-memory plans db")?;
         let store = Self {
             conn: Mutex::new(conn),
         };
@@ -162,6 +161,8 @@ impl PlanStore {
                 "completed" => PlanStatus::Completed,
                 "rejected" => PlanStatus::Rejected,
                 "cancelled" => PlanStatus::Cancelled,
+                "failed" => PlanStatus::Failed,
+                "failed_review" => PlanStatus::FailedReview,
                 _ => PlanStatus::Draft,
             };
 
@@ -197,14 +198,8 @@ impl PlanStore {
                 status,
                 created_at: parse_dt(&created_at_str)?,
                 updated_at: parse_dt(&updated_at_str)?,
-                confirmed_at: confirmed_at_str
-                    .as_deref()
-                    .map(parse_dt)
-                    .transpose()?,
-                completed_at: completed_at_str
-                    .as_deref()
-                    .map(parse_dt)
-                    .transpose()?,
+                confirmed_at: confirmed_at_str.as_deref().map(parse_dt).transpose()?,
+                completed_at: completed_at_str.as_deref().map(parse_dt).transpose()?,
             })
         });
         match row {
@@ -318,11 +313,8 @@ impl PlanStore {
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM agent_plans",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM agent_plans", [], |row| row.get(0))?;
         Ok(count)
     }
 
@@ -393,14 +385,8 @@ impl PlanStore {
             status,
             created_at: parse_dt(&created_at_str)?,
             updated_at: parse_dt(&updated_at_str)?,
-            confirmed_at: confirmed_at_str
-                .as_deref()
-                .map(parse_dt)
-                .transpose()?,
-            completed_at: completed_at_str
-                .as_deref()
-                .map(parse_dt)
-                .transpose()?,
+            confirmed_at: confirmed_at_str.as_deref().map(parse_dt).transpose()?,
+            completed_at: completed_at_str.as_deref().map(parse_dt).transpose()?,
         })
     }
 }

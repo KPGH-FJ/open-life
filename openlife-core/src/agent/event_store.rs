@@ -187,6 +187,13 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.created" => AgentRunEventType::PlanCreated,
         "plan.confirmation_requested" => AgentRunEventType::PlanConfirmationRequested,
         "plan.confirmation_resolved" => AgentRunEventType::PlanConfirmationResolved,
+        "plan.execution_started" => AgentRunEventType::PlanExecutionStarted,
+        "plan.step_started" => AgentRunEventType::PlanStepStarted,
+        "plan.step_completed" => AgentRunEventType::PlanStepCompleted,
+        "plan.step_failed" => AgentRunEventType::PlanStepFailed,
+        "plan.deviation_recorded" => AgentRunEventType::PlanDeviationRecorded,
+        "plan.execution_completed" => AgentRunEventType::PlanExecutionCompleted,
+        "plan.execution_failed" => AgentRunEventType::PlanExecutionFailed,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
         unknown => AgentRunEventType::Unknown(unknown.to_string()),
@@ -429,15 +436,21 @@ mod tests {
 
         // Write via original
         let e1 = AgentRunEvent::new(
-            run_id, AgentRunEventType::RunCreated,
-            AgentEventActor::Runtime, "original write", serde_json::json!({}),
+            run_id,
+            AgentRunEventType::RunCreated,
+            AgentEventActor::Runtime,
+            "original write",
+            serde_json::json!({}),
         );
         store.append_event(&e1).unwrap();
 
         // Write via clone
         let e2 = AgentRunEvent::new(
-            run_id, AgentRunEventType::RunCompleted,
-            AgentEventActor::Runtime, "clone write", serde_json::json!({}),
+            run_id,
+            AgentRunEventType::RunCompleted,
+            AgentEventActor::Runtime,
+            "clone write",
+            serde_json::json!({}),
         );
         clone.append_event(&e2).unwrap();
 
@@ -489,7 +502,9 @@ mod tests {
         let store = AgentRunEventStore::new_in_memory().unwrap();
         let run_id = "test-multi-unknown";
 
-        for (i, event_type_str) in ["v2.new_event", "v3.enriched", "ext.audit"].iter().enumerate()
+        for (i, event_type_str) in ["v2.new_event", "v3.enriched", "ext.audit"]
+            .iter()
+            .enumerate()
         {
             let event = AgentRunEvent {
                 id: format!("evt-{}", i),
@@ -516,5 +531,165 @@ mod tests {
                 evt.event_type
             );
         }
+    }
+
+    /// P4-1: Plan execution event types round-trip through event store.
+    #[test]
+    fn test_plan_execution_events_round_trip() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "p4-plan-exec-events";
+
+        let event_types = vec![
+            AgentRunEventType::PlanExecutionStarted,
+            AgentRunEventType::PlanStepStarted,
+            AgentRunEventType::PlanStepCompleted,
+            AgentRunEventType::PlanStepFailed,
+            AgentRunEventType::PlanDeviationRecorded,
+            AgentRunEventType::PlanExecutionCompleted,
+            AgentRunEventType::PlanExecutionFailed,
+        ];
+
+        for (i, event_type) in event_types.iter().enumerate() {
+            let event = AgentRunEvent {
+                id: format!("p4-ev-{}", i),
+                run_id: run_id.to_string(),
+                parent_event_id: None,
+                event_type: event_type.clone(),
+                phase: Some("execution".to_string()),
+                actor: AgentEventActor::Runtime,
+                summary: format!("plan execution event {}", event_type),
+                payload: serde_json::json!({"step": i}),
+                redaction: None,
+                created_at: chrono::Utc::now(),
+            };
+            store.append_event(&event).unwrap();
+        }
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 7);
+        assert_eq!(
+            events[0].event_type,
+            AgentRunEventType::PlanExecutionStarted
+        );
+        assert_eq!(events[1].event_type, AgentRunEventType::PlanStepStarted);
+        assert_eq!(events[2].event_type, AgentRunEventType::PlanStepCompleted);
+        assert_eq!(events[3].event_type, AgentRunEventType::PlanStepFailed);
+        assert_eq!(
+            events[4].event_type,
+            AgentRunEventType::PlanDeviationRecorded
+        );
+        assert_eq!(
+            events[5].event_type,
+            AgentRunEventType::PlanExecutionCompleted
+        );
+        assert_eq!(events[6].event_type, AgentRunEventType::PlanExecutionFailed);
+        assert!(events
+            .iter()
+            .all(|e| e.phase == Some("execution".to_string())));
+    }
+
+    /// P4-1: Execution outcome types serialize and deserialize correctly.
+    #[test]
+    fn test_plan_execution_outcome_serialization() {
+        use crate::agent::types::{
+            PlanExecutionMode, PlanExecutionOutcome, PlanStepExecutionResult,
+        };
+
+        let mode = PlanExecutionMode::Sequential;
+        let mode_json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(mode_json, r#""sequential""#);
+        let mode_parsed: PlanExecutionMode = serde_json::from_str(&mode_json).unwrap();
+        assert_eq!(mode_parsed, PlanExecutionMode::Sequential);
+
+        let step_result = PlanStepExecutionResult {
+            step_index: 0,
+            tool_name: "life_model.read".to_string(),
+            success: true,
+            output: Some("read ok".to_string()),
+            error: None,
+            duration_ms: 42,
+            deviation: None,
+        };
+        let json = serde_json::to_string_pretty(&step_result).unwrap();
+        let parsed: PlanStepExecutionResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.step_index, 0);
+        assert_eq!(parsed.tool_name, "life_model.read");
+        assert!(parsed.success);
+        assert_eq!(parsed.duration_ms, 42);
+
+        let outcome = PlanExecutionOutcome {
+            plan_id: "plan-1".to_string(),
+            success: true,
+            steps_completed: 3,
+            steps_failed: 0,
+            deviations: vec![],
+            review_required: false,
+        };
+        let json = serde_json::to_string_pretty(&outcome).unwrap();
+        let parsed: PlanExecutionOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.plan_id, "plan-1");
+        assert!(parsed.success);
+        assert_eq!(parsed.steps_completed, 3);
+
+        let failed_outcome = PlanExecutionOutcome {
+            plan_id: "plan-2".to_string(),
+            success: false,
+            steps_completed: 1,
+            steps_failed: 1,
+            deviations: vec!["step 1 used different tool".to_string()],
+            review_required: true,
+        };
+        let json = serde_json::to_string_pretty(&failed_outcome).unwrap();
+        let parsed2: PlanExecutionOutcome = serde_json::from_str(&json).unwrap();
+        assert!(!parsed2.success);
+        assert!(parsed2.review_required);
+        assert_eq!(parsed2.deviations.len(), 1);
+    }
+
+    /// P4-1: Unknown event type still round-trips preserving forward-compatibility.
+    #[test]
+    fn test_unknown_event_with_new_plan_events_does_not_collide() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "p4-unknown-coexist";
+
+        // Store a known new event
+        let known = AgentRunEvent {
+            id: "known".to_string(),
+            run_id: run_id.to_string(),
+            parent_event_id: None,
+            event_type: AgentRunEventType::PlanExecutionStarted,
+            phase: None,
+            actor: AgentEventActor::Runtime,
+            summary: "known plan event".to_string(),
+            payload: serde_json::json!({}),
+            redaction: None,
+            created_at: chrono::Utc::now(),
+        };
+        store.append_event(&known).unwrap();
+
+        // Store a future unknown event
+        let future = AgentRunEvent {
+            id: "future".to_string(),
+            run_id: run_id.to_string(),
+            parent_event_id: None,
+            event_type: AgentRunEventType::Unknown("plan.parallel_started".to_string()),
+            phase: None,
+            actor: AgentEventActor::Runtime,
+            summary: "future parallel plan".to_string(),
+            payload: serde_json::json!({}),
+            redaction: None,
+            created_at: chrono::Utc::now(),
+        };
+        store.append_event(&future).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].event_type,
+            AgentRunEventType::PlanExecutionStarted
+        );
+        assert!(
+            matches!(events[1].event_type, AgentRunEventType::Unknown(ref s) if s == "plan.parallel_started")
+        );
     }
 }

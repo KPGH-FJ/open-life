@@ -150,18 +150,16 @@ impl ExecutionSandbox {
         self.safe_paths
             .iter()
             .filter_map(|p| {
-                std::fs::canonicalize(p)
-                    .ok()
-                    .or_else(|| {
-                        // If the path itself doesn't exist, try its parent
-                        // so symlinks in the existing portion are resolved.
-                        let path = Path::new(p);
-                        path.parent().and_then(|parent| {
-                            std::fs::canonicalize(parent).ok().map(|canon_parent| {
-                                canon_parent.join(path.file_name().unwrap_or_default())
-                            })
+                std::fs::canonicalize(p).ok().or_else(|| {
+                    // If the path itself doesn't exist, try its parent
+                    // so symlinks in the existing portion are resolved.
+                    let path = Path::new(p);
+                    path.parent().and_then(|parent| {
+                        std::fs::canonicalize(parent).ok().map(|canon_parent| {
+                            canon_parent.join(path.file_name().unwrap_or_default())
                         })
                     })
+                })
             })
             .collect()
     }
@@ -289,9 +287,7 @@ impl ExecutionSandbox {
     /// Check whether a command is in the allowlist.
     pub fn is_command_allowed(&self, command: &str) -> bool {
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
-        self.command_allowlist
-            .iter()
-            .any(|c| c == cmd_name)
+        self.command_allowlist.iter().any(|c| c == cmd_name)
     }
 
     /// Check whether a command is permanently forbidden.
@@ -339,7 +335,10 @@ impl ExecutionSandbox {
         if let Some(dir) = cwd {
             // Deny patterns checked first (takes priority over safe paths)
             if self.is_path_denied_read(dir) {
-                return Err(format!("working directory '{}' is denied (read block)", dir));
+                return Err(format!(
+                    "working directory '{}' is denied (read block)",
+                    dir
+                ));
             }
             if self.is_path_denied_write(dir) {
                 return Err(format!(
@@ -350,12 +349,8 @@ impl ExecutionSandbox {
 
             // Canonicalize cwd and verify it's in safe_paths.
             // cwd MUST exist — use strict canonicalize.
-            let canon_cwd = Self::try_canonicalize_existing(dir).map_err(|e| {
-                format!(
-                    "working directory '{}' cannot be resolved: {}",
-                    dir, e
-                )
-            })?;
+            let canon_cwd = Self::try_canonicalize_existing(dir)
+                .map_err(|e| format!("working directory '{}' cannot be resolved: {}", dir, e))?;
             let canon_safe = self.canonicalize_safe_paths();
             let in_safe = canon_safe.iter().any(|safe| canon_cwd.starts_with(safe));
             if !in_safe {
@@ -394,9 +389,7 @@ fn glob_matches(pattern: &str, path: &str) -> bool {
         if middle.contains('*') {
             // Fall through to segment-based matching
         } else {
-            return path
-                .split(PATH_SEP)
-                .any(|seg| seg == middle)
+            return path.split(PATH_SEP).any(|seg| seg == middle)
                 || path.contains(&format!("{}{}{}", PATH_SEP, middle, PATH_SEP))
                 || path.ends_with(&format!("{}{}", PATH_SEP, middle));
         }
@@ -599,7 +592,11 @@ mod tests {
         );
         // /tmp/subdir is a real subdirectory — should be allowed
         let result = sandbox.validate_path_in_sandbox("/tmp", PathAccessKind::Read);
-        assert!(result.is_ok(), "/tmp itself should be allowed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "/tmp itself should be allowed: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -624,8 +621,7 @@ mod tests {
             ..ExecutionSandbox::default()
         };
         // ../secret relative to /tmp would escape safe_paths
-        let result =
-            sandbox.validate_path_in_sandbox("/tmp/../secret", PathAccessKind::Read);
+        let result = sandbox.validate_path_in_sandbox("/tmp/../secret", PathAccessKind::Read);
         // canonicalize resolves /tmp/../secret to /secret which is not in /tmp
         assert!(
             result.is_err(),
@@ -701,7 +697,11 @@ mod tests {
         };
         // echo "text" >> /tmp/log → operand with >> prefix should be cleaned
         let result = sandbox.validate_path_operand(">> /tmp/log", PathAccessKind::Write);
-        assert!(result.is_ok(), "expected ok after stripping >>: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected ok after stripping >>: {:?}",
+            result
+        );
     }
 
     #[test]

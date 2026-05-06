@@ -8,6 +8,7 @@ pub mod memory_evidence;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
+pub mod plan_executor;
 pub mod plan_mode;
 pub mod plan_store;
 pub mod prompt_stack;
@@ -38,17 +39,18 @@ pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     ProviderHealth, TaskType,
 };
+pub use plan_executor::{DefaultPlanReviewGate, PlanExecutionError, PlanExecutor, PlanReviewGate};
+pub use plan_mode::{
+    check_confirmation_required, is_plan_mode_read_only, record_confirmation_requested,
+    PlanConfirmation, PlanModeConfig, PlanModeRunner, PlanModeToolClass,
+};
+pub use plan_store::PlanStore;
 pub use proposal_engine::{
     BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter,
     FeedbackProposalGenerator, MemoryProposalGenerator, ProposalEngine, ProposalGenerator,
     ToolProposalGenerator,
 };
 pub use proposal_generators::ChatProposalGenerator;
-pub use plan_mode::{
-    check_confirmation_required, is_plan_mode_read_only, PlanConfirmation, PlanModeConfig,
-    PlanModeRunner, PlanModeToolClass, record_confirmation_requested,
-};
-pub use plan_store::PlanStore;
 pub use proposal_store::ProposalStore;
 pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{

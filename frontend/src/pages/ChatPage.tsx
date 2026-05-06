@@ -17,8 +17,9 @@ import {
   ShieldCheck,
   XCircle,
 } from "lucide-react";
-import type { ChatMessage, LifeModel } from "../types";
+import type { ChatMessage, LifeModel, AgentRunEvent } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
+import RunTracePanel from "../components/RunTracePanel";
 import {
   startStreamMessage,
   getChatHistory,
@@ -41,6 +42,7 @@ import {
   indexMemoryChunk,
   listAgentRunsForSession,
   getAgentRun,
+  listAgentRunEvents,
   getPendingProposals,
 } from "../tauri";
 import type {
@@ -250,6 +252,8 @@ export default function ChatPage() {
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
+  const [traceEvents, setTraceEvents] = useState<AgentRunEvent[]>([]);
+  const [showTrace, setShowTrace] = useState(false);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -258,10 +262,15 @@ export default function ChatPage() {
   const streamErrorHandledRef = useRef(false);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
+  const currentRunIdRef = useRef<string | null>(currentRunId);
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    currentRunIdRef.current = currentRunId;
+  }, [currentRunId]);
 
   const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
     try {
@@ -438,6 +447,7 @@ export default function ChatPage() {
     let unlistenChunk: (() => void) | null = null;
     let unlistenDone: (() => void) | null = null;
     let unlistenError: (() => void) | null = null;
+    let unlistenPlanDone: (() => void) | null = null;
 
     (async () => {
       unlistenStart = await listen<StreamMessageStartPayload>(
@@ -486,6 +496,13 @@ export default function ChatPage() {
           await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           refreshAgentRuns(event.payload.session_id);
           logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
+          // Fetch trace events for the completed run
+          listAgentRunEvents(event.payload.run_id)
+            .then(events => {
+              setTraceEvents(events);
+              if (events.length > 0) setShowTrace(true);
+            })
+            .catch(() => {});
         }
       });
       unlistenError = await listen<{ session_id: string; run_id?: string; error: string }>(
@@ -509,6 +526,22 @@ export default function ChatPage() {
           }
         }
       );
+      unlistenPlanDone = await listen<{
+        run_id: string;
+        plan_id: string;
+        success: boolean;
+        status?: string;
+      }>("plan-execution-done", async event => {
+        // Only refresh trace if the event belongs to the currently active run.
+        if (event.payload.run_id !== currentRunIdRef.current) return;
+        listAgentRunEvents(event.payload.run_id)
+          .then(events => {
+            setTraceEvents(events);
+            if (events.length > 0) setShowTrace(true);
+          })
+          .catch(() => {});
+        refreshAgentRuns(currentSessionIdRef.current);
+      });
     })();
 
     return () => {
@@ -517,6 +550,9 @@ export default function ChatPage() {
       if (unlistenChunk) unlistenChunk();
       if (unlistenDone) unlistenDone();
       if (unlistenError) unlistenError();
+      if (unlistenPlanDone) unlistenPlanDone();
+      setTraceEvents([]);
+      setShowTrace(false);
     };
   }, [currentSessionId]);
 
@@ -1102,6 +1138,17 @@ export default function ChatPage() {
                 去 Review Center 确认
               </Link>
             </div>
+          </div>
+        )}
+        {/* Run Trace Panel — shown only when trace events exist, collapsed by default */}
+        {traceEvents.length > 0 && currentRunId && (
+          <div className="border-b border-slate-200 bg-slate-50">
+            <RunTracePanel
+              events={traceEvents}
+              runId={currentRunId}
+              show={showTrace}
+              onToggle={() => setShowTrace(prev => !prev)}
+            />
           </div>
         )}
 

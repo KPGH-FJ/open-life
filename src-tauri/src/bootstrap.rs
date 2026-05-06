@@ -264,6 +264,37 @@ fn init_proposal_store(
     }
 }
 
+fn init_plan_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<openlife_core::agent::PlanStore, String> {
+    match openlife_core::agent::PlanStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("plans.db");
+            startup_warnings.borrow_mut().push(format!(
+                "plans.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::PlanStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 plans.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::PlanStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 plan store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
@@ -345,14 +376,24 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
 
     let agent_run_events_db_path = data_dir.join("agent_run_events.db");
     let agent_run_event_store = init_store(
-        || {
-            init_agent_run_event_store(&agent_run_events_db_path, &startup_warnings)
-        },
+        || init_agent_run_event_store(&agent_run_events_db_path, &startup_warnings),
         || {
             openlife_core::agent::event_store::AgentRunEventStore::new_in_memory()
                 .map_err(|e| e.to_string())
         },
         "AgentRunEventStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
+    let plans_db_path = data_dir.join("plans.db");
+    let plan_store = init_store(
+        || init_plan_store(&plans_db_path, &startup_warnings),
+        || openlife_core::agent::PlanStore::new_in_memory().map_err(|e| e.to_string()),
+        "PlanStore",
         &startup_warnings,
     )
     .unwrap_or_else(|e| {
@@ -480,6 +521,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         agent_run_event_store: Some(Arc::new(agent_run_event_store)),
+        plan_store: Some(Arc::new(std::sync::Mutex::new(plan_store))),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,

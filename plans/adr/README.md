@@ -36,10 +36,10 @@ Implementation should not begin for high-risk boundaries until the relevant ADR 
 | 0004 | LifeModel Field Risk Classification | accepted | Memory evolution, calibration, proposal apply |
 | 0005 | MemoryEvidence and LifeModel Evolution Proposal Policy | accepted | Phase 5 |
 | 0006 | Cloud Privacy Policy and ModelRouter Disclosure Rules | accepted | PromptStack, MemoryEvidence, ModelRouter |
-| 0007 | PlanMode Confirmation Policy | proposed | Phase 6 |
-| 0008 | SubAgent Default Permissions and Delegation Modes | proposed | Phase 7 |
-| 0009 | ExecutionSandbox and Bash/Shell Boundary | proposed | Phase 9 |
-| 0010 | ChatPage State Model Migration Policy | proposed | Phase 10 |
+| 0007 | PlanMode Confirmation Policy | accepted | Phase 6, P4 Plan Execution |
+| 0008 | SubAgent Default Permissions and Delegation Modes | accepted | Phase 7, P4 Review Gate |
+| 0009 | ExecutionSandbox and Bash/Shell Boundary | accepted | Phase 9 |
+| 0010 | ChatPage State Model Migration Policy | accepted | Phase 10, P4 Trace UI |
 
 ## Recommended Acceptance Sequence
 
@@ -56,7 +56,7 @@ Suggested order:
 4. Draft and accept ADR 0007-0010 before Phase 6-10 implementation.
    - PlanMode, SubAgent permissions, ExecutionSandbox/Bash, and ChatPage migration remain blocked until then.
 
-ADR 0007-0010 drafts now exist and should be reviewed after P0/P1 code is committed and before P2/P3 implementation.
+ADR 0007-0010 are accepted and have guided P2/P3 plus P3 hardening. Further high-risk changes should add new ADRs or supersede these records explicitly.
 
 ## Decision Backlog
 

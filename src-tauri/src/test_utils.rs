@@ -66,6 +66,9 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         agent_run_event_store: Some(Arc::new(
             openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap(),
         )),
+        plan_store: Some(Arc::new(std::sync::Mutex::new(
+            openlife_core::agent::PlanStore::new_in_memory().unwrap(),
+        ))),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
         ))),
@@ -97,7 +100,10 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
 #[tokio::test]
 async fn test_event_store_accessible_through_app_state() {
     let state = test_app_state();
-    let es = state.agent_run_event_store.as_ref().expect("event_store should be set");
+    let es = state
+        .agent_run_event_store
+        .as_ref()
+        .expect("event_store should be set");
 
     let run_id = "app-state-test-run";
     let event = openlife_core::agent::AgentRunEvent::new(
@@ -112,6 +118,9 @@ async fn test_event_store_accessible_through_app_state() {
 
     let events = es.list_events_by_run(run_id).unwrap();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, openlife_core::agent::AgentRunEventType::RunCreated);
+    assert_eq!(
+        events[0].event_type,
+        openlife_core::agent::AgentRunEventType::RunCreated
+    );
     assert_eq!(events[0].summary, "test event through AppState");
 }

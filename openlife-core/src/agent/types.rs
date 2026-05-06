@@ -28,6 +28,13 @@ pub enum AgentRunEventType {
     PlanCreated,
     PlanConfirmationRequested,
     PlanConfirmationResolved,
+    PlanExecutionStarted,
+    PlanStepStarted,
+    PlanStepCompleted,
+    PlanStepFailed,
+    PlanDeviationRecorded,
+    PlanExecutionCompleted,
+    PlanExecutionFailed,
     /// Unknown or future event type — preserved as-is in the trace.
     /// Older builds reading traces from newer builds use this variant.
     Unknown(String),
@@ -61,6 +68,17 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::PlanConfirmationResolved => {
                 write!(f, "plan.confirmation_resolved")
             }
+            AgentRunEventType::PlanExecutionStarted => write!(f, "plan.execution_started"),
+            AgentRunEventType::PlanStepStarted => write!(f, "plan.step_started"),
+            AgentRunEventType::PlanStepCompleted => write!(f, "plan.step_completed"),
+            AgentRunEventType::PlanStepFailed => write!(f, "plan.step_failed"),
+            AgentRunEventType::PlanDeviationRecorded => {
+                write!(f, "plan.deviation_recorded")
+            }
+            AgentRunEventType::PlanExecutionCompleted => {
+                write!(f, "plan.execution_completed")
+            }
+            AgentRunEventType::PlanExecutionFailed => write!(f, "plan.execution_failed"),
             AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
     }
@@ -95,6 +113,13 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.created" => AgentRunEventType::PlanCreated,
             "plan.confirmation_requested" => AgentRunEventType::PlanConfirmationRequested,
             "plan.confirmation_resolved" => AgentRunEventType::PlanConfirmationResolved,
+            "plan.execution_started" => AgentRunEventType::PlanExecutionStarted,
+            "plan.step_started" => AgentRunEventType::PlanStepStarted,
+            "plan.step_completed" => AgentRunEventType::PlanStepCompleted,
+            "plan.step_failed" => AgentRunEventType::PlanStepFailed,
+            "plan.deviation_recorded" => AgentRunEventType::PlanDeviationRecorded,
+            "plan.execution_completed" => AgentRunEventType::PlanExecutionCompleted,
+            "plan.execution_failed" => AgentRunEventType::PlanExecutionFailed,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
             other => AgentRunEventType::Unknown(other.to_string()),
@@ -931,6 +956,10 @@ pub enum PlanStatus {
     Rejected,
     /// Plan was cancelled
     Cancelled,
+    /// Plan execution failed at one or more steps.
+    Failed,
+    /// Plan execution completed but review found critical issues.
+    FailedReview,
 }
 
 impl std::fmt::Display for PlanStatus {
@@ -943,6 +972,8 @@ impl std::fmt::Display for PlanStatus {
             PlanStatus::Completed => write!(f, "completed"),
             PlanStatus::Rejected => write!(f, "rejected"),
             PlanStatus::Cancelled => write!(f, "cancelled"),
+            PlanStatus::Failed => write!(f, "failed"),
+            PlanStatus::FailedReview => write!(f, "failed_review"),
         }
     }
 }
@@ -1089,6 +1120,43 @@ impl AgentPlan {
     }
 }
 
+// ── Plan Execution types ──────────────────────────────────────────────
+
+/// Execution mode for a confirmed plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanExecutionMode {
+    /// Execute steps sequentially, stopping on first failure.
+    Sequential,
+}
+
+/// Result of executing a single plan step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStepExecutionResult {
+    pub step_index: u32,
+    pub tool_name: String,
+    pub success: bool,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub duration_ms: u64,
+    /// Whether the executed action deviated from the plan's declared tool intent.
+    pub deviation: Option<String>,
+}
+
+/// Outcome of a completed or failed plan execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecutionOutcome {
+    pub plan_id: String,
+    pub success: bool,
+    pub steps_completed: u32,
+    pub steps_failed: u32,
+    pub deviations: Vec<String>,
+    /// Whether the execution result requires review via ReviewAgent.
+    pub review_required: bool,
+}
+
 // ── CompactionSummary ─────────────────────────────────────────────────
 
 /// A compacted context summary used when conversation context grows beyond
@@ -1173,11 +1241,7 @@ impl CompactionSummary {
     }
 
     /// Mark sensitive content as redacted with the given policy.
-    pub fn with_redaction(
-        mut self,
-        policy: impl Into<String>,
-        fields: Vec<String>,
-    ) -> Self {
+    pub fn with_redaction(mut self, policy: impl Into<String>, fields: Vec<String>) -> Self {
         self.sensitive_content_redacted = true;
         self.redaction_policy = policy.into();
         self.redacted_fields = fields;
@@ -1254,7 +1318,9 @@ mod compaction_tests {
 
         assert!(summary.sensitive_content_redacted);
         assert_eq!(summary.redacted_fields.len(), 3);
-        assert!(summary.redacted_fields.contains(&"life_model.identity.name".into()));
+        assert!(summary
+            .redacted_fields
+            .contains(&"life_model.identity.name".into()));
         assert!(summary.redaction_policy.contains("PII"));
     }
 
@@ -1295,10 +1361,7 @@ mod compaction_tests {
                 pending_action: "Review results".into(),
                 risk_level: "low".into(),
             })
-            .with_redaction(
-                "redacted for cloud",
-                vec!["life_model".into()],
-            );
+            .with_redaction("redacted for cloud", vec!["life_model".into()]);
 
         let json = serde_json::to_string(&summary).unwrap();
         assert!(json.contains("run-001"));
@@ -1308,7 +1371,10 @@ mod compaction_tests {
 
         let deserialized: CompactionSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.id, summary.id);
-        assert_eq!(deserialized.active_proposal_ids, summary.active_proposal_ids);
+        assert_eq!(
+            deserialized.active_proposal_ids,
+            summary.active_proposal_ids
+        );
         assert_eq!(deserialized.unresolved_observation_count, 1);
         assert!(deserialized.sensitive_content_redacted);
     }
@@ -1575,17 +1641,13 @@ mod agent_spec_tests {
 
     #[test]
     fn test_agent_spec_read_only_blocks_writes() {
-        let spec = AgentSpec::new(
-            AgentRoleKind::Planner,
-            "Planner",
-            "Task decomposition",
-        )
-        .with_allowed_tools(vec![
-            "life_model.read".into(),
-            "web.search".into(),
-            "file.read".into(),
-        ])
-        .with_read_only();
+        let spec = AgentSpec::new(AgentRoleKind::Planner, "Planner", "Task decomposition")
+            .with_allowed_tools(vec![
+                "life_model.read".into(),
+                "web.search".into(),
+                "file.read".into(),
+            ])
+            .with_read_only();
 
         assert!(spec.read_only);
         assert!(!spec.can_generate_proposals);
@@ -1597,13 +1659,9 @@ mod agent_spec_tests {
 
     #[test]
     fn test_agent_spec_tool_allow_deny() {
-        let spec = AgentSpec::new(
-            AgentRoleKind::CodebaseExplorer,
-            "Explorer",
-            "Read files",
-        )
-        .with_allowed_tools(vec!["file.read".into(), "web.search".into()])
-        .with_denied_tools(vec!["life_model.propose_patch".into()]);
+        let spec = AgentSpec::new(AgentRoleKind::CodebaseExplorer, "Explorer", "Read files")
+            .with_allowed_tools(vec!["file.read".into(), "web.search".into()])
+            .with_denied_tools(vec!["life_model.propose_patch".into()]);
 
         assert!(spec.is_tool_allowed("file.read"));
         assert!(spec.is_tool_allowed("web.search"));
@@ -1614,13 +1672,9 @@ mod agent_spec_tests {
 
     #[test]
     fn test_sub_agent_spec_serialization() {
-        let spec = AgentSpec::new(
-            AgentRoleKind::Planner,
-            "Planner",
-            "Plan complex tasks",
-        )
-        .with_read_only()
-        .with_output_schema("agent_plan_v1");
+        let spec = AgentSpec::new(AgentRoleKind::Planner, "Planner", "Plan complex tasks")
+            .with_read_only()
+            .with_output_schema("agent_plan_v1");
 
         let sub = SubAgentSpec::new(spec, DelegationMode::CallAsTool)
             .with_parent_run("parent-run-001")
@@ -1633,14 +1687,8 @@ mod agent_spec_tests {
         assert!(json.contains("agent_plan_v1"));
 
         let deserialized: SubAgentSpec = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            deserialized.delegation_mode,
-            DelegationMode::CallAsTool
-        );
-        assert_eq!(
-            deserialized.parent_run_id,
-            Some("parent-run-001".into())
-        );
+        assert_eq!(deserialized.delegation_mode, DelegationMode::CallAsTool);
+        assert_eq!(deserialized.parent_run_id, Some("parent-run-001".into()));
         assert_eq!(deserialized.spec.role, AgentRoleKind::Planner);
         assert!(deserialized.isolated_context);
     }
@@ -1665,9 +1713,15 @@ mod agent_spec_tests {
     fn test_agent_role_kind_display() {
         assert_eq!(AgentRoleKind::Main.to_string(), "main");
         assert_eq!(AgentRoleKind::Planner.to_string(), "planner");
-        assert_eq!(AgentRoleKind::CodebaseExplorer.to_string(), "codebase_explorer");
+        assert_eq!(
+            AgentRoleKind::CodebaseExplorer.to_string(),
+            "codebase_explorer"
+        );
         assert_eq!(AgentRoleKind::MemoryCurator.to_string(), "memory_curator");
-        assert_eq!(AgentRoleKind::LifeModelGuardian.to_string(), "lifemodel_guardian");
+        assert_eq!(
+            AgentRoleKind::LifeModelGuardian.to_string(),
+            "lifemodel_guardian"
+        );
         assert_eq!(AgentRoleKind::Reviewer.to_string(), "reviewer");
         assert_eq!(
             AgentRoleKind::Custom("my-agent".into()).to_string(),
@@ -1677,11 +1731,7 @@ mod agent_spec_tests {
 
     #[test]
     fn test_sub_agent_default_isolated_context() {
-        let spec = AgentSpec::new(
-            AgentRoleKind::Reviewer,
-            "Reviewer",
-            "Review outputs",
-        );
+        let spec = AgentSpec::new(AgentRoleKind::Reviewer, "Reviewer", "Review outputs");
         let sub = SubAgentSpec::new(spec, DelegationMode::Review);
 
         assert!(sub.isolated_context);

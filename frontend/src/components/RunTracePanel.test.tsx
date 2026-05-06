@@ -65,38 +65,19 @@ const mockEvents: AgentRunEvent[] = [
 describe("RunTracePanel", () => {
   it("returns null when events array is empty", () => {
     const { container } = render(
-      <RunTracePanel
-        events={[]}
-        runId="run-001"
-        show={false}
-        onToggle={() => {}}
-      />,
+      <RunTracePanel events={[]} runId="run-001" show={false} onToggle={() => {}} />
     );
     expect(container.firstChild).toBeNull();
   });
 
   it("shows event count in collapsed state", () => {
-    render(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={false}
-        onToggle={() => {}}
-      />,
-    );
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={false} onToggle={() => {}} />);
     expect(screen.getByText(/6 events/)).toBeDefined();
     expect(screen.getByText(/run-001/)).toBeDefined();
   });
 
   it("shows event summaries when expanded", () => {
-    render(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={true}
-        onToggle={() => {}}
-      />,
-    );
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
     expect(screen.getByText("Agent run created")).toBeDefined();
     expect(screen.getByText("Calling deepseek-chat")).toBeDefined();
     expect(screen.getByText("email.read blocked")).toBeDefined();
@@ -105,28 +86,14 @@ describe("RunTracePanel", () => {
   });
 
   it("shows event types in collapsed metadata", () => {
-    render(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={true}
-        onToggle={() => {}}
-      />,
-    );
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
     expect(screen.getByText("run.created")).toBeDefined();
     expect(screen.getByText("tool.call_blocked")).toBeDefined();
     expect(screen.getByText("run.completed")).toBeDefined();
   });
 
   it("shows actor labels correctly", () => {
-    render(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={true}
-        onToggle={() => {}}
-      />,
-    );
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
     // Actor labels appear as "by runtime", "by agent", etc.
     // Each word segment renders in its own text node, so check container text
     const panel = document.querySelector(".border-slate-700\\/50");
@@ -151,26 +118,18 @@ describe("RunTracePanel", () => {
       },
     ];
     render(
-      <RunTracePanel
-        events={unknownEvents}
-        runId="run-001"
-        show={true}
-        onToggle={() => {}}
-      />,
+      <RunTracePanel events={unknownEvents} runId="run-001" show={true} onToggle={() => {}} />
     );
     expect(screen.getByText("Future cuscene event")).toBeDefined();
   });
 
   it("toggles expansion when clicked", async () => {
     let show = false;
-    const onToggle = () => { show = !show; };
+    const onToggle = () => {
+      show = !show;
+    };
     const { rerender } = render(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={show}
-        onToggle={onToggle}
-      />,
+      <RunTracePanel events={mockEvents} runId="run-001" show={show} onToggle={onToggle} />
     );
 
     // Initially collapsed — no event summaries
@@ -181,14 +140,7 @@ describe("RunTracePanel", () => {
     await userEvent.click(button);
 
     // Rerender with new state
-    rerender(
-      <RunTracePanel
-        events={mockEvents}
-        runId="run-001"
-        show={true}
-        onToggle={onToggle}
-      />,
-    );
+    rerender(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={onToggle} />);
 
     expect(screen.getByText("Agent run created")).toBeDefined();
   });

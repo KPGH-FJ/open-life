@@ -1,4 +1,12 @@
-import { Clock, Play, AlertTriangle, CheckCircle, XCircle, RefreshCw, FileText } from "lucide-react";
+import {
+  Clock,
+  Play,
+  AlertTriangle,
+  CheckCircle,
+  XCircle,
+  RefreshCw,
+  FileText,
+} from "lucide-react";
 import type { AgentRunEvent, AgentRunEventType } from "@/types";
 
 interface Props {
@@ -28,9 +36,16 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.created": <FileText size={14} className="text-cyan-400" />,
   "plan.confirmation_requested": <AlertTriangle size={14} className="text-yellow-400" />,
   "plan.confirmation_resolved": <CheckCircle size={14} className="text-green-400" />,
+  "plan.execution_started": <Play size={14} className="text-cyan-400" />,
+  "plan.step_started": <Play size={14} className="text-blue-400" />,
+  "plan.step_completed": <CheckCircle size={14} className="text-green-400" />,
+  "plan.step_failed": <XCircle size={14} className="text-red-400" />,
+  "plan.deviation_recorded": <AlertTriangle size={14} className="text-amber-400" />,
+  "plan.execution_completed": <CheckCircle size={14} className="text-green-400" />,
+  "plan.execution_failed": <XCircle size={14} className="text-red-400" />,
   "run.completed": <CheckCircle size={14} className="text-green-400" />,
   "run.failed": <XCircle size={14} className="text-red-400" />,
-  "unknown": <FileText size={14} className="text-slate-500" />,
+  unknown: <FileText size={14} className="text-slate-500" />,
 };
 
 function formatTimestamp(iso: string): string {
@@ -66,12 +81,14 @@ export default function RunTracePanel({ events, runId, show, onToggle }: Props) 
       </button>
       {show && (
         <div className="max-h-64 overflow-y-auto border-t border-slate-700/50">
-          {events.map((evt) => (
+          {events.map(evt => (
             <div
               key={evt.id}
               className="flex items-start gap-2 px-3 py-1.5 text-[11px] hover:bg-slate-800/30 transition-colors border-b border-slate-800/30 last:border-b-0"
             >
-              <span className="mt-0.5 shrink-0">{EVENT_ICONS[evt.eventType] ?? <FileText size={14} className="text-slate-500" />}</span>
+              <span className="mt-0.5 shrink-0">
+                {EVENT_ICONS[evt.eventType] ?? <FileText size={14} className="text-slate-500" />}
+              </span>
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-slate-300 truncate">{evt.summary}</span>

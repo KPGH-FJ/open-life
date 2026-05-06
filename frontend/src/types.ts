@@ -261,6 +261,13 @@ export type AgentRunEventType =
   | "plan.created"
   | "plan.confirmation_requested"
   | "plan.confirmation_resolved"
+  | "plan.execution_started"
+  | "plan.step_started"
+  | "plan.step_completed"
+  | "plan.step_failed"
+  | "plan.deviation_recorded"
+  | "plan.execution_completed"
+  | "plan.execution_failed"
   | "run.completed"
   | "run.failed"
   | "unknown";
@@ -296,4 +303,57 @@ export interface AgentRunEvent {
 export interface AgentRunEventTimelineProps {
   events: AgentRunEvent[];
   runId: string;
+}
+
+// ── AgentPlan types ────────────────────────────────────────────────────
+
+export type PlanStatus =
+  | "draft"
+  | "published"
+  | "confirmed"
+  | "executing"
+  | "completed"
+  | "rejected"
+  | "cancelled"
+  | "failed"
+  | "failed_review";
+
+export interface PlanStep {
+  index: number;
+  description: string;
+  toolIntent?: string;
+  expectedOutput?: string;
+  dependsOn: number[];
+}
+
+export type RiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface ToolIntent {
+  toolName: string;
+  purpose: string;
+  riskLevel: RiskLevel;
+  isWrite: boolean;
+  parametersSummary?: string;
+}
+
+export interface AgentPlan {
+  id: string;
+  runId?: string;
+  sessionId?: string;
+  goal: string;
+  assumptions: string[];
+  missingContext: string[];
+  steps: PlanStep[];
+  toolIntents: ToolIntent[];
+  subagentAssignments: Array<{ agentRole: string; task: string; delegationMode: string }>;
+  permissionRequirements: Array<{ target: string; reason: string; riskLevel: RiskLevel }>;
+  rollbackPlan?: string;
+  successCriteria: string[];
+  riskLevel: RiskLevel;
+  requiresConfirmation: boolean;
+  status: PlanStatus;
+  createdAt: string;
+  updatedAt: string;
+  confirmedAt?: string;
+  completedAt?: string;
 }

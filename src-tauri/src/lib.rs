@@ -65,6 +65,10 @@ use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
 };
+use commands::plan::{
+    confirm_agent_plan, execute_agent_plan, get_agent_plan, list_agent_plans_for_run,
+    list_agent_plans_for_session, reject_agent_plan,
+};
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
@@ -2772,6 +2776,12 @@ pub fn run() {
             delete_agent_run,
             restore_agent_run,
             replay_agent_action,
+            get_agent_plan,
+            list_agent_plans_for_run,
+            list_agent_plans_for_session,
+            confirm_agent_plan,
+            reject_agent_plan,
+            execute_agent_plan,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

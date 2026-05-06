@@ -24,16 +24,17 @@
 5. [`plans/openlife_vnext_migration_plan.md`](plans/openlife_vnext_migration_plan.md)：vNext 分阶段迁移路线。
 6. [`plans/openlife_vnext_p0_p1_task_specs.md`](plans/openlife_vnext_p0_p1_task_specs.md)：P0/P1 AI-coding-ready 任务规格。
 7. [`plans/openlife_vnext_p2_p3_task_specs.md`](plans/openlife_vnext_p2_p3_task_specs.md)：P0/P1 后的 PlanMode、SubAgent、Sandbox、Chat trace 任务规格。
-8. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
-9. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
-10. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
-11. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0006 已 accepted，ADR 0007-0010 已起草待 review。
-12. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
-13. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
-14. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
-15. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
-16. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-17. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+8. [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md)：P4 Confirmed Plan Execution 与 Chat trace UI 集成任务规格。
+9. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
+10. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
+11. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
+12. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted。
+13. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
+14. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
+15. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
+16. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
+17. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+18. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
@@ -708,10 +709,11 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | vNext 迁移计划 | [`plans/openlife_vnext_migration_plan.md`](plans/openlife_vnext_migration_plan.md) | vNext 分阶段推进计划 |
 | vNext P0/P1 任务 | [`plans/openlife_vnext_p0_p1_task_specs.md`](plans/openlife_vnext_p0_p1_task_specs.md) | AI-coding-ready 任务规格 |
 | vNext P2/P3 任务 | [`plans/openlife_vnext_p2_p3_task_specs.md`](plans/openlife_vnext_p2_p3_task_specs.md) | PlanMode、SubAgent、Sandbox、Chat trace 后续任务规格 |
+| vNext P4 任务 | [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md) | Confirmed Plan Execution 与 Chat trace UI 集成任务规格 |
 | vNext Agent 提示词 | [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md) | 后续 AI coding 可复用提示词 |
 | vNext 验收矩阵 | [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md) | 每阶段测试和验收门控 |
 | AI Coding Governance | [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md) | ADR-first 和 AI coding 协作规则 |
-| ADR Backlog | [`plans/adr/README.md`](plans/adr/README.md) | vNext 架构决策记录，0001-0006 已 accepted |
+| ADR Backlog | [`plans/adr/README.md`](plans/adr/README.md) | vNext 架构决策记录，0001-0010 已 accepted |
 | 架构基准 | [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md) | 当前最高优先级文档，定义 OpenLife 作为 Agent Framework 的目标架构 |
 | 产品需求 v2 | [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md) | 当前产品定义与需求基准 |
 | 开发计划 | [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md) | 当前开发路线图，按 Agent Runtime 迁移路线维护 |
@@ -766,6 +768,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-05 | **Sprint 14: Dashboard + 搜索增强**：Dashboard 主动建议卡片前端集成；web.search 多Provider支持（DuckDuckGo 默认/Brave API/SearXNG）；web.fetch 新增 summarize 参数 → Ollama 中文摘要；search_provider 配置入 SystemConfig | AI Agent |
 | 2026-05-05 | **Sprint 15: Engineering Consolidation**：AGENTS.md、development_plan.md 文档同步；工具 Taxonomy 表更新（P2→P1 标记校正）；ProviderTab act() 测试警告修复；Email Settings 配置区；前端 ErrorBoundary 完善（重试+错误详情） | AI Agent |
 | 2026-05-06 | **vNext Agent Framework 准备完成**：新增 current runtime audit、vNext principles/diagrams/primitives/migration、P0/P1 task specs、test acceptance matrix、AI coding governance、ADR 0001-0006 accepted；AGENTS.md 和 README.md 更新为 vNext 开发入口 | AI Agent |
+| 2026-05-06 | **P4: Confirmed Plan Execution and Trace UI Integration**：P4-0 文档与 ADR 状态同步；P4-1 PlanExecution 事件与类型；P4-2 最小 PlanExecutor；P4-3 Tauri plan commands；P4-4 Chat Trace UI 集成；P4-5 ReviewAgent gate；ADR 0007-0010 已接受且与代码事实一致 | AI Agent |
 
 ---
 

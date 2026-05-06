@@ -1,7 +1,7 @@
 # ADR 0009: ExecutionSandbox and Bash/Shell Boundary
 
 Date: 2026-05-06
-Status: proposed
+Status: accepted
 
 ## Context
 

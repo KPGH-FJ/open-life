@@ -68,10 +68,7 @@ pub struct SubAgentRuntime {
 }
 
 impl SubAgentRuntime {
-    pub fn new(
-        agent_run_store: AgentRunStore,
-        event_store: Option<AgentRunEventStore>,
-    ) -> Self {
+    pub fn new(agent_run_store: AgentRunStore, event_store: Option<AgentRunEventStore>) -> Self {
         Self {
             agent_run_store,
             event_store,
@@ -141,12 +138,7 @@ impl SubAgentRuntime {
         Self::validate_spec(spec)?;
 
         // ── Build complete child run ──────────────────────────────────
-        let child_run = Self::create_child_run(
-            parent_run,
-            &spec.spec,
-            task_description,
-            outcome,
-        );
+        let child_run = Self::create_child_run(parent_run, &spec.spec, task_description, outcome);
 
         // ── Create run + record event in one logical step ─────────────
         self.agent_run_store.create_run(&child_run)?;
@@ -247,19 +239,18 @@ impl SubAgentRuntime {
                 AgentRunStatus::Failed
             },
             kind: AgentTaskKind::ToolExecution,
-            user_input: Some(format!(
-                "[Sub-Agent {}] {}",
-                spec.role,
-                task_description
-            )),
+            user_input: Some(format!("[Sub-Agent {}] {}", spec.role, task_description)),
             context_summary: None,
             model_route: None,
             output_preview: Some(truncate(&outcome.output, 200)),
-            error: outcome.error.as_ref().map(|e| crate::agent::types::AgentRunError {
-                message: e.clone(),
-                phase: "sub_agent".into(),
-                recoverable: false,
-            }),
+            error: outcome
+                .error
+                .as_ref()
+                .map(|e| crate::agent::types::AgentRunError {
+                    message: e.clone(),
+                    phase: "sub_agent".into(),
+                    recoverable: false,
+                }),
             generated_proposals: Vec::new(),
             actions: Vec::new(),
             observations: Vec::new(),
@@ -350,8 +341,7 @@ mod tests {
         .with_allowed_tools(vec!["file.read".into(), "web.search".into()])
         .with_read_only();
 
-        SubAgentSpec::new(spec, DelegationMode::CallAsTool)
-            .with_deadline(30)
+        SubAgentSpec::new(spec, DelegationMode::CallAsTool).with_deadline(30)
     }
 
     // ── Spec validation tests ──────────────────────────────────────────
@@ -414,10 +404,7 @@ mod tests {
             .unwrap();
         assert_eq!(child.status, AgentRunStatus::Completed);
         assert!(result.success);
-        assert!(result
-            .observation
-            .content
-            .contains("Found 12 Rust files"));
+        assert!(result.observation.content.contains("Found 12 Rust files"));
     }
 
     #[test]
@@ -427,10 +414,8 @@ mod tests {
 
         let parent_run = create_test_parent_run();
         let spec = create_test_sub_spec();
-        let outcome = SubAgentExecutionOutcome::err(
-            "Failed to read: permission denied",
-            "permission_denied",
-        );
+        let outcome =
+            SubAgentExecutionOutcome::err("Failed to read: permission denied", "permission_denied");
 
         let result = runtime
             .execute_call_as_tool(&spec, &parent_run, "Read file", &outcome)
@@ -517,8 +502,8 @@ mod tests {
             "Curate memories",
         )
         .with_read_only();
-        let spec = SubAgentSpec::new(base_spec, DelegationMode::CallAsTool)
-            .with_inherited_context();
+        let spec =
+            SubAgentSpec::new(base_spec, DelegationMode::CallAsTool).with_inherited_context();
 
         assert!(!spec.isolated_context);
 
@@ -684,8 +669,7 @@ impl SubAgentRuntime {
         subject_type: &str,
     ) -> Result<SubAgentResult> {
         let outcome = SubAgentExecutionOutcome::ok(result_text);
-        let structured: Option<serde_json::Value> =
-            serde_json::from_str(&structured_json).ok();
+        let structured: Option<serde_json::Value> = serde_json::from_str(&structured_json).ok();
         let mut outcome = outcome;
         if let Some(ref s) = structured {
             outcome = outcome.with_structured(s.clone());

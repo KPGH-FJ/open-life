@@ -299,6 +299,7 @@ Use these documents together:
 - `plans/openlife_vnext_migration_plan.md`: phase order.
 - `plans/openlife_vnext_p0_p1_task_specs.md`: AI-coding-ready task specs.
 - `plans/openlife_vnext_p2_p3_task_specs.md`: next-stage PlanMode/SubAgent/Sandbox task specs.
+- `plans/openlife_vnext_p4_task_specs.md`: confirmed plan execution and trace UI task specs.
 - `plans/openlife_vnext_agent_coding_prompts.md`: reusable prompts for driving later Agent coding.
 - `plans/openlife_vnext_test_and_acceptance_matrix.md`: phase acceptance tests.
 - `plans/adr/README.md`: ADR backlog and workflow.
