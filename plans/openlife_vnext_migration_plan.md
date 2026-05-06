@@ -323,6 +323,7 @@ Next planning source after P0/P1:
 - See `plans/openlife_vnext_p4_task_specs.md`.
 - See `plans/openlife_vnext_p5_task_specs.md`.
 - See `plans/openlife_vnext_p6_task_specs.md`.
+- See `plans/openlife_vnext_p7_task_specs.md`.
 - See `plans/openlife_vnext_agent_coding_prompts.md`.
 - ADR 0007-0010 are accepted. P4 starts from confirmed plan execution and Chat trace UI integration.
 
@@ -404,3 +405,44 @@ Exit criteria:
 - PromptStack binds AgentSpec prompt references without ad hoc prompts
 - PlanExecutor respects AgentSpec policy
 - minimal trace UI surfaces AgentSpec governance decisions without destabilizing ChatPage
+
+## P7: AgentSpec Store, Runtime Selection, and Governed Agent Entry Points
+
+Goal:
+
+Make AgentSpec selection durable, deterministic, and visible across runtime and plan execution.
+
+Task source:
+
+- `plans/openlife_vnext_p7_task_specs.md`
+
+ADR source:
+
+- `plans/adr/0012-agentspec-store-runtime-selection.md`
+
+Scope:
+
+- AgentSpecStore
+- default main AgentSpec bootstrap
+- Tauri AgentSpec commands and frontend contract
+- runtime execution with resolved AgentSpec
+- AgentSpec-derived PromptStack and ContextPolicy
+- plan execution using stored AgentSpec instead of hardcoded default
+- minimal frontend contract surface
+
+Non-goals:
+
+- no Bash/Shell
+- no SubAgent parallel or handoff
+- no full AgentSpec marketplace/editor
+- no ChatPage rewrite
+- no bypass of ToolRuntime, ActionExecutor, Proposal, PromptStack, ContextPolicy, AgentRunEvent, ExecutionSandbox, or PlanExecutor
+
+Exit criteria:
+
+- default main AgentSpec is persisted and selectable
+- runtime can execute with a resolved AgentSpec
+- PromptStack and ContextPolicy are driven by the selected AgentSpec
+- plan execution resolves stored AgentSpec deterministically
+- frontend/backend contracts can read AgentSpec state
+- missing prompt blocks, missing specs, denied context, and denied tools are test-covered

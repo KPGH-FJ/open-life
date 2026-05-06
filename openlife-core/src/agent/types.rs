@@ -1120,6 +1120,10 @@ pub struct AgentPlan {
     pub id: String,
     pub run_id: Option<String>,
     pub session_id: Option<String>,
+    /// AgentSpec id that governs this plan's execution.
+    /// When set, the plan executor resolves tools/context/prompts against this spec.
+    #[serde(default)]
+    pub agent_spec_id: Option<String>,
     pub goal: String,
     pub assumptions: Vec<String>,
     pub missing_context: Vec<String>,
@@ -1146,6 +1150,7 @@ impl AgentPlan {
             id: Uuid::new_v4().to_string(),
             run_id: None,
             session_id: None,
+            agent_spec_id: None,
             goal: goal.into(),
             assumptions: Vec::new(),
             missing_context: Vec::new(),
@@ -1172,6 +1177,11 @@ impl AgentPlan {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    pub fn with_agent_spec(mut self, spec_id: impl Into<String>) -> Self {
+        self.agent_spec_id = Some(spec_id.into());
         self
     }
 
@@ -1738,6 +1748,58 @@ impl AgentSpec {
     /// Check if a tool is denied by this spec.
     pub fn is_tool_denied(&self, tool_name: &str) -> bool {
         self.denied_tools.iter().any(|t| t == tool_name)
+    }
+
+    /// Create the default main AgentSpec with a stable id for store bootstrapping.
+    pub fn default_main_spec() -> Self {
+        Self::new(
+            AgentRoleKind::Main,
+            "OpenLife Main Agent",
+            "LifeModel-governed personal agent",
+        )
+        .with_lifemodel_access()
+        .with_memory_evidence()
+        .with_id("main.default".to_string())
+    }
+
+    /// Set a specific id on this spec (useful for store bootstrapping).
+    pub fn with_id(mut self, id: String) -> Self {
+        self.id = id;
+        self
+    }
+}
+
+/// Structured error returned by AgentSpecStore operations.
+#[derive(Debug, Clone)]
+pub enum AgentSpecStoreError {
+    NotFound(String),
+    AlreadyExists(String),
+    /// The requested spec exists but its role kind does not match the
+    /// operation's requirements (e.g. set_default_main_spec on a Planner spec).
+    InvalidRole { spec_id: String, role: AgentRoleKind },
+    Store(String),
+}
+
+impl std::fmt::Display for AgentSpecStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentSpecStoreError::NotFound(id) => write!(f, "AgentSpec not found: {}", id),
+            AgentSpecStoreError::AlreadyExists(id) => write!(f, "AgentSpec already exists: {}", id),
+            AgentSpecStoreError::InvalidRole { spec_id, role } => write!(
+                f,
+                "AgentSpec {} has role {:?}, not valid for this operation",
+                spec_id, role
+            ),
+            AgentSpecStoreError::Store(msg) => write!(f, "AgentSpec store error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AgentSpecStoreError {}
+
+impl From<anyhow::Error> for AgentSpecStoreError {
+    fn from(e: anyhow::Error) -> Self {
+        AgentSpecStoreError::Store(e.to_string())
     }
 }
 

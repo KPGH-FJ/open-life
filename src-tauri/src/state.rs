@@ -69,6 +69,7 @@ pub struct AppState {
     pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
     pub proposal_engine: Arc<tokio::sync::Mutex<openlife_core::agent::ProposalEngine>>,
+    pub agent_spec_store: Arc<std::sync::Mutex<openlife_core::agent::AgentSpecStore>>,
     pub startup_warnings: Vec<String>,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_mutex: Arc<tokio::sync::Mutex<()>>,

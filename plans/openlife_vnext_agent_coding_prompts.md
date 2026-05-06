@@ -1065,3 +1065,270 @@ Required tests:
 - empty AgentSpec metadata does not render extra UI
 - existing ChatPage tests remain green
 ```
+
+## P7 Global Prompt
+
+```text
+You are working on OpenLife vNext P7: AgentSpec Store, Runtime Selection, and Governed Agent Entry Points.
+
+Read first:
+- AGENTS.md
+- plans/openlife_vnext_p7_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0001-agentrun-event-trace.md
+- plans/adr/0002-promptstack-system-prompt.md
+- plans/adr/0003-toolruntime-metadata.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+- plans/adr/0007-planmode-confirmation-policy.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+
+Rules:
+- Execute exactly one P7 task spec.
+- Do not introduce Bash/Shell.
+- Do not implement SubAgent parallel or handoff.
+- Do not rewrite ChatPage.
+- Do not build a full AgentSpec marketplace/editor.
+- Do not bypass ToolRuntime, ActionExecutor, Proposal, PromptStack, ContextPolicy, AgentRunEvent, ExecutionSandbox, PlanExecutor, or AgentSpecStore.
+- AgentSpec may constrain tools/context/prompts, but it must not grant authority beyond existing runtime policy.
+- Persisted AgentSpec selection must be deterministic and traceable.
+- Preserve append-only AgentRunEvent history.
+- Add focused tests, including denial/error tests.
+- Run the task spec verification commands.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P7-0 Prompt
+
+```text
+Execute vNext task P7-0: Documentation And ADR Sync.
+
+Use:
+- AGENTS.md
+- plans/openlife_vnext_p7_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+- plans/adr/README.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+
+Goal:
+- Make P7 discoverable and AI-coding-ready.
+- Ensure document entrypoints reference P7 task specs.
+- Ensure P7 task order and acceptance commands are clear.
+- Ensure ADR 0012 captures AgentSpecStore and runtime selection guardrails.
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+
+Verification:
+- rg -n "openlife_vnext_p7_task_specs|P7-0|P7-1|P7-2|P7-3|P7-4|P7-5|AgentSpec Store|ADR 0012" AGENTS.md plans
+- git diff --name-only contains documentation files only
+
+Report:
+- changed files
+- verification result
+- residual risks
+```
+
+## P7-1 Prompt
+
+```text
+Execute vNext task P7-1: AgentSpecStore.
+
+Use:
+- plans/openlife_vnext_p7_task_specs.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+
+Goal:
+- Add durable AgentSpecStore for AgentSpec definitions.
+- Bootstrap a default main AgentSpec with a stable id such as main.default.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/agent_spec_store.rs
+- openlife-core/src/agent/mod.rs
+- relevant focused tests under openlife-core/src/agent/
+
+Constraints:
+- Do not wire Tauri commands in this task.
+- Do not add UI.
+- Do not change PlanExecutor behavior.
+- Do not implement specialist agent marketplace semantics.
+
+Verification:
+- cargo test -p openlife-core agent
+- cargo check -q
+
+Required tests:
+- default main spec is bootstrapped
+- AgentSpec round-trips through store
+- inactive specs are not selected as default
+- unknown spec id returns structured error
+```
+
+## P7-2 Prompt
+
+```text
+Execute vNext task P7-2: Tauri AgentSpec Commands And AppState Wiring.
+
+Use:
+- plans/openlife_vnext_p7_task_specs.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+
+Goal:
+- Wire AgentSpecStore into AppState/bootstrap.
+- Expose minimal AgentSpec lifecycle commands and frontend wrappers.
+
+Expected commands:
+- get_agent_spec(spec_id)
+- list_agent_specs()
+- get_default_agent_spec()
+- update_agent_spec(spec)
+- set_default_agent_spec(spec_id)
+
+Allowed edit areas:
+- src-tauri/src/state.rs
+- src-tauri/src/bootstrap.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/commands/agent.rs or src-tauri/src/commands/agent_spec.rs
+- src-tauri/src/commands/mod.rs
+- src-tauri/src/test_utils.rs
+- frontend/src/tauri.ts
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+- relevant tests
+
+Constraints:
+- Do not build a polished AgentSpec editor.
+- Do not rewrite Settings or ChatPage.
+- Do not change normal chat behavior beyond bootstrap wiring.
+
+Verification:
+- cargo test -p openlife-tauri
+- pnpm --dir frontend typecheck
+- pnpm --dir frontend test -- --run tauri
+- cargo check -q
+
+Required tests:
+- default spec available after bootstrap
+- list returns the default main spec
+- update preserves stable fields
+- frontend wrappers typecheck
+```
+
+## P7-3 Prompt
+
+```text
+Execute vNext task P7-3: Runtime AgentSpec Selection.
+
+Use:
+- plans/openlife_vnext_p7_task_specs.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+- plans/adr/0002-promptstack-system-prompt.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+
+Goal:
+- Make AgentRuntime execute with a resolved AgentSpec.
+- Use selected AgentSpec to drive PromptStack and ContextPolicy.
+
+Allowed edit areas:
+- openlife-core/src/agent/runtime.rs
+- openlife-core/src/agent/context_assembler.rs
+- openlife-core/src/agent/prompt_stack.rs
+- openlife-core/src/agent/types.rs
+- relevant focused tests under openlife-core/src/agent/
+
+Constraints:
+- Do not call LLMs in new unit tests.
+- Do not bypass PromptStack or ContextPolicy.
+- Do not change ActionExecutor or PlanExecutor in this task.
+
+Verification:
+- cargo test -p openlife-core agent
+- cargo check -q
+
+Required tests:
+- execute_task_with_spec uses AgentSpec prompt block ids
+- unknown prompt block id fails before reasoning
+- spec without memory access excludes memory
+- spec without LifeModel access excludes LifeModel summary
+- default main spec preserves current behavior
+```
+
+## P7-4 Prompt
+
+```text
+Execute vNext task P7-4: Plan Execution Uses Stored AgentSpec.
+
+Use:
+- plans/openlife_vnext_p7_task_specs.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+- plans/adr/0007-planmode-confirmation-policy.md
+
+Goal:
+- Stop hardcoding default AgentSpec in plan execution.
+- Resolve stored AgentSpec for execute_agent_plan and retry_agent_plan.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/plan_store.rs
+- openlife-core/src/agent/plan_executor.rs
+- src-tauri/src/commands/plan.rs
+- relevant tests
+
+Constraints:
+- Do not introduce parallel plan execution.
+- Do not bypass PlanExecutor.
+- Do not change permission/proposal/replay policy.
+- Do not add plan editor UI.
+
+Verification:
+- cargo test -p openlife-core agent::plan_executor
+- cargo test -p openlife-tauri commands::plan
+- cargo check -q
+
+Required tests:
+- execute plan uses stored default AgentSpec
+- plan-bound AgentSpec deny blocks tool before execution
+- missing explicit spec id produces structured error or documented fallback
+- trace includes agentspec_id
+```
+
+## P7-5 Prompt
+
+```text
+Execute vNext task P7-5: Minimal Frontend Contract Surface.
+
+Use:
+- plans/openlife_vnext_p7_task_specs.md
+
+Goal:
+- Expose AgentSpec contract to frontend code without building a large editor.
+
+Allowed edit areas:
+- frontend/src/types.ts
+- frontend/src/tauri.ts
+- frontend/src/test/mocks/tauri.ts
+- optionally a small Settings tab or dev-only surface
+- focused frontend tests
+
+Constraints:
+- Do not rewrite Settings.
+- Do not rewrite ChatPage.
+- Do not add a full AgentSpec marketplace/editor.
+- Do not change trace UI except for small typed event metadata if needed.
+
+Verification:
+- pnpm --dir frontend typecheck
+- pnpm --dir frontend test -- --run tauri
+- if Settings changed: pnpm --dir frontend test -- --run Settings tauri
+
+Required tests:
+- wrappers typecheck
+- mock returns AgentSpec shape
+- default AgentSpec can be read from frontend wrapper
+```

@@ -202,11 +202,15 @@ impl PlanExecutor {
         }
 
         // Record execution started.
+        let mut start_payload = json!({"plan_id": plan_id, "total_steps": plan.steps.len()});
+        if let Some(ref spec) = self.agent_spec {
+            start_payload["agentspec_id"] = serde_json::Value::String(spec.id.clone());
+        }
         self.record_event(
             run_id,
             AgentRunEventType::PlanExecutionStarted,
             format!("started executing plan {}", plan_id),
-            json!({"plan_id": plan_id, "total_steps": plan.steps.len()}),
+            start_payload,
         );
 
         plan.start_execution();
@@ -1585,5 +1589,125 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.summary.contains("blocked by AgentSpec")));
+    }
+
+    // ── P7-4: Plan execution uses stored AgentSpec ─────────────────────
+
+    #[test]
+    fn test_execute_plan_uses_stored_agentspec() {
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        // Use the default main spec explicitly on the executor
+        let spec = AgentSpec::default_main_spec();
+        let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec.clone());
+
+        let outcome = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        assert!(outcome.success);
+
+        // PlanExecutionStarted event should include agentspec_id
+        let events = es.list_events_by_run(&run_id).unwrap();
+        let start_event = events
+            .iter()
+            .find(|e| e.event_type == AgentRunEventType::PlanExecutionStarted)
+            .expect("PlanExecutionStarted event should exist");
+
+        assert_eq!(
+            start_event.payload.get("agentspec_id").and_then(|v| v.as_str()),
+            Some("main.default"),
+            "PlanExecutionStarted should include agentspec_id"
+        );
+    }
+
+    #[test]
+    fn test_trace_includes_agentspec_id_on_blocked_tool() {
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        let spec = AgentSpec::default().with_denied_tools(vec!["life_model.read".to_string()]);
+        let spec_id = spec.id.clone();
+        let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
+
+        let _ = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        let events = es.list_events_by_run(&run_id).unwrap();
+        let blocked_event = events
+            .iter()
+            .find(|e| e.event_type == AgentRunEventType::ToolCallBlocked)
+            .expect("ToolCallBlocked event should exist");
+
+        assert_eq!(
+            blocked_event.payload.get("agentspec_id").and_then(|v| v.as_str()),
+            Some(spec_id.as_str()),
+            "ToolCallBlocked event should include agentspec_id"
+        );
+    }
+
+    #[test]
+    fn test_plan_without_agentspec_executes_with_default() {
+        // When no AgentSpec is attached, execution should still work (legacy mode)
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        let executor = PlanExecutor::new(ps, Some(es.clone()));
+
+        let outcome = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        assert!(outcome.success);
+
+        // PlanExecutionStarted should NOT have agentspec_id when no spec is attached
+        let events = es.list_events_by_run(&run_id).unwrap();
+        let start_event = events
+            .iter()
+            .find(|e| e.event_type == AgentRunEventType::PlanExecutionStarted)
+            .expect("PlanExecutionStarted event should exist");
+
+        assert!(
+            start_event.payload.get("agentspec_id").is_none(),
+            "PlanExecutionStarted should NOT have agentspec_id when no spec attached"
+        );
     }
 }

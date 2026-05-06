@@ -8,6 +8,7 @@ import type {
   AgentRunEvent,
   AgentPlan,
   PlanOperationResult,
+  AgentSpec,
 } from "./types";
 
 function isTauriEnv(): boolean {
@@ -1585,4 +1586,26 @@ export interface ProactiveSuggestion {
 
 export async function getProactiveSuggestions(): Promise<ProactiveSuggestion[]> {
   return safeInvoke("get_proactive_suggestions");
+}
+
+// ── AgentSpec ──
+
+export async function getAgentSpec(specId: string): Promise<AgentSpec | null> {
+  return safeInvoke<AgentSpec | null>("get_agent_spec", { specId, spec_id: specId });
+}
+
+export async function listAgentSpecs(): Promise<AgentSpec[]> {
+  return safeInvoke<AgentSpec[]>("list_agent_specs");
+}
+
+export async function getDefaultAgentSpec(): Promise<AgentSpec | null> {
+  return safeInvoke<AgentSpec | null>("get_default_agent_spec");
+}
+
+export async function updateAgentSpec(spec: AgentSpec): Promise<void> {
+  return safeInvoke("update_agent_spec", { spec });
+}
+
+export async function setDefaultAgentSpec(specId: string): Promise<void> {
+  return safeInvoke("set_default_agent_spec", { specId, spec_id: specId });
 }

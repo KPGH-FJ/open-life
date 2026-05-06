@@ -41,6 +41,7 @@ Implementation should not begin for high-risk boundaries until the relevant ADR 
 | 0009 | ExecutionSandbox and Bash/Shell Boundary | accepted | Phase 9 |
 | 0010 | ChatPage State Model Migration Policy | accepted | Phase 10, P4 Trace UI |
 | 0011 | Plan Recovery and Rollback Policy | proposed | P5 retry/cancel/rollback |
+| 0012 | AgentSpec Store And Runtime Selection | proposed | P7 AgentSpecStore, runtime selection |
 
 ## Recommended Acceptance Sequence
 
@@ -60,6 +61,8 @@ Suggested order:
 ADR 0007-0010 are accepted and have guided P2/P3 plus P3 hardening. Further high-risk changes should add new ADRs or supersede these records explicitly.
 
 ADR 0011 is proposed for P5. Implement cancellation and whole-plan retry only within the conservative policy in `plans/openlife_vnext_p5_task_specs.md`; rollback implementation should wait until ADR 0011 is accepted.
+
+ADR 0012 is proposed for P7. Implement AgentSpecStore and runtime selection conservatively: bootstrap a stored default main AgentSpec, resolve specs deterministically, and do not let AgentSpec grant authority beyond ToolRuntime, ActionExecutor, Proposal, PromptStack, ContextPolicy, AgentRunEvent, ExecutionSandbox, or PlanExecutor.
 
 ## Decision Backlog
 
@@ -105,6 +108,16 @@ These must be resolved before rollback implementation and advanced recovery:
 3. Which external side effects are explicitly irreversible?
 4. Should failed review ever allow a user override?
 5. Should rollback proposals live in Review Center or a dedicated plan recovery surface?
+
+### P7 Decisions
+
+These must be resolved before advanced specialist agents or AgentSpec editing:
+
+1. What is the stable id of the default main AgentSpec?
+2. Does AgentSpecStore live in the existing agent database or a dedicated SQLite file?
+3. Should missing explicit AgentSpec ids fail or fall back to the stored default main spec?
+4. Which AgentSpec changes eventually require Proposal review?
+5. Should inactive AgentSpecs be usable for historical replay only?
 
 ## ADR Template
 

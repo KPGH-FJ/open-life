@@ -89,6 +89,9 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         proposal_engine: Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::ProposalEngine::new(),
         )),
+        agent_spec_store: Arc::new(std::sync::Mutex::new(
+            openlife_core::agent::AgentSpecStore::new_in_memory().unwrap(),
+        )),
         startup_warnings: vec![],
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
@@ -123,4 +126,30 @@ async fn test_event_store_accessible_through_app_state() {
         openlife_core::agent::AgentRunEventType::RunCreated
     );
     assert_eq!(events[0].summary, "test event through AppState");
+}
+
+#[cfg(test)]
+#[test]
+fn test_default_agent_spec_available_after_bootstrap() {
+    let state = test_app_state();
+    let store = state.agent_spec_store.lock().unwrap();
+    let spec = store.get_default_spec().unwrap();
+    assert!(spec.is_some(), "default AgentSpec should exist after bootstrap");
+    let spec = spec.unwrap();
+    assert_eq!(spec.id, "main.default");
+    assert_eq!(spec.role, openlife_core::agent::AgentRoleKind::Main);
+    assert!(spec.active);
+}
+
+#[cfg(test)]
+#[test]
+fn test_list_returns_default_main_spec() {
+    let state = test_app_state();
+    let store = state.agent_spec_store.lock().unwrap();
+    let specs = store.list_specs().unwrap();
+    assert!(!specs.is_empty(), "list should return at least the default spec");
+    assert!(
+        specs.iter().any(|s| s.id == "main.default"),
+        "list should include main.default"
+    );
 }

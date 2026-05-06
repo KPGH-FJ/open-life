@@ -37,6 +37,10 @@ use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_run_events, list_agent_runs,
     list_agent_runs_for_session, replay_agent_action, restore_agent_run,
 };
+use commands::agent_spec::{
+    get_agent_spec, get_default_agent_spec, list_agent_specs, set_default_agent_spec,
+    update_agent_spec,
+};
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -2787,6 +2791,11 @@ pub fn run() {
             delete_agent_run,
             restore_agent_run,
             replay_agent_action,
+            get_agent_spec,
+            list_agent_specs,
+            get_default_agent_spec,
+            update_agent_spec,
+            set_default_agent_spec,
             get_agent_plan,
             list_agent_plans_for_run,
             list_agent_plans_for_session,

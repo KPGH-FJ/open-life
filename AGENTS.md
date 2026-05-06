@@ -27,16 +27,17 @@
 8. [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md)：P4 Confirmed Plan Execution 与 Chat trace UI 集成任务规格。
 9. [`plans/openlife_vnext_p5_task_specs.md`](plans/openlife_vnext_p5_task_specs.md)：P5 Governed Plan Operations and Recovery 任务规格。
 10. [`plans/openlife_vnext_p6_task_specs.md`](plans/openlife_vnext_p6_task_specs.md)：P6 AgentSpec-Governed Runtime and Context Assembly 任务规格。
-11. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
-12. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
-13. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
-14. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed。
-15. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
-16. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
-17. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
-18. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
-19. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-20. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+11. [`plans/openlife_vnext_p7_task_specs.md`](plans/openlife_vnext_p7_task_specs.md)：P7 AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 任务规格。
+12. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
+13. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
+14. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
+15. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed，ADR 0012 为 P7 AgentSpec store/runtime selection proposed。
+16. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
+17. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
+18. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
+19. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
+20. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+21. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
@@ -714,6 +715,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | vNext P4 任务 | [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md) | Confirmed Plan Execution 与 Chat trace UI 集成任务规格 |
 | vNext P5 任务 | [`plans/openlife_vnext_p5_task_specs.md`](plans/openlife_vnext_p5_task_specs.md) | Governed Plan Operations and Recovery 任务规格 |
 | vNext P6 任务 | [`plans/openlife_vnext_p6_task_specs.md`](plans/openlife_vnext_p6_task_specs.md) | AgentSpec-Governed Runtime and Context Assembly 任务规格 |
+| vNext P7 任务 | [`plans/openlife_vnext_p7_task_specs.md`](plans/openlife_vnext_p7_task_specs.md) | AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 任务规格 |
 | vNext Agent 提示词 | [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md) | 后续 AI coding 可复用提示词 |
 | vNext 验收矩阵 | [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md) | 每阶段测试和验收门控 |
 | AI Coding Governance | [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md) | ADR-first 和 AI coding 协作规则 |
@@ -775,6 +777,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-06 | **P4: Confirmed Plan Execution and Trace UI Integration**：P4-0 文档与 ADR 状态同步；P4-1 PlanExecution 事件与类型；P4-2 最小 PlanExecutor；P4-3 Tauri plan commands；P4-4 Chat Trace UI 集成；P4-5 ReviewAgent gate；ADR 0007-0010 已接受且与代码事实一致 | AI Agent |
 | 2026-05-06 | **P5 文档准备**：新增 `openlife_vnext_p5_task_specs.md`、ADR 0011 recovery/rollback policy 草案，并将 P5 Governed Plan Operations and Recovery 接入迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-06 | **P6 文档准备**：新增 `openlife_vnext_p6_task_specs.md`，将 AgentSpec-Governed Runtime and Context Assembly 接入迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
+| 2026-05-06 | **P7 文档准备**：新增 `openlife_vnext_p7_task_specs.md`、ADR 0012 AgentSpec store/runtime selection 草案，并将 P7 AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 接入迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 
 ---
 

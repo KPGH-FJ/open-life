@@ -379,3 +379,38 @@ export interface PlanOperationResult {
   reviewVerdict?: string;
   message?: string;
 }
+
+// ── AgentSpec types ────────────────────────────────────────────────────
+
+export type AgentRoleKind =
+  | "main"
+  | "planner"
+  | "codebase_explorer"
+  | "memory_curator"
+  | "lifemodel_guardian"
+  | "reviewer"
+  | string;
+
+export type PrivacyPolicy = "local_only" | "summary_only" | "cloud_allowed";
+
+export interface AgentSpec {
+  id: string;
+  role: AgentRoleKind;
+  name: string;
+  purpose: string;
+  promptBlockIds: string[];
+  allowedTools: string[];
+  deniedTools: string[];
+  canAccessLifemodel: boolean;
+  canAccessMemoryEvidence: boolean;
+  canGenerateProposals: boolean;
+  maxSteps: number;
+  maxToolCalls: number;
+  timeoutSeconds: number;
+  outputSchemaId?: string;
+  readOnly: boolean;
+  privacyPolicy: PrivacyPolicy;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}

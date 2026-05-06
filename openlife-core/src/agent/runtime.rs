@@ -5,7 +5,7 @@ use crate::agent::reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
     ReasoningStrategy, ReasoningTrace,
 };
-use crate::agent::types::AgentTask;
+use crate::agent::types::{AgentSpec, AgentTask};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -126,6 +126,130 @@ impl AgentRuntime {
             &spec.prompt_block_ids,
             registry,
         )
+    }
+
+    /// Derive ContextPolicy from an AgentSpec's fields.
+    pub fn context_policy_from_spec(spec: &AgentSpec) -> ContextPolicy {
+        ContextPolicy {
+            allow_lifemodel_summary: spec.can_access_lifemodel,
+            allow_goals: spec.can_access_lifemodel,
+            allow_state: spec.can_access_lifemodel,
+            allow_memory: spec.can_access_memory_evidence,
+            allow_session_summary: true,
+            allow_tool_observations: true,
+        }
+    }
+
+    /// Execute a task governed by an AgentSpec.
+    ///
+    /// Derives ContextPolicy and PromptStack from the AgentSpec before reasoning.
+    /// Unknown prompt block ids fail before any model call.
+    pub async fn execute_task_with_spec(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        spec: &AgentSpec,
+        prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        // Assemble PromptStack from AgentSpec prompt block ids.
+        // Unknown block ids fail before reasoning/model calls.
+        let mut prompt_stack = if spec.prompt_block_ids.is_empty() {
+            None
+        } else {
+            let stack = Self::prompt_stack_for_spec(spec, prompt_registry).map_err(|e| {
+                AgentRuntimeError::ContextAssembly(format!("prompt stack error: {}", e))
+            })?;
+            Some(stack)
+        };
+
+        // Derive policy from AgentSpec
+        let policy = Self::context_policy_from_spec(spec);
+
+        let mut input = AssembleInput {
+            session_id: task.session_id.clone(),
+            messages: Arc::new(task.messages.clone()),
+            life_model: Arc::new(life_model.clone()),
+            tools_prompt: tools_prompt.to_string(),
+            privacy_engine,
+            memory_context,
+            memory_hits,
+            memory_retrieval_time_ms: 0,
+        };
+
+        let (context, _governed) = self.assemble_governed(&mut input, &policy)?;
+
+        let strategy = if task.layer == Layer::L3 {
+            self.reasoning_strategies.get("layered")
+        } else {
+            self.reasoning_strategies.get("direct")
+        }
+        .ok_or_else(|| {
+            AgentRuntimeError::StrategyNotFound(
+                if task.layer == Layer::L3 {
+                    "layered"
+                } else {
+                    "direct"
+                }
+                .to_string(),
+            )
+        })?;
+
+        let reasoning_input = ReasoningInput {
+            task_kind: task.kind,
+            user_text: task.user_text.clone(),
+            session_id: task.session_id.clone(),
+        };
+
+        let run_id = Uuid::new_v4().to_string();
+        let reasoning_output = strategy
+            .reason(&reasoning_input, &context, &run_id)
+            .await
+            .map_err(AgentRuntimeError::Reasoning)?;
+
+        let mut final_messages = context.desensitized_messages.to_vec();
+
+        // Inject reasoning system prompt (task-specific instructions).
+        // Inserted before PromptStack, so it will be pushed to index 1
+        // when PromptStack is inserted at index 0 below.
+        if !reasoning_output.system_prompt.is_empty() {
+            final_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: reasoning_output.system_prompt.clone(),
+                },
+            );
+        }
+
+        // Inject AgentSpec PromptStack at index 0 (foundational blocks).
+        // This pushes the reasoning prompt (if any) to index 1, so task-specific
+        // instructions remain closer to the conversation messages.
+        // Raw prompt content is NOT written into events — only block IDs
+        // and versions are traceable (via PromptStack::block_trace).
+        if let Some(ref mut stack) = prompt_stack {
+            let assembled = stack.assemble();
+            if !assembled.is_empty() {
+                final_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: assembled,
+                    },
+                );
+            }
+        }
+
+        Ok(AgentRuntimeOutput {
+            final_messages,
+            reasoning_trace: reasoning_output.trace,
+            suggested_tools: reasoning_output.suggested_tools,
+            plan_steps: reasoning_output.plan_steps,
+            context_summary: context.context_summary,
+        })
     }
 
     /// Execute a task and return the reasoning output.
@@ -420,5 +544,192 @@ mod tests {
             recoverable: true,
         });
         assert!(format!("{}", err).contains("Reasoning failed"));
+    }
+
+    // ── P7-3: AgentSpec-driven runtime tests ────────────────────────────
+
+    use crate::agent::types::AgentSpec;
+
+    #[test]
+    fn test_execute_task_with_spec_uses_prompt_block_ids() {
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+        let spec = AgentSpec::default_main_spec();
+        // main.default has no prompt_block_ids by default, give it some
+        let mut spec = spec;
+        spec.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
+
+        let stack =
+            AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap();
+        assert_eq!(stack.blocks.len(), 2);
+        let ids: Vec<&str> = stack.blocks.iter().map(|b| b.id.as_str()).collect();
+        assert!(ids.contains(&"base_system"));
+        assert!(ids.contains(&"privacy_rule"));
+    }
+
+    #[test]
+    fn test_unknown_prompt_block_id_fails_before_reasoning() {
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+        let mut spec = AgentSpec::default_main_spec();
+        spec.prompt_block_ids = vec!["nonexistent_block".to_string()];
+
+        let err =
+            AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap_err();
+        assert!(err.contains("unknown prompt block"));
+        assert!(err.contains("nonexistent_block"));
+    }
+
+    #[test]
+    fn test_spec_without_memory_access_excludes_memory() {
+        let mut spec = AgentSpec::default_main_spec();
+        spec.can_access_memory_evidence = false;
+
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        assert!(!policy.allow_memory);
+    }
+
+    #[test]
+    fn test_spec_without_lifemodel_access_excludes_lifemodel_summary() {
+        let mut spec = AgentSpec::default_main_spec();
+        spec.can_access_lifemodel = false;
+
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        assert!(!policy.allow_lifemodel_summary);
+        assert!(!policy.allow_goals);
+        assert!(!policy.allow_state);
+    }
+
+    #[test]
+    fn test_default_main_spec_preserves_current_behavior() {
+        let spec = AgentSpec::default_main_spec();
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        let default_policy = ContextPolicy::default();
+
+        assert_eq!(policy.allow_lifemodel_summary, default_policy.allow_lifemodel_summary);
+        assert_eq!(policy.allow_goals, default_policy.allow_goals);
+        assert_eq!(policy.allow_state, default_policy.allow_state);
+        assert_eq!(policy.allow_memory, default_policy.allow_memory);
+        assert_eq!(policy.allow_session_summary, default_policy.allow_session_summary);
+        assert_eq!(policy.allow_tool_observations, default_policy.allow_tool_observations);
+    }
+
+    // ── P7 stabilization: PromptStack is used by runtime, not only validated ──
+
+    #[tokio::test]
+    async fn test_execute_task_with_spec_includes_prompt_stack_in_final_messages_l1() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let runtime = AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+
+        let mut task = create_test_task();
+        task.layer = crate::layer_router::Layer::L1; // uses DirectReasoner, no API needed
+
+        let spec = AgentSpec::default_main_spec();
+        let mut spec_with_blocks = spec.clone();
+        spec_with_blocks.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
+
+        let output = runtime
+            .execute_task_with_spec(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+                &spec_with_blocks,
+                &registry,
+            )
+            .await
+            .unwrap();
+
+        // PromptStack blocks should produce at least one system message
+        let system_msgs: Vec<_> = output
+            .final_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .collect();
+        assert!(
+            !system_msgs.is_empty(),
+            "PromptStack with 2 blocks should produce system messages"
+        );
+        // Verify the system message content is non-empty (blocks were assembled)
+        let assembled_content: String = system_msgs.iter().map(|m| m.content.as_str()).collect();
+        assert!(!assembled_content.is_empty(), "assembled prompt content should not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_empty_prompt_block_ids_preserves_previous_behavior() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let runtime = AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+
+        let mut task = create_test_task();
+        task.layer = crate::layer_router::Layer::L1;
+
+        // main.default has empty prompt_block_ids by default
+        let spec = AgentSpec::default_main_spec();
+
+        let output = runtime
+            .execute_task_with_spec(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+                &spec,
+                &registry,
+            )
+            .await
+            .unwrap();
+
+        // No extra system message from AgentSpec when prompt_block_ids is empty.
+        // With L1 DirectReasoner (no system_prompt), only desensitized_messages exist.
+        assert!(!output.final_messages.is_empty());
+        let system_count = output.final_messages.iter().filter(|m| m.role == "system").count();
+        assert_eq!(system_count, 0, "no system message should be injected for empty prompt_block_ids");
+    }
+
+    #[test]
+    fn test_block_trace_does_not_expose_raw_prompt_content() {
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+        let mut spec = AgentSpec::default_main_spec();
+        spec.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
+
+        let stack = AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap();
+        let trace = stack.block_trace();
+        assert_eq!(trace.len(), 2);
+
+        // Trace entries contain metadata only — no raw prompt content
+        for entry in &trace {
+            assert!(!entry.id.is_empty());
+            assert!(!entry.version.is_empty());
+            // BlockTraceEntry has no `content` field — confirmed by type definition
+        }
+
+        // Verify a trace entry serializes without raw prompt content
+        let json = serde_json::to_string(&trace).unwrap();
+        assert!(json.contains("base_system"));
+        assert!(json.contains("privacy_rule"));
+        assert!(!json.contains("You are OpenLife")); // raw prompt content must NOT appear
     }
 }

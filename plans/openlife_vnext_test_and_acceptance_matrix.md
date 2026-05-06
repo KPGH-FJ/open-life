@@ -243,6 +243,34 @@ Tests:
 - PlanExecutor blocks AgentSpec-denied plan tool
 - RunTracePanel renders AgentSpec metadata and block summary
 
+## P7: AgentSpec Store, Runtime Selection, and Governed Agent Entry Points
+
+Acceptance:
+
+- AgentSpecStore persists and retrieves AgentSpec records.
+- Default main AgentSpec is bootstrapped with a stable id.
+- Tauri AppState exposes AgentSpecStore-backed commands.
+- AgentRuntime can execute with a resolved AgentSpec.
+- PromptStack assembly uses selected AgentSpec prompt block ids.
+- ContextPolicy is derived from selected AgentSpec policy fields.
+- Plan execution resolves stored AgentSpec instead of hardcoded defaults.
+- Frontend/backend contract can read the current default AgentSpec.
+
+Tests:
+
+- default main spec bootstrap
+- AgentSpecStore create/get/list/update/activate
+- unknown spec id structured error
+- Tauri get/list/update/default AgentSpec commands
+- frontend wrapper and mock AgentSpec contract
+- runtime with AgentSpec prompt block ids
+- missing prompt block fails before reasoning
+- AgentSpec without memory access excludes memory
+- AgentSpec without LifeModel access excludes LifeModel summary
+- plan execution uses stored default AgentSpec
+- plan-bound AgentSpec-denied tool blocks before execution
+- trace payload includes `agentspec_id`
+
 ## Manual Review Checklist
 
 For each phase:

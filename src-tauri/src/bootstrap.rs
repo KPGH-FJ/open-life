@@ -7,7 +7,7 @@ use crate::storage::{
     load_mcp_audit_keyring_from_path, load_privacy_policy_from_path, mcp_audit_keyring_path,
     privacy_policy_path,
 };
-use openlife_core::agent::{ProposalEngine, ProposalStore};
+use openlife_core::agent::{AgentSpecStore, ProposalEngine, ProposalStore};
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -500,6 +500,28 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         }
     };
 
+    let agent_spec_store = {
+        let store_path = data_dir.join("agent_specs.db");
+        match AgentSpecStore::new(&store_path) {
+            Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+            Err(e) => {
+                startup_warnings
+                    .borrow_mut()
+                    .push(format!("agent_specs.db 初始化失败，降级为内存存储: {}", e));
+                match AgentSpecStore::new_in_memory() {
+                    Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+                    Err(memory_err) => {
+                        startup_warnings.borrow_mut().push(format!(
+                            "agent_specs 内存存储也失败: {}",
+                            memory_err
+                        ));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    };
+
     let app_state = Arc::new(AppState {
         config: Arc::new(Mutex::new(config)),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
@@ -541,6 +563,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
             engine.register(Box::new(openlife_core::agent::ToolProposalGenerator));
             engine
         })),
+        agent_spec_store,
         startup_warnings: startup_warnings.into_inner(),
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),

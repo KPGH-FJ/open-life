@@ -10,6 +10,11 @@ import {
   restoreArchivedChunks,
   saveChatMessage,
   startStreamMessage,
+  getAgentSpec,
+  listAgentSpecs,
+  getDefaultAgentSpec,
+  updateAgentSpec,
+  setDefaultAgentSpec,
 } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -115,6 +120,64 @@ describe("tauri command argument aliases", () => {
         proposal_id: "proposal-1",
         newAfter: { name: "新值" },
         new_after: { name: "新值" },
+      })
+    );
+  });
+});
+
+// ── P7 stabilization: AgentSpec wrapper command tests ─────────────
+
+describe("AgentSpec command aliases", () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+  });
+
+  it("getAgentSpec invokes get_agent_spec with dual arg aliases", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      id: "main.default",
+      role: "main",
+      name: "OpenLife Main Agent",
+    });
+    await getAgentSpec("main.default");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_agent_spec",
+      expect.objectContaining({
+        specId: "main.default",
+        spec_id: "main.default",
+      })
+    );
+  });
+
+  it("listAgentSpecs invokes list_agent_specs", async () => {
+    vi.mocked(invoke).mockResolvedValue([]);
+    await listAgentSpecs();
+    expect(invoke).toHaveBeenCalledWith("list_agent_specs", undefined);
+  });
+
+  it("getDefaultAgentSpec invokes get_default_agent_spec", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      id: "main.default",
+      role: "main",
+    });
+    await getDefaultAgentSpec();
+    expect(invoke).toHaveBeenCalledWith("get_default_agent_spec", undefined);
+  });
+
+  it("updateAgentSpec invokes update_agent_spec", async () => {
+    const spec = { id: "main.default", role: "main", name: "Update Test" };
+    await updateAgentSpec(spec as any);
+    expect(invoke).toHaveBeenCalledWith("update_agent_spec", { spec });
+  });
+
+  it("setDefaultAgentSpec invokes set_default_agent_spec with dual arg aliases", async () => {
+    await setDefaultAgentSpec("main.alt");
+
+    expect(invoke).toHaveBeenCalledWith(
+      "set_default_agent_spec",
+      expect.objectContaining({
+        specId: "main.alt",
+        spec_id: "main.alt",
       })
     );
   });

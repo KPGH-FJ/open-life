@@ -1381,6 +1381,9 @@ mod tests {
             ))),
             hot_cache,
             proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
+            agent_spec_store: Arc::new(std::sync::Mutex::new(
+                openlife_core::agent::AgentSpecStore::new_in_memory().unwrap(),
+            )),
             startup_warnings: vec![],
             provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),

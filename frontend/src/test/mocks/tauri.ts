@@ -7,6 +7,7 @@ import type {
   StateAlert,
   LifeModelVersion,
   AgentRunEvent,
+  AgentSpec,
 } from "@/types";
 
 export const mockLifeModel: LifeModel = {
@@ -922,6 +923,22 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         deviations: [],
         message: "no blocked actions to continue",
       } as T);
+    // ── AgentSpec mocks ──────────────────────────────────────────────
+    case "get_agent_spec": {
+      const id = (_args as any)?.specId || (_args as any)?.spec_id;
+      if (id === "main.default") {
+        return Promise.resolve(mockAgentSpec as T);
+      }
+      return Promise.resolve(null as T);
+    }
+    case "list_agent_specs":
+      return Promise.resolve([mockAgentSpec] as T);
+    case "get_default_agent_spec":
+      return Promise.resolve(mockAgentSpec as T);
+    case "update_agent_spec":
+      return Promise.resolve(undefined as T);
+    case "set_default_agent_spec":
+      return Promise.resolve(undefined as T);
     default:
       return Promise.resolve({} as T);
   }
@@ -1054,4 +1071,28 @@ export const mockAgentPlan = {
   updatedAt: "2026-05-06T10:00:00Z",
   confirmedAt: "2026-05-06T10:00:01Z",
   completedAt: undefined,
+};
+
+// ── AgentSpec mock data ──────────────────────────────────────────────────
+
+export const mockAgentSpec: AgentSpec = {
+  id: "main.default",
+  role: "main",
+  name: "OpenLife Main Agent",
+  purpose: "LifeModel-governed personal agent",
+  promptBlockIds: ["base_system", "tool_discipline", "privacy_rule"],
+  allowedTools: [],
+  deniedTools: [],
+  canAccessLifemodel: true,
+  canAccessMemoryEvidence: true,
+  canGenerateProposals: true,
+  maxSteps: 5,
+  maxToolCalls: 3,
+  timeoutSeconds: 60,
+  outputSchemaId: undefined,
+  readOnly: false,
+  privacyPolicy: "local_only",
+  active: true,
+  createdAt: "2026-05-06T10:00:00Z",
+  updatedAt: "2026-05-06T10:00:00Z",
 };

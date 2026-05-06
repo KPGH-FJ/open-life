@@ -1,5 +1,6 @@
 pub mod action_executor;
 pub mod agent_loop;
+pub mod agent_spec_store;
 pub mod context_assembler;
 pub mod event_store;
 pub mod execution_facade;
@@ -65,5 +66,7 @@ pub use sub_agent::{
     ReviewAgentOutput, ReviewIssue, ReviewVerdict, SubAgentExecutionOutcome, SubAgentResult,
     SubAgentRuntime,
 };
+pub use agent_spec_store::AgentSpecStore;
+pub use types::AgentSpecStoreError;
 pub use types::PlanOperationResult;
 pub use types::*;

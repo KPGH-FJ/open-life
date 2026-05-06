@@ -42,6 +42,7 @@ impl PlanStore {
                 id TEXT PRIMARY KEY,
                 run_id TEXT,
                 session_id TEXT,
+                agent_spec_id TEXT,
                 goal TEXT NOT NULL,
                 assumptions_json TEXT NOT NULL DEFAULT '[]',
                 missing_context_json TEXT NOT NULL DEFAULT '[]',
@@ -61,6 +62,19 @@ impl PlanStore {
             )",
             [],
         )?;
+        // Migration: add agent_spec_id column if missing (pre-existing DBs).
+        // Only ignore "duplicate column name" errors; propagate other failures.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE agent_plans ADD COLUMN agent_spec_id TEXT",
+            [],
+        ) {
+            if !e.to_string().contains("duplicate column name") {
+                return Err(anyhow::anyhow!(
+                    "failed to migrate agent_plans table: {}",
+                    e
+                ));
+            }
+        }
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_plans_status ON agent_plans(status, created_at DESC)",
             [],
@@ -83,17 +97,18 @@ impl PlanStore {
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
             "INSERT INTO agent_plans (
-                id, run_id, session_id, goal, assumptions_json,
+                id, run_id, session_id, agent_spec_id, goal, assumptions_json,
                 missing_context_json, steps_json, tool_intents_json,
                 subagent_assignments_json, permission_requirements_json,
                 rollback_plan, success_criteria_json, risk_level,
                 requires_confirmation, status, created_at, updated_at,
                 confirmed_at, completed_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 plan.id,
                 plan.run_id.as_ref(),
                 plan.session_id.as_ref(),
+                plan.agent_spec_id.as_ref(),
                 plan.goal,
                 serde_json::to_string(&plan.assumptions).unwrap_or_default(),
                 serde_json::to_string(&plan.missing_context).unwrap_or_default(),
@@ -121,7 +136,7 @@ impl PlanStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, session_id, goal, assumptions_json,
+            "SELECT id, run_id, session_id, agent_spec_id, goal, assumptions_json,
                     missing_context_json, steps_json, tool_intents_json,
                     subagent_assignments_json, permission_requirements_json,
                     rollback_plan, success_criteria_json, risk_level,
@@ -130,20 +145,20 @@ impl PlanStore {
              FROM agent_plans WHERE id = ?1",
         )?;
         let row = stmt.query_row([plan_id], |row| {
-            let assumptions_json: String = row.get(4)?;
-            let missing_context_json: String = row.get(5)?;
-            let steps_json: String = row.get(6)?;
-            let tool_intents_json: String = row.get(7)?;
-            let subagent_assignments_json: String = row.get(8)?;
-            let permission_requirements_json: String = row.get(9)?;
-            let success_criteria_json: String = row.get(11)?;
-            let risk_level_str: String = row.get(12)?;
-            let requires_confirmation_int: i32 = row.get(13)?;
-            let status_str: String = row.get(14)?;
-            let created_at_str: String = row.get(15)?;
-            let updated_at_str: String = row.get(16)?;
-            let confirmed_at_str: Option<String> = row.get(17)?;
-            let completed_at_str: Option<String> = row.get(18)?;
+            let assumptions_json: String = row.get(5)?;
+            let missing_context_json: String = row.get(6)?;
+            let steps_json: String = row.get(7)?;
+            let tool_intents_json: String = row.get(8)?;
+            let subagent_assignments_json: String = row.get(9)?;
+            let permission_requirements_json: String = row.get(10)?;
+            let success_criteria_json: String = row.get(12)?;
+            let risk_level_str: String = row.get(13)?;
+            let requires_confirmation_int: i32 = row.get(14)?;
+            let status_str: String = row.get(15)?;
+            let created_at_str: String = row.get(16)?;
+            let updated_at_str: String = row.get(17)?;
+            let confirmed_at_str: Option<String> = row.get(18)?;
+            let completed_at_str: Option<String> = row.get(19)?;
 
             let risk_level = match risk_level_str.as_str() {
                 "low" => RiskLevel::Low,
@@ -182,7 +197,8 @@ impl PlanStore {
                 id: row.get(0)?,
                 run_id: row.get(1)?,
                 session_id: row.get(2)?,
-                goal: row.get(3)?,
+                agent_spec_id: row.get(3)?,
+                goal: row.get(4)?,
                 assumptions: serde_json::from_str(&assumptions_json).unwrap_or_default(),
                 missing_context: serde_json::from_str(&missing_context_json).unwrap_or_default(),
                 steps: serde_json::from_str(&steps_json).unwrap_or_default(),
@@ -191,7 +207,7 @@ impl PlanStore {
                     .unwrap_or_default(),
                 permission_requirements: serde_json::from_str(&permission_requirements_json)
                     .unwrap_or_default(),
-                rollback_plan: row.get(10)?,
+                rollback_plan: row.get(11)?,
                 success_criteria: serde_json::from_str(&success_criteria_json).unwrap_or_default(),
                 risk_level,
                 requires_confirmation: requires_confirmation_int != 0,
@@ -215,7 +231,7 @@ impl PlanStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, session_id, goal, assumptions_json,
+            "SELECT id, run_id, session_id, agent_spec_id, goal, assumptions_json,
                     missing_context_json, steps_json, tool_intents_json,
                     subagent_assignments_json, permission_requirements_json,
                     rollback_plan, success_criteria_json, risk_level,
@@ -235,7 +251,7 @@ impl PlanStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, session_id, goal, assumptions_json,
+            "SELECT id, run_id, session_id, agent_spec_id, goal, assumptions_json,
                     missing_context_json, steps_json, tool_intents_json,
                     subagent_assignments_json, permission_requirements_json,
                     rollback_plan, success_criteria_json, risk_level,
@@ -255,7 +271,7 @@ impl PlanStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut stmt = conn.prepare(
-            "SELECT id, run_id, session_id, goal, assumptions_json,
+            "SELECT id, run_id, session_id, agent_spec_id, goal, assumptions_json,
                     missing_context_json, steps_json, tool_intents_json,
                     subagent_assignments_json, permission_requirements_json,
                     rollback_plan, success_criteria_json, risk_level,
@@ -277,17 +293,18 @@ impl PlanStore {
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
             "UPDATE agent_plans SET
-                run_id = ?2, session_id = ?3, goal = ?4, assumptions_json = ?5,
-                missing_context_json = ?6, steps_json = ?7, tool_intents_json = ?8,
-                subagent_assignments_json = ?9, permission_requirements_json = ?10,
-                rollback_plan = ?11, success_criteria_json = ?12, risk_level = ?13,
-                requires_confirmation = ?14, status = ?15, updated_at = ?16,
-                confirmed_at = ?17, completed_at = ?18
+                run_id = ?2, session_id = ?3, agent_spec_id = ?4, goal = ?5, assumptions_json = ?6,
+                missing_context_json = ?7, steps_json = ?8, tool_intents_json = ?9,
+                subagent_assignments_json = ?10, permission_requirements_json = ?11,
+                rollback_plan = ?12, success_criteria_json = ?13, risk_level = ?14,
+                requires_confirmation = ?15, status = ?16, updated_at = ?17,
+                confirmed_at = ?18, completed_at = ?19
              WHERE id = ?1",
             params![
                 plan.id,
                 plan.run_id.as_ref(),
                 plan.session_id.as_ref(),
+                plan.agent_spec_id.as_ref(),
                 plan.goal,
                 serde_json::to_string(&plan.assumptions).unwrap_or_default(),
                 serde_json::to_string(&plan.missing_context).unwrap_or_default(),
@@ -319,20 +336,20 @@ impl PlanStore {
     }
 
     fn row_to_plan(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentPlan> {
-        let assumptions_json: String = row.get(4)?;
-        let missing_context_json: String = row.get(5)?;
-        let steps_json: String = row.get(6)?;
-        let tool_intents_json: String = row.get(7)?;
-        let subagent_assignments_json: String = row.get(8)?;
-        let permission_requirements_json: String = row.get(9)?;
-        let success_criteria_json: String = row.get(11)?;
-        let risk_level_str: String = row.get(12)?;
-        let requires_confirmation_int: i32 = row.get(13)?;
-        let status_str: String = row.get(14)?;
-        let created_at_str: String = row.get(15)?;
-        let updated_at_str: String = row.get(16)?;
-        let confirmed_at_str: Option<String> = row.get(17)?;
-        let completed_at_str: Option<String> = row.get(18)?;
+        let assumptions_json: String = row.get(5)?;
+        let missing_context_json: String = row.get(6)?;
+        let steps_json: String = row.get(7)?;
+        let tool_intents_json: String = row.get(8)?;
+        let subagent_assignments_json: String = row.get(9)?;
+        let permission_requirements_json: String = row.get(10)?;
+        let success_criteria_json: String = row.get(12)?;
+        let risk_level_str: String = row.get(13)?;
+        let requires_confirmation_int: i32 = row.get(14)?;
+        let status_str: String = row.get(15)?;
+        let created_at_str: String = row.get(16)?;
+        let updated_at_str: String = row.get(17)?;
+        let confirmed_at_str: Option<String> = row.get(18)?;
+        let completed_at_str: Option<String> = row.get(19)?;
 
         let risk_level = match risk_level_str.as_str() {
             "low" => RiskLevel::Low,
@@ -350,6 +367,8 @@ impl PlanStore {
             "completed" => PlanStatus::Completed,
             "rejected" => PlanStatus::Rejected,
             "cancelled" => PlanStatus::Cancelled,
+            "failed" => PlanStatus::Failed,
+            "failed_review" => PlanStatus::FailedReview,
             _ => PlanStatus::Draft,
         };
 
@@ -369,7 +388,8 @@ impl PlanStore {
             id: row.get(0)?,
             run_id: row.get(1)?,
             session_id: row.get(2)?,
-            goal: row.get(3)?,
+            agent_spec_id: row.get(3)?,
+            goal: row.get(4)?,
             assumptions: serde_json::from_str(&assumptions_json).unwrap_or_default(),
             missing_context: serde_json::from_str(&missing_context_json).unwrap_or_default(),
             steps: serde_json::from_str(&steps_json).unwrap_or_default(),
@@ -378,7 +398,7 @@ impl PlanStore {
                 .unwrap_or_default(),
             permission_requirements: serde_json::from_str(&permission_requirements_json)
                 .unwrap_or_default(),
-            rollback_plan: row.get(10)?,
+            rollback_plan: row.get(11)?,
             success_criteria: serde_json::from_str(&success_criteria_json).unwrap_or_default(),
             risk_level,
             requires_confirmation: requires_confirmation_int != 0,
@@ -781,5 +801,41 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    // ── P7 stabilization: plan-bound AgentSpec round-trip ────────────
+
+    #[test]
+    fn test_agent_plan_agent_spec_id_round_trips_through_serde() {
+        let plan = create_test_plan("plan with spec", RiskLevel::Low)
+            .clone();
+        let mut plan = plan;
+        plan.agent_spec_id = Some("main.alt".to_string());
+
+        let json = serde_json::to_string(&plan).unwrap();
+        assert!(json.contains("agentSpecId"));
+        assert!(json.contains("main.alt"));
+
+        let deserialized: AgentPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_spec_id, Some("main.alt".to_string()));
+    }
+
+    #[test]
+    fn test_agent_plan_agent_spec_id_round_trips_through_store() {
+        let store = PlanStore::new_in_memory().unwrap();
+        let plan = AgentPlan::new("plan with spec", RiskLevel::Low)
+            .with_agent_spec("main.custom");
+        store.create_plan(&plan).unwrap();
+
+        let fetched = store.get_plan(&plan.id).unwrap().unwrap();
+        assert_eq!(fetched.agent_spec_id, Some("main.custom".to_string()));
+    }
+
+    #[test]
+    fn test_agent_plan_without_spec_id_deserializes_as_none() {
+        let plan = create_test_plan("no spec plan", RiskLevel::Low);
+        let json = serde_json::to_string(&plan).unwrap();
+        let deserialized: AgentPlan = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.agent_spec_id, None);
     }
 }
