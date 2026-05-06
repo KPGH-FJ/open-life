@@ -1,4 +1,6 @@
-use crate::agent::context_assembler::{AssembleInput, CompositeAssembler, ContextAssembler};
+use crate::agent::context_assembler::{
+    AssembleInput, CompositeAssembler, ContextAssembler, ContextPolicy, GovernedAssembleOutput,
+};
 use crate::agent::reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
     ReasoningStrategy, ReasoningTrace,
@@ -100,6 +102,32 @@ impl AgentRuntime {
         runtime
     }
 
+    /// Assemble context with governance policy applied.
+    /// Filters input before delegation to the composite assembler.
+    fn assemble_governed(
+        &self,
+        input: &mut AssembleInput,
+        policy: &ContextPolicy,
+    ) -> Result<(crate::agent::AssembleOutput, GovernedAssembleOutput), AgentRuntimeError> {
+        let governed = policy.filter_input(input);
+        let output = self
+            .context_assembler
+            .assemble(input)
+            .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
+        Ok((output, governed))
+    }
+
+    /// Build a governed PromptStack for the given AgentSpec.
+    pub fn prompt_stack_for_spec(
+        spec: &crate::agent::types::AgentSpec,
+        registry: &crate::agent::prompt_stack::PromptBlockRegistry,
+    ) -> Result<crate::agent::prompt_stack::PromptStack, String> {
+        crate::agent::prompt_stack::PromptStack::try_from_agentspec(
+            &spec.prompt_block_ids,
+            registry,
+        )
+    }
+
     /// Execute a task and return the reasoning output.
     /// This is the main entry point for the AgentRuntime.
     pub async fn execute_task(
@@ -112,7 +140,7 @@ impl AgentRuntime {
         privacy_engine: crate::privacy::PrivacyEngine,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         // 1. Build AssembleInput
-        let input = AssembleInput {
+        let mut input = AssembleInput {
             session_id: task.session_id.clone(),
             messages: Arc::new(task.messages.clone()),
             life_model: Arc::new(life_model.clone()),
@@ -123,11 +151,9 @@ impl AgentRuntime {
             memory_retrieval_time_ms: 0,
         };
 
-        // 2. Assemble context
-        let context = self
-            .context_assembler
-            .assemble(&input)
-            .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
+        // 2. Assemble context with governance policy.
+        let policy = ContextPolicy::default();
+        let (context, _governed) = self.assemble_governed(&mut input, &policy)?;
 
         // 3. Select reasoning strategy based on layer
         let strategy = if task.layer == Layer::L3 {
@@ -191,7 +217,7 @@ impl AgentRuntime {
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
-        let input = AssembleInput {
+        let mut input = AssembleInput {
             session_id: task.session_id.clone(),
             messages: Arc::new(task.messages.clone()),
             life_model: Arc::new(life_model.clone()),
@@ -202,10 +228,8 @@ impl AgentRuntime {
             memory_retrieval_time_ms: 0,
         };
 
-        let context = self
-            .context_assembler
-            .assemble(&input)
-            .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
+        let policy = ContextPolicy::default();
+        let (context, _governed) = self.assemble_governed(&mut input, &policy)?;
 
         Ok(AgentRuntimeOutput {
             final_messages: context.desensitized_messages.to_vec(),

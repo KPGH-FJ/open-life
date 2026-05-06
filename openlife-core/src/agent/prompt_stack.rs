@@ -327,7 +327,8 @@ impl PromptStack {
         since = "0.1.0",
         note = "use try_from_agentspec with PromptBlockRegistry"
     )]
-    pub fn from_agentspec(_block_ids: &[String]) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn from_agentspec(_block_ids: &[String]) -> Self {
         Self::new()
     }
     /// Build a PromptStack for PlanMode with the planning prompt block
