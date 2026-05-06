@@ -41,6 +41,7 @@ pub enum AgentRunEventType {
     PlanRetryStarted,
     PlanContinuationRequested,
     PlanActionReplayed,
+    PlanActionReplayRequested,
     /// Unknown or future event type — preserved as-is in the trace.
     /// Older builds reading traces from newer builds use this variant.
     Unknown(String),
@@ -93,6 +94,9 @@ impl std::fmt::Display for AgentRunEventType {
                 write!(f, "plan.continuation_requested")
             }
             AgentRunEventType::PlanActionReplayed => write!(f, "plan.action_replayed"),
+            AgentRunEventType::PlanActionReplayRequested => {
+                write!(f, "plan.action_replay_requested")
+            }
             AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
     }
@@ -140,6 +144,7 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.retry_started" => AgentRunEventType::PlanRetryStarted,
             "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
             "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
+            "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
             other => AgentRunEventType::Unknown(other.to_string()),

@@ -200,6 +200,7 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.retry_started" => AgentRunEventType::PlanRetryStarted,
         "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
         "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
+        "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
         unknown => AgentRunEventType::Unknown(unknown.to_string()),

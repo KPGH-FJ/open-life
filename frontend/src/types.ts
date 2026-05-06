@@ -274,6 +274,7 @@ export type AgentRunEventType =
   | "plan.retry_started"
   | "plan.continuation_requested"
   | "plan.action_replayed"
+  | "plan.action_replay_requested"
   | "run.completed"
   | "run.failed"
   | "unknown";

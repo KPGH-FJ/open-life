@@ -132,6 +132,15 @@ impl PlanExecutor {
             .map_err(|e| PlanExecutionError::StoreError(format!("plan store lock poisoned: {}", e)))
     }
 
+    /// Check whether the plan has been cancelled since execution started.
+    fn is_plan_cancelled(&self, plan_id: &str) -> Result<bool, PlanExecutionError> {
+        let guard = self.lock_store()?;
+        match guard.get_plan(plan_id) {
+            Ok(Some(plan)) => Ok(plan.status == PlanStatus::Cancelled),
+            _ => Ok(false),
+        }
+    }
+
     /// Execute all plan steps without finalising plan status.
     ///
     /// Loads the plan, checks confirmation, executes steps, records step
@@ -157,6 +166,28 @@ impl PlanExecutor {
         // Reject unconfirmed high-risk plans.
         if plan.requires_confirmation && plan.status != PlanStatus::Confirmed {
             return Err(PlanExecutionError::PlanNotConfirmed(plan_id.to_string()));
+        }
+
+        // Reject already-terminal plans (cancelled/completed/rejected/failed).
+        match plan.status {
+            PlanStatus::Cancelled
+            | PlanStatus::Completed
+            | PlanStatus::Rejected
+            | PlanStatus::Failed
+            | PlanStatus::FailedReview => {
+                return Ok((
+                    plan,
+                    PlanExecutionOutcome {
+                        plan_id: plan_id.to_string(),
+                        success: false,
+                        steps_completed: 0,
+                        steps_failed: 0,
+                        deviations: vec![],
+                        review_required: false,
+                    },
+                ));
+            }
+            _ => {}
         }
 
         // Record execution started.
@@ -188,6 +219,17 @@ impl PlanExecutor {
         let tool_intents: Vec<ToolIntent> = plan.tool_intents.clone();
 
         for step in &steps {
+            // Bail out if the plan was cancelled mid-execution.
+            if self.is_plan_cancelled(plan_id)? {
+                outcome.success = false;
+                self.record_event(
+                    run_id,
+                    AgentRunEventType::PlanExecutionFailed,
+                    format!("plan {} cancelled mid-execution", plan_id),
+                    json!({"reason": "cancelled", "step_index": step.index}),
+                );
+                return Ok((plan, outcome));
+            }
             self.record_event(
                 run_id,
                 AgentRunEventType::PlanStepStarted,
@@ -291,6 +333,10 @@ impl PlanExecutor {
             self.execute_steps_without_completion(plan_id, run_id, execute_step)?;
 
         if outcome.success {
+            // Guard: re-read persisted plan — if cancelled, don't complete.
+            if self.is_plan_cancelled(plan_id)? {
+                return Ok(outcome);
+            }
             self.record_event(
                 run_id,
                 AgentRunEventType::PlanExecutionCompleted,
@@ -344,6 +390,9 @@ impl PlanExecutor {
 
         if !outcome.review_required {
             // Low-risk: complete directly.
+            if self.is_plan_cancelled(plan_id)? {
+                return Ok(outcome);
+            }
             self.record_event(
                 run_id,
                 AgentRunEventType::PlanExecutionCompleted,
@@ -366,6 +415,10 @@ impl PlanExecutor {
 
         match self.review_execution(plan_id, run_id, &review) {
             Ok(()) => {
+                // Guard: re-read persisted plan — cancelled mid-review.
+                if self.is_plan_cancelled(plan_id)? {
+                    return Ok(outcome);
+                }
                 // Approved: complete plan.
                 self.record_event(
                     run_id,
@@ -1321,5 +1374,106 @@ mod tests {
         assert_eq!(payload["verdict"], "approved");
         assert_eq!(payload["issue_count"], 0);
         assert!(!payload["has_critical"].as_bool().unwrap());
+    }
+
+    // ── P5-S1: Cancellation safety tests ──────────────────────────────
+
+    #[test]
+    fn test_cancelled_during_execution_prevents_completion() {
+        let (ps, es, run_id) = setup();
+        let mut plan = create_read_only_plan(true);
+        plan.steps = vec![PlanStep {
+            index: 0,
+            description: "step 0".to_string(),
+            tool_intent: Some("life_model.read".to_string()),
+            expected_output: None,
+            depends_on: vec![],
+        }];
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        let executor = PlanExecutor::new(ps.clone(), Some(es.clone()));
+
+        // Cancel the plan after execution starts (simulate external cancellation).
+        {
+            let mut p = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+            p.start_execution();
+            p.cancel();
+            ps.lock().unwrap().update_plan(&p).unwrap();
+        }
+
+        // execute_steps_without_completion should detect cancellation and stop.
+        let result =
+            executor.execute_steps_without_completion(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 1,
+                    deviation: None,
+                }
+            });
+        let (_plan, outcome) = result.unwrap();
+        assert!(!outcome.success);
+
+        // execute() should NOT complete a cancelled plan.
+        let result2 = executor.execute(&plan_id, &run_id, |_step, _intent| {
+            PlanStepExecutionResult {
+                step_index: 0,
+                tool_name: "life_model.read".to_string(),
+                success: true,
+                output: Some("ok".to_string()),
+                error: None,
+                duration_ms: 1,
+                deviation: None,
+            }
+        });
+        let outcome2 = result2.unwrap();
+        assert!(
+            !outcome2.success,
+            "execute() should not complete a cancelled plan"
+        );
+
+        // Plan store must still show Cancelled, not Completed.
+        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        assert_eq!(fetched.status, PlanStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_cancelled_execution_does_not_record_completed() {
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        // Cancel before execution.
+        {
+            let mut p = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+            p.cancel();
+            ps.lock().unwrap().update_plan(&p).unwrap();
+        }
+
+        let executor = PlanExecutor::new(ps, Some(es.clone()));
+
+        executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 1,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        let events = es.list_events_by_run(&run_id).unwrap();
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e.event_type, AgentRunEventType::PlanExecutionCompleted)));
     }
 }

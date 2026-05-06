@@ -88,24 +88,26 @@ pub async fn restore_agent_run(
     }
 }
 
-#[tauri::command]
-pub async fn replay_agent_action(
-    run_id: String,
-    action_id: String,
-    state: State<'_, Arc<AppState>>,
+/// Replay a single blocked/needs-confirmation action.
+///
+/// Shared by `replay_agent_action` (the public command) and
+/// `continue_agent_plan` (batch continuation).  Returns the replayed
+/// `AgentAction` on success.
+pub(crate) async fn replay_action_internal(
+    run_id: &str,
+    action_id: &str,
+    state: &Arc<AppState>,
 ) -> Result<AgentAction, AppError> {
-    // 1. Retrieve the run
     let mut run = if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store
-            .get_run(&run_id)
+            .get_run(run_id)
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found("Run not found"))?
     } else {
         return Err(AppError::internal("AgentRun store not available"));
     };
 
-    // 2. Find the action
     let action_idx = run
         .actions
         .iter()
@@ -114,18 +116,15 @@ pub async fn replay_agent_action(
 
     let action = &run.actions[action_idx];
 
-    // 3. Check status
     if action.status != "needs_confirmation" {
         return Err(AppError::permission("Action does not need confirmation"));
     }
 
-    // 4. Get tool scope
     let tool_scope = action
         .tool_scope
         .as_ref()
         .ok_or_else(|| AppError::not_found("Action has no tool_scope"))?;
 
-    // Pre-check with peek() - does NOT consume AllowOnce policies
     let peek_decision = {
         let permission_store = state.tool_permission_store.lock().await;
         permission_store
@@ -140,12 +139,11 @@ pub async fn replay_agent_action(
     };
     if !peek_decision.allowed {
         return Err(AppError::permission(format!(
-            "Action is not authorized yet. Please accept the ToolPermission proposal in Review Center first. Decision: {} ({})",
+            "Action is not authorized yet. Decision: {} ({})",
             peek_decision.decision, peek_decision.reason
         )));
     }
 
-    // 5. Re-execute the tool call via ActionExecutor.
     let (reg, audit) = state.get_mcp_state().await;
     let permission_store = state.tool_permission_store.lock().await;
     let privacy_engine = state.privacy_engine.lock().await;
@@ -204,7 +202,7 @@ pub async fn replay_agent_action(
         action_type: action.action_type.clone(),
         target: tool_scope.tool_name.clone(),
         input: serde_json::json!({ "arguments": args }),
-        source_run_id: Some(run_id.clone()),
+        source_run_id: Some(run_id.to_string()),
         step_index: action_idx as u32,
     };
 
@@ -212,19 +210,17 @@ pub async fn replay_agent_action(
     drop(proposal_store_guard);
     drop(agent_run_store_guard);
 
-    // 6. Update action and observation, preserving the original action id.
     let mut new_action = exec_result.action;
     let mut new_observation = exec_result.observation;
-    new_action.id = action_id.clone();
-    new_observation.action_id = Some(action_id.clone());
+    new_action.id = action_id.to_string();
+    new_observation.action_id = Some(action_id.to_string());
 
     run.actions[action_idx] = new_action.clone();
 
-    // 7. Update observation
     if let Some(obs_idx) = run
         .observations
         .iter()
-        .position(|o| o.action_id.as_deref() == Some(&action_id))
+        .position(|o| o.action_id.as_deref() == Some(action_id))
     {
         run.observations[obs_idx] = new_observation;
     } else {
@@ -250,19 +246,26 @@ pub async fn replay_agent_action(
         }
     }
 
-    // 8. Update run status if no more pending actions
     let still_pending = run.actions.iter().any(|a| a.status == "needs_confirmation");
     if !still_pending && run.status == openlife_core::agent::AgentRunStatus::WaitingPermission {
         run.status = openlife_core::agent::AgentRunStatus::Completed;
     }
 
-    // 9. Update run in store
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
         store.update_run(&run).map_err(AppError::from)?;
     }
 
     Ok(new_action)
+}
+
+#[tauri::command]
+pub async fn replay_agent_action(
+    run_id: String,
+    action_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<AgentAction, AppError> {
+    replay_action_internal(&run_id, &action_id, state.inner()).await
 }
 
 #[tauri::command]

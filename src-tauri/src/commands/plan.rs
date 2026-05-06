@@ -270,7 +270,7 @@ pub async fn retry_agent_plan(
 
     let run_id = plan.run_id.clone().unwrap_or_else(|| plan.id.clone());
 
-    // Record retry events.
+    // Record retry requested — always, even if setup later fails.
     if let Some(ref es) = state.agent_run_event_store {
         let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
             &run_id,
@@ -279,23 +279,10 @@ pub async fn retry_agent_plan(
             format!("plan {} retry requested", plan_id),
             serde_json::json!({"plan_id": plan_id}),
         ));
-        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
-            &run_id,
-            openlife_core::agent::AgentRunEventType::PlanRetryStarted,
-            openlife_core::agent::AgentEventActor::Runtime,
-            format!("plan {} retry started", plan_id),
-            serde_json::json!({"plan_id": plan_id}),
-        ));
     }
 
-    // Reset to Confirmed so the execution path accepts it.
-    plan.retry();
-    {
-        let store = plan_store_arc.lock().unwrap();
-        store.update_plan(&plan).map_err(AppError::from)?;
-    }
-
-    // Build execution context (same as execute_agent_plan).
+    // Build execution context BEFORE mutating plan status.
+    // If context setup fails, the plan stays in its terminal state.
     let event_store = state
         .agent_run_event_store
         .as_ref()
@@ -341,6 +328,22 @@ pub async fn retry_agent_plan(
         network_policy: Some(&network_policy),
         event_store: event_store.clone(),
     };
+
+    // Context setup complete — now atomically reset plan for retry.
+    plan.retry();
+    {
+        let store = plan_store_arc.lock().unwrap();
+        store.update_plan(&plan).map_err(AppError::from)?;
+    }
+    if let Some(ref es) = state.agent_run_event_store {
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &run_id,
+            openlife_core::agent::AgentRunEventType::PlanRetryStarted,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!("plan {} retry started", plan_id),
+            serde_json::json!({"plan_id": plan_id}),
+        ));
+    }
 
     let mut result = run_plan_execution(
         &plan_id,
@@ -458,17 +461,24 @@ async fn run_plan_execution(
         ..Default::default()
     };
     let action_executor = openlife_core::agent::ActionExecutor::new(executor_config);
-    let plan_executor = PlanExecutor::new(plan_store_arc, event_store);
+    let plan_executor = PlanExecutor::new(plan_store_arc.clone(), event_store);
 
-    let execution_result = plan_executor
-        .execute_with_review(plan_id, run_id, |step, intent| {
-            let tool_name =
-                intent.map(|i| i.tool_name.clone()).unwrap_or_else(|| "unknown".to_string());
+    let execution_result = plan_executor.execute_with_review(
+        plan_id,
+        run_id,
+        |step, intent| {
+            let tool_name = intent
+                .map(|i| i.tool_name.clone())
+                .unwrap_or_else(|| "unknown".to_string());
 
             let request = openlife_core::agent::AgentActionRequest {
                 action_type: "builtin_tool".to_string(),
                 target: tool_name.clone(),
-                input: serde_json::json!({"plan_step": step.index, "description": step.description}),
+                input: serde_json::json!({
+                    "plan_step": step.index,
+                    "description": step.description,
+                    "plan_id": plan_id,
+                }),
                 source_run_id: Some(run_id.to_string()),
                 step_index: step.index,
             };
@@ -506,9 +516,11 @@ async fn run_plan_execution(
                     deviation: None,
                 },
             }
-        }, review_gate);
+        },
+        review_gate,
+    );
 
-    let result = match execution_result {
+    let mut result = match execution_result {
         Ok(outcome) => {
             let (status, review_verdict) = if outcome.success {
                 (
@@ -561,6 +573,18 @@ async fn run_plan_execution(
         },
     };
 
+    // Re-read persisted plan to capture final status (e.g. Cancelled mid-execution).
+    if let Ok(guard) = plan_store_arc.lock() {
+        if let Ok(Some(persisted)) = guard.get_plan(plan_id) {
+            result.status = persisted.status;
+            result.success =
+                result.success && persisted.status == openlife_core::agent::PlanStatus::Completed;
+            if persisted.status == openlife_core::agent::PlanStatus::Cancelled {
+                result.message = Some("plan was cancelled".to_string());
+            }
+        }
+    }
+
     let _ = app_handle.emit(
         "plan-execution-done",
         serde_json::json!({
@@ -595,22 +619,14 @@ pub async fn continue_agent_plan(
     let run_id = plan.run_id.clone().unwrap_or_else(|| plan.id.clone());
 
     // Count blocked actions in the associated run.
-    let (blocked_count, run_available) = if let Some(ref agent_store_arc) = state.agent_run_store {
-        if let Ok(Some(run)) = {
-            let store = agent_store_arc.lock().await;
-            store.get_run(&run_id)
-        } {
-            let count = run
-                .actions
-                .iter()
-                .filter(|a| a.status == "needs_confirmation")
-                .count();
-            (count, true)
-        } else {
-            (0, false)
-        }
+    let run_available = if let Some(ref agent_store_arc) = state.agent_run_store {
+        agent_store_arc
+            .lock()
+            .await
+            .get_run(&run_id)
+            .is_ok_and(|r| r.is_some())
     } else {
-        (0, false)
+        false
     };
 
     // Record continuation request event.
@@ -620,15 +636,107 @@ pub async fn continue_agent_plan(
             openlife_core::agent::AgentRunEventType::PlanContinuationRequested,
             openlife_core::agent::AgentEventActor::User,
             format!("plan {} continuation requested", plan_id),
-            serde_json::json!({"plan_id": plan_id, "blocked_actions": blocked_count}),
+            serde_json::json!({"plan_id": plan_id}),
         ));
     }
+
+    struct ReplayCandidate {
+        action_id: String,
+        step_index: u32,
+    }
+
+    // Build replay candidates: needs_confirmation, plan_id match, step in plan.
+    let allowed_steps: Vec<u32> = plan.steps.iter().map(|s| s.index).collect();
+    let candidates: Vec<ReplayCandidate> = if run_available {
+        let agent_store_ref = state.agent_run_store.as_ref().unwrap();
+        let agent_store = agent_store_ref.lock().await;
+        if let Ok(Some(run)) = agent_store.get_run(&run_id) {
+            run.actions
+                .iter()
+                .filter(|a| a.status == "needs_confirmation")
+                .filter(|a| {
+                    a.input
+                        .get("plan_id")
+                        .and_then(|v| v.as_str())
+                        .map(|id| id == plan_id)
+                        .unwrap_or(false)
+                })
+                .filter_map(|a| {
+                    a.input
+                        .get("plan_step")
+                        .and_then(|v| v.as_u64())
+                        .map(|i| i as u32)
+                        .filter(|step| allowed_steps.contains(step))
+                        .map(|step_index| ReplayCandidate {
+                            action_id: a.id.clone(),
+                            step_index,
+                        })
+                })
+                .collect()
+        } else {
+            vec![]
+        }
+    } else {
+        vec![]
+    };
+
+    let eligible_count = candidates.len() as u32;
+    let mut replayed = 0u32;
+    let mut still_blocked = 0u32;
+
+    let state_arc = state.inner().clone();
+    for candidate in &candidates {
+        // Emit replay-requested with step_index.
+        if let Some(ref es) = state.agent_run_event_store {
+            let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                &run_id,
+                openlife_core::agent::AgentRunEventType::PlanActionReplayRequested,
+                openlife_core::agent::AgentEventActor::User,
+                format!("plan {} action replay requested", plan_id),
+                serde_json::json!({
+                    "plan_id": plan_id,
+                    "action_id": candidate.action_id,
+                    "step_index": candidate.step_index,
+                }),
+            ));
+        }
+        match crate::commands::agent::replay_action_internal(
+            &run_id,
+            &candidate.action_id,
+            &state_arc,
+        )
+        .await
+        {
+            Ok(_) => {
+                replayed += 1;
+                if let Some(ref es) = state.agent_run_event_store {
+                    let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                        &run_id,
+                        openlife_core::agent::AgentRunEventType::PlanActionReplayed,
+                        openlife_core::agent::AgentEventActor::Runtime,
+                        format!("plan {} action {} replayed", plan_id, candidate.action_id),
+                        serde_json::json!({
+                            "plan_id": plan_id,
+                            "action_id": candidate.action_id,
+                            "step_index": candidate.step_index,
+                        }),
+                    ));
+                }
+            }
+            Err(_) => {
+                still_blocked += 1;
+            }
+        }
+    }
+
+    let success =
+        run_available && eligible_count > 0 && replayed == eligible_count && still_blocked == 0;
 
     Ok(PlanOperationResult {
         plan_id,
         run_id: Some(run_id),
         operation: "continue".to_string(),
-        success: run_available && blocked_count == 0,
+        success,
         status: plan.status,
         steps_completed: None,
         steps_failed: None,
@@ -636,13 +744,15 @@ pub async fn continue_agent_plan(
         review_verdict: None,
         message: if !run_available {
             Some("run not available for this plan".to_string())
-        } else if blocked_count == 0 {
-            Some("no blocked actions to continue".to_string())
-        } else {
+        } else if eligible_count == 0 {
+            Some("no eligible blocked plan actions found".to_string())
+        } else if still_blocked > 0 {
             Some(format!(
-                "{} blocked action(s) found — use replay_agent_action to continue each",
-                blocked_count
+                "{} replayed, {} still blocked (approval required)",
+                replayed, still_blocked
             ))
+        } else {
+            Some(format!("{} action(s) replayed successfully", replayed))
         },
     })
 }

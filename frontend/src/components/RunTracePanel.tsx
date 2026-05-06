@@ -49,6 +49,7 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.retry_started": <RefreshCw size={14} className="text-blue-400" />,
   "plan.continuation_requested": <Play size={14} className="text-emerald-400" />,
   "plan.action_replayed": <RefreshCw size={14} className="text-green-400" />,
+  "plan.action_replay_requested": <Play size={14} className="text-amber-400" />,
   "run.completed": <CheckCircle size={14} className="text-green-400" />,
   "run.failed": <XCircle size={14} className="text-red-400" />,
   unknown: <FileText size={14} className="text-slate-500" />,
