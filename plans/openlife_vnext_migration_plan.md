@@ -321,5 +321,47 @@ Next planning source after P0/P1:
 
 - See `plans/openlife_vnext_p2_p3_task_specs.md`.
 - See `plans/openlife_vnext_p4_task_specs.md`.
+- See `plans/openlife_vnext_p5_task_specs.md`.
 - See `plans/openlife_vnext_agent_coding_prompts.md`.
 - ADR 0007-0010 are accepted. P4 starts from confirmed plan execution and Chat trace UI integration.
+
+## P5: Governed Plan Operations and Recovery
+
+Goal:
+
+Turn confirmed plan execution into a governed operational workflow.
+
+Task source:
+
+- `plans/openlife_vnext_p5_task_specs.md`
+
+ADR source:
+
+- `plans/adr/0011-plan-recovery-rollback-policy.md`
+
+Scope:
+
+- stable plan operation contracts
+- cancellation
+- whole-plan retry for failed / failed-review plans
+- blocked action continuation through existing Permission / Proposal / Replay
+- rollback policy ADR before rollback implementation
+- read-only ReviewAgent integration
+- minimal plan operations UI
+
+Non-goals:
+
+- no Bash/Shell
+- no SubAgent parallel or handoff
+- no automatic rollback executor before ADR 0011 is accepted
+- no ChatPage rewrite
+- no bypass of ToolRuntime, Proposal, PromptStack, AgentRunEvent, or ExecutionSandbox
+
+Exit criteria:
+
+- plan operation contracts are stable across Tauri and frontend
+- cancellation and retry are traceable
+- blocked action continuation uses existing permission/proposal policy
+- rollback boundaries are accepted by ADR
+- ReviewAgent remains read-only
+- minimal UI operations preserve streaming and trace behavior

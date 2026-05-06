@@ -6,7 +6,6 @@ import {
   builderStart,
   editProposal,
   getStateHistory,
-  normalizePlanExecutionResult,
   recordState,
   restoreArchivedChunks,
   saveChatMessage,
@@ -118,75 +117,5 @@ describe("tauri command argument aliases", () => {
         new_after: { name: "新值" },
       })
     );
-  });
-});
-
-// ── Plan execution result normalization ──────────────────────────────
-
-describe("normalizePlanExecutionResult", () => {
-  it("maps snake_case backend response to camelCase", () => {
-    const result = normalizePlanExecutionResult({
-      plan_id: "p-1",
-      success: true,
-      steps_completed: 3,
-      steps_failed: 0,
-      deviations: [],
-      status: "completed",
-    });
-
-    expect(result).toEqual({
-      planId: "p-1",
-      success: true,
-      stepsCompleted: 3,
-      stepsFailed: 0,
-      deviations: [],
-      status: "completed",
-    });
-  });
-
-  it("preserves already-camelCase response (mock passthrough)", () => {
-    const result = normalizePlanExecutionResult({
-      planId: "p-2",
-      success: false,
-      stepsCompleted: 1,
-      stepsFailed: 1,
-      deviations: ["step 0 deviated"],
-    });
-
-    expect(result.planId).toBe("p-2");
-    expect(result.stepsCompleted).toBe(1);
-    expect(result.stepsFailed).toBe(1);
-    expect(result.deviations).toEqual(["step 0 deviated"]);
-    expect(result.status).toBeUndefined();
-  });
-
-  it("defaults missing optional arrays to empty", () => {
-    const result = normalizePlanExecutionResult({
-      success: true,
-    });
-
-    expect(result.deviations).toEqual([]);
-  });
-
-  it("defaults missing numbers to zero", () => {
-    const result = normalizePlanExecutionResult({
-      success: false,
-    });
-
-    expect(result.stepsCompleted).toBe(0);
-    expect(result.stepsFailed).toBe(0);
-    expect(result.planId).toBe("");
-  });
-
-  it("preserves failed_review status", () => {
-    const result = normalizePlanExecutionResult({
-      plan_id: "p-3",
-      success: false,
-      status: "failed_review",
-    });
-
-    expect(result.planId).toBe("p-3");
-    expect(result.success).toBe(false);
-    expect(result.status).toBe("failed_review");
   });
 });

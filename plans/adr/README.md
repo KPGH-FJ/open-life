@@ -40,6 +40,7 @@ Implementation should not begin for high-risk boundaries until the relevant ADR 
 | 0008 | SubAgent Default Permissions and Delegation Modes | accepted | Phase 7, P4 Review Gate |
 | 0009 | ExecutionSandbox and Bash/Shell Boundary | accepted | Phase 9 |
 | 0010 | ChatPage State Model Migration Policy | accepted | Phase 10, P4 Trace UI |
+| 0011 | Plan Recovery and Rollback Policy | proposed | P5 retry/cancel/rollback |
 
 ## Recommended Acceptance Sequence
 
@@ -57,6 +58,8 @@ Suggested order:
    - PlanMode, SubAgent permissions, ExecutionSandbox/Bash, and ChatPage migration remain blocked until then.
 
 ADR 0007-0010 are accepted and have guided P2/P3 plus P3 hardening. Further high-risk changes should add new ADRs or supersede these records explicitly.
+
+ADR 0011 is proposed for P5. Implement cancellation and whole-plan retry only within the conservative policy in `plans/openlife_vnext_p5_task_specs.md`; rollback implementation should wait until ADR 0011 is accepted.
 
 ## Decision Backlog
 
@@ -92,6 +95,16 @@ These must be resolved before PlanMode/SubAgent/Bash implementation:
 4. Can sub-agents call tools directly or only request the parent agent to call them?
 5. Is Bash available to user-initiated tasks, scheduled tasks, or neither by default?
 6. What is the default filesystem deny-read list?
+
+### P5 Decisions
+
+These must be resolved before rollback implementation and advanced recovery:
+
+1. Does retry create a new `AgentRun` or reuse the parent run with attempt markers?
+2. Which local side effects have enough metadata for rollback?
+3. Which external side effects are explicitly irreversible?
+4. Should failed review ever allow a user override?
+5. Should rollback proposals live in Review Center or a dedicated plan recovery surface?
 
 ## ADR Template
 

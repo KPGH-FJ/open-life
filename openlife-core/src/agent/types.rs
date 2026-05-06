@@ -35,6 +35,12 @@ pub enum AgentRunEventType {
     PlanDeviationRecorded,
     PlanExecutionCompleted,
     PlanExecutionFailed,
+    PlanCancelRequested,
+    PlanCancelled,
+    PlanRetryRequested,
+    PlanRetryStarted,
+    PlanContinuationRequested,
+    PlanActionReplayed,
     /// Unknown or future event type — preserved as-is in the trace.
     /// Older builds reading traces from newer builds use this variant.
     Unknown(String),
@@ -79,6 +85,14 @@ impl std::fmt::Display for AgentRunEventType {
                 write!(f, "plan.execution_completed")
             }
             AgentRunEventType::PlanExecutionFailed => write!(f, "plan.execution_failed"),
+            AgentRunEventType::PlanCancelRequested => write!(f, "plan.cancel_requested"),
+            AgentRunEventType::PlanCancelled => write!(f, "plan.cancelled"),
+            AgentRunEventType::PlanRetryRequested => write!(f, "plan.retry_requested"),
+            AgentRunEventType::PlanRetryStarted => write!(f, "plan.retry_started"),
+            AgentRunEventType::PlanContinuationRequested => {
+                write!(f, "plan.continuation_requested")
+            }
+            AgentRunEventType::PlanActionReplayed => write!(f, "plan.action_replayed"),
             AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
     }
@@ -120,6 +134,12 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.deviation_recorded" => AgentRunEventType::PlanDeviationRecorded,
             "plan.execution_completed" => AgentRunEventType::PlanExecutionCompleted,
             "plan.execution_failed" => AgentRunEventType::PlanExecutionFailed,
+            "plan.cancel_requested" => AgentRunEventType::PlanCancelRequested,
+            "plan.cancelled" => AgentRunEventType::PlanCancelled,
+            "plan.retry_requested" => AgentRunEventType::PlanRetryRequested,
+            "plan.retry_started" => AgentRunEventType::PlanRetryStarted,
+            "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
+            "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
             other => AgentRunEventType::Unknown(other.to_string()),
@@ -1107,6 +1127,19 @@ impl AgentPlan {
         self.updated_at = Utc::now();
     }
 
+    /// Set plan status to Cancelled.
+    pub fn cancel(&mut self) {
+        self.status = PlanStatus::Cancelled;
+        self.updated_at = Utc::now();
+    }
+
+    /// Reset a failed or failed-review plan back to Confirmed for retry.
+    pub fn retry(&mut self) {
+        self.status = PlanStatus::Confirmed;
+        self.completed_at = None;
+        self.updated_at = Utc::now();
+    }
+
     /// Returns true if any tool intent involves write side effects.
     pub fn has_write_intents(&self) -> bool {
         self.tool_intents.iter().any(|t| t.is_write)
@@ -1155,6 +1188,49 @@ pub struct PlanExecutionOutcome {
     pub deviations: Vec<String>,
     /// Whether the execution result requires review via ReviewAgent.
     pub review_required: bool,
+}
+
+// ── Plan Operation Result (stable frontend/backend contract) ──────────
+
+/// Structured result for every plan lifecycle operation.
+///
+/// All Tauri plan commands (`execute_agent_plan`, `confirm_agent_plan`,
+/// `reject_agent_plan`, and future `cancel` / `retry`) return this type
+/// so that frontend callers receive a uniform, camelCase contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanOperationResult {
+    pub plan_id: String,
+    pub run_id: Option<String>,
+    /// Operation name, e.g. "execute", "confirm", "reject"
+    pub operation: String,
+    pub success: bool,
+    /// Final plan status after the operation.
+    pub status: PlanStatus,
+    pub steps_completed: Option<u32>,
+    pub steps_failed: Option<u32>,
+    pub deviations: Vec<String>,
+    /// Review verdict, if a review gate was applied.
+    pub review_verdict: Option<String>,
+    /// Human-readable message.
+    pub message: Option<String>,
+}
+
+impl PlanOperationResult {
+    pub fn from_execution(plan: &AgentPlan, outcome: &PlanExecutionOutcome) -> Self {
+        Self {
+            plan_id: outcome.plan_id.clone(),
+            run_id: plan.run_id.clone(),
+            operation: "execute".to_string(),
+            success: outcome.success,
+            status: plan.status,
+            steps_completed: Some(outcome.steps_completed),
+            steps_failed: Some(outcome.steps_failed),
+            deviations: outcome.deviations.clone(),
+            review_verdict: None,
+            message: None,
+        }
+    }
 }
 
 // ── CompactionSummary ─────────────────────────────────────────────────

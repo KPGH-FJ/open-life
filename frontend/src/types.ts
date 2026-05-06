@@ -268,6 +268,12 @@ export type AgentRunEventType =
   | "plan.deviation_recorded"
   | "plan.execution_completed"
   | "plan.execution_failed"
+  | "plan.cancel_requested"
+  | "plan.cancelled"
+  | "plan.retry_requested"
+  | "plan.retry_started"
+  | "plan.continuation_requested"
+  | "plan.action_replayed"
   | "run.completed"
   | "run.failed"
   | "unknown";
@@ -356,4 +362,19 @@ export interface AgentPlan {
   updatedAt: string;
   confirmedAt?: string;
   completedAt?: string;
+}
+
+// ── Stable Plan Operation Contract ────────────────────────────────────
+
+export interface PlanOperationResult {
+  planId: string;
+  runId?: string;
+  operation: string;
+  success: boolean;
+  status: PlanStatus;
+  stepsCompleted?: number;
+  stepsFailed?: number;
+  deviations: string[];
+  reviewVerdict?: string;
+  message?: string;
 }

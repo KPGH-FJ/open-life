@@ -39,7 +39,9 @@ pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     ProviderHealth, TaskType,
 };
-pub use plan_executor::{DefaultPlanReviewGate, PlanExecutionError, PlanExecutor, PlanReviewGate};
+pub use plan_executor::{
+    DefaultPlanReviewGate, PlanExecutionError, PlanExecutor, PlanReviewGate, SubAgentReviewGate,
+};
 pub use plan_mode::{
     check_confirmation_required, is_plan_mode_read_only, record_confirmation_requested,
     PlanConfirmation, PlanModeConfig, PlanModeRunner, PlanModeToolClass,
@@ -63,4 +65,5 @@ pub use sub_agent::{
     ReviewAgentOutput, ReviewIssue, ReviewVerdict, SubAgentExecutionOutcome, SubAgentResult,
     SubAgentRuntime,
 };
+pub use types::PlanOperationResult;
 pub use types::*;

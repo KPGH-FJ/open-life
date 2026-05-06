@@ -20,6 +20,7 @@ import {
 import type { ChatMessage, LifeModel, AgentRunEvent } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
 import RunTracePanel from "../components/RunTracePanel";
+import PlanStatusBanner from "../components/PlanStatusBanner";
 import {
   startStreamMessage,
   getChatHistory,
@@ -1150,6 +1151,20 @@ export default function ChatPage() {
               onToggle={() => setShowTrace(prev => !prev)}
             />
           </div>
+        )}
+        {/* Plan Operations */}
+        {currentRunId && (
+          <PlanStatusBanner
+            runId={currentRunId}
+            onOperation={() =>
+              listAgentRunEvents(currentRunId)
+                .then(events => {
+                  setTraceEvents(events);
+                  if (events.length > 0) setShowTrace(true);
+                })
+                .catch(() => {})
+            }
+          />
         )}
 
         {/* Chat mode selector */}

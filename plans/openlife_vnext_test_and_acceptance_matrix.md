@@ -193,6 +193,30 @@ Tests:
 - memory evidence rendering
 - plan confirmation interaction
 
+## P5: Governed Plan Operations and Recovery
+
+Acceptance:
+
+- Plan operation command results use a stable frontend/backend contract.
+- `cancel_agent_plan` only cancels legal non-terminal states.
+- `retry_agent_plan` only retries `failed` and `failed_review` plans.
+- Retry appends a new attempt marker and preserves prior events.
+- Blocked action continuation uses existing Permission / Proposal / Replay policy.
+- Rollback implementation is blocked until ADR 0011 is accepted.
+- Real ReviewAgent integration remains read-only and traceable.
+- Minimal plan operations UI does not destabilize ChatPage streaming or trace.
+
+Tests:
+
+- plan operation result contract normalization
+- cancel legal state success
+- cancel illegal terminal state rejected
+- retry failed plan appends events
+- retry completed/rejected plan rejected
+- blocked action continuation records replay events
+- ReviewAgent cannot call write tools
+- ChatPage plan operation regression
+
 ## Manual Review Checklist
 
 For each phase:

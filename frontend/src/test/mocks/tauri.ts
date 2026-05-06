@@ -870,16 +870,57 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "list_agent_plans_for_session":
       return Promise.resolve([mockAgentPlan] as T);
     case "confirm_agent_plan":
-      return Promise.resolve({ ...mockAgentPlan, status: "confirmed" } as T);
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "confirm",
+        success: true,
+        status: "confirmed",
+        deviations: [],
+      } as T);
     case "reject_agent_plan":
-      return Promise.resolve({ ...mockAgentPlan, status: "rejected" } as T);
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "reject",
+        success: true,
+        status: "rejected",
+        deviations: [],
+      } as T);
     case "execute_agent_plan":
       return Promise.resolve({
         planId: "mock-plan-1",
+        runId: "run-001",
+        operation: "execute",
         success: true,
+        status: "completed",
         stepsCompleted: 1,
         stepsFailed: 0,
         deviations: [],
+        reviewVerdict: "approved",
+      } as T);
+    case "cancel_agent_plan":
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "cancel",
+        success: true,
+        status: "cancelled",
+        deviations: [],
+      } as T);
+    case "retry_agent_plan":
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "retry",
+        success: true,
+        status: "executing",
+        deviations: [],
+      } as T);
+    case "continue_agent_plan":
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "continue",
+        success: true,
+        status: "confirmed",
+        deviations: [],
+        message: "no blocked actions to continue",
       } as T);
     default:
       return Promise.resolve({} as T);

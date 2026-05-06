@@ -395,3 +395,295 @@ Verification:
 - cargo test -p openlife-core agent
 - cargo check -q
 ```
+
+## P5 Global Prompt
+
+```text
+You are working on OpenLife vNext P5: Governed Plan Operations and Recovery.
+
+Read first:
+- AGENTS.md
+- plans/openlife_vnext_p5_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0001-agentrun-event-trace.md
+- plans/adr/0003-toolruntime-metadata.md
+- plans/adr/0007-planmode-confirmation-policy.md
+- plans/adr/0008-subagent-permissions.md
+- plans/adr/0011-plan-recovery-rollback-policy.md
+
+Rules:
+- Execute exactly one P5 task spec.
+- Do not introduce Bash/Shell.
+- Do not implement SubAgent parallel or handoff.
+- Do not rewrite ChatPage.
+- Do not implement automatic rollback before ADR 0011 is accepted.
+- Do not bypass ToolRuntime, Proposal, PromptStack, AgentRunEvent, ExecutionSandbox, or PlanExecutor.
+- Preserve append-only AgentRunEvent history.
+- Add focused tests for new behavior.
+- Run the task spec verification commands.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P5-0 Prompt
+
+```text
+Execute vNext task P5-0: Closeout And Baseline.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+
+Goal:
+- Clean up P4 closeout leftovers before P5 implementation.
+- Remove test-only unused imports.
+- Add wrapper-level test proving executeAgentPlan() normalizes backend snake_case to frontend camelCase.
+- Run the P4 closeout verification.
+
+Constraints:
+- No new plan operations.
+- No UI changes.
+- No retry/cancel implementation.
+
+Verification:
+- pnpm --dir frontend test -- --run tauri
+- cargo test -p openlife-core agent::plan_executor
+- cargo check -q
+- make ci
+
+Report:
+- changed files
+- warnings fixed or intentionally left
+- tests run
+- residual risks
+```
+
+## P5-1 Prompt
+
+```text
+Execute vNext task P5-1: Stable Plan Operation Contract.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0007-planmode-confirmation-policy.md
+
+Goal:
+- Define stable plan operation result types.
+- Replace ad hoc plan command JSON responses with a stable contract.
+- Keep frontend wrappers camelCase.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- src-tauri/src/commands/plan.rs
+- frontend/src/tauri.ts
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+- relevant tests
+
+Constraints:
+- Do not add cancel/retry/continue behavior in this task.
+- Do not bypass PlanExecutor or ToolRuntime.
+- Do not rewrite ChatPage.
+
+Verification:
+- cargo test -p openlife-tauri commands::plan
+- pnpm --dir frontend test -- --run tauri
+- pnpm --dir frontend typecheck
+- cargo check -q
+```
+
+## P5-2 Prompt
+
+```text
+Execute vNext task P5-2: Cancel Plan.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0011-plan-recovery-rollback-policy.md
+
+Goal:
+- Add governed cancel_agent_plan(plan_id).
+- Allow cancellation only from published, confirmed, or executing states.
+- Reject cancellation for completed and rejected plans.
+- Record plan.cancel_requested and plan.cancelled events.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/plan_store.rs
+- openlife-core/src/agent/plan_executor.rs only if lifecycle helper is needed
+- src-tauri/src/commands/plan.rs
+- frontend/src/tauri.ts
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+- focused tests
+
+Constraints:
+- Cancellation does not rollback side effects.
+- No Bash/Shell.
+- No direct LifeModel, Memory, file, or external mutation.
+- Do not implement retry in this task.
+
+Verification:
+- cargo test -p openlife-core agent::plan_store
+- cargo test -p openlife-tauri commands::plan
+- pnpm --dir frontend typecheck
+- cargo check -q
+```
+
+## P5-3 Prompt
+
+```text
+Execute vNext task P5-3: Retry Failed Plan.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0011-plan-recovery-rollback-policy.md
+- plans/adr/0007-planmode-confirmation-policy.md
+
+Goal:
+- Add retry_agent_plan(plan_id) for failed and failed_review plans.
+- Retry the whole plan in the first implementation.
+- Preserve append-only trace history and record retry attempt events.
+
+Expected events:
+- plan.retry_requested
+- plan.retry_started
+- normal plan execution events for the new attempt
+
+Constraints:
+- No from-step retry yet.
+- No rollback.
+- No deletion or mutation of historical events.
+- Retry must still use PlanExecutor, ToolRuntime, Permission, Proposal, and ReviewGate.
+
+Verification:
+- cargo test -p openlife-core agent::plan_executor
+- cargo test -p openlife-tauri commands::plan
+- pnpm --dir frontend typecheck
+- cargo check -q
+```
+
+## P5-4 Prompt
+
+```text
+Execute vNext task P5-4: Blocked Action Continuation.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0003-toolruntime-metadata.md
+- plans/adr/0011-plan-recovery-rollback-policy.md
+
+Goal:
+- Link blocked/needs-confirmation plan actions to plan id and step index.
+- Continue or replay after user approval through existing Permission / Proposal / Replay.
+- Record plan action replay events.
+
+Expected command shape:
+- continue_agent_plan(plan_id)
+- or replay_plan_action(plan_id, action_id), if action-level replay is safer
+
+Constraints:
+- Do not bypass ToolRuntime.
+- Do not auto-approve permissions.
+- Do not implement rollback.
+- Do not directly write LifeModel, Memory, files, or external systems.
+
+Verification:
+- cargo test -p openlife-core agent
+- cargo test -p openlife-tauri commands::plan
+- cargo check -q
+```
+
+## P5-5 Prompt
+
+```text
+Execute vNext task P5-5: Rollback Policy ADR.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0011-plan-recovery-rollback-policy.md
+- plans/adr/README.md
+
+Goal:
+- Finalize ADR 0011 for plan recovery and rollback policy.
+- Decide retry, cancellation, rollback-capable, irreversible, confirmation, and event rules.
+- Update ADR README status and backlog.
+
+Constraints:
+- Documentation only.
+- Do not implement rollback executor.
+- Do not add code.
+
+Verification:
+- rg checks can find ADR 0011 and P5 rollback policy references.
+- git diff contains documentation files only.
+```
+
+## P5-6 Prompt
+
+```text
+Execute vNext task P5-6: Real Read-Only ReviewAgent Integration.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0008-subagent-permissions.md
+- plans/adr/0007-planmode-confirmation-policy.md
+
+Goal:
+- Replace production deterministic review gate with governed read-only ReviewAgent path.
+- ReviewAgent outputs structured ReviewAgentOutput.
+- Critical review continues to prevent Completed status.
+- Parent trace links review result.
+
+Allowed edit areas:
+- openlife-core/src/agent/plan_executor.rs
+- openlife-core/src/agent/sub_agent.rs
+- src-tauri/src/commands/plan.rs
+- focused tests
+
+Constraints:
+- ReviewAgent cannot mutate LifeModel, Memory, files, or external systems.
+- No parallel reviewers.
+- No handoff.
+- No UI for review editing.
+- No Bash/Shell.
+
+Verification:
+- cargo test -p openlife-core agent
+- cargo check -q
+```
+
+## P5-7 Prompt
+
+```text
+Execute vNext task P5-7: Minimal Plan Operations UI.
+
+Use:
+- plans/openlife_vnext_p5_task_specs.md
+- plans/adr/0010-chatpage-state-model.md
+
+Goal:
+- Add minimal UI controls for legal plan operations.
+- Show plan status, operation result, and trace linkage.
+- Preserve ChatPage streaming, proposal banner, and trace behavior.
+
+Allowed edit areas:
+- frontend/src/components/
+- frontend/src/pages/ChatPage.tsx only for minimal integration
+- frontend/src/tauri.ts
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+- focused frontend tests
+
+Constraints:
+- Do not rewrite ChatPage.
+- Do not add a full plan editor.
+- Do not do visual redesign.
+- Empty plan state should not clutter UI.
+
+Verification:
+- pnpm --dir frontend typecheck
+- pnpm --dir frontend test -- --run ChatPage RunTracePanel tauri
+```

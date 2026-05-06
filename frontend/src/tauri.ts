@@ -7,6 +7,7 @@ import type {
   StateAlert,
   AgentRunEvent,
   AgentPlan,
+  PlanOperationResult,
 } from "./types";
 
 function isTauriEnv(): boolean {
@@ -1322,57 +1323,28 @@ export async function listAgentPlansForSession(
   return safeInvoke<AgentPlan[]>("list_agent_plans_for_session", { sessionId, limit });
 }
 
-export async function confirmAgentPlan(planId: string): Promise<AgentPlan> {
-  return safeInvoke<AgentPlan>("confirm_agent_plan", { planId });
+export async function confirmAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("confirm_agent_plan", { planId });
 }
 
-export async function rejectAgentPlan(planId: string): Promise<AgentPlan> {
-  return safeInvoke<AgentPlan>("reject_agent_plan", { planId });
+export async function rejectAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("reject_agent_plan", { planId });
 }
 
-// ── Plan execution result types ─────────────────────────────────────────
-
-export interface PlanExecutionResult {
-  planId: string;
-  success: boolean;
-  stepsCompleted: number;
-  stepsFailed: number;
-  deviations: string[];
-  status?: "completed" | "failed" | "failed_review";
+export async function executeAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("execute_agent_plan", { planId });
 }
 
-interface RawPlanExecutionResult {
-  plan_id?: string;
-  planId?: string;
-  success: boolean;
-  steps_completed?: number;
-  stepsCompleted?: number;
-  steps_failed?: number;
-  stepsFailed?: number;
-  deviations?: string[];
-  status?: "completed" | "failed" | "failed_review";
+export async function cancelAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("cancel_agent_plan", { planId });
 }
 
-/**
- * Normalise a plan-execution payload from the backend so that callers
- * always receive camelCase.  The Rust backend emits `snake_case` via
- * `serde_json::json!`; this helper bridges the contract without
- * requiring a backend rename.
- */
-export function normalizePlanExecutionResult(raw: RawPlanExecutionResult): PlanExecutionResult {
-  return {
-    planId: raw.planId ?? raw.plan_id ?? "",
-    success: raw.success,
-    stepsCompleted: raw.stepsCompleted ?? raw.steps_completed ?? 0,
-    stepsFailed: raw.stepsFailed ?? raw.steps_failed ?? 0,
-    deviations: raw.deviations ?? [],
-    status: raw.status,
-  };
+export async function retryAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("retry_agent_plan", { planId });
 }
 
-export async function executeAgentPlan(planId: string): Promise<PlanExecutionResult> {
-  const raw = await safeInvoke<RawPlanExecutionResult>("execute_agent_plan", { planId });
-  return normalizePlanExecutionResult(raw);
+export async function continueAgentPlan(planId: string): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("continue_agent_plan", { planId });
 }
 
 export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {

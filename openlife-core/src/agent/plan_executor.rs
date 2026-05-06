@@ -1,7 +1,7 @@
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::plan_store::PlanStore;
+use crate::agent::sub_agent::{ReviewAgentOutput, ReviewIssue};
 use crate::agent::types::*;
-use crate::agent::{ReviewAgentOutput, ReviewIssue};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -62,6 +62,45 @@ impl PlanReviewGate for DefaultPlanReviewGate {
         } else {
             Ok(ReviewAgentOutput::needs_changes(
                 "deterministic review gate: execution failed",
+                vec![ReviewIssue {
+                    severity: "high".to_string(),
+                    category: "execution_failure".to_string(),
+                    description: format!("{} steps failed", outcome.steps_failed),
+                    suggestion: Some("review failed steps and retry".to_string()),
+                }],
+                vec![],
+            ))
+        }
+    }
+}
+
+/// Review gate backed by `SubAgentRuntime` for read-only boundary enforcement.
+///
+/// In the current implementation this gate produces the same deterministic
+/// verdict as `DefaultPlanReviewGate`.  When a real LLM reviewer is
+/// integrated the `review()` method should:
+///
+/// 1. Call the LLM to analyse the plan execution and produce a
+///    `ReviewAgentOutput`.
+/// 2. Route the output through `SubAgentRuntime::execute_review()` so
+///    the read-only tool restriction and child-run linkage are enforced.
+///
+/// Until then, production code uses `DefaultPlanReviewGate`.
+pub struct SubAgentReviewGate;
+
+impl PlanReviewGate for SubAgentReviewGate {
+    fn review(
+        &self,
+        _plan: &AgentPlan,
+        outcome: &PlanExecutionOutcome,
+    ) -> Result<ReviewAgentOutput, PlanExecutionError> {
+        if outcome.success {
+            Ok(ReviewAgentOutput::approved(
+                "governed review gate: all steps passed",
+            ))
+        } else {
+            Ok(ReviewAgentOutput::needs_changes(
+                "governed review gate: execution failed",
                 vec![ReviewIssue {
                     severity: "high".to_string(),
                     category: "execution_failure".to_string(),
@@ -1146,7 +1185,7 @@ mod tests {
 
     #[test]
     fn test_approved_review_allows_completed_status() {
-        use crate::agent::{ReviewAgentOutput, ReviewIssue, ReviewVerdict};
+        use crate::agent::ReviewAgentOutput;
 
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
@@ -1187,7 +1226,7 @@ mod tests {
 
     #[test]
     fn test_critical_issue_leaves_plan_failed_review() {
-        use crate::agent::{ReviewAgentOutput, ReviewIssue, ReviewVerdict};
+        use crate::agent::{ReviewAgentOutput, ReviewIssue};
 
         let (ps, es, run_id) = setup();
         let plan = create_high_risk_plan(true);
@@ -1241,7 +1280,7 @@ mod tests {
 
     #[test]
     fn test_review_gate_records_parent_trace_event() {
-        use crate::agent::{ReviewAgentOutput, ReviewIssue, ReviewVerdict};
+        use crate::agent::ReviewAgentOutput;
 
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
