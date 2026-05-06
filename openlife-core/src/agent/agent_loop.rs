@@ -1752,6 +1752,7 @@ mod tests {
             user_text: "帮我查天气".into(),
             messages: vec![],
             layer: crate::layer_router::Layer::L2,
+            ..Default::default()
         };
         let obs = vec![AgentObservation {
             id: "obs-1".into(),
@@ -1783,6 +1784,7 @@ mod tests {
             user_text: "hello".into(),
             messages: vec![],
             layer: crate::layer_router::Layer::L2,
+            ..Default::default()
         };
 
         let messages = agent.build_follow_up_messages(&task, "Hi there!", &[], "可用工具: echo");
@@ -1811,6 +1813,7 @@ mod tests {
                 },
             ],
             layer: crate::layer_router::Layer::L2,
+            ..Default::default()
         };
 
         let obs = vec![AgentObservation {

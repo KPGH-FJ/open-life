@@ -161,6 +161,7 @@ pub async fn run_skill(
             },
         ],
         layer: openlife_core::layer_router::Layer::L2,
+        ..Default::default()
     };
 
     // 4. Execute via AgentRuntime

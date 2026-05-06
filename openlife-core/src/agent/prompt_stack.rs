@@ -307,7 +307,14 @@ impl PromptStack {
         }
     }
 
-    /// Build a PromptStack for PlanMode with the planning prompt block
+    /// Build a PromptStack from an AgentSpec's prompt block references.
+    /// In the current implementation this creates an empty stack — blocks
+    /// are resolved at compile time via `PromptBlock::planning()` and
+    /// similar constructors, not by runtime name lookup.
+    /// Future: resolve block_ids to registered blocks.
+    pub fn from_agentspec(_block_ids: &[String]) -> Self {
+        Self::new()
+    }
     /// and the AgentPlan output schema.
     pub fn plan_mode_stack() -> Self {
         Self::new()
@@ -780,5 +787,16 @@ mod tests {
         // preview is trimmed to 500 chars
         assert!(!stack.assembled_preview.is_empty());
         assert!(stack.assembled_preview.len() <= 500);
+    }
+
+    // ── P6-5: AgentSpec prompt binding test ────────────────────────────
+
+    #[test]
+    fn test_from_agentspec_creates_empty_stack_for_unknown_ids() {
+        let stack = PromptStack::from_agentspec(&[
+            "unknown-block-1".to_string(),
+            "unknown-block-2".to_string(),
+        ]);
+        assert!(stack.blocks.is_empty());
     }
 }

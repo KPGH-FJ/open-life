@@ -59,6 +59,7 @@ fn create_test_task(messages: Vec<ChatMessage>) -> AgentTask {
             .unwrap_or_default(),
         messages,
         layer: Layer::L2,
+        ..Default::default()
     }
 }
 
@@ -358,7 +359,7 @@ fn test_max_tool_calls_stop_reason() {
     let config = AgentLoopConfig {
         max_steps: 4,
         max_tool_calls: 1,
-        ..AgentLoopConfig::default()
+        ..Default::default()
     };
     let loop_instance = create_test_agent_loop(config);
     let mut run = AgentRun::new_chat_run("test", "Hi");

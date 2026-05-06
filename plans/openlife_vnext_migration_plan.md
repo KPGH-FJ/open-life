@@ -322,6 +322,7 @@ Next planning source after P0/P1:
 - See `plans/openlife_vnext_p2_p3_task_specs.md`.
 - See `plans/openlife_vnext_p4_task_specs.md`.
 - See `plans/openlife_vnext_p5_task_specs.md`.
+- See `plans/openlife_vnext_p6_task_specs.md`.
 - See `plans/openlife_vnext_agent_coding_prompts.md`.
 - ADR 0007-0010 are accepted. P4 starts from confirmed plan execution and Chat trace UI integration.
 
@@ -365,3 +366,41 @@ Exit criteria:
 - rollback boundaries are accepted by ADR
 - ReviewAgent remains read-only
 - minimal UI operations preserve streaming and trace behavior
+
+## P6: AgentSpec-Governed Runtime and Context Assembly
+
+Goal:
+
+Make agent identity, context selection, tool policy, and prompt binding explicit runtime contracts.
+
+Task source:
+
+- `plans/openlife_vnext_p6_task_specs.md`
+
+Scope:
+
+- AgentSpec core contract
+- AgentTask intent contract
+- ContextPolicy and ContextAssembler
+- AgentSpec tool policy enforcement
+- PromptStack binding
+- PlanExecutor AgentSpec policy integration
+- minimal trace exposure for AgentSpec governance
+
+Non-goals:
+
+- no Bash/Shell
+- no SubAgent parallel or handoff
+- no automatic rollback executor
+- no full AgentSpec editor
+- no ChatPage rewrite
+- no bypass of ToolRuntime, ActionExecutor, Proposal, PromptStack, AgentRunEvent, ExecutionSandbox, or PlanExecutor
+
+Exit criteria:
+
+- AgentSpec and AgentTask are stable contracts
+- context assembly produces event-safe summaries
+- AgentSpec tool policy cannot bypass ToolRuntime or Permission
+- PromptStack binds AgentSpec prompt references without ad hoc prompts
+- PlanExecutor respects AgentSpec policy
+- minimal trace UI surfaces AgentSpec governance decisions without destabilizing ChatPage

@@ -217,6 +217,32 @@ Tests:
 - ReviewAgent cannot call write tools
 - ChatPage plan operation regression
 
+## P6: AgentSpec-Governed Runtime and Context Assembly
+
+Acceptance:
+
+- AgentSpec is a stable runtime identity and policy contract.
+- AgentTask separates intent/constraints from AgentRun trace.
+- ContextAssembler can produce event-safe context summaries.
+- AgentSpec tool policy blocks denied tools without bypassing ToolRuntime or Permission.
+- PromptStack consumes AgentSpec prompt references without ad hoc prompt fragments.
+- PlanExecutor respects AgentSpec policy for plan tool intents.
+- Minimal trace UI can display AgentSpec governance decisions.
+
+Tests:
+
+- AgentSpec serde round-trip
+- default/main AgentSpec construction
+- AgentTask serde round-trip
+- ContextPolicy allow/deny categories
+- event-safe context summary redaction
+- AgentSpec-allowed tool executes only when ToolRuntime allows it
+- AgentSpec-denied tool records block
+- PromptStack assembles AgentSpec prompt block ids
+- missing prompt block structured error
+- PlanExecutor blocks AgentSpec-denied plan tool
+- RunTracePanel renders AgentSpec metadata and block summary
+
 ## Manual Review Checklist
 
 For each phase:

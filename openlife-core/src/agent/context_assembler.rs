@@ -297,6 +297,105 @@ impl ContextAssembler for CompositeAssembler {
     }
 }
 
+// ── P6-3: Governed Context Assembly ──────────────────────────────────
+
+/// Controls which context categories may be included in agent input.
+#[derive(Debug, Clone)]
+pub struct ContextPolicy {
+    pub allow_lifemodel_summary: bool,
+    pub allow_goals: bool,
+    pub allow_state: bool,
+    pub allow_memory: bool,
+    pub allow_session_summary: bool,
+    pub allow_tool_observations: bool,
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            allow_lifemodel_summary: true,
+            allow_goals: true,
+            allow_state: true,
+            allow_memory: true,
+            allow_session_summary: true,
+            allow_tool_observations: true,
+        }
+    }
+}
+
+/// Result of governed context assembly — records what was included, excluded,
+/// and any privacy/redaction notes without exposing raw sensitive text.
+#[derive(Debug, Clone)]
+pub struct GovernedAssembleOutput {
+    pub included: Vec<String>,
+    pub excluded: Vec<String>,
+    pub privacy_notes: Vec<String>,
+    /// Compact, event-safe summary suitable for AgentRunEvent.
+    pub event_summary: String,
+}
+
+impl ContextPolicy {
+    /// Apply policy to an assembly input, producing a governed output.
+    /// Does NOT call LLMs — it reads the existing input and decides what
+    /// categories are safe to include based on the policy flags.
+    pub fn apply(&self, input: &AssembleInput) -> GovernedAssembleOutput {
+        let mut included = Vec::new();
+        let mut excluded = Vec::new();
+        let mut privacy_notes = Vec::new();
+
+        macro_rules! check {
+            ($flag:expr, $name:expr, $has:expr) => {
+                if $flag {
+                    included.push($name.to_string());
+                } else if $has {
+                    excluded.push($name.to_string());
+                    privacy_notes.push(format!("{} omitted per policy", $name));
+                }
+            };
+        }
+
+        check!(
+            self.allow_lifemodel_summary,
+            "lifemodel_summary",
+            !input.life_model.identity.name.is_empty()
+        );
+        check!(
+            self.allow_goals,
+            "goals",
+            !input.life_model.goals.short_term.is_empty()
+        );
+        check!(
+            self.allow_state && !input.life_model.state.current_focus.is_empty(),
+            "state",
+            !input.life_model.state.current_focus.is_empty()
+        );
+        check!(self.allow_memory, "memory", !input.memory_hits.is_empty());
+        check!(
+            self.allow_session_summary,
+            "session_summary",
+            !input.messages.is_empty()
+        );
+        check!(
+            self.allow_tool_observations,
+            "tool_observations",
+            !input.tools_prompt.is_empty()
+        );
+
+        let event_summary = format!(
+            "governed assembly: included=[{}] excluded=[{}]",
+            included.join(", "),
+            excluded.join(", ")
+        );
+
+        GovernedAssembleOutput {
+            included,
+            excluded,
+            privacy_notes,
+            event_summary,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,5 +509,66 @@ mod tests {
         assert_eq!(output.context_summary.included_life_model_sections.len(), 4);
         assert!(output.memory_context.contains("关键记忆"));
         assert_eq!(output.context_summary.memory_hit_count, 1);
+    }
+
+    // ── P6-3: ContextPolicy tests ─────────────────────────────────────
+
+    #[test]
+    fn test_policy_allows_lifemodel_summary() {
+        let policy = ContextPolicy::default();
+        let input = create_test_input();
+        let output = policy.apply(&input);
+        assert!(output.included.contains(&"lifemodel_summary".to_string()));
+    }
+
+    #[test]
+    fn test_policy_denies_memory() {
+        let mut policy = ContextPolicy::default();
+        policy.allow_memory = false;
+        let mut input = create_test_input();
+        input.memory_hits = vec![MemoryHit {
+            id: 1,
+            content: "secret".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+            tier: 1,
+        }];
+        let output = policy.apply(&input);
+        assert!(output.excluded.contains(&"memory".to_string()));
+        assert!(output.privacy_notes.iter().any(|n| n.contains("memory")));
+    }
+
+    #[test]
+    fn test_privacy_note_on_denied_context() {
+        let mut policy = ContextPolicy::default();
+        policy.allow_memory = false;
+        let mut input = create_test_input();
+        input.memory_hits = vec![MemoryHit {
+            id: 1,
+            content: "some memory".to_string(),
+            source: "test".to_string(),
+            score: 0.5,
+            tier: 1,
+        }];
+        let output = policy.apply(&input);
+        assert!(output.excluded.contains(&"memory".to_string()));
+        assert!(output.privacy_notes.iter().any(|n| n.contains("memory")));
+    }
+
+    #[test]
+    fn test_event_summary_excludes_raw_sensitive_text() {
+        let mut policy = ContextPolicy::default();
+        policy.allow_memory = false;
+        let mut input = create_test_input();
+        input.memory_hits = vec![MemoryHit {
+            id: 1,
+            content: "sensitive personal data here".to_string(),
+            source: "test".to_string(),
+            score: 0.9,
+            tier: 1,
+        }];
+        let output = policy.apply(&input);
+        assert!(!output.event_summary.contains("sensitive personal data"));
+        assert!(output.event_summary.contains("excluded"));
     }
 }

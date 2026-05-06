@@ -1234,6 +1234,7 @@ async fn send_message_with_agent_loop(
             .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer,
+        ..Default::default()
     };
 
     let network_policy = cfg.system.network_policy.clone();
@@ -1734,6 +1735,7 @@ async fn start_stream_message_with_agent_loop(
             .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer: _layer,
+        ..Default::default()
     };
 
     let network_policy = cfg.system.network_policy.clone();
@@ -2166,6 +2168,7 @@ async fn start_stream_message(
             .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer,
+        ..Default::default()
     };
 
     let mut reasoning_trace = ReasoningTrace::default();

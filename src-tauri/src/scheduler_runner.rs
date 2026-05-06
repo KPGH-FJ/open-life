@@ -183,6 +183,7 @@ async fn execute_scheduled_task(
             content: prompt.to_string(),
         }],
         layer: Layer::L2,
+        ..Default::default()
     };
 
     let tools_prompt = String::new();

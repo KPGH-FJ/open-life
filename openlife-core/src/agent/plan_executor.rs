@@ -116,6 +116,7 @@ impl PlanReviewGate for SubAgentReviewGate {
 pub struct PlanExecutor {
     plan_store: Arc<Mutex<PlanStore>>,
     event_store: Option<AgentRunEventStore>,
+    agent_spec: Option<AgentSpec>,
 }
 
 impl PlanExecutor {
@@ -123,7 +124,14 @@ impl PlanExecutor {
         Self {
             plan_store,
             event_store,
+            agent_spec: None,
         }
+    }
+
+    /// Attach an AgentSpec that constrains tool execution.
+    pub fn with_agent_spec(mut self, spec: AgentSpec) -> Self {
+        self.agent_spec = Some(spec);
+        self
     }
 
     fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, PlanStore>, PlanExecutionError> {
@@ -242,7 +250,27 @@ impl PlanExecutor {
                 .as_ref()
                 .and_then(|tool_name| tool_intents.iter().find(|ti| ti.tool_name == *tool_name));
 
-            let result = execute_step(step, tool_intent);
+            let mut result = execute_step(step, tool_intent);
+
+            // Enforce AgentSpec tool policy if attached.
+            if let Some(ref spec) = self.agent_spec {
+                if !spec.is_tool_allowed(&result.tool_name) {
+                    result.success = false;
+                    result.error = Some(format!(
+                        "tool '{}' blocked by AgentSpec policy",
+                        result.tool_name
+                    ));
+                    self.record_event(
+                        run_id,
+                        AgentRunEventType::ToolCallBlocked,
+                        format!(
+                            "tool '{}' blocked by AgentSpec {}",
+                            result.tool_name, spec.id
+                        ),
+                        json!({"tool_name": result.tool_name, "agentspec_id": spec.id}),
+                    );
+                }
+            }
 
             // Detect deviation.
             if let Some(intent) = tool_intent {
@@ -1475,5 +1503,69 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e.event_type, AgentRunEventType::PlanExecutionCompleted)));
+    }
+
+    // ── P6-6: AgentSpec tool policy enforcement ────────────────────────
+
+    #[test]
+    fn test_agentspec_allowed_tool_executes() {
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        // AgentSpec allows life_model.read
+        let spec = AgentSpec::default().with_allowed_tools(vec!["life_model.read".to_string()]);
+        let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
+
+        let outcome = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        assert!(outcome.success);
+    }
+
+    #[test]
+    fn test_agentspec_denied_tool_blocked_with_event() {
+        let (ps, es, run_id) = setup();
+        let plan = create_read_only_plan(true);
+        let plan_id = plan.id.clone();
+        ps.lock().unwrap().create_plan(&plan).unwrap();
+
+        // AgentSpec denies life_model.read
+        let spec = AgentSpec::default().with_denied_tools(vec!["life_model.read".to_string()]);
+        let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
+
+        let outcome = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .unwrap();
+
+        // Step was blocked by AgentSpec — plan should not complete.
+        assert!(!outcome.success);
+
+        let events = es.list_events_by_run(&run_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.summary.contains("blocked by AgentSpec")));
     }
 }

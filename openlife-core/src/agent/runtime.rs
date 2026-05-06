@@ -271,6 +271,7 @@ mod tests {
             }],
             session_id: "test-session".to_string(),
             layer: Layer::L3,
+            ..Default::default()
         }
     }
 

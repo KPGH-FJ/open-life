@@ -333,14 +333,88 @@ impl std::fmt::Display for AgentTaskStatus {
     }
 }
 
-/// A task submitted to the AgentRuntime for execution.
-#[derive(Debug, Clone)]
+/// A formal task submitted for agent execution.
+///
+/// Separated from `AgentRun` so that intent, policy, and constraints are
+/// captured before execution begins.  The runtime may use these fields to
+/// select models, assemble context, and enforce governance.
+fn default_layer() -> crate::layer_router::Layer {
+    crate::layer_router::Layer::L3
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentTask {
+    /// Unique identifier for this task.
+    pub id: String,
+    /// Task category.
     pub kind: AgentTaskKind,
     pub session_id: String,
+    /// User intent as raw text or structured description.
     pub user_text: String,
     pub messages: Vec<crate::llm::ChatMessage>,
+    #[serde(skip, default = "default_layer")]
     pub layer: crate::layer_router::Layer,
+    /// Who or what initiated this task.
+    pub initiator: String,
+    /// AgentSpec id that governs this task's execution.
+    pub agent_spec_id: Option<String>,
+    /// Whether this task requires a plan before execution.
+    #[serde(default)]
+    pub requires_plan: bool,
+    /// Expected output description (guides the agent).
+    pub expected_output: Option<String>,
+    /// Workspace scope for file/context access.
+    pub workspace_scope: Option<String>,
+    /// Privacy policy for this task (overrides AgentSpec default when set).
+    pub privacy_policy: Option<PrivacyPolicy>,
+    pub status: AgentTaskStatus,
+}
+
+impl Default for AgentTask {
+    fn default() -> Self {
+        Self::new(AgentTaskKind::Conversation, "default")
+    }
+}
+
+impl AgentTask {
+    pub fn new(kind: AgentTaskKind, session_id: impl Into<String>) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            session_id: session_id.into(),
+            user_text: String::new(),
+            messages: Vec::new(),
+            layer: crate::layer_router::Layer::L3,
+            initiator: "user".to_string(),
+            agent_spec_id: None,
+            requires_plan: false,
+            expected_output: None,
+            workspace_scope: None,
+            privacy_policy: None,
+            status: AgentTaskStatus::Pending,
+        }
+    }
+
+    pub fn with_user_text(mut self, text: impl Into<String>) -> Self {
+        self.user_text = text.into();
+        self
+    }
+
+    pub fn with_agent_spec(mut self, spec_id: impl Into<String>) -> Self {
+        self.agent_spec_id = Some(spec_id.into());
+        self
+    }
+
+    pub fn with_requires_plan(mut self) -> Self {
+        self.requires_plan = true;
+        self
+    }
+
+    pub fn with_privacy(mut self, policy: PrivacyPolicy) -> Self {
+        self.privacy_policy = Some(policy);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1516,6 +1590,28 @@ impl std::fmt::Display for DelegationMode {
     }
 }
 
+/// AgentSpec privacy policy — governs what data may leave the local device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyPolicy {
+    /// All data must stay local; no cloud calls permitted.
+    LocalOnly,
+    /// Summarized context may be sent to cloud providers.
+    SummaryOnly,
+    /// Full context may be sent to cloud providers under user consent.
+    CloudAllowed,
+}
+
+impl std::fmt::Display for PrivacyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrivacyPolicy::LocalOnly => write!(f, "local_only"),
+            PrivacyPolicy::SummaryOnly => write!(f, "summary_only"),
+            PrivacyPolicy::CloudAllowed => write!(f, "cloud_allowed"),
+        }
+    }
+}
+
 /// Canonical specification of an agent's identity, permissions, and runtime
 /// constraints. Used for both the main agent and sub-agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1551,10 +1647,17 @@ pub struct AgentSpec {
     pub output_schema_id: Option<String>,
     /// Whether this spec describes a read-only agent.
     pub read_only: bool,
+    /// Privacy policy governing cloud data exposure.
+    #[serde(default = "default_privacy_policy")]
+    pub privacy_policy: PrivacyPolicy,
     /// Whether this spec is active.
     pub active: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_privacy_policy() -> PrivacyPolicy {
+    PrivacyPolicy::LocalOnly
 }
 
 impl AgentSpec {
@@ -1577,6 +1680,7 @@ impl AgentSpec {
             output_schema_id: None,
             read_only: false,
             active: true,
+            privacy_policy: PrivacyPolicy::LocalOnly,
             created_at: now,
             updated_at: now,
         }
@@ -1606,6 +1710,11 @@ impl AgentSpec {
 
     pub fn with_lifemodel_access(mut self) -> Self {
         self.can_access_lifemodel = true;
+        self
+    }
+
+    pub fn with_privacy_policy(mut self, policy: PrivacyPolicy) -> Self {
+        self.privacy_policy = policy;
         self
     }
 
@@ -1718,6 +1827,58 @@ mod agent_spec_tests {
         assert!(spec.can_access_lifemodel);
         assert!(spec.can_access_memory_evidence);
         assert!(spec.active);
+        assert_eq!(spec.privacy_policy, PrivacyPolicy::LocalOnly);
+    }
+
+    #[test]
+    fn test_privacy_policy_serde_round_trip() {
+        let spec = AgentSpec::default().with_privacy_policy(PrivacyPolicy::CloudAllowed);
+        let json = serde_json::to_string(&spec).unwrap();
+        let parsed: AgentSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.privacy_policy, PrivacyPolicy::CloudAllowed);
+
+        let summary = AgentSpec::default().with_privacy_policy(PrivacyPolicy::SummaryOnly);
+        let json = serde_json::to_string(&summary).unwrap();
+        assert!(json.contains("summary_only"));
+        let parsed2: AgentSpec = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed2.privacy_policy, PrivacyPolicy::SummaryOnly);
+    }
+
+    #[test]
+    fn test_privacy_policy_display() {
+        assert_eq!(PrivacyPolicy::LocalOnly.to_string(), "local_only");
+        assert_eq!(PrivacyPolicy::SummaryOnly.to_string(), "summary_only");
+        assert_eq!(PrivacyPolicy::CloudAllowed.to_string(), "cloud_allowed");
+    }
+
+    // ── P6-4: AgentSpec tool policy tests ─────────────────────────────
+
+    #[test]
+    fn test_agentspec_allowed_read_tool_executes() {
+        let spec = AgentSpec::default().with_allowed_tools(vec!["life_model.read".into()]);
+        assert!(spec.is_tool_allowed("life_model.read"));
+    }
+
+    #[test]
+    fn test_agentspec_denied_tool_blocked() {
+        let spec = AgentSpec::default().with_denied_tools(vec!["web.search".into()]);
+        assert!(!spec.is_tool_allowed("web.search"));
+        // Other tools still allowed when allowed_tools is empty.
+        assert!(spec.is_tool_allowed("life_model.read"));
+    }
+
+    #[test]
+    fn test_agentspec_deny_overrides_allow() {
+        let spec = AgentSpec::default()
+            .with_allowed_tools(vec!["file.read".into()])
+            .with_denied_tools(vec!["file.read".into()]);
+        assert!(!spec.is_tool_allowed("file.read"));
+    }
+
+    #[test]
+    fn test_agentspec_empty_allowlist_allows_all() {
+        let spec = AgentSpec::default();
+        assert!(spec.is_tool_allowed("anything.here"));
     }
 
     #[test]
@@ -1829,6 +1990,40 @@ mod agent_spec_tests {
 
         assert!(!sub.isolated_context);
         assert!(sub.inherit_context);
-        assert!(sub.inherit_tool_policy);
+    }
+
+    // ── P6-2: AgentTask contract tests ─────────────────────────────────
+
+    #[test]
+    fn test_agent_task_round_trip_serde() {
+        let task = AgentTask::new(AgentTaskKind::Conversation, "session-1")
+            .with_user_text("hello")
+            .with_agent_spec("spec-1")
+            .with_requires_plan()
+            .with_privacy(PrivacyPolicy::SummaryOnly);
+
+        assert_eq!(task.agent_spec_id, Some("spec-1".to_string()));
+        assert!(task.requires_plan);
+        assert_eq!(task.privacy_policy, Some(PrivacyPolicy::SummaryOnly));
+        assert_eq!(task.initiator, "user");
+        assert_eq!(task.status, AgentTaskStatus::Pending);
+        assert!(!task.id.is_empty());
+    }
+
+    #[test]
+    fn test_agent_task_serializes_to_camelcase() {
+        let task = AgentTask::new(AgentTaskKind::Planning, "sess-2").with_agent_spec("spec-2");
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("agentSpecId"));
+        assert!(json.contains("spec-2"));
+        assert!(!json.contains("agent_spec_id"));
+    }
+
+    #[test]
+    fn test_agent_task_workspace_and_privacy_optional() {
+        let task = AgentTask::new(AgentTaskKind::Conversation, "sess-3");
+        assert_eq!(task.workspace_scope, None);
+        assert_eq!(task.privacy_policy, None);
+        assert!(!task.requires_plan);
     }
 }
