@@ -57,5 +57,8 @@ pub use reasoning::{
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use store::AgentRunStore;
-pub use sub_agent::{ReviewAgentOutput, ReviewIssue, ReviewVerdict, SubAgentResult, SubAgentRuntime};
+pub use sub_agent::{
+    ReviewAgentOutput, ReviewIssue, ReviewVerdict, SubAgentExecutionOutcome, SubAgentResult,
+    SubAgentRuntime,
+};
 pub use types::*;

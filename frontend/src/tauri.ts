@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "./types";
+import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert, AgentRunEvent } from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -1291,6 +1291,10 @@ export async function getAgentRun(runId: string): Promise<AgentRun | null> {
 
 export async function listAgentRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
   return safeInvoke<AgentRun[]>("list_agent_runs", { limit, offset });
+}
+
+export async function listAgentRunEvents(runId: string): Promise<AgentRunEvent[]> {
+  return safeInvoke<AgentRunEvent[]>("list_agent_run_events", { runId });
 }
 
 export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {

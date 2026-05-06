@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use crate::AppState;
-use openlife_core::agent::{AgentAction, AgentRun};
+use openlife_core::agent::{AgentAction, AgentRun, AgentRunEvent};
 use std::sync::Arc;
 use tauri::State;
 
@@ -260,4 +260,16 @@ pub async fn replay_agent_action(
     }
 
     Ok(new_action)
+}
+
+#[tauri::command]
+pub async fn list_agent_run_events(
+    run_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<Vec<AgentRunEvent>, AppError> {
+    if let Some(ref es) = state.agent_run_event_store {
+        es.list_events_by_run(&run_id).map_err(AppError::from)
+    } else {
+        Ok(vec![])
+    }
 }

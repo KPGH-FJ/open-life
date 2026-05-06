@@ -189,7 +189,7 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.confirmation_resolved" => AgentRunEventType::PlanConfirmationResolved,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
-        _ => AgentRunEventType::RunCreated, // safe fallback
+        unknown => AgentRunEventType::Unknown(unknown.to_string()),
     }
 }
 
@@ -449,5 +449,72 @@ mod tests {
         assert_eq!(from_clone.len(), 2);
         assert_eq!(from_original[0].summary, "original write");
         assert_eq!(from_original[1].summary, "clone write");
+    }
+
+    /// Unknown/future event types must NOT be silently mapped to RunCreated.
+    /// They must round-trip as Unknown(String) through the store.
+    #[test]
+    fn test_unknown_event_type_round_trip() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-unknown-events";
+
+        // Simulate a future event type that this build doesn't know about
+        let future_event = AgentRunEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            run_id: run_id.to_string(),
+            parent_event_id: None,
+            event_type: AgentRunEventType::Unknown("future.event.type".into()),
+            phase: None,
+            actor: AgentEventActor::System,
+            summary: "Future event".into(),
+            payload: serde_json::json!({}),
+            redaction: None,
+            created_at: chrono::Utc::now(),
+        };
+        store.append_event(&future_event).unwrap();
+
+        // Read back — must be Unknown, not RunCreated
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(events[0].event_type, AgentRunEventType::Unknown(ref s) if s == "future.event.type"),
+            "expected Unknown(\"future.event.type\"), got {:?}",
+            events[0].event_type
+        );
+    }
+
+    /// Multiple unknown event types must coexist without collision.
+    #[test]
+    fn test_multiple_unknown_events() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-multi-unknown";
+
+        for (i, event_type_str) in ["v2.new_event", "v3.enriched", "ext.audit"].iter().enumerate()
+        {
+            let event = AgentRunEvent {
+                id: format!("evt-{}", i),
+                run_id: run_id.to_string(),
+                parent_event_id: None,
+                event_type: AgentRunEventType::Unknown(event_type_str.to_string()),
+                phase: None,
+                actor: AgentEventActor::Runtime,
+                summary: format!("Event {}", i),
+                payload: serde_json::json!({"index": i}),
+                redaction: None,
+                created_at: chrono::Utc::now(),
+            };
+            store.append_event(&event).unwrap();
+        }
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 3);
+        // All should be Unknown, none should be RunCreated
+        for evt in &events {
+            assert!(
+                matches!(evt.event_type, AgentRunEventType::Unknown(_)),
+                "all events should be Unknown, got {:?}",
+                evt.event_type
+            );
+        }
     }
 }

@@ -30,6 +30,7 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.confirmation_resolved": <CheckCircle size={14} className="text-green-400" />,
   "run.completed": <CheckCircle size={14} className="text-green-400" />,
   "run.failed": <XCircle size={14} className="text-red-400" />,
+  "unknown": <FileText size={14} className="text-slate-500" />,
 };
 
 function formatTimestamp(iso: string): string {

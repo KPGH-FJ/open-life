@@ -5,8 +5,7 @@ use uuid::Uuid;
 // ── vNext AgentRunEvent ──────────────────────────────────────────────
 
 /// Append-only event kinds for every meaningful runtime transition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentRunEventType {
     RunCreated,
     ContextAssembled,
@@ -29,6 +28,9 @@ pub enum AgentRunEventType {
     PlanCreated,
     PlanConfirmationRequested,
     PlanConfirmationResolved,
+    /// Unknown or future event type — preserved as-is in the trace.
+    /// Older builds reading traces from newer builds use this variant.
+    Unknown(String),
 }
 
 impl std::fmt::Display for AgentRunEventType {
@@ -59,7 +61,44 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::PlanConfirmationResolved => {
                 write!(f, "plan.confirmation_resolved")
             }
+            AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
+    }
+}
+
+impl serde::Serialize for AgentRunEventType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AgentRunEventType {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(match raw.as_str() {
+            "run.created" => AgentRunEventType::RunCreated,
+            "context.assembled" => AgentRunEventType::ContextAssembled,
+            "model.route_selected" => AgentRunEventType::ModelRouteSelected,
+            "model.call_started" => AgentRunEventType::ModelCallStarted,
+            "model.call_completed" => AgentRunEventType::ModelCallCompleted,
+            "model.call_failed" => AgentRunEventType::ModelCallFailed,
+            "tool.call_started" => AgentRunEventType::ToolCallStarted,
+            "tool.call_blocked" => AgentRunEventType::ToolCallBlocked,
+            "tool.call_completed" => AgentRunEventType::ToolCallCompleted,
+            "tool.call_failed" => AgentRunEventType::ToolCallFailed,
+            "observation.created" => AgentRunEventType::ObservationCreated,
+            "proposal.created" => AgentRunEventType::ProposalCreated,
+            "fallback.started" => AgentRunEventType::FallbackStarted,
+            "fallback.completed" => AgentRunEventType::FallbackCompleted,
+            "json_repair.started" => AgentRunEventType::JsonRepairStarted,
+            "json_repair.completed" => AgentRunEventType::JsonRepairCompleted,
+            "plan.created" => AgentRunEventType::PlanCreated,
+            "plan.confirmation_requested" => AgentRunEventType::PlanConfirmationRequested,
+            "plan.confirmation_resolved" => AgentRunEventType::PlanConfirmationResolved,
+            "run.completed" => AgentRunEventType::RunCompleted,
+            "run.failed" => AgentRunEventType::RunFailed,
+            other => AgentRunEventType::Unknown(other.to_string()),
+        })
     }
 }
 

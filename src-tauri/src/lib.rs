@@ -34,8 +34,8 @@ use commands::a2a::{
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
 };
 use commands::agent::{
-    delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    replay_agent_action, restore_agent_run,
+    delete_agent_run, get_agent_run, list_agent_run_events, list_agent_runs,
+    list_agent_runs_for_session, replay_agent_action, restore_agent_run,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -2767,6 +2767,7 @@ pub fn run() {
             save_config,
             get_agent_run,
             list_agent_runs,
+            list_agent_run_events,
             list_agent_runs_for_session,
             delete_agent_run,
             restore_agent_run,

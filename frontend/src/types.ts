@@ -262,7 +262,8 @@ export type AgentRunEventType =
   | "plan.confirmation_requested"
   | "plan.confirmation_resolved"
   | "run.completed"
-  | "run.failed";
+  | "run.failed"
+  | "unknown";
 
 export type AgentEventActor =
   | "user"

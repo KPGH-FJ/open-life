@@ -283,7 +283,7 @@ pub fn check_confirmation_required(plan: &AgentPlan) -> PlanConfirmation {
         requires = true;
         reasons.push(format!(
             "Risk level is '{}' (medium or higher requires confirmation)",
-            plan.risk_level.to_string()
+            plan.risk_level
         ));
     }
 
