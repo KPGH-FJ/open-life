@@ -135,6 +135,15 @@ impl Default for ExecutionSandbox {
                 "nc".into(),
                 "ncat".into(),
                 "telnet".into(),
+                "sh".into(),
+                "bash".into(),
+                "zsh".into(),
+                "fish".into(),
+                "dash".into(),
+                "cmd".into(),
+                "powershell".into(),
+                "pwsh".into(),
+                "osascript".into(),
             ],
             bash_enabled: false,
         }
@@ -291,11 +300,17 @@ impl ExecutionSandbox {
     }
 
     /// Check whether a command is permanently forbidden.
+    /// Checks both the raw command name and the executable basename so
+    /// absolute paths like /bin/sh cannot bypass the denylist.
     pub fn is_command_dangerous(&self, command: &str) -> bool {
         let cmd_name = command.split_whitespace().next().unwrap_or(command);
+        let basename = std::path::Path::new(cmd_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(cmd_name);
         self.dangerous_command_denylist
             .iter()
-            .any(|c| c == cmd_name)
+            .any(|c| c == cmd_name || c == basename)
     }
 
     /// Check whether an environment variable name is in the allowlist.
@@ -913,5 +928,22 @@ mod tests {
         let result = sandbox.validate("rm file.txt", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("dangerous command denylist"));
+    }
+
+    #[test]
+    fn test_absolute_interpreter_path_detected_as_dangerous() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.is_command_dangerous("/bin/sh"));
+        assert!(sandbox.is_command_dangerous("/usr/bin/bash"));
+        assert!(sandbox.is_command_dangerous("/bin/zsh"));
+    }
+
+    #[test]
+    fn test_normal_commands_not_dangerous() {
+        let sandbox = make_enabled_sandbox();
+        assert!(!sandbox.is_command_dangerous("ls"));
+        assert!(!sandbox.is_command_dangerous("cat"));
+        assert!(!sandbox.is_command_dangerous("echo"));
+        assert!(!sandbox.is_command_dangerous("/bin/echo")); // echo not in denylist
     }
 }
