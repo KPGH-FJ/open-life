@@ -170,6 +170,9 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
     match s {
         "run.created" => AgentRunEventType::RunCreated,
         "context.assembled" => AgentRunEventType::ContextAssembled,
+        "agent_spec.selected" => AgentRunEventType::AgentSpecSelected,
+        "prompt_stack.assembled" => AgentRunEventType::PromptStackAssembled,
+        "context_governance.applied" => AgentRunEventType::ContextGovernanceApplied,
         "model.route_selected" => AgentRunEventType::ModelRouteSelected,
         "model.call_started" => AgentRunEventType::ModelCallStarted,
         "model.call_completed" => AgentRunEventType::ModelCallCompleted,
@@ -203,6 +206,7 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
+        "model.failed" => AgentRunEventType::ModelFailed,
         unknown => AgentRunEventType::Unknown(unknown.to_string()),
     }
 }
@@ -698,5 +702,102 @@ mod tests {
         assert!(
             matches!(events[1].event_type, AgentRunEventType::Unknown(ref s) if s == "plan.parallel_started")
         );
+    }
+
+    // ── P7 Stabilize: governance event payload safety ────────────────────
+
+    /// P7-3: Governance events (AgentSpecSelected, PromptStackAssembled,
+    /// ContextGovernanceApplied) must NOT contain raw prompt content,
+    /// raw memory snippets, or full LifeModel data.
+    #[test]
+    fn test_runtime_governance_event_excludes_raw_prompt() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "p7-governance-events";
+
+        // Simulate the three governance events written in the Chat path.
+        let spec_selected = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::AgentSpecSelected,
+            AgentEventActor::Runtime,
+            "AgentSpec main.default selected",
+            serde_json::json!({
+                "agent_spec_id": "main.default",
+                "role": "main",
+                "privacy_policy": "local_only",
+            }),
+        );
+        let prompt_stack_assembled = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::PromptStackAssembled,
+            AgentEventActor::Runtime,
+            "PromptStack assembled with 2 blocks from AgentSpec main.default",
+            serde_json::json!({
+                "agent_spec_id": "main.default",
+                "prompt_blocks": [
+                    {"id": "base_system", "version": "1.0.0"},
+                    {"id": "privacy_rule", "version": "1.0.0"},
+                ],
+            }),
+        );
+        let context_governance = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ContextGovernanceApplied,
+            AgentEventActor::Runtime,
+            "Context governance applied by AgentSpec main.default",
+            serde_json::json!({
+                "agent_spec_id": "main.default",
+                "context_included": ["session_summary", "lifemodel_summary"],
+                "context_excluded": ["memory"],
+                "privacy_policy": "local_only",
+            }),
+        );
+
+        store.append_event(&spec_selected).unwrap();
+        store.append_event(&prompt_stack_assembled).unwrap();
+        store.append_event(&context_governance).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 3);
+
+        // All three events must round-trip with correct types
+        assert_eq!(events[0].event_type, AgentRunEventType::AgentSpecSelected);
+        assert_eq!(
+            events[1].event_type,
+            AgentRunEventType::PromptStackAssembled
+        );
+        assert_eq!(
+            events[2].event_type,
+            AgentRunEventType::ContextGovernanceApplied
+        );
+
+        // Payload must NOT contain raw prompt content, raw memory, or full LifeModel.
+        for event in &events {
+            let payload_str = serde_json::to_string(&event.payload).unwrap();
+            assert!(
+                !payload_str.contains("raw memory hit"),
+                "governance event must not expose raw memory content"
+            );
+            assert!(
+                !payload_str.contains("prompt raw content"),
+                "governance event must not expose raw prompt content"
+            );
+            assert!(
+                !payload_str.contains("life_model.identity.name"),
+                "governance event must not expose full LifeModel data"
+            );
+            // prompt_blocks payload uses only id/version, no raw content
+            assert!(
+                !payload_str.contains("You are OpenLife"),
+                "PromptStack event must not contain raw system prompt text"
+            );
+        }
+
+        // context_excluded must show "memory" as a category label, not raw memory text
+        let governance_payload = &events[2].payload;
+        let excluded: Vec<String> = governance_payload
+            .get("context_excluded")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        assert!(excluded.contains(&"memory".to_string()));
     }
 }

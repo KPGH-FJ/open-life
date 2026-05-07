@@ -30,6 +30,7 @@ pub use action_executor::{
     ActionExecutorConfig, AgentActionRequest,
 };
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
+pub use agent_spec_store::AgentSpecStore;
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,
@@ -66,7 +67,6 @@ pub use sub_agent::{
     ReviewAgentOutput, ReviewIssue, ReviewVerdict, SubAgentExecutionOutcome, SubAgentResult,
     SubAgentRuntime,
 };
-pub use agent_spec_store::AgentSpecStore;
 pub use types::AgentSpecStoreError;
 pub use types::PlanOperationResult;
 pub use types::*;

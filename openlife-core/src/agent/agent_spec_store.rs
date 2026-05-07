@@ -1,6 +1,6 @@
-use crate::agent::types::{AgentSpec, AgentSpecStoreError};
 #[cfg(test)]
 use crate::agent::types::{AgentRoleKind, PrivacyPolicy};
+use crate::agent::types::{AgentSpec, AgentSpecStoreError};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::PathBuf;
@@ -71,15 +71,22 @@ impl AgentSpecStore {
             .map_err(|e| format!("invalid datetime: {}", e))
     }
 
-    fn row_to_spec(
-        row: &rusqlite::Row<'_>,
-    ) -> std::result::Result<AgentSpec, rusqlite::Error> {
+    fn row_to_spec(row: &rusqlite::Row<'_>) -> std::result::Result<AgentSpec, rusqlite::Error> {
         let spec_json: String = row.get(1)?;
         let active_int: i32 = row.get(2)?;
         let created_at_str: String = row.get(3)?;
         let updated_at_str: String = row.get(4)?;
 
-        let mut spec: AgentSpec = serde_json::from_str(&spec_json).unwrap_or_default();
+        let mut spec: AgentSpec = serde_json::from_str(&spec_json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                1,
+                rusqlite::types::Type::Text,
+                Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("corrupt spec_json for row: {}", e),
+                )),
+            )
+        })?;
         spec.active = active_int != 0;
         spec.created_at = Self::parse_dt(&created_at_str).unwrap_or_else(|_| chrono::Utc::now());
         spec.updated_at = Self::parse_dt(&updated_at_str).unwrap_or_else(|_| chrono::Utc::now());
@@ -87,7 +94,7 @@ impl AgentSpecStore {
     }
 
     pub fn ensure_default_main_spec(&self) -> Result<(), AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM agent_specs WHERE id = 'main.default'",
@@ -99,8 +106,8 @@ impl AgentSpecStore {
         if !exists {
             let spec = AgentSpec::default_main_spec();
             let now = spec.created_at.to_rfc3339();
-            let spec_json =
-                serde_json::to_string(&spec).map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
+            let spec_json = serde_json::to_string(&spec)
+                .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
             conn.execute(
                 "INSERT INTO agent_specs (id, spec_json, active, created_at, updated_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -112,7 +119,7 @@ impl AgentSpecStore {
     }
 
     pub fn create_spec(&self, spec: &AgentSpec) -> Result<(), AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM agent_specs WHERE id = ?1",
@@ -137,7 +144,7 @@ impl AgentSpecStore {
     }
 
     pub fn get_spec(&self, spec_id: &str) -> Result<Option<AgentSpec>, AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let mut stmt = conn
             .prepare("SELECT id, spec_json, active, created_at, updated_at FROM agent_specs WHERE id = ?1")
             .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
@@ -151,8 +158,11 @@ impl AgentSpecStore {
         )
     }
 
-    pub fn get_spec_optional(&self, spec_id: &str) -> Result<Option<AgentSpec>, AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+    pub fn get_spec_optional(
+        &self,
+        spec_id: &str,
+    ) -> Result<Option<AgentSpec>, AgentSpecStoreError> {
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let mut stmt = conn
             .prepare("SELECT id, spec_json, active, created_at, updated_at FROM agent_specs WHERE id = ?1")
             .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
@@ -162,7 +172,7 @@ impl AgentSpecStore {
     }
 
     pub fn list_specs(&self) -> Result<Vec<AgentSpec>, AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, spec_json, active, created_at, updated_at FROM agent_specs ORDER BY created_at DESC",
@@ -179,7 +189,7 @@ impl AgentSpecStore {
     }
 
     pub fn list_active_specs(&self) -> Result<Vec<AgentSpec>, AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, spec_json, active, created_at, updated_at FROM agent_specs WHERE active = 1 ORDER BY created_at DESC",
@@ -196,7 +206,7 @@ impl AgentSpecStore {
     }
 
     pub fn update_spec(&self, spec: &AgentSpec) -> Result<(), AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM agent_specs WHERE id = ?1",
@@ -220,7 +230,7 @@ impl AgentSpecStore {
     }
 
     pub fn set_active(&self, spec_id: &str, active: bool) -> Result<(), AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let exists: bool = conn
             .query_row(
                 "SELECT COUNT(*) > 0 FROM agent_specs WHERE id = ?1",
@@ -252,7 +262,7 @@ impl AgentSpecStore {
     /// direct query on the already-held connection, avoiding a deadlock from
     /// re-entering `get_spec()` which would lock the mutex again.
     pub fn set_default_main_spec(&self, spec_id: &str) -> Result<(), AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
 
         // ── Pre-check: load spec via direct query (no re-lock) ────────
         let mut stmt = conn
@@ -294,7 +304,8 @@ impl AgentSpecStore {
         })();
         match result {
             Ok(()) => {
-                conn.execute("COMMIT", []).map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
+                conn.execute("COMMIT", [])
+                    .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
                 Ok(())
             }
             Err(e) => {
@@ -305,7 +316,7 @@ impl AgentSpecStore {
     }
 
     pub fn get_default_spec(&self) -> Result<Option<AgentSpec>, AgentSpecStoreError> {
-        let conn = self.lock_conn().map_err(|e| AgentSpecStoreError::Store(e))?;
+        let conn = self.lock_conn().map_err(AgentSpecStoreError::Store)?;
         let mut stmt = conn
             .prepare(
                 "SELECT id, spec_json, active, created_at, updated_at FROM agent_specs
@@ -326,7 +337,9 @@ impl AgentSpecStore {
         explicit_spec_id: Option<&str>,
     ) -> Result<AgentSpec, AgentSpecStoreError> {
         if let Some(sid) = explicit_spec_id {
-            return self.get_spec(sid)?.ok_or_else(|| AgentSpecStoreError::NotFound(sid.to_string()));
+            return self
+                .get_spec(sid)?
+                .ok_or_else(|| AgentSpecStoreError::NotFound(sid.to_string()));
         }
         self.get_default_spec()?
             .ok_or_else(|| AgentSpecStoreError::Store("no active main AgentSpec found".to_string()))
@@ -341,7 +354,10 @@ mod tests {
     fn test_default_main_spec_is_bootstrapped() {
         let store = AgentSpecStore::new_in_memory().unwrap();
         let spec = store.get_default_spec().unwrap();
-        assert!(spec.is_some(), "default main spec should exist after bootstrap");
+        assert!(
+            spec.is_some(),
+            "default main spec should exist after bootstrap"
+        );
         let spec = spec.unwrap();
         assert_eq!(spec.id, "main.default");
         assert_eq!(spec.role, AgentRoleKind::Main);
@@ -368,23 +384,60 @@ mod tests {
     }
 
     #[test]
-    fn test_list_specs_returns_default() {
+    fn test_set_default_main_spec_is_atomic_on_error() {
         let store = AgentSpecStore::new_in_memory().unwrap();
-        let specs = store.list_specs().unwrap();
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].id, "main.default");
+        let _ = store.set_default_main_spec("nonexistent");
+        let default = store.get_default_spec().unwrap().unwrap();
+        assert_eq!(default.id, "main.default");
+        assert!(default.active);
+    }
+
+    // ── Phase 2: corrupted spec_json must not silently degrade to default ──
+
+    #[test]
+    fn test_corrupt_spec_json_returns_store_error() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+        // Directly insert a row with illegal JSON
+        {
+            let conn = store.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO agent_specs (id, spec_json, active, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    "corrupt.test",
+                    "not-valid-json{{{",
+                    1,
+                    "2026-01-01T00:00:00Z",
+                    "2026-01-01T00:00:00Z"
+                ],
+            )
+            .unwrap();
+        }
+
+        // get_spec should return Store error, not silently return default
+        let result = store.get_spec_optional("corrupt.test");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("corrupt spec_json"),
+            "should report corruption, not silently degrade, got: {}",
+            err_msg
+        );
+
+        // list_specs should also fail (propagates through row_to_spec)
+        let list_result = store.list_specs();
+        assert!(
+            list_result.is_err(),
+            "list_specs should fail on corrupt JSON"
+        );
     }
 
     #[test]
     fn test_create_and_get_custom_spec() {
         let store = AgentSpecStore::new_in_memory().unwrap();
-        let custom = AgentSpec::new(
-            AgentRoleKind::Planner,
-            "Test Planner",
-            "planning tasks",
-        )
-        .with_id("test.planner".to_string())
-        .with_read_only();
+        let custom = AgentSpec::new(AgentRoleKind::Planner, "Test Planner", "planning tasks")
+            .with_id("test.planner".to_string())
+            .with_read_only();
         store.create_spec(&custom).unwrap();
 
         let fetched = store.get_spec_optional("test.planner").unwrap();
@@ -399,14 +452,10 @@ mod tests {
         let store = AgentSpecStore::new_in_memory().unwrap();
 
         // Create a second main spec and activate it, deactivate main.default
-        let mut alt_spec = AgentSpec::new(
-            AgentRoleKind::Main,
-            "Alt Main",
-            "alternative",
-        )
-        .with_id("main.alt".to_string())
-        .with_lifemodel_access()
-        .with_memory_evidence();
+        let mut alt_spec = AgentSpec::new(AgentRoleKind::Main, "Alt Main", "alternative")
+            .with_id("main.alt".to_string())
+            .with_lifemodel_access()
+            .with_memory_evidence();
         alt_spec.active = true;
         store.create_spec(&alt_spec).unwrap();
 
@@ -508,7 +557,11 @@ mod tests {
             .into_iter()
             .filter(|s| s.active && s.role == AgentRoleKind::Main)
             .collect();
-        assert_eq!(active_mains.len(), 1, "only main.default should remain active");
+        assert_eq!(
+            active_mains.len(),
+            1,
+            "only main.default should remain active"
+        );
         assert_eq!(active_mains[0].id, "main.default");
     }
 
@@ -532,7 +585,11 @@ mod tests {
             .into_iter()
             .filter(|s| s.active && s.role == AgentRoleKind::Main)
             .collect();
-        assert_eq!(active_mains.len(), 1, "only main.default should remain active");
+        assert_eq!(
+            active_mains.len(),
+            1,
+            "only main.default should remain active"
+        );
     }
 
     #[test]
@@ -557,17 +614,5 @@ mod tests {
         // main.default should be deactivated
         let old = store.get_spec_optional("main.default").unwrap().unwrap();
         assert!(!old.active);
-    }
-
-    #[test]
-    fn test_set_default_main_spec_is_atomic_on_error() {
-        // Verify that when a transaction error occurs (e.g. deactivating
-        // another main spec that doesn't exist etc), nothing is partially
-        // modified.  The simplest proof: a missing spec = no mutation.
-        let store = AgentSpecStore::new_in_memory().unwrap();
-        let _ = store.set_default_main_spec("nonexistent");
-        let default = store.get_default_spec().unwrap().unwrap();
-        assert_eq!(default.id, "main.default");
-        assert!(default.active);
     }
 }

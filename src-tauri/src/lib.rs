@@ -1249,6 +1249,22 @@ async fn send_message_with_agent_loop(
         ..Default::default()
     };
 
+    // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
+    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
+        &state.agent_spec_store,
+        None,
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            log::error!("[AgentSpec] non-stream resolution failed: {}", e);
+            return Err(format!("AgentSpec resolution failed: {}", e));
+        }
+    };
+    // AgentSpecSelected / PromptStackAssembled / ContextGovernanceApplied
+    // events are recorded by AgentLoop::run_loop_core using the real run id.
+
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
+
     let network_policy = cfg.system.network_policy.clone();
 
     let loop_result = {
@@ -1293,6 +1309,9 @@ async fn send_message_with_agent_loop(
                 &tools_prompt,
                 None,
                 privacy_engine.clone(),
+                agent_spec.privacy_policy,
+                &agent_spec,
+                &prompt_registry,
                 &action_ctx,
             )
             .await
@@ -1333,6 +1352,7 @@ async fn send_message_with_agent_loop(
                 state.agent_run_store.as_ref(),
                 state.agent_run_event_store.as_ref(),
                 &e.to_string(),
+                agent_spec.privacy_policy,
             )
             .await?;
 
@@ -1443,15 +1463,16 @@ fn emit_stream_error(
     );
 }
 
-async fn generate_non_stream_fallback(
+async fn generate_non_stream_fallback_governed(
     scheduler: &InferenceScheduler,
     messages: Vec<ChatMessage>,
     life_model: &LifeModel,
     tools_prompt: &str,
+    privacy_policy: openlife_core::agent::types::PrivacyPolicy,
 ) -> Result<String, String> {
     timeout(
         Duration::from_secs(NON_STREAM_FALLBACK_TIMEOUT_SECS),
-        scheduler.generate(messages, life_model, Some(tools_prompt)),
+        scheduler.generate_governed(messages, life_model, Some(tools_prompt), privacy_policy),
     )
     .await
     .map_err(|_| {
@@ -1479,6 +1500,7 @@ async fn handle_agent_loop_fallback(
     >,
     event_store: Option<&std::sync::Arc<openlife_core::agent::event_store::AgentRunEventStore>>,
     original_error: &str,
+    privacy_policy: openlife_core::agent::types::PrivacyPolicy,
 ) -> Result<(String, openlife_core::agent::AgentRun), String> {
     // Create AgentRun first so fallback.started has a real run_id
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
@@ -1494,15 +1516,20 @@ async fn handle_agent_loop_fallback(
         );
         let _ = es.append_event(&ev);
     }
-    let fallback_reply =
-        generate_non_stream_fallback(scheduler, messages, life_model, tools_prompt)
-            .await
-            .map_err(|fallback_err| {
-                format!(
-                    "AgentLoop failed: {}. Fallback also failed: {}",
-                    original_error, fallback_err
-                )
-            })?;
+    let fallback_reply = generate_non_stream_fallback_governed(
+        scheduler,
+        messages,
+        life_model,
+        tools_prompt,
+        privacy_policy,
+    )
+    .await
+    .map_err(|fallback_err| {
+        format!(
+            "AgentLoop failed: {}. Fallback also failed: {}",
+            original_error, fallback_err
+        )
+    })?;
 
     agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
     agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
@@ -1706,6 +1733,26 @@ async fn start_stream_message_with_agent_loop(
         None
     };
 
+    // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
+    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
+        &state.agent_spec_store,
+        None,
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            log::error!("[AgentSpec] AgentLoop stream resolution failed: {}", e);
+            emit_stream_error(
+                &app_handle,
+                &session_id,
+                &placeholder_run_id,
+                format!("AgentSpec resolution failed: {}", e),
+            );
+            return Err(format!("AgentSpec resolution failed: {}", e));
+        }
+    };
+    let agent_spec_id = agent_spec.id.clone();
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
+
     // Run AgentLoop
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
@@ -1765,6 +1812,7 @@ async fn start_stream_message_with_agent_loop(
         serde_json::json!({
             "session_id": &session_id,
             "run_id": placeholder_run_id,
+            "agent_spec_id": agent_spec_id,
             "reasoning_trace": ReasoningTrace::default(),
             "tool_calls": Vec::<ToolCallResult>::new(),
         }),
@@ -1812,6 +1860,9 @@ async fn start_stream_message_with_agent_loop(
                 &tools_prompt,
                 None,
                 privacy_engine.clone(),
+                agent_spec.privacy_policy,
+                &agent_spec,
+                &prompt_registry,
                 &action_ctx,
                 callback,
             )
@@ -1839,6 +1890,7 @@ async fn start_stream_message_with_agent_loop(
                 state.agent_run_store.as_ref(),
                 state.agent_run_event_store.as_ref(),
                 &e.to_string(),
+                agent_spec.privacy_policy,
             )
             .await
             {
@@ -2162,6 +2214,53 @@ async fn start_stream_message(
         None
     };
 
+    // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
+    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
+        &state.agent_spec_store,
+        None,
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            log::error!("[AgentSpec] Chat resolution failed: {}", e);
+            emit_stream_error(
+                &app_handle,
+                &session_id,
+                &agent_run.id,
+                format!("AgentSpec 解析失败：{}", e),
+            );
+            agent_run.fail(openlife_core::agent::AgentRunError {
+                message: format!("AgentSpec resolution failed: {}", e),
+                phase: "preprocess".to_string(),
+                recoverable: false,
+            });
+            if let Some(ref store_arc) = state.agent_run_store {
+                let store = store_arc.lock().await;
+                if let Err(err) = store.update_run(&agent_run) {
+                    log::warn!("[AgentRun] update_run failed: {}", err);
+                }
+            }
+            return Err(e.to_string());
+        }
+    };
+
+    // Record AgentSpecSelected event — fail-closed governance metadata
+    if let Some(ref es) = state.agent_run_event_store {
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &agent_run.id,
+            openlife_core::agent::AgentRunEventType::AgentSpecSelected,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!(
+                "AgentSpec {} selected for governed execution",
+                agent_spec.id
+            ),
+            serde_json::json!({
+                "agent_spec_id": agent_spec.id,
+                "role": agent_spec.role.to_string(),
+                "privacy_policy": agent_spec.privacy_policy.to_string(),
+            }),
+        ));
+    }
+
     let scheduler_clone = state.scheduler.lock().await.clone();
     let model_route = scheduler_clone
         .preview_chat_route(Some(&tools_prompt))
@@ -2170,6 +2269,8 @@ async fn start_stream_message(
     let agent_runtime =
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler_clone.clone(), &cfg);
     drop(cfg);
+
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
 
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Conversation,
@@ -2180,42 +2281,118 @@ async fn start_stream_message(
             .unwrap_or_default(),
         messages: desensitized_messages.clone(),
         layer,
+        agent_spec_id: Some(agent_spec.id.clone()),
         ..Default::default()
     };
 
     let mut reasoning_trace = ReasoningTrace::default();
     let mut messages_with_reasoning = desensitized_messages.clone();
 
-    let _actual_layer = if layer == Layer::L3 {
-        let runtime_output = agent_runtime
-            .execute_task(
-                &task,
-                &life_model,
-                &tools_prompt,
-                None,
-                vec![],
-                privacy_engine.clone(),
-            )
-            .await;
+    // All layers go through AgentSpec-governed runtime.
+    let runtime_output = agent_runtime
+        .execute_task_with_spec(
+            &task,
+            &life_model,
+            &tools_prompt,
+            None,
+            vec![],
+            privacy_engine.clone(),
+            &agent_spec,
+            &prompt_registry,
+        )
+        .await;
 
-        match runtime_output {
-            Ok(output) => {
-                messages_with_reasoning = output.final_messages;
-                reasoning_trace = output.reasoning_trace;
-                agent_run.reasoning_strategy = Some("layered".to_string());
-                agent_run.reasoning_trace = Some(reasoning_trace.clone());
-                Layer::L3
+    let _actual_layer = match runtime_output {
+        Ok(output) => {
+            messages_with_reasoning = output.final_messages;
+            reasoning_trace = output.reasoning_trace;
+            // Record governance metadata as AgentRunEvents
+            if let Some(ref es) = state.agent_run_event_store {
+                // PromptStackAssembled — block IDs/versions only, no raw prompt content
+                let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                    &agent_run.id,
+                    openlife_core::agent::AgentRunEventType::PromptStackAssembled,
+                    openlife_core::agent::AgentEventActor::Runtime,
+                    format!(
+                        "PromptStack assembled with {} blocks from AgentSpec {}",
+                        output.prompt_block_trace.len(),
+                        agent_spec.id
+                    ),
+                    serde_json::json!({
+                        "agent_spec_id": agent_spec.id,
+                        "prompt_blocks": output.prompt_block_trace,
+                    }),
+                ));
+                // ContextGovernanceApplied — included/excluded categories only, no raw data
+                let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                    &agent_run.id,
+                    openlife_core::agent::AgentRunEventType::ContextGovernanceApplied,
+                    openlife_core::agent::AgentEventActor::Runtime,
+                    format!("Context governance applied by AgentSpec {}", agent_spec.id),
+                    serde_json::json!({
+                        "agent_spec_id": agent_spec.id,
+                        "context_included": output.governed_context_summary.as_ref()
+                            .map(|g| &g.included).unwrap_or(&vec![]),
+                        "context_excluded": output.governed_context_summary.as_ref()
+                            .map(|g| &g.excluded).unwrap_or(&vec![]),
+                        "privacy_policy": agent_spec.privacy_policy.to_string(),
+                    }),
+                ));
             }
-            Err(e) => {
-                log::warn!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
+            if layer == Layer::L3 {
+                agent_run.reasoning_strategy = Some("layered".to_string());
+            } else {
                 agent_run.reasoning_strategy = Some("direct".to_string());
+            }
+            agent_run.reasoning_trace = Some(reasoning_trace.clone());
+            layer
+        }
+        Err(e) => {
+            if e.is_governance_failure() {
+                log::error!(
+                    "[AgentRuntime] Governance failure (prompt stack / context policy): {}",
+                    e
+                );
+                emit_stream_error(
+                    &app_handle,
+                    &session_id,
+                    &agent_run.id,
+                    format!("AgentSpec governance failure: {}", e),
+                );
+                if let Some(ref es) = state.agent_run_event_store {
+                    let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                        &agent_run.id,
+                        openlife_core::agent::AgentRunEventType::ModelFailed,
+                        openlife_core::agent::AgentEventActor::Runtime,
+                        format!("Governance failure: {}", e),
+                        serde_json::json!({
+                            "agent_spec_id": agent_spec.id,
+                            "error": e.to_string(),
+                        }),
+                    ));
+                }
+                agent_run.fail(openlife_core::agent::AgentRunError {
+                    message: format!("Governance failure: {}", e),
+                    phase: "governance".to_string(),
+                    recoverable: false,
+                });
+                if let Some(ref store_arc) = state.agent_run_store {
+                    let store = store_arc.lock().await;
+                    if let Err(err) = store.update_run(&agent_run) {
+                        log::warn!("[AgentRun] update_run failed: {}", err);
+                    }
+                }
+                return Err(format!("Governance failure: {}", e));
+            }
+            log::warn!("[AgentRuntime] Reasoning failed: {}, falling back to L2", e);
+            agent_run.reasoning_strategy = Some("direct".to_string());
+            if layer == Layer::L3 {
                 let lr = state.layer_router.lock().await;
                 lr.fallback(Layer::L3).unwrap_or(Layer::L2)
+            } else {
+                layer
             }
         }
-    } else {
-        agent_run.reasoning_strategy = Some("direct".to_string());
-        layer
     };
 
     let _ = app_handle.emit(
@@ -2223,6 +2400,7 @@ async fn start_stream_message(
         serde_json::json!({
             "session_id": &session_id,
             "run_id": agent_run.id,
+            "agent_spec_id": agent_spec.id,
             "reasoning_trace": reasoning_trace.clone(),
             "tool_calls": Vec::<ToolCallResult>::new(),
         }),
@@ -2245,10 +2423,11 @@ async fn start_stream_message(
     if full_reply.is_empty() {
         match timeout(
             Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
-            scheduler_clone.generate_stream(
+            scheduler_clone.generate_stream_governed(
                 messages_with_reasoning.clone(),
                 &life_model,
                 Some(&tools_prompt),
+                agent_spec.privacy_policy,
             ),
         )
         .await
@@ -2266,11 +2445,12 @@ async fn start_stream_message(
                     Err(_) => {
                         let stream_error =
                             format!("超过 {} 秒没有收到模型输出", STREAM_CHUNK_TIMEOUT_SECS);
-                        match generate_non_stream_fallback(
+                        match generate_non_stream_fallback_governed(
                             &scheduler_clone,
                             messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
+                            agent_spec.privacy_policy,
                         )
                         .await
                         {
@@ -2343,11 +2523,12 @@ async fn start_stream_message(
                     }
                     Err(e) => {
                         let stream_error = e.to_string();
-                        match generate_non_stream_fallback(
+                        match generate_non_stream_fallback_governed(
                             &scheduler_clone,
                             messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
+                            agent_spec.privacy_policy,
                         )
                         .await
                         {
@@ -2405,11 +2586,12 @@ async fn start_stream_message(
             },
             Err(stream_error) => {
                 let stream_error = stream_error.to_string();
-                match generate_non_stream_fallback(
+                match generate_non_stream_fallback_governed(
                     &scheduler_clone,
                     messages_with_reasoning.clone(),
                     &life_model,
                     &tools_prompt,
+                    agent_spec.privacy_policy,
                 )
                 .await
                 {
@@ -2452,11 +2634,12 @@ async fn start_stream_message(
         }
         if full_reply.trim().is_empty() {
             let stream_error = "流式响应已结束，但没有收到可显示内容".to_string();
-            match generate_non_stream_fallback(
+            match generate_non_stream_fallback_governed(
                 &scheduler_clone,
                 messages_with_reasoning.clone(),
                 &life_model,
                 &tools_prompt,
+                agent_spec.privacy_policy,
             )
             .await
             {

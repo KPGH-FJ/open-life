@@ -26,6 +26,9 @@ pub struct AgentExecutionDeps {
     pub life_model: LifeModel,
     pub tools_prompt: String,
     pub privacy_engine: PrivacyEngine,
+    pub privacy_policy: crate::agent::types::PrivacyPolicy,
+    pub agent_spec: crate::agent::types::AgentSpec,
+    pub prompt_registry: crate::agent::prompt_stack::PromptBlockRegistry,
     pub scheduler: InferenceScheduler,
     pub app_config: AppConfig,
     pub agent_loop_config: AgentLoopConfig,
@@ -105,6 +108,9 @@ impl AgentExecutionFacade {
                 &deps.tools_prompt,
                 None,
                 deps.privacy_engine.clone(),
+                deps.privacy_policy,
+                &deps.agent_spec,
+                &deps.prompt_registry,
                 action_ctx,
             )
             .await
@@ -134,6 +140,9 @@ impl AgentExecutionFacade {
                 &deps.tools_prompt,
                 None,
                 deps.privacy_engine.clone(),
+                deps.privacy_policy,
+                &deps.agent_spec,
+                &deps.prompt_registry,
                 action_ctx,
                 callback,
             )
@@ -163,6 +172,9 @@ impl AgentExecutionFacade {
                 &deps.tools_prompt,
                 None,
                 deps.privacy_engine.clone(),
+                deps.privacy_policy,
+                &deps.agent_spec,
+                &deps.prompt_registry,
                 action_ctx,
             )
             .await
@@ -190,6 +202,9 @@ impl AgentExecutionFacade {
                 &deps.tools_prompt,
                 None,
                 deps.privacy_engine.clone(),
+                deps.privacy_policy,
+                &deps.agent_spec,
+                &deps.prompt_registry,
                 action_ctx,
             )
             .await

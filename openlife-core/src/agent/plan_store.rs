@@ -64,10 +64,7 @@ impl PlanStore {
         )?;
         // Migration: add agent_spec_id column if missing (pre-existing DBs).
         // Only ignore "duplicate column name" errors; propagate other failures.
-        if let Err(e) = conn.execute(
-            "ALTER TABLE agent_plans ADD COLUMN agent_spec_id TEXT",
-            [],
-        ) {
+        if let Err(e) = conn.execute("ALTER TABLE agent_plans ADD COLUMN agent_spec_id TEXT", []) {
             if !e.to_string().contains("duplicate column name") {
                 return Err(anyhow::anyhow!(
                     "failed to migrate agent_plans table: {}",
@@ -807,8 +804,7 @@ mod tests {
 
     #[test]
     fn test_agent_plan_agent_spec_id_round_trips_through_serde() {
-        let plan = create_test_plan("plan with spec", RiskLevel::Low)
-            .clone();
+        let plan = create_test_plan("plan with spec", RiskLevel::Low).clone();
         let mut plan = plan;
         plan.agent_spec_id = Some("main.alt".to_string());
 
@@ -823,8 +819,7 @@ mod tests {
     #[test]
     fn test_agent_plan_agent_spec_id_round_trips_through_store() {
         let store = PlanStore::new_in_memory().unwrap();
-        let plan = AgentPlan::new("plan with spec", RiskLevel::Low)
-            .with_agent_spec("main.custom");
+        let plan = AgentPlan::new("plan with spec", RiskLevel::Low).with_agent_spec("main.custom");
         store.create_plan(&plan).unwrap();
 
         let fetched = store.get_plan(&plan.id).unwrap().unwrap();

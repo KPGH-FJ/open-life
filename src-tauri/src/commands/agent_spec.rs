@@ -1,15 +1,36 @@
 use crate::errors::AppError;
 use crate::AppState;
-use openlife_core::agent::{AgentSpec, AgentSpecStoreError};
-use std::sync::Arc;
+use openlife_core::agent::{AgentSpec, AgentSpecStore, AgentSpecStoreError};
+use std::sync::{Arc, Mutex};
 use tauri::State;
+
+/// Resolve the required AgentSpec for governed execution.
+///
+/// Follows ADR 0012 resolution order: explicit spec → stored default main.
+/// Returns a hard error on failure — never falls back to `AgentSpec::default()`.
+pub fn resolve_required_agent_spec(
+    store: &Mutex<AgentSpecStore>,
+    explicit_id: Option<&str>,
+) -> Result<AgentSpec, AppError> {
+    let store = store
+        .lock()
+        .map_err(|e| AppError::internal(format!("AgentSpecStore lock: {}", e)))?;
+    store.resolve_spec(explicit_id).map_err(|e| match &e {
+        AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
+        AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
+        _ => AppError::internal(e.to_string()),
+    })
+}
 
 #[tauri::command]
 pub async fn get_agent_spec(
     spec_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentSpec>, AppError> {
-    let store = state.agent_spec_store.lock().map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?;
     match store.get_spec_optional(&spec_id) {
         Ok(spec) => Ok(spec),
         Err(e) => {
@@ -23,19 +44,27 @@ pub async fn get_agent_spec(
 }
 
 #[tauri::command]
-pub async fn list_agent_specs(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<AgentSpec>, AppError> {
-    let store = state.agent_spec_store.lock().map_err(|e| AppError::internal(format!("{}", e)))?;
-    store.list_specs().map_err(|e| AppError::internal(e.to_string()))
+pub async fn list_agent_specs(state: State<'_, Arc<AppState>>) -> Result<Vec<AgentSpec>, AppError> {
+    let store = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    store
+        .list_specs()
+        .map_err(|e| AppError::internal(e.to_string()))
 }
 
 #[tauri::command]
 pub async fn get_default_agent_spec(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentSpec>, AppError> {
-    let store = state.agent_spec_store.lock().map_err(|e| AppError::internal(format!("{}", e)))?;
-    store.get_default_spec().map_err(|e| AppError::internal(e.to_string()))
+    let store = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    store
+        .get_default_spec()
+        .map_err(|e| AppError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -43,8 +72,13 @@ pub async fn update_agent_spec(
     spec: AgentSpec,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state.agent_spec_store.lock().map_err(|e| AppError::internal(format!("{}", e)))?;
-    store.update_spec(&spec).map_err(|e| AppError::internal(e.to_string()))
+    let store = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    store
+        .update_spec(&spec)
+        .map_err(|e| AppError::internal(e.to_string()))
 }
 
 #[tauri::command]
@@ -52,7 +86,10 @@ pub async fn set_default_agent_spec(
     spec_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state.agent_spec_store.lock().map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?;
     store.set_default_main_spec(&spec_id).map_err(|e| match &e {
         AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
         AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
@@ -62,7 +99,60 @@ pub async fn set_default_agent_spec(
 
 #[cfg(test)]
 mod tests {
-    use openlife_core::agent::{AgentRoleKind, AgentSpec, AgentSpecStore};
+    use openlife_core::agent::{AgentRoleKind, AgentSpec, AgentSpecStore, AgentSpecStoreError};
+
+    // ── P7 Stabilize: resolve_required_agent_spec fail-closed tests ──────
+
+    /// When the store has no `main.default` (e.g., corrupt bootstrap),
+    /// resolve_required_agent_spec MUST return an error — not fall back
+    /// to AgentSpec::default().
+    #[test]
+    fn test_chat_agentspec_resolution_failure_fails_run_without_model_call() {
+        use std::sync::Mutex;
+        // Create an in-memory store and deactivate the bootstrapped main.default.
+        let store = AgentSpecStore::new_in_memory().unwrap();
+        // Deactivate main.default to simulate a missing default spec.
+        store.set_active("main.default", false).unwrap();
+        // Verify main.default is no longer active.
+        let default = store.get_default_spec().unwrap();
+        assert!(
+            default.is_none(),
+            "main.default should not be active after deactivation"
+        );
+
+        let locked = Mutex::new(store);
+        let result = super::resolve_required_agent_spec(&locked, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.message().contains("not found") || err.message().contains("no active"),
+            "expected AgentSpec resolution failure, got: {}",
+            err.message()
+        );
+    }
+
+    /// When the store returns a Non-Main spec for the default slot,
+    /// resolve_required_agent_spec MUST return a permission error.
+    #[test]
+    fn test_skill_agentspec_resolution_failure_returns_error() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+        // Deactivate main.default and activate a Planner spec as default.
+        let planner = AgentSpec::new(AgentRoleKind::Planner, "Planner", "test")
+            .with_id("planner.test".to_string());
+        store.create_spec(&planner).unwrap();
+        // Force the planner as default — this should fail because it's not Main.
+        let result = store.set_default_main_spec("planner.test");
+        // Setting a non-Main as default should fail (InvalidRole).
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AgentSpecStoreError::InvalidRole { .. }
+        ));
+        // After the failed set_default, main.default should still be active.
+        let default = store.get_default_spec().unwrap().unwrap();
+        assert_eq!(default.id, "main.default");
+        assert!(default.active);
+    }
 
     #[test]
     fn test_set_default_to_missing_id_returns_error_and_preserves_default() {

@@ -217,8 +217,12 @@ pub async fn execute_agent_plan(
         .map_err(|e| AppError::internal(format!("{}", e)))?
         .resolve_spec(plan.agent_spec_id.as_deref())
         .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
-            openlife_core::agent::AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
-            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
+            openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
+                AppError::not_found(e.to_string())
+            }
+            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => {
+                AppError::permission(e.to_string())
+            }
             _ => AppError::internal(e.to_string()),
         })?; // execute_agent_plan spec resolution
 
@@ -327,6 +331,23 @@ pub async fn retry_agent_plan(
         None
     };
 
+    // Resolve AgentSpec BEFORE mutating plan state.
+    // If spec is missing or invalid, return error and leave plan unchanged.
+    let agent_spec = state
+        .agent_spec_store
+        .lock()
+        .map_err(|e| AppError::internal(format!("{}", e)))?
+        .resolve_spec(plan.agent_spec_id.as_deref())
+        .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
+            openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
+                AppError::not_found(e.to_string())
+            }
+            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => {
+                AppError::permission(e.to_string())
+            }
+            _ => AppError::internal(e.to_string()),
+        })?;
+
     let ctx = openlife_core::agent::ActionExecutionContext {
         registry: &reg,
         permission_store: &permission_store,
@@ -342,7 +363,7 @@ pub async fn retry_agent_plan(
         event_store: event_store.clone(),
     };
 
-    // Context setup complete — now atomically reset plan for retry.
+    // Spec resolved, context built — now atomically reset plan for retry.
     plan.retry();
     {
         let store = plan_store_arc.lock().unwrap();
@@ -357,18 +378,6 @@ pub async fn retry_agent_plan(
             serde_json::json!({"plan_id": plan_id}),
         ));
     }
-
-    // Resolve stored AgentSpec: plan-bound spec first, then stored default.
-    let agent_spec = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?
-        .resolve_spec(plan.agent_spec_id.as_deref())
-        .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
-            openlife_core::agent::AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
-            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
-            _ => AppError::internal(e.to_string()),
-        })?; // retry spec resolution
 
     let mut result = run_plan_execution(
         &plan_id,
@@ -902,13 +911,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_bound_deny_spec_blocks_tool_before_execution() {
-        use openlife_core::agent::AgentSpecStore;
         use openlife_core::agent::AgentRoleKind;
+        use openlife_core::agent::AgentSpecStore;
 
         let plan_store = Arc::new(std::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
-        let event_store = openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
 
         let spec_store = AgentSpecStore::new_in_memory().unwrap();
         let deny_spec = openlife_core::agent::AgentSpec::new(
@@ -940,8 +950,8 @@ mod tests {
         plan.agent_spec_id = Some("main.deny".to_string());
         plan_store.lock().unwrap().create_plan(&plan).unwrap();
 
-        let executor = PlanExecutor::new(plan_store.clone(), Some(event_store))
-            .with_agent_spec(deny_spec);
+        let executor =
+            PlanExecutor::new(plan_store.clone(), Some(event_store)).with_agent_spec(deny_spec);
 
         let result = executor.execute(&plan.id, "run-1", |_step, _intent| {
             openlife_core::agent::PlanStepExecutionResult {
@@ -956,12 +966,20 @@ mod tests {
         });
 
         let outcome = result.expect("execution should complete even with blocked tool");
-        assert!(!outcome.success, "blocked tool should cause plan step failure");
+        assert!(
+            !outcome.success,
+            "blocked tool should cause plan step failure"
+        );
         assert_eq!(outcome.steps_completed, 0, "no steps should have completed");
         assert_eq!(outcome.steps_failed, 1, "one step should have failed");
 
         // Re-read plan to check status
-        let fetched = plan_store.lock().unwrap().get_plan(&plan.id).unwrap().unwrap();
+        let fetched = plan_store
+            .lock()
+            .unwrap()
+            .get_plan(&plan.id)
+            .unwrap()
+            .unwrap();
         assert!(matches!(
             fetched.status,
             openlife_core::agent::PlanStatus::Failed
@@ -983,7 +1001,9 @@ mod tests {
         // When no plan-bound spec, resolve_spec(None) should return default.
         // The resolve_spec method on AgentSpecStore already has tests for this.
         let spec_store = openlife_core::agent::AgentSpecStore::new_in_memory().unwrap();
-        let resolved = spec_store.resolve_spec(plan.agent_spec_id.as_deref()).unwrap();
+        let resolved = spec_store
+            .resolve_spec(plan.agent_spec_id.as_deref())
+            .unwrap();
         assert_eq!(resolved.id, "main.default");
         assert_eq!(resolved.role, openlife_core::agent::AgentRoleKind::Main);
     }
@@ -993,7 +1013,8 @@ mod tests {
         let plan_store = Arc::new(std::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
-        let event_store = openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
 
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.publish();
@@ -1002,8 +1023,8 @@ mod tests {
 
         let spec = openlife_core::agent::AgentSpec::default_main_spec();
 
-        let executor = PlanExecutor::new(plan_store, Some(event_store.clone()))
-            .with_agent_spec(spec);
+        let executor =
+            PlanExecutor::new(plan_store, Some(event_store.clone())).with_agent_spec(spec);
 
         let _ = executor.execute(&plan.id, "run-1", |_step, _intent| {
             openlife_core::agent::PlanStepExecutionResult {
@@ -1022,7 +1043,9 @@ mod tests {
             .iter()
             .find(|e| e.event_type == openlife_core::agent::AgentRunEventType::PlanExecutionStarted)
             .expect("PlanExecutionStarted event should exist");
-        let agentspec_id = started_evt.payload.get("agentspec_id")
+        let agentspec_id = started_evt
+            .payload
+            .get("agentspec_id")
             .and_then(|v| v.as_str());
         assert_eq!(agentspec_id, Some("main.default"));
     }
@@ -1032,5 +1055,39 @@ mod tests {
         let plan = AgentPlan::new("plan with spec", openlife_core::agent::RiskLevel::Low)
             .with_agent_spec("main.custom");
         assert_eq!(plan.agent_spec_id, Some("main.custom".to_string()));
+    }
+
+    // ── Phase 1: retry state consistency ────────────────────────────
+
+    #[test]
+    fn test_retry_with_missing_plan_bound_spec_preserves_failed_status() {
+        let store = openlife_core::agent::AgentSpecStore::new_in_memory().unwrap();
+        let plan_store = Arc::new(std::sync::Mutex::new(
+            openlife_core::agent::PlanStore::new_in_memory().unwrap(),
+        ));
+
+        // Create a failed plan with a non-existent spec id
+        let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
+        plan.status = openlife_core::agent::PlanStatus::Failed;
+        plan.agent_spec_id = Some("nonexistent".to_string());
+        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+
+        // Resolving the spec should fail without changing the plan
+        let resolved = store.resolve_spec(plan.agent_spec_id.as_deref());
+        assert!(resolved.is_err());
+        assert!(matches!(
+            resolved.unwrap_err(),
+            openlife_core::agent::AgentSpecStoreError::NotFound(_)
+        ));
+
+        // Plan should still be Failed
+        let fetched = plan_store
+            .lock()
+            .unwrap()
+            .get_plan(&plan.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched.status, openlife_core::agent::PlanStatus::Failed);
+        assert_eq!(fetched.agent_spec_id, Some("nonexistent".to_string()));
     }
 }

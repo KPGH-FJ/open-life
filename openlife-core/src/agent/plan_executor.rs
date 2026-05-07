@@ -456,8 +456,13 @@ impl PlanExecutor {
         }
 
         // Review gate for medium/high/critical plans.
-        let default_spec = AgentSpec::default();
-        let review_spec = self.agent_spec.as_ref().unwrap_or(&default_spec);
+        // Must use stored AgentSpec — no default() fallback.
+        let review_spec = self.agent_spec.as_ref().ok_or_else(|| {
+            PlanExecutionError::StoreError(
+                "PlanExecutor used without AgentSpec; call with_agent_spec() before review_gate"
+                    .to_string(),
+            )
+        })?;
         let review = review_gate.review(&plan, &outcome, review_spec)?;
 
         match self.review_execution(plan_id, run_id, &review) {
@@ -1128,7 +1133,8 @@ mod tests {
         let plan_id = plan.id.clone();
         ps.lock().unwrap().create_plan(&plan).unwrap();
 
-        let executor = PlanExecutor::new(ps.clone(), Some(es.clone()));
+        let executor = PlanExecutor::new(ps.clone(), Some(es.clone()))
+            .with_agent_spec(AgentSpec::default_main_spec());
         let gate = DefaultPlanReviewGate;
 
         // execute_with_review on medium-risk plan: review gate runs, approves.
@@ -1184,7 +1190,8 @@ mod tests {
         let plan_id = plan.id.clone();
         ps.lock().unwrap().create_plan(&plan).unwrap();
 
-        let executor = PlanExecutor::new(ps.clone(), Some(es.clone()));
+        let executor = PlanExecutor::new(ps.clone(), Some(es.clone()))
+            .with_agent_spec(AgentSpec::default_main_spec());
 
         // Custom review gate that always returns critical failure.
         struct CriticalGate;
@@ -1628,7 +1635,10 @@ mod tests {
             .expect("PlanExecutionStarted event should exist");
 
         assert_eq!(
-            start_event.payload.get("agentspec_id").and_then(|v| v.as_str()),
+            start_event
+                .payload
+                .get("agentspec_id")
+                .and_then(|v| v.as_str()),
             Some("main.default"),
             "PlanExecutionStarted should include agentspec_id"
         );
@@ -1666,7 +1676,10 @@ mod tests {
             .expect("ToolCallBlocked event should exist");
 
         assert_eq!(
-            blocked_event.payload.get("agentspec_id").and_then(|v| v.as_str()),
+            blocked_event
+                .payload
+                .get("agentspec_id")
+                .and_then(|v| v.as_str()),
             Some(spec_id.as_str()),
             "ToolCallBlocked event should include agentspec_id"
         );

@@ -9,6 +9,9 @@ use uuid::Uuid;
 pub enum AgentRunEventType {
     RunCreated,
     ContextAssembled,
+    AgentSpecSelected,
+    PromptStackAssembled,
+    ContextGovernanceApplied,
     ModelRouteSelected,
     ModelCallStarted,
     ModelCallCompleted,
@@ -25,6 +28,7 @@ pub enum AgentRunEventType {
     JsonRepairCompleted,
     RunCompleted,
     RunFailed,
+    ModelFailed,
     PlanCreated,
     PlanConfirmationRequested,
     PlanConfirmationResolved,
@@ -52,6 +56,11 @@ impl std::fmt::Display for AgentRunEventType {
         match self {
             AgentRunEventType::RunCreated => write!(f, "run.created"),
             AgentRunEventType::ContextAssembled => write!(f, "context.assembled"),
+            AgentRunEventType::AgentSpecSelected => write!(f, "agent_spec.selected"),
+            AgentRunEventType::PromptStackAssembled => write!(f, "prompt_stack.assembled"),
+            AgentRunEventType::ContextGovernanceApplied => {
+                write!(f, "context_governance.applied")
+            }
             AgentRunEventType::ModelRouteSelected => write!(f, "model.route_selected"),
             AgentRunEventType::ModelCallStarted => write!(f, "model.call_started"),
             AgentRunEventType::ModelCallCompleted => write!(f, "model.call_completed"),
@@ -68,6 +77,7 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::JsonRepairCompleted => write!(f, "json_repair.completed"),
             AgentRunEventType::RunCompleted => write!(f, "run.completed"),
             AgentRunEventType::RunFailed => write!(f, "run.failed"),
+            AgentRunEventType::ModelFailed => write!(f, "model.failed"),
             AgentRunEventType::PlanCreated => write!(f, "plan.created"),
             AgentRunEventType::PlanConfirmationRequested => {
                 write!(f, "plan.confirmation_requested")
@@ -114,6 +124,9 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
         Ok(match raw.as_str() {
             "run.created" => AgentRunEventType::RunCreated,
             "context.assembled" => AgentRunEventType::ContextAssembled,
+            "agent_spec.selected" => AgentRunEventType::AgentSpecSelected,
+            "prompt_stack.assembled" => AgentRunEventType::PromptStackAssembled,
+            "context_governance.applied" => AgentRunEventType::ContextGovernanceApplied,
             "model.route_selected" => AgentRunEventType::ModelRouteSelected,
             "model.call_started" => AgentRunEventType::ModelCallStarted,
             "model.call_completed" => AgentRunEventType::ModelCallCompleted,
@@ -147,6 +160,7 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
+            "model.failed" => AgentRunEventType::ModelFailed,
             other => AgentRunEventType::Unknown(other.to_string()),
         })
     }
@@ -1776,7 +1790,10 @@ pub enum AgentSpecStoreError {
     AlreadyExists(String),
     /// The requested spec exists but its role kind does not match the
     /// operation's requirements (e.g. set_default_main_spec on a Planner spec).
-    InvalidRole { spec_id: String, role: AgentRoleKind },
+    InvalidRole {
+        spec_id: String,
+        role: AgentRoleKind,
+    },
     Store(String),
 }
 

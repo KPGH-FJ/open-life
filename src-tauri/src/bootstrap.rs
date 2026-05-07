@@ -511,10 +511,9 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
                 match AgentSpecStore::new_in_memory() {
                     Ok(store) => Arc::new(std::sync::Mutex::new(store)),
                     Err(memory_err) => {
-                        startup_warnings.borrow_mut().push(format!(
-                            "agent_specs 内存存储也失败: {}",
-                            memory_err
-                        ));
+                        startup_warnings
+                            .borrow_mut()
+                            .push(format!("agent_specs 内存存储也失败: {}", memory_err));
                         std::process::exit(1);
                     }
                 }

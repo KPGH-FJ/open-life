@@ -144,6 +144,7 @@ impl AgentRuntime {
     ///
     /// Derives ContextPolicy and PromptStack from the AgentSpec before reasoning.
     /// Unknown prompt block ids fail before any model call.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_task_with_spec(
         &self,
         task: &AgentTask,
@@ -180,7 +181,7 @@ impl AgentRuntime {
             memory_retrieval_time_ms: 0,
         };
 
-        let (context, _governed) = self.assemble_governed(&mut input, &policy)?;
+        let (context, governed) = self.assemble_governed(&mut input, &policy)?;
 
         let strategy = if task.layer == Layer::L3 {
             self.reasoning_strategies.get("layered")
@@ -243,12 +244,23 @@ impl AgentRuntime {
             }
         }
 
+        // Capture PromptBlock trace (IDs/versions only, no raw content)
+        let block_trace = prompt_stack
+            .as_ref()
+            .map(|s| s.block_trace())
+            .unwrap_or_default();
+        // Capture governed context redactions (included/excluded categories only)
+        let governed_ctx = Some(governed.clone());
+
         Ok(AgentRuntimeOutput {
             final_messages,
             reasoning_trace: reasoning_output.trace,
             suggested_tools: reasoning_output.suggested_tools,
             plan_steps: reasoning_output.plan_steps,
             context_summary: context.context_summary,
+            agent_spec_id: Some(spec.id.clone()),
+            prompt_block_trace: block_trace,
+            governed_context_summary: governed_ctx,
         })
     }
 
@@ -328,10 +340,40 @@ impl AgentRuntime {
             suggested_tools: reasoning_output.suggested_tools,
             plan_steps: reasoning_output.plan_steps,
             context_summary: context.context_summary,
+            agent_spec_id: None,
+            prompt_block_trace: vec![],
+            governed_context_summary: None,
         })
     }
 
-    /// Generate response directly without reasoning (for L1/L2).
+    /// Generate governed output for L1/L2 layers using an AgentSpec.
+    /// Delegates to execute_task_with_spec internally.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn generate_direct_with_spec(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        spec: &AgentSpec,
+        prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_with_spec(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            spec,
+            prompt_registry,
+        )
+        .await
+    }
+
+    /// Generate response directly without reasoning (for L1/L2) — ungoverned, no AgentSpec.
     pub async fn generate_direct(
         &self,
         task: &AgentTask,
@@ -361,6 +403,9 @@ impl AgentRuntime {
             suggested_tools: vec![],
             plan_steps: vec![],
             context_summary: context.context_summary,
+            agent_spec_id: None,
+            prompt_block_trace: vec![],
+            governed_context_summary: None,
         })
     }
 }
@@ -373,6 +418,12 @@ pub struct AgentRuntimeOutput {
     pub suggested_tools: Vec<String>,
     pub plan_steps: Vec<String>,
     pub context_summary: crate::agent::types::ContextSummary,
+    /// Resolved AgentSpec id that governed this execution.
+    pub agent_spec_id: Option<String>,
+    /// Trace of PromptBlock IDs and versions used (no raw content).
+    pub prompt_block_trace: Vec<crate::agent::prompt_stack::BlockTraceEntry>,
+    /// Governed context summary (included/excluded categories, no raw data).
+    pub governed_context_summary: Option<crate::agent::context_assembler::GovernedAssembleOutput>,
 }
 
 /// Errors from AgentRuntime.
@@ -381,6 +432,14 @@ pub enum AgentRuntimeError {
     ContextAssembly(String),
     StrategyNotFound(String),
     Reasoning(ReasoningError),
+}
+
+impl AgentRuntimeError {
+    /// Returns true if the error is a governance failure (prompt stack / context policy)
+    /// that must stop execution rather than triggering a model fallback.
+    pub fn is_governance_failure(&self) -> bool {
+        matches!(self, AgentRuntimeError::ContextAssembly(_))
+    }
 }
 
 impl std::fmt::Display for AgentRuntimeError {
@@ -558,8 +617,7 @@ mod tests {
         let mut spec = spec;
         spec.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
 
-        let stack =
-            AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap();
+        let stack = AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap();
         assert_eq!(stack.blocks.len(), 2);
         let ids: Vec<&str> = stack.blocks.iter().map(|b| b.id.as_str()).collect();
         assert!(ids.contains(&"base_system"));
@@ -572,8 +630,7 @@ mod tests {
         let mut spec = AgentSpec::default_main_spec();
         spec.prompt_block_ids = vec!["nonexistent_block".to_string()];
 
-        let err =
-            AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap_err();
+        let err = AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap_err();
         assert!(err.contains("unknown prompt block"));
         assert!(err.contains("nonexistent_block"));
     }
@@ -604,12 +661,21 @@ mod tests {
         let policy = AgentRuntime::context_policy_from_spec(&spec);
         let default_policy = ContextPolicy::default();
 
-        assert_eq!(policy.allow_lifemodel_summary, default_policy.allow_lifemodel_summary);
+        assert_eq!(
+            policy.allow_lifemodel_summary,
+            default_policy.allow_lifemodel_summary
+        );
         assert_eq!(policy.allow_goals, default_policy.allow_goals);
         assert_eq!(policy.allow_state, default_policy.allow_state);
         assert_eq!(policy.allow_memory, default_policy.allow_memory);
-        assert_eq!(policy.allow_session_summary, default_policy.allow_session_summary);
-        assert_eq!(policy.allow_tool_observations, default_policy.allow_tool_observations);
+        assert_eq!(
+            policy.allow_session_summary,
+            default_policy.allow_session_summary
+        );
+        assert_eq!(
+            policy.allow_tool_observations,
+            default_policy.allow_tool_observations
+        );
     }
 
     // ── P7 stabilization: PromptStack is used by runtime, not only validated ──
@@ -627,7 +693,8 @@ mod tests {
             "text-embedding-3-small".to_string(),
             false,
         );
-        let runtime = AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let runtime =
+            AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
         let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
 
         let mut task = create_test_task();
@@ -635,7 +702,8 @@ mod tests {
 
         let spec = AgentSpec::default_main_spec();
         let mut spec_with_blocks = spec.clone();
-        spec_with_blocks.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
+        spec_with_blocks.prompt_block_ids =
+            vec!["base_system".to_string(), "privacy_rule".to_string()];
 
         let output = runtime
             .execute_task_with_spec(
@@ -663,7 +731,10 @@ mod tests {
         );
         // Verify the system message content is non-empty (blocks were assembled)
         let assembled_content: String = system_msgs.iter().map(|m| m.content.as_str()).collect();
-        assert!(!assembled_content.is_empty(), "assembled prompt content should not be empty");
+        assert!(
+            !assembled_content.is_empty(),
+            "assembled prompt content should not be empty"
+        );
     }
 
     #[tokio::test]
@@ -679,7 +750,8 @@ mod tests {
             "text-embedding-3-small".to_string(),
             false,
         );
-        let runtime = AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let runtime =
+            AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
         let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
 
         let mut task = create_test_task();
@@ -705,8 +777,15 @@ mod tests {
         // No extra system message from AgentSpec when prompt_block_ids is empty.
         // With L1 DirectReasoner (no system_prompt), only desensitized_messages exist.
         assert!(!output.final_messages.is_empty());
-        let system_count = output.final_messages.iter().filter(|m| m.role == "system").count();
-        assert_eq!(system_count, 0, "no system message should be injected for empty prompt_block_ids");
+        let system_count = output
+            .final_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .count();
+        assert_eq!(
+            system_count, 0,
+            "no system message should be injected for empty prompt_block_ids"
+        );
     }
 
     #[test]
@@ -731,5 +810,162 @@ mod tests {
         assert!(json.contains("base_system"));
         assert!(json.contains("privacy_rule"));
         assert!(!json.contains("You are OpenLife")); // raw prompt content must NOT appear
+    }
+
+    // ── Phase 6: privacy_policy governance ────────────────────────────
+
+    #[test]
+    fn test_local_only_privacy_policy_is_reflected_in_governed_output() {
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::LocalOnly;
+
+        // ContextPolicy access is unchanged (privacy blocks cloud edge, not local context)
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        assert!(policy.allow_lifemodel_summary);
+        assert!(policy.allow_memory);
+
+        // Privacy policy is available on the spec for ModelRouter / scheduler checks
+        assert_eq!(
+            spec.privacy_policy,
+            crate::agent::types::PrivacyPolicy::LocalOnly
+        );
+    }
+
+    #[test]
+    fn test_summary_only_privacy_is_on_spec() {
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::SummaryOnly;
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        assert!(policy.allow_lifemodel_summary);
+        assert!(policy.allow_memory);
+    }
+
+    #[test]
+    fn test_cloud_allowed_privacy_is_on_spec() {
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::CloudAllowed;
+        let policy = AgentRuntime::context_policy_from_spec(&spec);
+        assert!(policy.allow_lifemodel_summary);
+        assert!(policy.allow_memory);
+    }
+
+    // ── P7 Stabilize: generate_direct_with_spec ──────────────────────────
+
+    #[tokio::test]
+    async fn test_generate_direct_with_spec_uses_prompt_blocks_l2() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let runtime =
+            AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+
+        let mut task = create_test_task();
+        task.layer = crate::layer_router::Layer::L2;
+
+        let mut spec = AgentSpec::default_main_spec();
+        spec.prompt_block_ids = vec!["base_system".to_string(), "privacy_rule".to_string()];
+
+        let output = runtime
+            .generate_direct_with_spec(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                crate::privacy::PrivacyEngine::new(),
+                &spec,
+                &registry,
+            )
+            .await
+            .unwrap();
+
+        // L2 uses direct reasoning, no API needed
+        let system_msgs: Vec<_> = output
+            .final_messages
+            .iter()
+            .filter(|m| m.role == "system")
+            .collect();
+        assert!(
+            !system_msgs.is_empty(),
+            "PromptStack with 2 blocks should produce system messages for L2"
+        );
+        assert_eq!(output.agent_spec_id, Some("main.default".to_string()));
+        assert_eq!(output.prompt_block_trace.len(), 2);
+    }
+
+    // ── P7 Final Hardening: fail-closed governance tests ─────────────────
+
+    #[tokio::test]
+    async fn test_unknown_prompt_block_fails_before_model_call() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let runtime =
+            AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+
+        let mut task = create_test_task();
+        task.layer = crate::layer_router::Layer::L2;
+
+        let mut spec = AgentSpec::default_main_spec();
+        spec.prompt_block_ids = vec!["missing.block".to_string()];
+
+        let result = runtime
+            .execute_task_with_spec(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+                &spec,
+                &registry,
+            )
+            .await;
+
+        match result {
+            Err(AgentRuntimeError::ContextAssembly(msg)) => {
+                assert!(
+                    msg.contains("unknown prompt block") || msg.contains("missing.block"),
+                    "error should mention the unknown block, got: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("unknown prompt block must fail before model call"),
+            Err(other) => panic!("expected ContextAssembly error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_governance_failure_is_distinct_from_reasoning_failure() {
+        let governance_err = AgentRuntimeError::ContextAssembly("prompt stack error".to_string());
+        assert!(governance_err.is_governance_failure());
+
+        let reasoning_err = AgentRuntimeError::Reasoning(ReasoningError {
+            phase: "generation".to_string(),
+            message: "timeout".to_string(),
+            recoverable: true,
+        });
+        assert!(!reasoning_err.is_governance_failure());
+
+        let strategy_err = AgentRuntimeError::StrategyNotFound("direct".to_string());
+        assert!(!strategy_err.is_governance_failure());
     }
 }

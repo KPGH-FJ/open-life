@@ -188,6 +188,18 @@ async fn execute_scheduled_task(
 
     let tools_prompt = String::new();
 
+    // ── Resolve AgentSpec for governed execution ──────────────────
+    let agent_spec =
+        crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)
+            .unwrap_or_else(|e| {
+                log::warn!(
+                    "[SchedulerRunner] AgentSpec resolution failed: {}, using fragile default",
+                    e
+                );
+                openlife_core::agent::AgentSpec::default()
+            });
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
+
     let loop_result = {
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
@@ -227,6 +239,9 @@ async fn execute_scheduled_task(
                 &tools_prompt,
                 None,
                 privacy_engine.clone(),
+                agent_spec.privacy_policy,
+                &agent_spec,
+                &prompt_registry,
                 &action_ctx,
             )
             .await

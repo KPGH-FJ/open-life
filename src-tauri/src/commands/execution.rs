@@ -145,7 +145,37 @@ pub async fn run_skill(
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
     drop(cfg);
 
-    // 3. Create skill task with system prompt
+    // Resolve stored default AgentSpec for governed execution — fail closed, no fallback.
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
+    let agent_spec =
+        crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)?;
+
+    // Create AgentRun before governed execution so events can reference the run_id.
+    let mut run = AgentRun::new_chat_run(
+        &format!("skill-{}", skill_id),
+        input.get("text").and_then(Value::as_str).unwrap_or(""),
+    );
+    run.kind = AgentTaskKind::Skill;
+
+    // Record AgentSpecSelected event
+    if let Some(ref es) = state.agent_run_event_store {
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &run.id,
+            openlife_core::agent::AgentRunEventType::AgentSpecSelected,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!(
+                "AgentSpec {} selected for skill {}",
+                agent_spec.id, skill_id
+            ),
+            serde_json::json!({
+                "agent_spec_id": agent_spec.id,
+                "role": agent_spec.role.to_string(),
+                "privacy_policy": agent_spec.privacy_policy.to_string(),
+            }),
+        ));
+    }
+
+    // 3. Create skill task with system prompt (skill prompt as user message)
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Skill,
         session_id: format!("skill-{}", skill_id),
@@ -161,27 +191,35 @@ pub async fn run_skill(
             },
         ],
         layer: openlife_core::layer_router::Layer::L2,
+        agent_spec_id: Some(agent_spec.id.clone()),
         ..Default::default()
     };
 
-    // 4. Execute via AgentRuntime
+    // 4. Execute via AgentRuntime with stored AgentSpec governance
     let runtime_output = agent_runtime
-        .execute_task(
+        .execute_task_with_spec(
             &task,
             &life_model,
             "",
             None,
             vec![],
             openlife_core::privacy::PrivacyEngine::default(),
+            &agent_spec,
+            &prompt_registry,
         )
         .await
         .map_err(AppError::from)?;
 
-    // 5. Generate skill response from model
+    // 5. Generate skill response from model with privacy enforcement
     let model_output = scheduler
-        .generate(runtime_output.final_messages.clone(), &life_model, None)
+        .generate_governed(
+            runtime_output.final_messages.clone(),
+            &life_model,
+            None,
+            agent_spec.privacy_policy,
+        )
         .await
-        .map_err(AppError::from)?;
+        .map_err(AppError::external)?;
 
     // 6. Parse JSON envelope
     let (mut envelope, parse_error) = match openlife_core::skills::parse_skill_json(&model_output) {
@@ -238,12 +276,7 @@ pub async fn run_skill(
         }
     }
 
-    // 7. Create AgentRun
-    let mut run = AgentRun::new_chat_run(
-        &task.session_id,
-        input.get("text").and_then(Value::as_str).unwrap_or(""),
-    );
-    run.kind = AgentTaskKind::Skill;
+    // 7. Finalize AgentRun (created earlier for event recording)
     let model_route = scheduler.preview_chat_route(None).await;
     run.complete(
         &crate::preview_text(&envelope.summary, 200),
@@ -327,6 +360,42 @@ pub async fn run_skill(
     if let Some(ref run_store_arc) = state.agent_run_store {
         let store = run_store_arc.lock().await;
         store.create_run(&run).map_err(AppError::from)?;
+    }
+
+    // Record governance events after run is persisted (avoids orphan events).
+    if let Some(ref es) = state.agent_run_event_store {
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &run.id,
+            openlife_core::agent::AgentRunEventType::PromptStackAssembled,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!(
+                "PromptStack assembled with {} blocks from AgentSpec {} for skill {}",
+                runtime_output.prompt_block_trace.len(),
+                agent_spec.id,
+                skill_id
+            ),
+            serde_json::json!({
+                "agent_spec_id": agent_spec.id,
+                "prompt_blocks": runtime_output.prompt_block_trace,
+            }),
+        ));
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &run.id,
+            openlife_core::agent::AgentRunEventType::ContextGovernanceApplied,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!(
+                "Context governance applied by AgentSpec {} for skill {}",
+                agent_spec.id, skill_id
+            ),
+            serde_json::json!({
+                "agent_spec_id": agent_spec.id,
+                "context_included": runtime_output.governed_context_summary.as_ref()
+                    .map(|g| &g.included).unwrap_or(&vec![]),
+                "context_excluded": runtime_output.governed_context_summary.as_ref()
+                    .map(|g| &g.excluded).unwrap_or(&vec![]),
+                "privacy_policy": agent_spec.privacy_policy.to_string(),
+            }),
+        ));
     }
 
     Ok(SkillRunResponse {

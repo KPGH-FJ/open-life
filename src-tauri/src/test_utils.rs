@@ -134,7 +134,10 @@ fn test_default_agent_spec_available_after_bootstrap() {
     let state = test_app_state();
     let store = state.agent_spec_store.lock().unwrap();
     let spec = store.get_default_spec().unwrap();
-    assert!(spec.is_some(), "default AgentSpec should exist after bootstrap");
+    assert!(
+        spec.is_some(),
+        "default AgentSpec should exist after bootstrap"
+    );
     let spec = spec.unwrap();
     assert_eq!(spec.id, "main.default");
     assert_eq!(spec.role, openlife_core::agent::AgentRoleKind::Main);
@@ -147,7 +150,10 @@ fn test_list_returns_default_main_spec() {
     let state = test_app_state();
     let store = state.agent_spec_store.lock().unwrap();
     let specs = store.list_specs().unwrap();
-    assert!(!specs.is_empty(), "list should return at least the default spec");
+    assert!(
+        !specs.is_empty(),
+        "list should return at least the default spec"
+    );
     assert!(
         specs.iter().any(|s| s.id == "main.default"),
         "list should include main.default"

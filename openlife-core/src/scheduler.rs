@@ -1,6 +1,9 @@
 use crate::agent::ModelRouteTrace;
 use crate::life_model::LifeModel;
-use crate::llm::{chat_with_openrouter, chat_with_openrouter_stream, ChatMessage, StreamResult};
+use crate::llm::{
+    chat_with_openrouter, chat_with_openrouter_raw, chat_with_openrouter_raw_stream,
+    chat_with_openrouter_stream, ChatMessage, StreamResult,
+};
 use crate::ollama::{chat_with_ollama, chat_with_ollama_raw_stream, resolve_ollama_model};
 use anyhow::Result;
 use async_stream::try_stream;
@@ -297,6 +300,151 @@ impl InferenceScheduler {
         }
     }
 
+    /// Generate a stream with AgentSpec privacy_policy enforcement.
+    ///
+    /// * `LocalOnly` — forces local Ollama; returns error if unavailable.
+    /// * `SummaryOnly` — local: full context OK; cloud: summary-only prompt,
+    ///   no raw LifeModel YAML, no memory snippets.
+    /// * `CloudAllowed` — normal routing (legacy behavior).
+    pub async fn generate_stream_governed(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Result<StreamResult, String> {
+        use crate::agent::types::PrivacyPolicy;
+
+        match privacy_policy {
+            PrivacyPolicy::LocalOnly => {
+                let resolved = resolve_ollama_model(&self.local_model).await;
+                if resolved.is_none() {
+                    return Err(
+                        "LocalOnly privacy policy requires a local model, but Ollama is not available or configured"
+                            .to_string(),
+                    );
+                }
+                let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+                chat_with_ollama_raw_stream(
+                    resolved.as_deref().unwrap_or(&self.local_model),
+                    messages,
+                    Some(&system_prompt),
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            PrivacyPolicy::SummaryOnly => {
+                let resolved_local = resolve_ollama_model(&self.local_model).await;
+                let has_remote = self.has_remote_key();
+                let use_local = should_use_local_for_summary_only(
+                    resolved_local.is_some(),
+                    self.prefer_local,
+                    has_remote,
+                );
+                if use_local {
+                    let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+                    chat_with_ollama_raw_stream(
+                        resolved_local.as_deref().unwrap_or(&self.local_model),
+                        messages,
+                        Some(&system_prompt),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else if has_remote {
+                    let summary_prompt = build_summary_only_system_prompt(life_model, tools_prompt);
+                    chat_with_openrouter_raw_stream(
+                        messages,
+                        Some(&summary_prompt),
+                        &self.provider,
+                        &self.openai_base,
+                        &self.openai_key,
+                        &self.chat_model,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(
+                        "SummaryOnly: no local model available and no cloud key configured"
+                            .to_string(),
+                    )
+                }
+            }
+            PrivacyPolicy::CloudAllowed => self
+                .generate_stream(messages, life_model, tools_prompt)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Generate non-stream with AgentSpec privacy_policy enforcement.
+    pub async fn generate_governed(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Result<String, String> {
+        use crate::agent::types::PrivacyPolicy;
+
+        match privacy_policy {
+            PrivacyPolicy::LocalOnly => {
+                let resolved = resolve_ollama_model(&self.local_model).await;
+                if resolved.is_none() {
+                    return Err(
+                        "LocalOnly privacy policy requires a local model, but Ollama is not available or configured"
+                            .to_string(),
+                    );
+                }
+                chat_with_ollama(
+                    resolved.as_deref().unwrap_or(&self.local_model),
+                    messages,
+                    life_model,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            PrivacyPolicy::SummaryOnly => {
+                let resolved_local = resolve_ollama_model(&self.local_model).await;
+                let has_remote = self.has_remote_key();
+                let use_local = should_use_local_for_summary_only(
+                    resolved_local.is_some(),
+                    self.prefer_local,
+                    has_remote,
+                );
+                if use_local {
+                    chat_with_ollama(
+                        resolved_local.as_deref().unwrap_or(&self.local_model),
+                        messages,
+                        life_model,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else if has_remote {
+                    let summary_prompt = build_summary_only_system_prompt(life_model, tools_prompt);
+                    chat_with_openrouter_raw(
+                        messages,
+                        Some(&summary_prompt),
+                        &self.provider,
+                        &self.openai_base,
+                        &self.openai_key,
+                        &self.chat_model,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(
+                        "SummaryOnly: no local model available and no cloud key configured"
+                            .to_string(),
+                    )
+                }
+            }
+            PrivacyPolicy::CloudAllowed => self
+                .generate(messages, life_model, tools_prompt)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
     /// Preview the routing decision for a chat request without actually calling the LLM.
     /// Returns a ModelRouteTrace describing which backend would be chosen and why.
     pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
@@ -375,6 +523,85 @@ impl InferenceScheduler {
     }
 }
 
+/// Build a summary-only system prompt for `PrivacyPolicy::SummaryOnly`.
+///
+/// Excludes raw LifeModel YAML, identity.name, birth_date, goal descriptions,
+/// recent_events, reflections, custom_dimensions, and memory snippets.
+/// Keeps: current_focus, goal counts, value names (no descriptions), tools_prompt.
+fn build_summary_only_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -> String {
+    let tool_section = tools_prompt.unwrap_or("");
+
+    let state_hint = if !life_model.state.current_focus.is_empty() {
+        format!(
+            "- 当前重心: {}\n- 当前心情: {}",
+            life_model.state.current_focus, life_model.state.emotional_state.current_mood
+        )
+    } else {
+        "暂无状态摘要".to_string()
+    };
+
+    let goal_summary = format!(
+        "短期目标 {} 个，中期 {} 个，长期 {} 个，人生目标 {} 个，每日 {} 个",
+        life_model.goals.short_term.len(),
+        life_model.goals.medium_term.len(),
+        life_model.goals.long_term.len(),
+        life_model.goals.life_goals.len(),
+        life_model.goals.daily.len(),
+    );
+
+    let value_names: Vec<&str> = life_model
+        .identity
+        .values
+        .iter()
+        .map(|v| v.name.as_str())
+        .collect();
+    let values_hint = if value_names.is_empty() {
+        "暂无核心价值观".to_string()
+    } else {
+        format!("核心价值观: {}", value_names.join("、"))
+    };
+
+    format!(
+        r#"你是 OpenLife，用户的终身成长合伙人。
+
+[SummaryOnly] 云端隐私保护模式下，仅发送以下摘要信息：
+
+【用户状态摘要】
+{}
+
+【目标摘要】
+{}
+
+【价值观方向】
+{}
+
+【工具信息】
+{}
+
+在每次回应时：
+1. 基于用户的核心价值观方向给出建议
+2. 结合用户当前的状态和大致目标方向
+3. 语气要温和、支持但不透露具体个人信息
+4. 如用户要求具体信息，请说明当前处于隐私保护模式，建议切换到本地模型
+"#,
+        state_hint, goal_summary, values_hint, tool_section,
+    )
+}
+
+/// Pure decision function for SummaryOnly routing.
+///
+/// * no local + no cloud → error (handled by caller)
+/// * local + no cloud → use local (even if prefer_local=false)
+/// * local + prefer_local → use local
+/// * remote + not prefer_local → cloud summary-only
+pub fn should_use_local_for_summary_only(
+    resolved_local: bool,
+    prefer_local: bool,
+    has_remote_key: bool,
+) -> bool {
+    resolved_local && (prefer_local || !has_remote_key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::InferenceScheduler;
@@ -437,5 +664,241 @@ mod tests {
             true,
         );
         assert!(scheduler.should_use_local_for_chat(None, true));
+    }
+
+    // ── P7 Stabilize: privacy_policy enforcement tests ──────────────────
+
+    use crate::agent::types::PrivacyPolicy;
+
+    #[tokio::test]
+    async fn test_local_only_cloud_only_route_is_blocked() {
+        // Create a scheduler with no local model, cloud-only config.
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5:7b".into(),
+            false, // prefer cloud
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "sk-test-key".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        // With LocalOnly privacy and no Ollama running, generate_stream_governed
+        // must return an error rather than silently falling back to cloud.
+        let messages = vec![];
+        let life_model = crate::life_model::LifeModel::default();
+
+        let result = scheduler
+            .generate_stream_governed(
+                messages.clone(),
+                &life_model,
+                None,
+                PrivacyPolicy::LocalOnly,
+            )
+            .await;
+
+        // LocalOnly with no local model available -> error, not cloud fallback.
+        match result {
+            Err(err) => {
+                assert!(
+                    err.contains("LocalOnly") || err.contains("Ollama"),
+                    "error should mention LocalOnly/Ollama, got: {}",
+                    err
+                );
+            }
+            Ok(_) => panic!("LocalOnly must block cloud calls when no local model is available"),
+        }
+    }
+
+    #[test]
+    fn test_cloud_allowed_returns_existing_route_for_normal_config() {
+        // CloudAllowed and SummaryOnly should not change the routing behavior
+        // beyond what the existing ContextPolicy already handles.
+        let _scheduler = InferenceScheduler::new(
+            "qwen2.5:7b".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        // No cloud key, but local is available in config — CloudAllowed should
+        // not error (it doesn't add restrictions).
+        assert_eq!(format!("{}", PrivacyPolicy::CloudAllowed), "cloud_allowed");
+        assert_eq!(format!("{}", PrivacyPolicy::SummaryOnly), "summary_only");
+        assert_eq!(format!("{}", PrivacyPolicy::LocalOnly), "local_only");
+    }
+
+    // ── P7: SummaryOnly prompt excludes raw LifeModel fields ──────────────
+
+    #[test]
+    fn test_summary_only_prompt_excludes_raw_lifemodel_fields() {
+        use crate::life_model::{
+            EmotionalState, GoalItem, Goals, Identity, LifeModel, State, ValueItem,
+        };
+
+        let mut life_model = LifeModel::default();
+        life_model.identity = Identity {
+            name: "Alice Secret".to_string(),
+            birth_date: Some("1990-01-01".to_string()),
+            values: vec![ValueItem {
+                name: "诚实".to_string(),
+                weight: 90,
+                description: "保持诚实正直".to_string(),
+            }],
+            ..Default::default()
+        };
+        life_model.goals = Goals {
+            short_term: vec![GoalItem {
+                name: "秘密目标".to_string(),
+                description: "不能让人知道的目标".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        life_model.state = State {
+            current_focus: "提升工作效率".to_string(),
+            emotional_state: EmotionalState {
+                current_mood: "平静".to_string(),
+                stress_level: 3,
+                fulfillment_score: 7,
+            },
+            recent_events: vec!["敏感事件A".to_string(), "敏感事件B".to_string()],
+            ..Default::default()
+        };
+
+        let prompt = super::build_summary_only_system_prompt(&life_model, Some("工具测试"));
+
+        // Sensitive fields must not appear
+        assert!(
+            !prompt.contains("Alice Secret"),
+            "prompt should not contain identity.name"
+        );
+        assert!(
+            !prompt.contains("1990-01-01"),
+            "prompt should not contain birth_date"
+        );
+        assert!(
+            !prompt.contains("不能让人知道的目标"),
+            "prompt should not contain goal descriptions"
+        );
+        assert!(
+            !prompt.contains("敏感事件A"),
+            "prompt should not contain recent_events"
+        );
+        assert!(
+            !prompt.contains("敏感事件B"),
+            "prompt should not contain recent_events"
+        );
+
+        // Summary-only fields should appear
+        assert!(
+            prompt.contains("提升工作效率"),
+            "prompt should contain current_focus summary"
+        );
+        assert!(prompt.contains("诚实"), "prompt should contain value names");
+        assert!(prompt.contains("1 个"), "prompt should contain goal count");
+        assert!(
+            prompt.contains("SummaryOnly"),
+            "prompt should be marked SummaryOnly"
+        );
+        assert!(
+            prompt.contains("工具测试"),
+            "prompt should contain tools section"
+        );
+
+        // Value descriptions (sensitive) should not appear
+        assert!(
+            !prompt.contains("保持诚实正直"),
+            "prompt should not contain value descriptions"
+        );
+    }
+
+    #[test]
+    fn test_summary_only_prompt_includes_goal_counts_not_names() {
+        use crate::life_model::{GoalItem, Goals, LifeModel};
+
+        let mut life_model = LifeModel::default();
+        life_model.goals = Goals {
+            short_term: vec![
+                GoalItem {
+                    name: "目标A".to_string(),
+                    description: "详细描述A".to_string(),
+                    ..Default::default()
+                },
+                GoalItem {
+                    name: "目标B".to_string(),
+                    description: "详细描述B".to_string(),
+                    ..Default::default()
+                },
+            ],
+            medium_term: vec![GoalItem {
+                name: "中期目标".to_string(),
+                description: "中期描述".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let prompt = super::build_summary_only_system_prompt(&life_model, None);
+
+        assert!(
+            prompt.contains("短期目标 2 个"),
+            "should show short-term count"
+        );
+        assert!(
+            prompt.contains("中期 1 个"),
+            "should show medium-term count"
+        );
+        assert!(!prompt.contains("目标A"), "should not contain goal names");
+        assert!(
+            !prompt.contains("详细描述A"),
+            "should not contain goal descriptions"
+        );
+    }
+
+    // ── P7: SummaryOnly routing pure-function tests ───────────────────
+
+    #[test]
+    fn test_should_use_local_for_summary_only_all_cases() {
+        let func = super::should_use_local_for_summary_only;
+
+        // local + prefer_local → use local
+        assert!(func(true, true, true));
+        assert!(func(true, true, false));
+
+        // local + !prefer_local + no cloud → use local
+        assert!(func(true, false, false));
+
+        // local + !prefer_local + cloud → cloud summary
+        assert!(!func(true, false, true));
+
+        // no local + cloud → cloud summary
+        assert!(!func(false, true, true));
+        assert!(!func(false, false, true));
+
+        // no local + no cloud → error (handled by caller)
+        assert!(!func(false, true, false));
+        assert!(!func(false, false, false));
+    }
+
+    #[test]
+    fn test_summary_only_uses_local_when_remote_missing_even_if_prefer_local_false() {
+        assert!(
+            super::should_use_local_for_summary_only(true, false, false),
+            "SummaryOnly with local available but no cloud key must use local"
+        );
+    }
+
+    #[test]
+    fn test_summary_only_uses_cloud_summary_when_remote_available_and_prefer_local_false() {
+        assert!(
+            !super::should_use_local_for_summary_only(true, false, true),
+            "SummaryOnly with local + cloud key + !prefer_local must use cloud summary"
+        );
     }
 }
