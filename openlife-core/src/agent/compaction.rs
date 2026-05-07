@@ -51,10 +51,7 @@ pub fn estimate_message_tokens(messages: &[ChatMessage]) -> usize {
     total
 }
 
-pub fn should_compact(
-    messages: &[ChatMessage],
-    config: &CompactionConfig,
-) -> CompactionDecision {
+pub fn should_compact(messages: &[ChatMessage], config: &CompactionConfig) -> CompactionDecision {
     let message_count = messages.len();
     let original_token_estimate = estimate_message_tokens(messages);
 
@@ -139,11 +136,10 @@ pub struct CompactionSummaryBuilder;
 impl CompactionSummaryBuilder {
     pub fn build_rule_based(input: CompactionInput) -> CompactionSummary {
         let conversation_summary = build_safe_conversation_summary(&input);
-        let compacted_token_estimate =
-            estimate_message_tokens(&[ChatMessage {
-                role: "system".into(),
-                content: conversation_summary.clone(),
-            }]);
+        let compacted_token_estimate = estimate_message_tokens(&[ChatMessage {
+            role: "system".into(),
+            content: conversation_summary.clone(),
+        }]);
 
         let mut redacted_fields: Vec<String> = Vec::new();
         let mut sensitive_content_redacted = false;
@@ -172,7 +168,10 @@ impl CompactionSummaryBuilder {
             }
         }
 
-        let redaction_policy = format!("{} under {}", "PII and LifeModel redacted", input.privacy_policy);
+        let redaction_policy = format!(
+            "{} under {}",
+            "PII and LifeModel redacted", input.privacy_policy
+        );
 
         let mut summary = CompactionSummary::new(
             &input.run_id,
@@ -206,11 +205,7 @@ fn build_safe_conversation_summary(input: &CompactionInput) -> String {
 
     parts.push("Prior context was compacted under privacy policy.".into());
 
-    let user_msgs: Vec<&ChatMessage> = input
-        .messages
-        .iter()
-        .filter(|m| m.role == "user")
-        .collect();
+    let user_msgs: Vec<&ChatMessage> = input.messages.iter().filter(|m| m.role == "user").collect();
     let assistant_msgs: Vec<&ChatMessage> = input
         .messages
         .iter()
@@ -282,10 +277,9 @@ fn redact_count(n: usize) -> String {
 }
 
 fn has_pii(text: &str) -> bool {
-    let email_pattern = regex::Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-        .unwrap();
-    let us_phone_pattern =
-        regex::Regex::new(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap();
+    let email_pattern =
+        regex::Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap();
+    let us_phone_pattern = regex::Regex::new(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap();
     let cn_mobile_pattern =
         regex::Regex::new(r"(?:\+?86[-.\s]?)?1[3-9]\d[-.\s]?\d{4}[-.\s]?\d{4}").unwrap();
     let cn_landline_pattern =
@@ -303,8 +297,14 @@ fn has_pii_in_batch(texts: &[&str]) -> bool {
 
 fn contains_lifemodel_raw(messages: &[ChatMessage]) -> bool {
     let lifemodel_keys = [
-        "life_model", "identity", "mission_statement", "life_philosophy",
-        "personality_traits", "values", "role_definition", "voice_style",
+        "life_model",
+        "identity",
+        "mission_statement",
+        "life_philosophy",
+        "personality_traits",
+        "values",
+        "role_definition",
+        "voice_style",
     ];
     for msg in messages {
         let lower = msg.content.to_lowercase();
@@ -652,7 +652,10 @@ mod tests {
         let msgs = make_messages(12);
         let decision = should_compact(&msgs, &config);
         assert!(!decision.should_compact);
-        assert!(decision.reason.unwrap().contains("min_messages_before_compaction"));
+        assert!(decision
+            .reason
+            .unwrap()
+            .contains("min_messages_before_compaction"));
     }
 
     #[test]
@@ -700,14 +703,12 @@ mod tests {
             run_id: "run-2".into(),
             messages: make_messages(10),
             active_proposal_ids: vec![],
-            unresolved_observations: vec![
-                CompactedObservation {
-                    tool_name: "web.search".into(),
-                    summary: "Search done".into(),
-                    pending_action: "Review".into(),
-                    risk_level: "low".into(),
-                },
-            ],
+            unresolved_observations: vec![CompactedObservation {
+                tool_name: "web.search".into(),
+                summary: "Search done".into(),
+                pending_action: "Review".into(),
+                risk_level: "low".into(),
+            }],
             preserved_decisions: vec![],
             pending_task_summaries: vec![],
             privacy_policy: PrivacyPolicy::SummaryOnly,
@@ -761,7 +762,9 @@ mod tests {
         assert!(
             summary.redacted_fields.contains(&"pii_detected".into())
                 || summary.redacted_fields.contains(&"life_model".into())
-                || summary.redacted_fields.contains(&"sensitive_user_text".into())
+                || summary
+                    .redacted_fields
+                    .contains(&"sensitive_user_text".into())
         );
         assert!(!summary.conversation_summary.contains("test@example.com"));
     }
@@ -833,7 +836,10 @@ mod tests {
         let deser: CompactionSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.id, summary.id);
         assert_eq!(deser.active_proposal_ids, summary.active_proposal_ids);
-        assert_eq!(deser.unresolved_observation_count, summary.unresolved_observation_count);
+        assert_eq!(
+            deser.unresolved_observation_count,
+            summary.unresolved_observation_count
+        );
         assert_eq!(deser.preserved_decisions, summary.preserved_decisions);
         assert_eq!(deser.pending_task_summaries, summary.pending_task_summaries);
         assert_eq!(deser.source_message_count, summary.source_message_count);
@@ -1021,7 +1027,9 @@ mod tests {
         );
         assert!(result.is_some());
         let r = result.unwrap();
-        let concat: String = r.compacted_messages.iter()
+        let concat: String = r
+            .compacted_messages
+            .iter()
             .map(|m| m.content.as_str())
             .collect::<Vec<_>>()
             .join(" ");
@@ -1120,10 +1128,7 @@ mod tests {
 
     #[test]
     fn test_unknown_source_default_omitted() {
-        let obs = build_safe_compacted_observation(
-            "unknown.tool",
-            "some random output text",
-        );
+        let obs = build_safe_compacted_observation("unknown.tool", "some random output text");
         assert!(!obs.summary.contains("random output"));
         assert!(obs.summary.contains("raw tool output omitted"));
     }
@@ -1171,10 +1176,8 @@ mod tests {
 
     #[test]
     fn test_safe_source_with_credential_omitted() {
-        let obs = build_safe_compacted_observation(
-            "goal.read",
-            "Credential=mysecret used for login",
-        );
+        let obs =
+            build_safe_compacted_observation("goal.read", "Credential=mysecret used for login");
         assert!(!obs.summary.contains("mysecret"));
         assert!(!obs.summary.contains("Credential"));
         assert!(obs.summary.contains("sensitive content omitted"));
@@ -1214,10 +1217,8 @@ mod tests {
 
     #[test]
     fn test_email_propose_draft_raw_output_omitted() {
-        let obs = build_safe_compacted_observation(
-            "email.propose_draft",
-            "draft email content for user",
-        );
+        let obs =
+            build_safe_compacted_observation("email.propose_draft", "draft email content for user");
         assert!(!obs.summary.contains("draft email content"));
         assert!(obs.summary.contains("raw tool output omitted"));
     }
@@ -1238,10 +1239,8 @@ mod tests {
 
     #[test]
     fn test_life_model_read_goals_not_in_summary() {
-        let obs = build_safe_compacted_observation(
-            "life_model.read",
-            "goals: change job, learn Rust",
-        );
+        let obs =
+            build_safe_compacted_observation("life_model.read", "goals: change job, learn Rust");
         assert!(!obs.summary.contains("change job"));
         assert!(!obs.summary.contains("learn Rust"));
         assert!(obs.summary.contains("raw tool output omitted"));
@@ -1374,7 +1373,7 @@ mod tests {
 
     #[test]
     fn test_has_pii_no_false_positive_on_short_numbers() {
-        assert!(!has_pii("123"));  // too short
+        assert!(!has_pii("123")); // too short
         assert!(!has_pii("count: 42"));
     }
 }

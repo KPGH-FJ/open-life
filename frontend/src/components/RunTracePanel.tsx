@@ -7,6 +7,7 @@ import {
   RefreshCw,
   FileText,
   Layers,
+  Terminal,
 } from "lucide-react";
 import type { AgentRunEvent, AgentRunEventType } from "@/types";
 
@@ -56,6 +57,8 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.action_replayed": <RefreshCw size={14} className="text-green-400" />,
   "plan.action_replay_requested": <Play size={14} className="text-amber-400" />,
   "compaction.created": <Layers size={14} className="text-orange-400" />,
+  "shell.blocked": <Terminal size={14} className="text-red-400" />,
+  "shell.completed": <Terminal size={14} className="text-green-400" />,
   "run.completed": <CheckCircle size={14} className="text-green-400" />,
   "run.failed": <XCircle size={14} className="text-red-400" />,
   unknown: <FileText size={14} className="text-slate-500" />,

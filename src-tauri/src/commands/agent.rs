@@ -196,6 +196,7 @@ pub(crate) async fn replay_action_internal(
             .agent_run_event_store
             .as_ref()
             .map(|es| (**es).clone()),
+        execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let request = openlife_core::agent::AgentActionRequest {

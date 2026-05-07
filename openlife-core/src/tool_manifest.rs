@@ -304,4 +304,15 @@ mod tests {
         assert!(!m.declarative_only);
         assert!(m.enabled);
     }
+
+    #[test]
+    fn infer_permission_level_high_for_shell() {
+        assert_eq!(ToolManifest::infer_permission_level("shell.run"), "high");
+    }
+
+    #[test]
+    fn infer_capabilities_for_shell_run() {
+        let caps = ToolManifest::infer_capabilities("shell.run");
+        assert!(caps.contains(&"filesystem".to_string()));
+    }
 }

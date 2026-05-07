@@ -543,6 +543,54 @@ impl McpRegistry {
             vec!["write".into(), "network".into()],
             "write",
         );
+
+        // P9: shell.run — default-off, declarative-only, high-risk.
+        // No executor yet. Must be explicitly enabled via sandbox + AgentSpec.
+        self.register_builtin(
+            ToolManifest {
+                id: "shell.run".into(),
+                name: "shell.run".into(),
+                description: "在 ExecutionSandbox 治理下执行非交互式结构化命令".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "要执行的命令（不含参数）" },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "命令参数列表"
+                        },
+                        "cwd": { "type": "string", "description": "工作目录" },
+                        "env": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "环境变量名-值映射"
+                        },
+                        "reason": { "type": "string", "description": "可选：执行原因" }
+                    },
+                    "required": ["command"]
+                }),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: ToolSource::BuiltIn,
+                capabilities: vec![
+                    "write".into(),
+                    "filesystem".into(),
+                    "external_side_effect".into(),
+                ],
+                requires_confirmation: true,
+                enabled: false,
+                declarative_only: true,
+                action_type: "external_side_effect".into(),
+                tags: vec!["shell".into(), "execution".into(), "p9".into()],
+            },
+            Box::new(|_args| {
+                Err(anyhow::anyhow!(
+                    "shell.run is declarative-only and cannot execute yet"
+                ))
+            }),
+        );
     }
 
     /// Helper to register a Core OS tool with standard metadata.
@@ -1064,5 +1112,69 @@ mod tests {
         let prompt = registry.tools_prompt();
         assert!(prompt.contains("web.search"));
         assert!(prompt.contains("\"query\""));
+    }
+
+    // ── P9-2: shell.run manifest tests ─────────────────────────────────
+
+    #[test]
+    fn test_shell_run_is_high_risk() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .expect("shell.run manifest should be registered");
+        assert_eq!(manifest.permission_level, "high");
+        assert_eq!(manifest.risk_level, "high");
+        assert!(manifest.requires_confirmation);
+    }
+
+    #[test]
+    fn test_shell_run_default_not_model_callable() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        assert!(!manifest.enabled, "shell.run must be disabled by default");
+        assert!(
+            manifest.declarative_only,
+            "shell.run must be declarative-only by default"
+        );
+        // Not in model-callable tools prompt
+        let prompt = registry.tools_prompt();
+        assert!(
+            !prompt.contains("shell.run"),
+            "shell.run must not appear in tools prompt"
+        );
+    }
+
+    #[test]
+    fn test_shell_run_blocked_by_declarative_only() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        assert!(manifest.declarative_only);
+        // Declarative-only tools are filtered from is_model_callable
+        let prompt = registry.tools_prompt();
+        assert!(!prompt.contains("shell.run"));
+    }
+
+    #[test]
+    fn test_shell_run_not_executable_yet() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        assert!(!manifest.enabled);
+        assert!(manifest.declarative_only);
+        // Even if we try to execute via manifest, it will be blocked by
+        // declarative_only check in execute_manifest or return error.
     }
 }

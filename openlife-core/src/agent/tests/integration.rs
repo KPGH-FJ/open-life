@@ -138,6 +138,7 @@ fn test_action_parser_final_envelope() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -170,6 +171,7 @@ fn test_action_parser_actions_envelope() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -204,6 +206,7 @@ fn test_action_parser_legacy_tool_calls() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -236,6 +239,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let reply = "{broken json";
@@ -269,6 +273,7 @@ fn test_action_parser_no_json() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -301,6 +306,7 @@ fn test_action_parser_final_with_actions() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     // Model returns both final text and tool calls
@@ -379,6 +385,7 @@ fn test_max_tool_calls_stop_reason() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     // Simulate model returning actions when budget is already exceeded
@@ -413,6 +420,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     // Malformed JSON: missing closing brace
@@ -450,6 +458,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
@@ -490,6 +499,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -559,6 +569,7 @@ fn test_permission_check_tool() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -612,6 +623,7 @@ fn test_memory_propose_write_creates_proposal() {
         agent_run_store: None,
         network_policy: None,
         event_store: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -759,6 +771,7 @@ fn test_declarative_only_tool_blocked_at_runtime() {
         agent_run_store: None,
         event_store: None,
         network_policy: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -802,6 +815,7 @@ fn test_blocked_tool_records_event() {
         agent_run_store: None,
         event_store: Some(event_store.clone()),
         network_policy: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -854,6 +868,7 @@ fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
         agent_run_store: None,
         event_store: None,
         network_policy: None,
+        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -871,4 +886,61 @@ fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
     // Should succeed or need confirmation, not be blocked
     assert!(result.status != crate::agent::ActionExecutionStatus::Blocked);
     assert!(result.action.status == "succeeded" || result.action.status == "needs_confirmation");
+}
+
+// ── P9-3: Sandbox wiring tests ──────────────────────────────────────
+
+#[test]
+fn test_missing_config_yields_disabled_sandbox() {
+    use crate::agent::action_executor::DISABLED_SANDBOX;
+    assert!(!DISABLED_SANDBOX.bash_enabled);
+    assert_eq!(
+        DISABLED_SANDBOX.network_policy,
+        crate::agent::execution_sandbox::NetworkPolicy::None
+    );
+    // Default sandbox keeps conservative defaults but bash is always disabled
+    assert!(DISABLED_SANDBOX
+        .dangerous_command_denylist
+        .iter()
+        .any(|c| c == "rm"));
+}
+
+#[test]
+fn test_action_context_default_is_disabled_sandbox() {
+    let reg = McpRegistry::new();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit =
+        crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
+    let pe = PrivacyEngine::new();
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[]);
+    assert!(!ctx.execution_sandbox.bash_enabled);
+    assert!(!ctx.execution_sandbox.command_allowlist.is_empty());
+}
+
+#[test]
+fn test_configured_safe_paths_feed_sandbox_safe_paths() {
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        safe_paths: vec!["/custom/path".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    assert!(!sandbox.bash_enabled);
+    assert!(sandbox.safe_paths.contains(&"/custom/path".into()));
+    assert!(sandbox.is_path_in_safe_paths("/custom/path"));
+}
+
+#[test]
+fn test_plan_execution_receives_sandbox_without_enabling_shell() {
+    let reg = McpRegistry::new();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit =
+        crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
+    let pe = PrivacyEngine::new();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        safe_paths: vec!["/tmp".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox);
+    assert!(!ctx.execution_sandbox.bash_enabled);
+    assert!(!ctx.execution_sandbox.command_allowlist.is_empty());
 }

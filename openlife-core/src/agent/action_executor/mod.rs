@@ -14,6 +14,12 @@ use crate::privacy::PrivacyEngine;
 use crate::tool_permissions::ToolPermissionStore;
 use anyhow::Result;
 use serde_json::Value;
+use std::sync::LazyLock;
+
+/// Always-disabled sandbox reference for paths that have not wired an
+/// explicit sandbox policy. All fields are maximum-safety defaults.
+pub static DISABLED_SANDBOX: LazyLock<crate::agent::execution_sandbox::ExecutionSandbox> =
+    LazyLock::new(crate::agent::execution_sandbox::ExecutionSandbox::default);
 
 /// Configuration for action execution.
 #[derive(Debug, Clone)]
@@ -85,6 +91,8 @@ pub struct ActionExecutionContext<'a> {
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     /// ICS calendar file paths for calendar.read tool
     pub calendar_ics_paths: &'a [String],
+    /// Sandbox policy for shell execution (default-off)
+    pub execution_sandbox: &'a crate::agent::execution_sandbox::ExecutionSandbox,
 }
 
 impl<'a> ActionExecutionContext<'a> {
@@ -110,7 +118,16 @@ impl<'a> ActionExecutionContext<'a> {
             event_store: None,
             network_policy: None,
             calendar_ics_paths: &[],
+            execution_sandbox: &DISABLED_SANDBOX,
         }
+    }
+
+    pub fn with_execution_sandbox(
+        mut self,
+        sandbox: &'a crate::agent::execution_sandbox::ExecutionSandbox,
+    ) -> Self {
+        self.execution_sandbox = sandbox;
+        self
     }
 
     pub fn with_life_model(mut self, life_model: &'a crate::life_model::LifeModel) -> Self {

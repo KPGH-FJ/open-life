@@ -320,10 +320,7 @@ impl AgentLoop {
             _ => return false,
         };
 
-        let decision = crate::agent::compaction::should_compact(
-            &task.messages,
-            compaction_cfg,
-        );
+        let decision = crate::agent::compaction::should_compact(&task.messages, compaction_cfg);
         if !decision.should_compact {
             return false;
         }
@@ -574,17 +571,12 @@ impl AgentLoop {
             // P8: Compaction check before each model call.
             // Only re-trigger if enough new messages have accumulated since
             // the last compaction, to avoid infinite re-compaction.
-            if last_compacted_message_count == 0
+            if (last_compacted_message_count == 0
                 || current_task.messages.len()
-                    >= last_compacted_message_count + min_new_messages_for_recompact
+                    >= last_compacted_message_count + min_new_messages_for_recompact)
+                && self.try_compact_context(&mut current_task, &mut run, actx.privacy_policy)
             {
-                if self.try_compact_context(
-                    &mut current_task,
-                    &mut run,
-                    actx.privacy_policy,
-                ) {
-                    last_compacted_message_count = current_task.messages.len();
-                }
+                last_compacted_message_count = current_task.messages.len();
             }
 
             // Execute single step (catch parse errors to preserve run.actions)
@@ -726,8 +718,7 @@ impl AgentLoop {
         prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
-        let effective_policy =
-            crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
+        let effective_policy = crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
         let actx = AgentLoopContext {
             task,
             life_model,
@@ -757,8 +748,7 @@ impl AgentLoop {
         action_ctx: &ActionExecutionContext<'_>,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
-        let effective_policy =
-            crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
+        let effective_policy = crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
         let actx = AgentLoopContext {
             task,
             life_model,
@@ -1792,6 +1782,7 @@ mod tests {
                 network_policy: None,
                 calendar_ics_paths: &[],
                 event_store: None,
+                execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
             }
         }
     }

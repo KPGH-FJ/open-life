@@ -280,6 +280,8 @@ export type AgentRunEventType =
   | "plan.action_replayed"
   | "plan.action_replay_requested"
   | "compaction.created"
+  | "shell.blocked"
+  | "shell.completed"
   | "run.completed"
   | "run.failed"
   | "unknown";

@@ -238,6 +238,7 @@ async fn execute_scheduled_task(
                 .agent_run_event_store
                 .as_ref()
                 .map(|es| (**es).clone()),
+            execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
         };
 
         agent_loop

@@ -307,15 +307,23 @@ impl ExecutionSandbox {
     ///
     /// Checks (in order):
     /// 1. Bash must be enabled.
-    /// 2. Command must not be on the dangerous denylist.
-    /// 3. Command must be in the allowlist (if non-empty).
-    /// 4. cwd must not match deny_read or deny_write patterns.
-    /// 5. cwd must be within a canonicalized safe_path.
+    /// 2. Shell metacharacters are rejected.
+    /// 3. Command must not be on the dangerous denylist.
+    /// 4. Command must be in the allowlist (if non-empty).
+    /// 5. cwd must not match deny_read or deny_write patterns.
+    /// 6. cwd must be within a canonicalized safe_path.
     ///
     /// Returns `Ok(())` if allowed, `Err(reason)` if blocked.
     pub fn validate(&self, command: &str, cwd: Option<&str>) -> Result<(), String> {
         if !self.bash_enabled {
             return Err("bash execution is disabled".into());
+        }
+
+        if has_shell_metacharacters(command) {
+            return Err(format!(
+                "command contains shell metacharacters: '{}'",
+                command
+            ));
         }
 
         if self.is_command_dangerous(command) {
@@ -364,6 +372,27 @@ impl ExecutionSandbox {
 
         Ok(())
     }
+}
+
+/// Reject shell metacharacters that could enable command chaining,
+/// pipes, redirects, command substitution, or variable expansion.
+fn has_shell_metacharacters(command: &str) -> bool {
+    command.contains('|')
+        || command.contains(';')
+        || command.contains('&')
+        || command.contains('$')
+        || command.contains('`')
+        || command.contains('<')
+        || command.contains('>')
+        || command.contains('(')
+        || command.contains(')')
+        || command.contains('*')
+        || command.contains('?')
+        || command.contains('~')
+        || command.contains('{')
+        || command.contains('}')
+        || command.contains('[')
+        || command.contains(']')
 }
 
 // ── Glob matching ──────────────────────────────────────────────────────
@@ -766,5 +795,123 @@ mod tests {
         assert!(sandbox.is_path_denied_write("/etc/hosts"));
         assert!(sandbox.is_path_denied_write("/System/Library/test"));
         assert!(!sandbox.is_path_denied_write("/tmp/safe_output.txt"));
+    }
+
+    // ── Shell metacharacter rejection ──────────────────────────────────
+
+    #[test]
+    fn test_shell_pipe_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("ls | grep foo", None).is_err());
+        assert!(sandbox
+            .validate("cat file | head", None)
+            .unwrap_err()
+            .contains("shell metacharacters"));
+    }
+
+    #[test]
+    fn test_shell_redirect_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("echo hello > /tmp/out", None).is_err());
+        assert!(sandbox.validate("cat < /etc/passwd", None).is_err());
+    }
+
+    #[test]
+    fn test_shell_semicolon_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("ls; rm -rf /", None).is_err());
+    }
+
+    #[test]
+    fn test_shell_ampersand_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("sleep 10 &", None).is_err());
+    }
+
+    #[test]
+    fn test_shell_dollar_expansion_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("echo $HOME", None).is_err());
+    }
+
+    #[test]
+    fn test_shell_backtick_rejected() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("echo `whoami`", None).is_err());
+    }
+
+    #[test]
+    fn test_clean_command_passes_metacharacter_check() {
+        let sandbox = make_enabled_sandbox();
+        assert!(sandbox.validate("ls", None).is_ok());
+        assert!(sandbox.validate("echo hello", None).is_ok());
+        assert!(sandbox.validate("cat file.txt", None).is_ok());
+        assert!(sandbox.validate("wc -l output.log", None).is_ok());
+    }
+
+    #[test]
+    fn test_unknown_command_blocked_when_allowlist_non_empty() {
+        let sandbox = make_enabled_sandbox();
+        // "python" is not in the allowlist
+        let result = sandbox.validate("python", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in the allowed command"));
+    }
+
+    #[test]
+    fn test_relative_parent_traversal_cwd_rejected() {
+        // cwd with ../ should not resolve within safe_paths
+        let sandbox = ExecutionSandbox {
+            safe_paths: vec!["/tmp".into()],
+            bash_enabled: true,
+            ..ExecutionSandbox::default()
+        };
+        // /tmp/../etc resolves outside /tmp — canonicalize should reject
+        let result = sandbox.validate("ls", Some("/tmp/../etc"));
+        assert!(
+            result.is_err(),
+            "../ traversal cwd should be rejected: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_deny_read_blocks_env_under_safe_path() {
+        let sandbox = ExecutionSandbox {
+            safe_paths: vec!["/tmp".into(), "/home".into()],
+            ..ExecutionSandbox::default()
+        };
+        // deny_read_patterns blocks .env even under safe_paths
+        assert!(sandbox.is_path_denied_read("/tmp/.env"));
+        assert!(sandbox.is_path_denied_read("/home/user/.env"));
+        assert!(sandbox.is_path_denied_read("/tmp/.env.production"));
+    }
+
+    #[test]
+    fn test_deny_read_blocks_ssh_keys() {
+        let sandbox = ExecutionSandbox::default();
+        assert!(sandbox.is_path_denied_read("/root/.ssh/id_rsa"));
+        assert!(sandbox.is_path_denied_read("/home/user/.ssh/id_ed25519"));
+        assert!(sandbox.is_path_denied_read("/app/config/.ssh/authorized_keys"));
+    }
+
+    #[test]
+    fn test_deny_read_blocks_credential_files() {
+        let sandbox = ExecutionSandbox::default();
+        assert!(sandbox.is_path_denied_read("/home/user/.aws/credentials"));
+        assert!(sandbox.is_path_denied_read("/app/secrets/db_password"));
+        assert!(sandbox.is_path_denied_read("/root/.git-credentials"));
+    }
+
+    #[test]
+    fn test_dangerous_command_wins_over_allowlist() {
+        // rm is in both allowlist AND denylist — denylist should win
+        let mut sandbox = make_enabled_sandbox();
+        sandbox.command_allowlist.push("rm".into());
+        sandbox.dangerous_command_denylist.push("rm".into());
+
+        let result = sandbox.validate("rm file.txt", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("dangerous command denylist"));
     }
 }

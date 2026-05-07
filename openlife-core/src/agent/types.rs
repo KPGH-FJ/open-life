@@ -1814,6 +1814,7 @@ impl AgentSpec {
         .with_lifemodel_access()
         .with_memory_evidence()
         .with_id("main.default".to_string())
+        .with_denied_tools(vec!["shell.run".to_string()])
         .with_prompt_blocks(vec![
             "base_system".to_string(),
             "tool_discipline".to_string(),

@@ -1108,6 +1108,15 @@ export const mockAgentRunEvents: AgentRunEvent[] = [
     createdAt: "2026-05-07T10:00:02Z",
   },
   {
+    id: "evt-shell-blocked-001",
+    runId: "run-001",
+    eventType: "shell.blocked",
+    actor: "runtime",
+    summary: "shell.run blocked: shell execution is disabled",
+    payload: { tool: "shell.run", reason: "sandbox_disabled" },
+    createdAt: "2026-05-07T10:00:03Z",
+  },
+  {
     id: "evt-run-completed-001",
     runId: "run-001",
     eventType: "run.completed",

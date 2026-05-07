@@ -14,9 +14,12 @@ Read first:
 - plans/openlife_vnext_migration_plan.md
 - plans/openlife_vnext_p2_p3_task_specs.md
 - plans/openlife_vnext_p4_task_specs.md
+- plans/openlife_vnext_p8_task_specs.md
 - plans/openlife_vnext_test_and_acceptance_matrix.md
 - plans/openlife_ai_coding_governance.md
 - relevant ADR files under plans/adr/
+
+Current phase: P8 Compaction can close. P9 ExecutionSandbox-Governed Shell Execution is next.
 
 Rules:
 - Execute exactly one task spec.
@@ -25,6 +28,7 @@ Rules:
 - Do not introduce SubAgentRuntime before its task.
 - Do not introduce Bash/Shell before ExecutionSandbox task.
 - Do not bypass ToolRuntime, Proposal, PromptStack, or AgentRunEvent.
+- For P9: shell is default-off, no interactive terminal, no /bin/sh -c, no raw shell strings, structured command input only, no scheduled/sub-agent shell by default.
 - Add tests for new behavior.
 - Run verification commands.
 - Report changed files, tests run, results, and residual risks.
@@ -1888,4 +1892,32 @@ Constraints:
 Verification:
 - pnpm --dir frontend test -- --run RunTracePanel tauri
 - pnpm --dir frontend typecheck
+```
+
+## P9-0 Prompt
+
+```text
+Execute vNext task P9-0: Documentation And Entry Sync.
+
+Goal:
+- Make P9 discoverable and AI-coding-ready.
+- State that P8 can close and P9 is the next phase.
+- Ensure P9 explicitly excludes interactive shell, arbitrary shell strings,
+  scheduled shell, sub-agent shell, and direct writes.
+
+Allowed edit areas:
+- AGENTS.md
+- README.md
+- plans/openlife_vnext_p9_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+
+Verification:
+- rg -n "openlife_vnext_p9_task_specs|P9-0|P9-1|P9-2|P9-3|P9-4|P9-5|P9-6|P9-7|ExecutionSandbox-Governed Shell" AGENTS.md README.md plans
+- git diff --name-only contains documentation files only.
 ```

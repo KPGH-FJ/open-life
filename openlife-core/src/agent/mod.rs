@@ -19,6 +19,7 @@ pub mod proposal_generators;
 pub mod proposal_store;
 pub mod reasoning;
 pub mod runtime;
+pub mod shell_executor;
 pub mod store;
 pub mod sub_agent;
 pub mod types;
@@ -26,17 +27,17 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
-pub use compaction::{
-    build_safe_compacted_observation, compact_messages_for_agent_loop, should_compact,
-    CompactionConfig, CompactionDecision, CompactionInput, CompactionResult,
-    CompactionSummaryBuilder, estimate_message_tokens,
-};
 pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,
 };
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
 pub use agent_spec_store::AgentSpecStore;
+pub use compaction::{
+    build_safe_compacted_observation, compact_messages_for_agent_loop, estimate_message_tokens,
+    should_compact, CompactionConfig, CompactionDecision, CompactionInput, CompactionResult,
+    CompactionSummaryBuilder,
+};
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,

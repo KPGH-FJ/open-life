@@ -16,7 +16,7 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **vNext P8 可以收口，当前进入 P9 Shell/Sandbox 规划与开发**：P8 已将长对话/长 AgentRun 的上下文压缩、proposal/observation 保留与 `compaction.created` trace 接入；P9 聚焦 `ExecutionSandbox` 治理下的默认关闭、非交互式、可追踪 shell 能力。
+- **vNext P8 可以收口，当前进入 P9 Shell/Sandbox 规划与开发**：P8 已将长对话/长 AgentRun 的上下文压缩、proposal/observation 保留与 `compaction.created` trace 接入；P9 聚焦 `ExecutionSandbox` 治理下的默认关闭、非交互式、结构化命令执行能力。P9 不引入交互式终端、`/bin/sh -c` 原始 shell 字符串、定时/主动 shell、子 Agent shell。写入仍走 Proposal-first。
 - **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
 - **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。

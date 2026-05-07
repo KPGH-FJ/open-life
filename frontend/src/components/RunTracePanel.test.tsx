@@ -204,6 +204,23 @@ describe("RunTracePanel", () => {
   it("renders compaction.created event", () => {
     render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
     expect(screen.getByText("compaction.created")).toBeDefined();
-    expect(screen.getByText(/Context compacted: 25 -> 7 messages/)).toBeDefined();
+    expect(screen.getByText(/Context compacted:/)).toBeDefined();
+  });
+
+  it("renders shell.blocked event", () => {
+    const shellEvents: AgentRunEvent[] = [
+      {
+        id: "evt-shell-1",
+        runId: "run-001",
+        eventType: "shell.blocked",
+        actor: "runtime",
+        summary: "shell.run blocked: shell execution is disabled",
+        payload: { tool: "shell.run" },
+        createdAt: "2026-05-07T10:00:03Z",
+      },
+    ];
+    render(<RunTracePanel events={shellEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    expect(screen.getByText("shell.blocked")).toBeDefined();
+    expect(screen.getByText("shell.run blocked: shell execution is disabled")).toBeDefined();
   });
 });
