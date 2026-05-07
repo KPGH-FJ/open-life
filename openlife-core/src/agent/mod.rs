@@ -1,6 +1,7 @@
 pub mod action_executor;
 pub mod agent_loop;
 pub mod agent_spec_store;
+pub mod compaction;
 pub mod context_assembler;
 pub mod event_store;
 pub mod execution_facade;
@@ -25,6 +26,11 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use compaction::{
+    build_safe_compacted_observation, compact_messages_for_agent_loop, should_compact,
+    CompactionConfig, CompactionDecision, CompactionInput, CompactionResult,
+    CompactionSummaryBuilder, estimate_message_tokens,
+};
 pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,

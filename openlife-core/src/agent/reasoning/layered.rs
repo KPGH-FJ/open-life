@@ -222,41 +222,12 @@ impl LayeredReasoner {
         trace: &mut ReasoningTrace,
     ) -> Result<serde_json::Value, ReasoningError> {
         let start = std::time::Instant::now();
+        let privacy_policy = input
+            .privacy_policy
+            .unwrap_or(crate::agent::types::PrivacyPolicy::CloudAllowed);
         let user_text = &input.user_text;
 
-        let mut prompt = format!(
-            "你是 OpenLife 的策略规划层。请基于用户的人生模型目标，为以下请求制定回应策略。\n\n请求方法: {}\n用户输入: {}\n",
-            input.task_kind, user_text
-        );
-
-        let active_goals: Vec<String> = self
-            .life_model
-            .goals
-            .short_term
-            .iter()
-            .chain(self.life_model.goals.medium_term.iter())
-            .chain(self.life_model.goals.long_term.iter())
-            .chain(self.life_model.goals.life_goals.iter())
-            .filter(|g| g.priority >= 3)
-            .map(|g| format!("- [{}] {} (优先级{})", g.name, g.description, g.priority))
-            .collect();
-        if !active_goals.is_empty() {
-            prompt.push_str("\n用户高优先级目标:\n");
-            prompt.push_str(&active_goals.join("\n"));
-            prompt.push('\n');
-        }
-
-        if !context.tools_prompt.is_empty() {
-            prompt.push_str("\n可用工具: 是。若策略需要外部数据，请标记 needs_tools=true。");
-        }
-
-        if !context.memory_context.is_empty() {
-            prompt.push_str("\n相关记忆: 存在。策略应保持一致性。");
-        }
-
-        prompt.push_str(
-            "\n\n请用 JSON 输出策略（不要包含 markdown 代码块标记）:\n{\n  \"text\": \"策略描述（50字以内）\",\n  \"plan_steps\": [\"步骤1\", \"步骤2\"],\n  \"required_keywords\": [],\n  \"needs_tools\": false\n}\n"
-        );
+        let prompt = build_strategy_prompt(input, &self.life_model, context, privacy_policy);
 
         let messages = vec![ChatMessage {
             role: "user".to_string(),
@@ -265,9 +236,10 @@ impl LayeredReasoner {
 
         let result = match self
             .scheduler
-            .generate_raw(
+            .generate_raw_governed(
                 messages,
                 Some("你是一个严谨的策略规划助手，只输出合法 JSON。"),
+                privacy_policy,
             )
             .await
         {
@@ -300,7 +272,19 @@ impl LayeredReasoner {
                     Err(_) => self.fallback_strategy(user_text),
                 }
             }
-            Err(_) => self.fallback_strategy(user_text),
+            Err(e) => {
+                // Governance error is fail-closed; strategy fallback is local-only
+                if privacy_policy == crate::agent::types::PrivacyPolicy::LocalOnly
+                    && e.contains("LocalOnly")
+                {
+                    return Err(ReasoningError {
+                        phase: "strategy".to_string(),
+                        message: format!("Strategy phase blocked by LocalOnly privacy: {}", e),
+                        recoverable: false,
+                    });
+                }
+                self.fallback_strategy(user_text)
+            }
         };
 
         let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -432,9 +416,12 @@ impl LayeredReasoner {
             });
         }
 
+        let privacy_policy = _input
+            .privacy_policy
+            .unwrap_or(crate::agent::types::PrivacyPolicy::CloudAllowed);
         let result = match self
             .scheduler
-            .generate_raw(messages.to_vec(), Some(&system_prompt))
+            .generate_raw_governed(messages.to_vec(), Some(&system_prompt), privacy_policy)
             .await
         {
             Ok(text) => json!({
@@ -442,11 +429,20 @@ impl LayeredReasoner {
                 "used_strategy": strategy.clone(),
             }),
             Err(e) => {
+                if privacy_policy == crate::agent::types::PrivacyPolicy::LocalOnly
+                    && e.contains("LocalOnly")
+                {
+                    return Err(ReasoningError {
+                        phase: "generation".to_string(),
+                        message: format!("Generation phase blocked by LocalOnly privacy: {}", e),
+                        recoverable: false,
+                    });
+                }
                 return Err(ReasoningError {
                     phase: "generation".to_string(),
                     message: format!("Generation phase LLM call failed: {}", e),
                     recoverable: false,
-                })
+                });
             }
         };
 
@@ -575,6 +571,85 @@ impl SafetyChecker {
     }
 }
 
+/// Build the strategy planning prompt respecting privacy_policy.
+///
+/// SummaryOnly: excludes raw user_text, goal names, goal descriptions, memory content.
+/// Includes only: task_kind, goal counts, boolean tools/memory signals.
+/// LocalOnly / CloudAllowed: full prompt with raw data.
+pub fn build_strategy_prompt(
+    input: &ReasoningInput,
+    life_model: &LifeModel,
+    context: &AssembleOutput,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+) -> String {
+    let is_summary_only = privacy_policy == crate::agent::types::PrivacyPolicy::SummaryOnly;
+
+    let mut prompt = format!(
+        "你是 OpenLife 的策略规划层。请基于用户的人生模型目标，为以下请求制定回应策略。\n\n请求方法: {}\n",
+        input.task_kind
+    );
+
+    if is_summary_only {
+        prompt.push_str("用户输入: 用户提出了一个请求，原文因 SummaryOnly 隐私策略已省略。\n");
+    } else {
+        prompt.push_str(&format!("用户输入: {}\n", input.user_text));
+    }
+
+    if is_summary_only {
+        let total_goals = life_model.goals.short_term.len()
+            + life_model.goals.medium_term.len()
+            + life_model.goals.long_term.len()
+            + life_model.goals.life_goals.len();
+        let high_priority_count: usize = life_model
+            .goals
+            .short_term
+            .iter()
+            .chain(life_model.goals.medium_term.iter())
+            .chain(life_model.goals.long_term.iter())
+            .chain(life_model.goals.life_goals.iter())
+            .filter(|g| g.priority >= 3)
+            .count();
+        prompt.push_str(&format!(
+            "用户共有 {} 个目标，其中 {} 个为高优先级（未列出名称/描述因隐私策略）。\n",
+            total_goals, high_priority_count
+        ));
+    } else {
+        let active_goals: Vec<String> = life_model
+            .goals
+            .short_term
+            .iter()
+            .chain(life_model.goals.medium_term.iter())
+            .chain(life_model.goals.long_term.iter())
+            .chain(life_model.goals.life_goals.iter())
+            .filter(|g| g.priority >= 3)
+            .map(|g| format!("- [{}] {} (优先级{})", g.name, g.description, g.priority))
+            .collect();
+        if !active_goals.is_empty() {
+            prompt.push_str("\n用户高优先级目标:\n");
+            prompt.push_str(&active_goals.join("\n"));
+            prompt.push('\n');
+        }
+    }
+
+    if !context.tools_prompt.is_empty() {
+        prompt.push_str("\n可用工具: 是。若策略需要外部数据，请标记 needs_tools=true。");
+    }
+
+    if !context.memory_context.is_empty() {
+        if is_summary_only {
+            prompt.push_str("\n相关记忆: 存在（内容因隐私策略省略）。策略应保持一致性。");
+        } else {
+            prompt.push_str("\n相关记忆: 存在。策略应保持一致性。");
+        }
+    }
+
+    prompt.push_str(
+        "\n\n请用 JSON 输出策略（不要包含 markdown 代码块标记）:\n{\n  \"text\": \"策略描述（50字以内）\",\n  \"plan_steps\": [\"步骤1\", \"步骤2\"],\n  \"required_keywords\": [],\n  \"needs_tools\": false\n}\n",
+    );
+
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,5 +689,239 @@ mod tests {
         let result = checker.check(&trace);
         assert!(!result.passed);
         assert!(result.warnings.iter().any(|w| w.contains("赌博")));
+    }
+
+    // ── P1: SummaryOnly strategy prompt tests ──────────────────────────
+
+    use crate::agent::context_assembler::AssembleOutput;
+    use crate::life_model::{GoalItem, Goals, Identity, LifeModel, State};
+
+    fn make_test_life_model() -> LifeModel {
+        let mut lm = LifeModel::default();
+        lm.identity = Identity {
+            name: "SecretUser".to_string(),
+            birth_date: Some("1990-01-01".to_string()),
+            values: vec![crate::life_model::ValueItem {
+                name: "诚实".to_string(),
+                weight: 90,
+                description: "保持诚实正直".to_string(),
+            }],
+            ..Default::default()
+        };
+        lm.goals = Goals {
+            short_term: vec![GoalItem {
+                name: "目标A".to_string(),
+                description: "详细描述A".to_string(),
+                priority: 5,
+                ..Default::default()
+            }],
+            medium_term: vec![GoalItem {
+                name: "中期目标B".to_string(),
+                description: "详细描述B".to_string(),
+                priority: 6,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        lm.state = State {
+            current_focus: "提升效率".to_string(),
+            recent_events: vec!["敏感事件X".to_string()],
+            ..Default::default()
+        };
+        lm
+    }
+
+    fn make_test_context(memory_ctx: &str) -> AssembleOutput {
+        AssembleOutput {
+            life_model: std::sync::Arc::new(LifeModel::default()),
+            tools_prompt: "web.search".to_string(),
+            privacy_map: std::collections::HashMap::new(),
+            desensitized_messages: std::sync::Arc::new(vec![crate::llm::ChatMessage {
+                role: "user".to_string(),
+                content: "test message".to_string(),
+            }]),
+            context_summary: crate::agent::types::ContextSummary {
+                life_model_empty: false,
+                included_life_model_sections: vec![],
+                memory_hit_count: 0,
+                memory_sources: vec![],
+                used_tools_prompt: false,
+                redaction_applied: false,
+                redaction_level: crate::agent::types::RedactionLevel::None,
+            },
+            embed_error: None,
+            memory_context: memory_ctx.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_summary_only_prompt_excludes_raw_user_text() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "我的真实名字是张三，帮我规划目标".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::SummaryOnly),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        );
+        assert!(!prompt.contains("张三"), "raw user text must be excluded");
+        assert!(
+            prompt.contains("SummaryOnly"),
+            "must indicate privacy policy"
+        );
+        assert!(prompt.contains("请求方法"), "must include task kind marker");
+        assert!(prompt.contains("conversation"), "must include task_kind");
+    }
+
+    #[test]
+    fn test_summary_only_prompt_excludes_goal_names_and_descriptions() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "帮我".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::SummaryOnly),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        );
+        assert!(!prompt.contains("目标A"), "goal name must be excluded");
+        assert!(
+            !prompt.contains("详细描述A"),
+            "goal description must be excluded"
+        );
+        assert!(!prompt.contains("中期目标B"), "goal name must be excluded");
+        assert!(
+            !prompt.contains("详细描述B"),
+            "goal description must be excluded"
+        );
+    }
+
+    #[test]
+    fn test_summary_only_prompt_includes_goal_counts() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "帮我".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::SummaryOnly),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        );
+        assert!(
+            prompt.contains("2 个目标"),
+            "should include total goal count, got: {}",
+            prompt
+        );
+        assert!(
+            prompt.contains("2 个为高优先级"),
+            "should include high-priority count"
+        );
+    }
+
+    #[test]
+    fn test_summary_only_prompt_includes_tools_and_memory_signals() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "帮我".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::SummaryOnly),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("some_context");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        );
+        assert!(
+            prompt.contains("可用工具: 是"),
+            "must include tools boolean"
+        );
+        assert!(
+            prompt.contains("相关记忆: 存在"),
+            "must include memory boolean"
+        );
+        assert!(
+            prompt.contains("隐私策略省略"),
+            "must note privacy omission for memory"
+        );
+    }
+
+    #[test]
+    fn test_cloud_allowed_prompt_includes_raw_data() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "测试用户输入".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::CloudAllowed),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("记忆内容");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::CloudAllowed,
+        );
+        assert!(
+            prompt.contains("测试用户输入"),
+            "CloudAllowed must include raw user text"
+        );
+        assert!(
+            prompt.contains("目标A"),
+            "CloudAllowed must include goal names"
+        );
+        assert!(
+            prompt.contains("详细描述A"),
+            "CloudAllowed must include goal descriptions"
+        );
+        assert!(
+            prompt.contains("记忆: 存在"),
+            "CloudAllowed must include memory signal"
+        );
+        assert!(
+            !prompt.contains("SummaryOnly"),
+            "CloudAllowed must not have SummaryOnly marker"
+        );
+    }
+
+    #[test]
+    fn test_local_only_prompt_includes_raw_data() {
+        let input = ReasoningInput {
+            task_kind: crate::agent::types::AgentTaskKind::Conversation,
+            user_text: "local test".to_string(),
+            session_id: "sess-1".to_string(),
+            privacy_policy: Some(crate::agent::types::PrivacyPolicy::LocalOnly),
+        };
+        let lm = make_test_life_model();
+        let ctx = make_test_context("");
+        let prompt = super::build_strategy_prompt(
+            &input,
+            &lm,
+            &ctx,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        assert!(
+            prompt.contains("local test"),
+            "LocalOnly keeps raw data since it stays local"
+        );
+        assert!(prompt.contains("目标A"), "LocalOnly includes goal names");
     }
 }

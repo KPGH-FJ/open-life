@@ -65,6 +65,7 @@ pub async fn a2a_bridge_local(
         task_kind: openlife_core::agent::AgentTaskKind::Conversation,
         user_text: text.clone(),
         session_id: session_id.clone().unwrap_or_default(),
+        privacy_policy: None,
     };
     let a2a_req = reasoning_input_to_a2a_task(&req, skill.as_deref(), None);
     let life_model = {
@@ -83,6 +84,7 @@ pub async fn a2a_bridge_local(
             task_kind: openlife_core::agent::AgentTaskKind::Conversation,
             user_text: text,
             session_id: session_id.unwrap_or_default(),
+            privacy_policy: None,
         },
         None,
         None,

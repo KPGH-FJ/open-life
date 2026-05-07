@@ -204,6 +204,7 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
         "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
         "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
+        "compaction.created" => AgentRunEventType::CompactionCreated,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
         "model.failed" => AgentRunEventType::ModelFailed,

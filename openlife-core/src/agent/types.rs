@@ -46,6 +46,7 @@ pub enum AgentRunEventType {
     PlanContinuationRequested,
     PlanActionReplayed,
     PlanActionReplayRequested,
+    CompactionCreated,
     /// Unknown or future event type — preserved as-is in the trace.
     /// Older builds reading traces from newer builds use this variant.
     Unknown(String),
@@ -107,6 +108,7 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::PlanActionReplayRequested => {
                 write!(f, "plan.action_replay_requested")
             }
+            AgentRunEventType::CompactionCreated => write!(f, "compaction.created"),
             AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
     }
@@ -158,6 +160,7 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
             "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
             "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
+            "compaction.created" => AgentRunEventType::CompactionCreated,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
             "model.failed" => AgentRunEventType::ModelFailed,
@@ -1367,6 +1370,18 @@ pub struct CompactionSummary {
     pub compacted_token_estimate: usize,
     /// When the compaction was created.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Key decisions preserved through compaction.
+    #[serde(default)]
+    pub preserved_decisions: Vec<String>,
+    /// Pending user confirmations or tasks preserved.
+    #[serde(default)]
+    pub pending_task_summaries: Vec<String>,
+    /// Number of source messages before compaction.
+    #[serde(default)]
+    pub source_message_count: usize,
+    /// Privacy policy governing this compaction.
+    #[serde(default)]
+    pub privacy_policy: Option<crate::agent::types::PrivacyPolicy>,
 }
 
 /// A compacted representation of an unresolved tool observation.
@@ -1399,6 +1414,10 @@ impl CompactionSummary {
             original_token_estimate: original_tokens,
             compacted_token_estimate: compacted_tokens,
             created_at: chrono::Utc::now(),
+            preserved_decisions: Vec::new(),
+            pending_task_summaries: Vec::new(),
+            source_message_count: 0,
+            privacy_policy: None,
         }
     }
 
@@ -1553,6 +1572,24 @@ mod compaction_tests {
         assert_eq!(deserialized.unresolved_observation_count, 1);
         assert!(deserialized.sensitive_content_redacted);
     }
+}
+
+// ── CompactionEventPayload ────────────────────────────────────────────
+
+/// Payload for compaction.created events. Must not contain raw sensitive content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionEventPayload {
+    pub compaction_id: String,
+    pub run_id: String,
+    pub reason: String,
+    pub original_token_estimate: usize,
+    pub compacted_token_estimate: usize,
+    pub source_message_count: usize,
+    pub active_proposal_count: usize,
+    pub unresolved_observation_count: u32,
+    pub redacted_fields: Vec<String>,
+    pub privacy_policy: String,
 }
 
 // ── AgentSpec & SubAgentSpec ───────────────────────────────────────────
@@ -1765,6 +1802,9 @@ impl AgentSpec {
     }
 
     /// Create the default main AgentSpec with a stable id for store bootstrapping.
+    ///
+    /// Includes baseline prompt blocks (base_system, tool_discipline, privacy_rule)
+    /// so that PromptStack governance is active by default.
     pub fn default_main_spec() -> Self {
         Self::new(
             AgentRoleKind::Main,
@@ -1774,6 +1814,17 @@ impl AgentSpec {
         .with_lifemodel_access()
         .with_memory_evidence()
         .with_id("main.default".to_string())
+        .with_prompt_blocks(vec![
+            "base_system".to_string(),
+            "tool_discipline".to_string(),
+            "privacy_rule".to_string(),
+        ])
+    }
+
+    /// Set prompt_block_ids on this spec.
+    pub fn with_prompt_blocks(mut self, ids: Vec<String>) -> Self {
+        self.prompt_block_ids = ids;
+        self
     }
 
     /// Set a specific id on this spec (useful for store bootstrapping).

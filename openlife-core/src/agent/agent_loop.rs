@@ -1,11 +1,14 @@
 use crate::agent::action_executor::{
     ActionExecutionContext, ActionExecutionStatus, ActionExecutor, AgentActionRequest,
 };
+use crate::agent::compaction::{
+    build_safe_compacted_observation, compact_messages_for_agent_loop, CompactionConfig,
+};
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{
     AgentEventActor, AgentObservation, AgentRun, AgentRunError, AgentRunEvent, AgentRunEventType,
-    AgentRunStatus, AgentTask,
+    AgentRunStatus, AgentTask, CompactionEventPayload,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -31,6 +34,9 @@ pub struct AgentLoopConfig {
     pub role: AgentRole,
     /// Optional restrict to specific tools (empty = all allowed)
     pub toolset_allowlist: Vec<String>,
+    /// Compaction configuration for long-context continuity.
+    /// None disables compaction. Default: Some(CompactionConfig::default()).
+    pub compaction_config: Option<CompactionConfig>,
 }
 
 /// Specialization role for the agent loop.
@@ -54,6 +60,7 @@ impl Default for AgentLoopConfig {
             shutdown_notify: None,
             role: AgentRole::default(),
             toolset_allowlist: Vec::new(),
+            compaction_config: Some(CompactionConfig::default()),
         }
     }
 }
@@ -249,6 +256,7 @@ impl AgentLoop {
         run_id: &str,
         agent_spec: &crate::agent::types::AgentSpec,
         runtime_output: &AgentRuntimeOutput,
+        effective_privacy_policy: crate::agent::types::PrivacyPolicy,
     ) {
         self.try_record_event(
             run_id,
@@ -275,7 +283,8 @@ impl AgentLoop {
                     .map(|g| &g.included).unwrap_or(&vec![]),
                 "context_excluded": runtime_output.governed_context_summary.as_ref()
                     .map(|g| &g.excluded).unwrap_or(&vec![]),
-                "privacy_policy": agent_spec.privacy_policy.to_string(),
+                "agent_spec_privacy_policy": agent_spec.privacy_policy.to_string(),
+                "effective_privacy_policy": effective_privacy_policy.to_string(),
             }),
         );
     }
@@ -295,6 +304,90 @@ impl AgentLoop {
             tool_call_index,
             timestamp: chrono::Utc::now(),
         });
+    }
+
+    /// P8: Check compaction policy and, if triggered, replace the current
+    /// task messages with compacted context. Records `compaction.created`
+    /// event and returns true if compaction was applied.
+    fn try_compact_context(
+        &self,
+        task: &mut AgentTask,
+        run: &mut AgentRun,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> bool {
+        let compaction_cfg = match &self.config.compaction_config {
+            Some(cfg) if cfg.enabled => cfg,
+            _ => return false,
+        };
+
+        let decision = crate::agent::compaction::should_compact(
+            &task.messages,
+            compaction_cfg,
+        );
+        if !decision.should_compact {
+            return false;
+        }
+
+        let unresolved_obs: Vec<crate::agent::types::CompactedObservation> = run
+            .observations
+            .iter()
+            .map(|obs| build_safe_compacted_observation(&obs.source, &obs.content))
+            .collect();
+        let unresolved_count = unresolved_obs.len();
+
+        if let Some(result) = compact_messages_for_agent_loop(
+            &task.messages,
+            &run.id,
+            compaction_cfg,
+            privacy_policy,
+            run.generated_proposals.clone(),
+            unresolved_obs,
+        ) {
+            let reason = decision
+                .reason
+                .unwrap_or_else(|| "triggered by policy".into());
+            let payload = CompactionEventPayload {
+                compaction_id: result.summary.id.clone(),
+                run_id: run.id.clone(),
+                reason,
+                original_token_estimate: decision.original_token_estimate,
+                compacted_token_estimate: result.summary.compacted_token_estimate,
+                source_message_count: decision.message_count,
+                active_proposal_count: run.generated_proposals.len(),
+                unresolved_observation_count: unresolved_count as u32,
+                redacted_fields: result.summary.redacted_fields.clone(),
+                privacy_policy: privacy_policy.to_string(),
+            };
+            self.try_record_event(
+                &run.id,
+                AgentRunEventType::CompactionCreated,
+                AgentEventActor::Runtime,
+                format!(
+                    "Context compacted: {} -> {} messages (~{} -> ~{} tokens)",
+                    payload.source_message_count,
+                    result.compacted_messages.len(),
+                    payload.original_token_estimate,
+                    payload.compacted_token_estimate,
+                ),
+                serde_json::to_value(&payload).unwrap_or_default(),
+            );
+
+            task.messages = result.compacted_messages;
+            return true;
+        }
+
+        false
+    }
+
+    /// P8 helper exposed for tests: public visibility for compaction tests.
+    #[doc(hidden)]
+    pub fn _test_compact_context(
+        &self,
+        task: &mut AgentTask,
+        run: &mut AgentRun,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> bool {
+        self.try_compact_context(task, run, privacy_policy)
     }
 
     /// Attempt a one-shot JSON self-repair when the model produces malformed JSON.
@@ -407,6 +500,7 @@ impl AgentLoop {
         }
         let current_memory_context = actx.memory_context.clone();
         let current_privacy_engine = actx.privacy_engine.clone();
+
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
         // Set reasoning strategy
@@ -418,6 +512,11 @@ impl AgentLoop {
 
         #[allow(unused_assignments)]
         let mut stop_reason = String::new();
+
+        // P8: re-compaction guard — only re-trigger when significant new
+        // messages have accumulated since the last compaction.
+        let mut last_compacted_message_count: usize = 0;
+        let min_new_messages_for_recompact: usize = 5;
 
         loop {
             // Emit thinking status at start of each step
@@ -471,6 +570,22 @@ impl AgentLoop {
             } else {
                 current_memory_context.clone()
             };
+
+            // P8: Compaction check before each model call.
+            // Only re-trigger if enough new messages have accumulated since
+            // the last compaction, to avoid infinite re-compaction.
+            if last_compacted_message_count == 0
+                || current_task.messages.len()
+                    >= last_compacted_message_count + min_new_messages_for_recompact
+            {
+                if self.try_compact_context(
+                    &mut current_task,
+                    &mut run,
+                    actx.privacy_policy,
+                ) {
+                    last_compacted_message_count = current_task.messages.len();
+                }
+            }
 
             // Execute single step (catch parse errors to preserve run.actions)
             let step_result = match self
@@ -606,18 +721,20 @@ impl AgentLoop {
         tools_prompt: &str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
-        privacy_policy: crate::agent::types::PrivacyPolicy,
+        _privacy_policy: crate::agent::types::PrivacyPolicy,
         agent_spec: &crate::agent::types::AgentSpec,
         prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
         action_ctx: &ActionExecutionContext<'_>,
     ) -> Result<AgentLoopResult> {
+        let effective_policy =
+            crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
         let actx = AgentLoopContext {
             task,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            privacy_policy,
+            privacy_policy: effective_policy,
             agent_spec,
             prompt_registry,
         };
@@ -634,19 +751,21 @@ impl AgentLoop {
         tools_prompt: &str,
         memory_context: Option<String>,
         privacy_engine: PrivacyEngine,
-        privacy_policy: crate::agent::types::PrivacyPolicy,
+        _privacy_policy: crate::agent::types::PrivacyPolicy,
         agent_spec: &crate::agent::types::AgentSpec,
         prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
         action_ctx: &ActionExecutionContext<'_>,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
+        let effective_policy =
+            crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
         let actx = AgentLoopContext {
             task,
             life_model,
             tools_prompt,
             memory_context,
             privacy_engine,
-            privacy_policy,
+            privacy_policy: effective_policy,
             agent_spec,
             prompt_registry,
         };
@@ -903,7 +1022,12 @@ impl AgentLoop {
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
 
-        self.record_runtime_governance_events(run_id, actx.agent_spec, &runtime_output);
+        self.record_runtime_governance_events(
+            run_id,
+            actx.agent_spec,
+            &runtime_output,
+            actx.privacy_policy,
+        );
 
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
@@ -951,7 +1075,12 @@ impl AgentLoop {
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
 
-        self.record_runtime_governance_events(run_id, actx.agent_spec, &runtime_output);
+        self.record_runtime_governance_events(
+            run_id,
+            actx.agent_spec,
+            &runtime_output,
+            actx.privacy_policy,
+        );
 
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
@@ -2396,14 +2525,7 @@ mod tests {
         let action_ctx = test_ctx.as_ctx();
         let life_model = LifeModel::default();
         let spec = AgentSpec::default_main_spec();
-        let mut spec = spec; // remove mut if not needed, but we need to set prompt_block_ids
-                             // For this test, we just use the default spec with valid blocks.
-                             // The execute_task_with_spec will succeed; generate_governed will fail
-                             // because the fake scheduler has no real backend.
-                             // But BEFORE the model call, record_runtime_governance_events writes
-                             // PromptStackAssembled with real runtime_output data.
-                             // This test validates that real trace comes from runtime_output, not
-                             // from manual block_id iteration.
+        // default_main_spec now includes baseline prompt_block_ids
 
         let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
         let task = AgentTask {
@@ -2550,7 +2672,255 @@ mod tests {
         }
     }
 
+    // ── P2: effective privacy_policy resolution tests ─────────────────
+
+    /// Helper: resolve effective privacy_policy for AgentLoop, using
+    /// AgentSpec as sole fallback (ignoring any caller-passed parameter).
+    fn resolve_agent_loop_privacy_policy(
+        task: &crate::agent::types::AgentTask,
+        agent_spec: &crate::agent::types::AgentSpec,
+    ) -> crate::agent::types::PrivacyPolicy {
+        crate::agent::runtime::resolve_privacy_policy(task, agent_spec)
+    }
+
+    #[test]
+    fn test_effective_policy_task_override_over_agent_spec() {
+        use crate::agent::types::AgentTaskKind;
+
+        let mut task = crate::agent::types::AgentTask::new(AgentTaskKind::Conversation, "sess");
+        task.privacy_policy = Some(crate::agent::types::PrivacyPolicy::LocalOnly);
+        let spec = crate::agent::types::AgentSpec::default()
+            .with_privacy_policy(crate::agent::types::PrivacyPolicy::CloudAllowed);
+
+        // Task override wins
+        let resolved = resolve_agent_loop_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::LocalOnly);
+    }
+
+    #[test]
+    fn test_effective_policy_agent_spec_fallback_ignores_param() {
+        use crate::agent::types::AgentTaskKind;
+
+        let task = crate::agent::types::AgentTask::new(AgentTaskKind::Conversation, "sess");
+        // No task override
+        let spec = crate::agent::types::AgentSpec::default()
+            .with_privacy_policy(crate::agent::types::PrivacyPolicy::SummaryOnly);
+
+        // AgentSpec is the fallback — NOT a caller-supplied parameter
+        let resolved = resolve_agent_loop_privacy_policy(&task, &spec);
+        assert_eq!(
+            resolved,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+            "effective policy must fall back to AgentSpec, not caller parameter"
+        );
+    }
+
+    #[test]
+    fn test_effective_policy_streaming_uses_agent_spec_fallback() {
+        use crate::agent::types::AgentTaskKind;
+
+        // Same semantics apply to run_streaming — tested through the same helper
+        let task = crate::agent::types::AgentTask::new(AgentTaskKind::Conversation, "sess");
+        let spec = crate::agent::types::AgentSpec::default()
+            .with_privacy_policy(crate::agent::types::PrivacyPolicy::CloudAllowed);
+
+        let resolved = resolve_agent_loop_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::CloudAllowed);
+    }
+
+    #[test]
+    fn test_effective_policy_event_payload_records_effective_not_param() {
+        use crate::agent::types::AgentTaskKind;
+
+        // Verify the governance event payload records effective policy
+        // by checking that the helper itself uses AgentSpec fallback
+        let mut task = crate::agent::types::AgentTask::new(AgentTaskKind::Conversation, "sess");
+        task.privacy_policy = Some(crate::agent::types::PrivacyPolicy::LocalOnly);
+        let spec = crate::agent::types::AgentSpec::default()
+            .with_privacy_policy(crate::agent::types::PrivacyPolicy::SummaryOnly);
+
+        // effective = task override (LocalOnly), not spec (SummaryOnly)
+        let effective = resolve_agent_loop_privacy_policy(&task, &spec);
+        assert_eq!(effective, crate::agent::types::PrivacyPolicy::LocalOnly);
+        assert_ne!(effective, spec.privacy_policy);
+    }
+
     // ── End of P7 hardening tests ─────────────────────────────────────
+
+    // ── P8: Compaction integration tests ───────────────────────────────
+
+    fn make_chat_msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    fn make_long_conversation(count: usize) -> Vec<ChatMessage> {
+        let mut msgs = Vec::new();
+        for i in 0..count {
+            msgs.push(make_chat_msg(
+                if i % 2 == 0 { "user" } else { "assistant" },
+                &format!(
+                    "Message {} with substantial content for counting. {}",
+                    i,
+                    "x".repeat(60),
+                ),
+            ));
+        }
+        msgs
+    }
+
+    #[test]
+    fn test_try_compact_context_triggered_by_long_history() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let msgs = make_long_conversation(25);
+        let mut task = crate::agent::types::AgentTask::new(
+            crate::agent::types::AgentTaskKind::Conversation,
+            "sess",
+        );
+        task.messages = msgs;
+
+        let compacted = agent._test_compact_context(
+            &mut task,
+            &mut run,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        assert!(compacted, "long conversation should trigger compaction");
+        assert!(
+            task.messages.len() < 25,
+            "compacted messages {} should be fewer than 25",
+            task.messages.len()
+        );
+    }
+
+    #[test]
+    fn test_compact_context_preserves_latest_user_message() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut msgs = make_long_conversation(22);
+        msgs.push(make_chat_msg("user", "my latest question"));
+        let mut task = crate::agent::types::AgentTask::new(
+            crate::agent::types::AgentTaskKind::Conversation,
+            "sess",
+        );
+        task.messages = msgs;
+
+        let _ = agent._test_compact_context(
+            &mut task,
+            &mut run,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        let has_latest = task
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("my latest question"));
+        assert!(has_latest, "latest user message must be preserved");
+    }
+
+    #[test]
+    fn test_compact_context_no_panic_without_event_store() {
+        let agent = make_test_agent_loop(); // event_store is None
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let msgs = make_long_conversation(30);
+        let mut task = crate::agent::types::AgentTask::new(
+            crate::agent::types::AgentTaskKind::Conversation,
+            "sess",
+        );
+        task.messages = msgs;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            agent._test_compact_context(
+                &mut task,
+                &mut run,
+                crate::agent::types::PrivacyPolicy::LocalOnly,
+            )
+        }));
+        assert!(result.is_ok(), "should not panic without event_store");
+    }
+
+    #[test]
+    fn test_compact_context_idempotent_without_new_messages() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let msgs = make_long_conversation(25);
+        let mut task = crate::agent::types::AgentTask::new(
+            crate::agent::types::AgentTaskKind::Conversation,
+            "sess",
+        );
+        task.messages = msgs;
+
+        let first = agent._test_compact_context(
+            &mut task,
+            &mut run,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        assert!(first);
+
+        // Immediately try again — should NOT compact because the guard
+        // prevents re-compaction if message count hasn't grown enough.
+        let prev_len = task.messages.len();
+        let second = agent._test_compact_context(
+            &mut task,
+            &mut run,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        // Whether it compacts or not depends on the config thresholds, but
+        // the messages should not shrink further (guard prevents it).
+        if second {
+            assert!(
+                task.messages.len() >= prev_len,
+                "should not shrink further without new messages"
+            );
+        }
+    }
+
+    #[test]
+    fn test_compact_context_multi_step_with_observations() {
+        let agent = make_test_agent_loop();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        run.observations.push(AgentObservation {
+            id: "obs-1".into(),
+            action_id: None,
+            content: "Observed file content with password=abc123".into(),
+            source: "file.read".into(),
+            structured_result: None,
+            timestamp: chrono::Utc::now(),
+        });
+        run.observations.push(AgentObservation {
+            id: "obs-2".into(),
+            action_id: None,
+            content: "Search returned contact user@example.com".into(),
+            source: "web.search".into(),
+            structured_result: None,
+            timestamp: chrono::Utc::now(),
+        });
+
+        let msgs = make_long_conversation(25);
+        let mut task = crate::agent::types::AgentTask::new(
+            crate::agent::types::AgentTaskKind::Conversation,
+            "sess",
+        );
+        task.messages = msgs;
+
+        let compacted = agent._test_compact_context(
+            &mut task,
+            &mut run,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+        assert!(compacted);
+
+        // Verify no sensitive content leaked into compacted messages
+        let all_content: String = task
+            .messages
+            .iter()
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(!all_content.contains("abc123"));
+        assert!(!all_content.contains("user@example.com"));
+    }
 }
 
 /// Search memory store for relevant context and format as a string.

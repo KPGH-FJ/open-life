@@ -114,6 +114,37 @@ impl AgentSpecStore {
                 params!["main.default", spec_json, 1, now, now],
             )
             .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
+        } else {
+            // ── Migration: upgrade existing main.default with empty prompt_block_ids ──
+            let spec_json_str: Option<String> = conn
+                .query_row(
+                    "SELECT spec_json FROM agent_specs WHERE id = 'main.default'",
+                    [],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(json_str) = spec_json_str {
+                if let Ok(mut spec) = serde_json::from_str::<AgentSpec>(&json_str) {
+                    if spec.prompt_block_ids.is_empty() && spec.active {
+                        spec.prompt_block_ids = vec![
+                            "base_system".to_string(),
+                            "tool_discipline".to_string(),
+                            "privacy_rule".to_string(),
+                        ];
+                        let migrated_json = serde_json::to_string(&spec)
+                            .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
+                        let now = chrono::Utc::now().to_rfc3339();
+                        conn.execute(
+                            "UPDATE agent_specs SET spec_json = ?1, updated_at = ?2 WHERE id = 'main.default'",
+                            params![migrated_json, now],
+                        )
+                        .map_err(|e| AgentSpecStoreError::Store(e.to_string()))?;
+                        eprintln!(
+                            "[AgentSpecStore] Migrated main.default: added baseline prompt blocks"
+                        );
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -614,5 +645,174 @@ mod tests {
         // main.default should be deactivated
         let old = store.get_spec_optional("main.default").unwrap().unwrap();
         assert!(!old.active);
+    }
+
+    // ── P7 Finding 4: default main spec baseline prompt blocks ──────────
+
+    #[test]
+    fn test_default_main_spec_includes_baseline_prompt_block_ids() {
+        let spec = AgentSpec::default_main_spec();
+        assert!(
+            !spec.prompt_block_ids.is_empty(),
+            "default_main_spec must have baseline prompt blocks"
+        );
+        assert!(spec.prompt_block_ids.contains(&"base_system".to_string()));
+        assert!(spec
+            .prompt_block_ids
+            .contains(&"tool_discipline".to_string()));
+        assert!(spec.prompt_block_ids.contains(&"privacy_rule".to_string()));
+        assert_eq!(spec.id, "main.default");
+    }
+
+    #[test]
+    fn test_store_bootstrap_includes_baseline_block_ids() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+        let spec = store.get_default_spec().unwrap().unwrap();
+        assert!(
+            !spec.prompt_block_ids.is_empty(),
+            "bootstrapped spec must have prompt blocks"
+        );
+        assert!(spec.prompt_block_ids.contains(&"base_system".to_string()));
+        assert!(spec
+            .prompt_block_ids
+            .contains(&"tool_discipline".to_string()));
+        assert!(spec.prompt_block_ids.contains(&"privacy_rule".to_string()));
+    }
+
+    #[test]
+    fn test_migration_upgrades_empty_prompt_block_ids() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+
+        // Directly update main.default to have empty prompt_block_ids (simulating old data)
+        {
+            let conn = store.conn.lock().unwrap();
+            let mut spec = AgentSpec::default_main_spec();
+            spec.prompt_block_ids = vec![];
+            let json = serde_json::to_string(&spec).unwrap();
+            conn.execute(
+                "UPDATE agent_specs SET spec_json = ?1 WHERE id = 'main.default'",
+                params![json],
+            )
+            .unwrap();
+        }
+
+        // Verify it's empty before migration
+        let before = store.get_default_spec().unwrap().unwrap();
+        assert!(
+            before.prompt_block_ids.is_empty(),
+            "should be empty before migration"
+        );
+
+        // Re-run ensure_default_main_spec (simulates restart/migration)
+        store.ensure_default_main_spec().unwrap();
+
+        // After migration, should have baseline blocks
+        let after = store.get_default_spec().unwrap().unwrap();
+        assert!(
+            !after.prompt_block_ids.is_empty(),
+            "migration should add baseline blocks"
+        );
+        assert!(after.prompt_block_ids.contains(&"base_system".to_string()));
+        assert!(after
+            .prompt_block_ids
+            .contains(&"tool_discipline".to_string()));
+        assert!(after.prompt_block_ids.contains(&"privacy_rule".to_string()));
+        assert!(after.active, "active status must be preserved");
+        assert_eq!(after.id, "main.default");
+    }
+
+    #[test]
+    fn test_migration_does_not_overwrite_custom_prompt_blocks() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+
+        // Update main.default with custom prompt_block_ids
+        let custom_blocks = vec!["custom_block_a".to_string(), "custom_block_b".to_string()];
+        {
+            let conn = store.conn.lock().unwrap();
+            let mut spec = AgentSpec::default_main_spec();
+            spec.prompt_block_ids = custom_blocks.clone();
+            spec.privacy_policy = PrivacyPolicy::CloudAllowed;
+            let json = serde_json::to_string(&spec).unwrap();
+            conn.execute(
+                "UPDATE agent_specs SET spec_json = ?1 WHERE id = 'main.default'",
+                params![json],
+            )
+            .unwrap();
+        }
+
+        // Re-run ensure (simulates restart)
+        store.ensure_default_main_spec().unwrap();
+
+        // Custom block ids must not be overwritten
+        let after = store.get_default_spec().unwrap().unwrap();
+        assert_eq!(
+            after.prompt_block_ids, custom_blocks,
+            "custom prompt blocks must be preserved"
+        );
+        assert_eq!(
+            after.privacy_policy,
+            PrivacyPolicy::CloudAllowed,
+            "other custom fields must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_migration_is_idempotent() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+
+        // Set empty prompt_block_ids
+        {
+            let conn = store.conn.lock().unwrap();
+            let mut spec = AgentSpec::default_main_spec();
+            spec.prompt_block_ids = vec![];
+            let json = serde_json::to_string(&spec).unwrap();
+            conn.execute(
+                "UPDATE agent_specs SET spec_json = ?1 WHERE id = 'main.default'",
+                params![json],
+            )
+            .unwrap();
+        }
+
+        // Run migration twice
+        store.ensure_default_main_spec().unwrap();
+        store.ensure_default_main_spec().unwrap();
+
+        let after = store.get_default_spec().unwrap().unwrap();
+        assert_eq!(
+            after.prompt_block_ids.len(),
+            3,
+            "migration should add exactly 3 baseline blocks"
+        );
+        assert!(after.prompt_block_ids.contains(&"base_system".to_string()));
+    }
+
+    #[test]
+    fn test_migration_does_not_activate_inactive_spec() {
+        let store = AgentSpecStore::new_in_memory().unwrap();
+
+        // Deactivate main.default and empty prompt blocks
+        {
+            let conn = store.conn.lock().unwrap();
+            let mut spec = AgentSpec::default_main_spec();
+            spec.active = false;
+            spec.prompt_block_ids = vec![];
+            let json = serde_json::to_string(&spec).unwrap();
+            conn.execute(
+                "UPDATE agent_specs SET spec_json = ?1, active = 0 WHERE id = 'main.default'",
+                params![json],
+            )
+            .unwrap();
+        }
+
+        // Migration should NOT upgrade prompt_block_ids on inactive spec
+        store.ensure_default_main_spec().unwrap();
+
+        let after = store.get_spec_optional("main.default").unwrap().unwrap();
+        assert!(!after.active, "inactive spec should remain inactive");
+        // Inactive spec with empty blocks is NOT migrated (only active specs are upgraded)
+        assert!(
+            after.prompt_block_ids.is_empty(),
+            "inactive spec should not be migrated"
+        );
     }
 }

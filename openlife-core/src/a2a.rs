@@ -448,6 +448,7 @@ impl A2AServerHandler {
             task_kind: AgentTaskKind::Conversation,
             user_text: user_text.clone(),
             session_id: session_id.clone(),
+            privacy_policy: None,
         };
 
         let assemble_output = AssembleOutput {
@@ -630,6 +631,7 @@ mod tests {
             task_kind: AgentTaskKind::Conversation,
             user_text: "do something".to_string(),
             session_id: "sess-42".to_string(),
+            privacy_policy: None,
         };
         let task = reasoning_input_to_a2a_task(
             &req,

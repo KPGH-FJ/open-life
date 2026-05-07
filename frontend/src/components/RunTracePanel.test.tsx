@@ -15,6 +15,33 @@ const mockEvents: AgentRunEvent[] = [
     createdAt: "2026-05-06T10:00:00Z",
   },
   {
+    id: "evt-agentspec",
+    runId: "run-001",
+    eventType: "agent_spec.selected",
+    actor: "runtime",
+    summary: "AgentSpec main.default selected",
+    payload: { agentSpecId: "main.default", role: "main", privacyPolicy: "local_only" },
+    createdAt: "2026-05-06T10:00:00.1Z",
+  },
+  {
+    id: "evt-promptstack",
+    runId: "run-001",
+    eventType: "prompt_stack.assembled",
+    actor: "runtime",
+    summary: "PromptStack assembled: 3 blocks",
+    payload: { promptBlocks: [{ id: "base_system", version: "1.0.0" }] },
+    createdAt: "2026-05-06T10:00:00.2Z",
+  },
+  {
+    id: "evt-contextgov",
+    runId: "run-001",
+    eventType: "context_governance.applied",
+    actor: "runtime",
+    summary: "Context governance applied",
+    payload: { contextIncluded: ["life_model_summary"], contextExcluded: [] },
+    createdAt: "2026-05-06T10:00:00.3Z",
+  },
+  {
     id: "evt-2",
     runId: "run-001",
     eventType: "model.call_started",
@@ -23,6 +50,15 @@ const mockEvents: AgentRunEvent[] = [
     summary: "Calling deepseek-chat",
     payload: { provider: "deepseek" },
     createdAt: "2026-05-06T10:00:01Z",
+  },
+  {
+    id: "evt-modelfailed",
+    runId: "run-001",
+    eventType: "model.failed",
+    actor: "runtime",
+    summary: "Model call failed: LocalOnly blocked cloud",
+    payload: { error: "LocalOnly privacy policy requires a local model" },
+    createdAt: "2026-05-06T10:00:01.5Z",
   },
   {
     id: "evt-3",
@@ -41,6 +77,26 @@ const mockEvents: AgentRunEvent[] = [
     summary: "Plan created: Analyze project",
     payload: { plan_id: "plan-1" },
     createdAt: "2026-05-06T10:00:03Z",
+  },
+  {
+    id: "evt-compaction",
+    runId: "run-001",
+    eventType: "compaction.created",
+    actor: "runtime",
+    summary: "Context compacted: 25 -> 7 messages (~8500 -> ~450 tokens)",
+    payload: {
+      compaction_id: "comp-001",
+      run_id: "run-001",
+      reason: "token estimate 8500 >= threshold 8000",
+      original_token_estimate: 8500,
+      compacted_token_estimate: 450,
+      source_message_count: 25,
+      active_proposal_count: 2,
+      unresolved_observation_count: 0,
+      redacted_fields: ["pii_detected", "life_model"],
+      privacy_policy: "summary_only",
+    },
+    createdAt: "2026-05-06T10:00:03.5Z",
   },
   {
     id: "evt-5",
@@ -72,7 +128,7 @@ describe("RunTracePanel", () => {
 
   it("shows event count in collapsed state", () => {
     render(<RunTracePanel events={mockEvents} runId="run-001" show={false} onToggle={() => {}} />);
-    expect(screen.getByText(/6 events/)).toBeDefined();
+    expect(screen.getByText(/11 events/)).toBeDefined();
     expect(screen.getByText(/run-001/)).toBeDefined();
   });
 
@@ -143,5 +199,11 @@ describe("RunTracePanel", () => {
     rerender(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={onToggle} />);
 
     expect(screen.getByText("Agent run created")).toBeDefined();
+  });
+
+  it("renders compaction.created event", () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    expect(screen.getByText("compaction.created")).toBeDefined();
+    expect(screen.getByText(/Context compacted: 25 -> 7 messages/)).toBeDefined();
   });
 });

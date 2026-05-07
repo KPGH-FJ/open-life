@@ -244,10 +244,14 @@ export interface LifeModelVersion {
 export type AgentRunEventType =
   | "run.created"
   | "context.assembled"
+  | "agent_spec.selected"
+  | "prompt_stack.assembled"
+  | "context_governance.applied"
   | "model.route_selected"
   | "model.call_started"
   | "model.call_completed"
   | "model.call_failed"
+  | "model.failed"
   | "tool.call_started"
   | "tool.call_blocked"
   | "tool.call_completed"
@@ -275,6 +279,7 @@ export type AgentRunEventType =
   | "plan.continuation_requested"
   | "plan.action_replayed"
   | "plan.action_replay_requested"
+  | "compaction.created"
   | "run.completed"
   | "run.failed"
   | "unknown";

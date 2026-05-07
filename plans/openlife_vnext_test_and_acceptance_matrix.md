@@ -157,15 +157,19 @@ Tests:
 Acceptance:
 
 - Bash default-off.
-- Shell uses sandbox.
+- Shell uses `ExecutionSandbox`.
 - Deny-read blocks secrets.
 - Dangerous commands blocked.
 - Timeout and output limits enforced.
 - Shell cannot bypass ToolRuntime.
+- `shell.run` is not model-callable unless sandbox, manifest, permission, and AgentSpec all allow it.
+- Initial executor is non-interactive and structured, not raw shell-string based.
+- Scheduled/proactive and sub-agent shell access remain disabled by default.
 
 Tests:
 
 - shell disabled by default
+- manifest disabled/declarative-only blocks execution
 - allowed command success
 - denied command block
 - secret path read block
@@ -173,6 +177,9 @@ Tests:
 - output truncation
 - env allowlist
 - write operation proposal-first
+- AgentSpec-denied shell block
+- scheduled/proactive disabled sandbox
+- trace events for blocked/completed/failed shell attempts
 
 ## Phase 10: Frontend Agent Workspace
 

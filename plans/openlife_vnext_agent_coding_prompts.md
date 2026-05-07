@@ -1332,3 +1332,560 @@ Required tests:
 - mock returns AgentSpec shape
 - default AgentSpec can be read from frontend wrapper
 ```
+
+## P8 Global Prompt
+
+```text
+You are working on OpenLife vNext P8: Compaction, Long-Context Continuity, and Privacy-Governed Summary Trace.
+
+Read first:
+- AGENTS.md
+- plans/openlife_vnext_p8_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0001-agentrun-event-trace.md
+- plans/adr/0002-promptstack-system-prompt.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+- plans/adr/0012-agentspec-store-runtime-selection.md
+
+Rules:
+- Execute exactly one P8 task spec.
+- Do not introduce Bash/Shell.
+- Do not implement SubAgent parallel or handoff.
+- Do not rewrite ChatPage.
+- Do not bypass AgentSpec, PromptStack, ContextPolicy, AgentRunEvent, PrivacyPolicy, ToolRuntime, ActionExecutor, Proposal, or PlanExecutor.
+- Compaction must preserve active proposals, unresolved tool observations, important decisions, and pending user confirmations.
+- Compaction summaries and event payloads must not contain raw sensitive user text, raw LifeModel identity fields, or raw memory snippets.
+- SummaryOnly cloud paths must receive sanitized messages only.
+- Prefer rule-based compaction first. Model summarization is optional and must be privacy-governed.
+- Add focused tests and avoid network-backed unit tests.
+- Run the task spec verification commands.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P8-0 Prompt
+
+```text
+Execute vNext task P8-0: Documentation And Entry Sync.
+
+Use:
+- AGENTS.md
+- plans/openlife_vnext_p8_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+
+Goal:
+- Make P8 discoverable and AI-coding-ready.
+- Ensure document entrypoints reference P8 task specs.
+- Ensure P8 explicitly means Compaction, not Bash/Shell, SubAgent parallel, or ChatPage rewrite.
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+
+Verification:
+- rg -n "openlife_vnext_p8_task_specs|P8-0|P8-1|P8-2|P8-3|P8-4|P8-5|P8-6|CompactionSummary|compaction.created" AGENTS.md plans
+- git diff --name-only contains documentation files only
+
+Report:
+- changed files
+- verification result
+- residual risks
+```
+
+## P8-1 Prompt
+
+```text
+Execute vNext task P8-1: Compaction Trigger And Policy.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+
+Goal:
+- Define when an AgentLoop context should be compacted.
+- Keep the decision deterministic and model-free.
+
+Allowed edit areas:
+- openlife-core/src/agent/compaction.rs
+- openlife-core/src/agent/mod.rs
+- relevant focused tests
+
+Suggested implementation:
+- CompactionConfig
+- CompactionDecision
+- estimate_message_tokens(messages)
+- should_compact(messages, config)
+
+Constraints:
+- No LLM calls.
+- No AgentLoop behavior changes in this task.
+- No persistence changes in this task.
+
+Verification:
+- cargo test -p openlife-core agent::compaction --lib
+- cargo check -q
+
+Required tests:
+- disabled config never compacts
+- empty messages do not compact
+- below thresholds does not compact
+- token threshold triggers compaction
+- message count threshold triggers compaction
+- min_messages_before_compaction prevents premature compaction
+```
+
+## P8-2 Prompt
+
+```text
+Execute vNext task P8-2: CompactionSummary Builder.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+- plans/adr/0001-agentrun-event-trace.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+
+Goal:
+- Build a CompactionSummary from runtime context while preserving critical state and redacting sensitive content.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/compaction.rs
+- relevant focused tests
+
+Expected behavior:
+- Preserve active proposal ids.
+- Preserve unresolved tool observations.
+- Preserve important decisions and pending tasks.
+- Redact obvious PII, raw LifeModel identity fields, raw memory snippets, and raw sensitive user messages.
+- Keep the first implementation rule-based and model-free.
+
+Constraints:
+- No model summarizer in this task.
+- Do not store raw sensitive content in summary fields.
+- Preserve serde compatibility where possible with serde defaults for new fields.
+
+Verification:
+- cargo test -p openlife-core agent::compaction --lib
+- cargo test -p openlife-core agent::types::compaction_tests --lib
+- cargo check -q
+
+Required tests:
+- active proposals are preserved
+- unresolved observations are preserved
+- decisions/pending tasks are preserved
+- PII is redacted
+- raw LifeModel/memory/user sensitive text is absent from cloud-safe summary
+- summary round-trips through serde
+```
+
+## P8-3 Prompt
+
+```text
+Execute vNext task P8-3: Compaction AgentRunEvent.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+- plans/adr/0001-agentrun-event-trace.md
+
+Goal:
+- Record compaction as append-only runtime trace.
+
+Expected event:
+- AgentRunEventType::CompactionCreated serialized as "compaction.created"
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/event_store.rs
+- frontend/src/types.ts
+- frontend/src/components/RunTracePanel.tsx
+- frontend/src/components/RunTracePanel.test.tsx
+- frontend/src/test/mocks/tauri.ts
+- relevant focused tests
+
+Constraints:
+- No large trace UI rewrite.
+- Event payload must not expose raw prompt, memory, LifeModel, or sensitive user text.
+
+Verification:
+- cargo test -p openlife-core agent::event_store --lib
+- pnpm --dir frontend test -- --run RunTracePanel tauri
+- pnpm --dir frontend typecheck
+- cargo check -q
+
+Required tests:
+- compaction.created serde round-trip
+- event payload excludes raw sensitive content
+- frontend type union includes compaction.created
+- RunTracePanel renders a compaction event
+```
+
+## P8-4 Prompt
+
+```text
+Execute vNext task P8-4: AgentLoop Compaction Hook.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+- plans/adr/0001-agentrun-event-trace.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+
+Goal:
+- Use compacted context during long AgentLoop runs.
+
+Allowed edit areas:
+- openlife-core/src/agent/agent_loop.rs
+- openlife-core/src/agent/compaction.rs
+- openlife-core/src/agent/types.rs
+- relevant focused tests
+
+Expected behavior:
+- AgentLoop checks compaction policy before model generation.
+- If compaction triggers, build CompactionSummary and record compaction.created.
+- Replace older messages with one compacted context message.
+- Preserve latest user message, active proposals, unresolved observations, and pending decisions.
+- Future generation uses compacted context.
+
+Constraints:
+- Do not lose the latest user message.
+- Do not lose unresolved tool observations.
+- Do not call a cloud model for compaction in this task.
+- Missing event store must not panic.
+- Keep changes localized to AgentLoop context preparation.
+
+Verification:
+- cargo test -p openlife-core agent::agent_loop --lib
+- cargo test -p openlife-core agent::compaction --lib
+- cargo check -q
+
+Required tests:
+- long message history triggers compaction
+- compacted message count is smaller than original
+- latest user message remains present
+- active proposal ids appear in summary metadata
+- unresolved observations appear in summary metadata
+- compaction.created event is recorded
+- no event store path remains safe
+- SummaryOnly compaction summary excludes raw sensitive text
+```
+
+## P8-5 Prompt
+
+```text
+Execute vNext task P8-5: Optional Privacy-Governed Summarizer.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+- plans/adr/0006-cloud-privacy-modelrouter.md
+
+Goal:
+- Optionally add a model-based compaction summarizer after the rule-based path is safe.
+
+Allowed edit areas:
+- openlife-core/src/agent/compaction.rs
+- openlife-core/src/scheduler.rs
+- relevant focused tests
+
+Constraints:
+- This task is optional for P8 completion unless explicitly requested.
+- Do not require network-backed tests.
+- Do not bypass P7 privacy governance.
+- LocalOnly never falls back to cloud.
+- SummaryOnly cloud payload must be sanitized.
+
+Verification:
+- cargo test -p openlife-core agent::compaction --lib
+- cargo test -p openlife-core scheduler --lib
+- cargo check -q
+
+Required tests:
+- LocalOnly without local model does not call cloud
+- SummaryOnly cloud payload is sanitized
+- summarizer error falls back to rule-based summary
+```
+
+## P8-6 Prompt
+
+```text
+Execute vNext task P8-6: Minimal Frontend Trace Surface.
+
+Use:
+- plans/openlife_vnext_p8_task_specs.md
+
+Goal:
+- Expose compaction in trace without building a large new UI.
+
+Allowed edit areas:
+- frontend/src/types.ts
+- frontend/src/components/RunTracePanel.tsx
+- frontend/src/components/RunTracePanel.test.tsx
+- frontend/src/test/mocks/tauri.ts
+
+Constraints:
+- Minimal trace support only.
+- Do not build a compaction editor or timeline redesign.
+- Do not rewrite ChatPage.
+
+Verification:
+- pnpm --dir frontend test -- --run RunTracePanel tauri
+- pnpm --dir frontend typecheck
+
+Required tests:
+- compaction event renders
+- existing trace events still render
+```
+
+## P9 Global Prompt
+
+```text
+You are working on OpenLife vNext P9: ExecutionSandbox-Governed Shell Execution.
+
+Read first:
+- AGENTS.md
+- plans/openlife_vnext_p9_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_core_primitives_and_boundaries.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0009-execution-sandbox-bash.md
+
+Rules:
+- Execute exactly one P9 task spec.
+- Shell is default-off.
+- Do not expose an interactive shell.
+- Do not use /bin/sh -c, cmd /C, or arbitrary command strings in the first executor.
+- Use structured command input: command, args, cwd, env.
+- Do not allow pipes, redirects, chained commands, command substitution, glob expansion, or shell metacharacter bypasses.
+- Do not enable shell for normal chat, scheduled/proactive tasks, or sub-agents by default.
+- Route shell through ToolRuntime/ActionExecutor only.
+- Do not bypass AgentSpec, PromptStack, ContextPolicy, AgentRunEvent, Permission, Proposal, or ExecutionSandbox.
+- Writes remain proposal-first.
+- Add focused denial tests, not only success tests.
+- Run the task spec verification commands.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P9-0 Prompt
+
+```text
+Execute vNext task P9-0: Documentation And Entry Sync.
+
+Use:
+- AGENTS.md
+- README.md
+- plans/openlife_vnext_p9_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+
+Goal:
+- Make P9 discoverable and AI-coding-ready.
+- State that P8 can close and P9 is the next phase.
+- Ensure P9 explicitly excludes interactive shell, arbitrary shell strings, scheduled shell, sub-agent shell, and direct writes.
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+
+Verification:
+- rg -n "openlife_vnext_p9_task_specs|P9-0|P9-1|P9-2|P9-3|P9-4|P9-5|P9-6|P9-7|ExecutionSandbox-Governed Shell" AGENTS.md README.md plans
+- git diff --name-only contains documentation files only
+```
+
+## P9-1 Prompt
+
+```text
+Execute vNext task P9-1: Sandbox Contract Hardening.
+
+Use:
+- plans/openlife_vnext_p9_task_specs.md
+- plans/adr/0009-execution-sandbox-bash.md
+
+Goal:
+- Promote ExecutionSandbox from existing skeleton to stable P9 policy contract.
+- Keep shell default-off.
+
+Allowed edit areas:
+- openlife-core/src/agent/execution_sandbox.rs
+- openlife-core/src/agent/mod.rs
+- focused tests
+
+Constraints:
+- No shell executor.
+- No manifest registration.
+- No Tauri settings.
+
+Verification:
+- cargo test -p openlife-core agent::execution_sandbox --lib
+- cargo check -q
+```
+
+## P9-2 Prompt
+
+```text
+Execute vNext task P9-2: Shell Tool Manifest Default-Off.
+
+Use:
+- plans/openlife_vnext_p9_task_specs.md
+- plans/adr/0009-execution-sandbox-bash.md
+
+Goal:
+- Add the shell.run manifest contract without making it executable.
+- Keep it high-risk and default-off.
+
+Allowed edit areas:
+- openlife-core/src/mcp.rs
+- openlife-core/src/tool_manifest.rs
+- openlife-core/src/agent/prompt_stack.rs
+- focused tests
+
+Constraints:
+- No executor.
+- No ActionExecutor branch.
+- No frontend shell UI.
+
+Verification:
+- cargo test -p openlife-core mcp --lib
+- cargo test -p openlife-core tool_manifest --lib
+- cargo test -p openlife-core agent::prompt_stack --lib
+- cargo check -q
+```
+
+## P9-3 Prompt
+
+```text
+Execute vNext task P9-3: AppState And Action Context Sandbox Wiring.
+
+Goal:
+- Carry ExecutionSandbox policy through config/AppState/action execution paths without executing shell.
+
+Allowed edit areas:
+- openlife-core/src/config.rs
+- openlife-core/src/agent/action_executor/mod.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/commands/agent.rs
+- src-tauri/src/commands/plan.rs
+- src-tauri/src/scheduler_runner.rs
+- focused tests
+
+Constraints:
+- No shell execution.
+- No settings UI beyond type-safe config plumbing.
+- Preserve existing safe_paths behavior for file tools.
+
+Verification:
+- cargo test -p openlife-core agent::action_executor --lib
+- cargo test -p openlife-tauri commands::plan --lib
+- cargo check -q
+```
+
+## P9-4 Prompt
+
+```text
+Execute vNext task P9-4: Non-Interactive Command Executor Skeleton.
+
+Goal:
+- Add a structured command executor primitive that does not use shell interpreters.
+
+Allowed edit areas:
+- openlife-core/src/agent/shell_executor.rs
+- openlife-core/src/agent/execution_sandbox.rs
+- openlife-core/src/agent/mod.rs
+- focused tests
+
+Constraints:
+- No ToolRuntime integration yet.
+- No Tauri command.
+- No interactive session.
+- No network commands.
+
+Verification:
+- cargo test -p openlife-core agent::shell_executor --lib
+- cargo test -p openlife-core agent::execution_sandbox --lib
+- cargo check -q
+```
+
+## P9-5 Prompt
+
+```text
+Execute vNext task P9-5: ToolRuntime Shell Integration And Trace.
+
+Goal:
+- Expose shell.run through ActionExecutor only when sandbox, manifest, permission, and AgentSpec all allow it.
+
+Allowed edit areas:
+- openlife-core/src/agent/action_executor/
+- openlife-core/src/agent/shell_executor.rs
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/event_store.rs
+- focused tests
+
+Constraints:
+- No frontend shell command box.
+- No scheduled/proactive shell.
+- No sub-agent shell.
+- Do not bypass existing permission/proposal/replay paths.
+
+Verification:
+- cargo test -p openlife-core agent::action_executor --lib
+- cargo test -p openlife-core agent::event_store --lib
+- cargo check -q
+```
+
+## P9-6 Prompt
+
+```text
+Execute vNext task P9-6: Governed Runtime Entry Policy.
+
+Goal:
+- Prevent shell from leaking into broad agent behavior before explicit product design.
+
+Allowed edit areas:
+- openlife-core/src/agent/types.rs
+- openlife-core/src/agent/agent_loop.rs
+- openlife-core/src/agent/plan_mode.rs
+- openlife-core/src/agent/plan_executor.rs
+- openlife-core/src/agent/sub_agent.rs
+- src-tauri/src/scheduler_runner.rs
+- focused tests
+
+Constraints:
+- No interactive shell.
+- No broad ChatPage rewrite.
+- No automatic enabling.
+
+Verification:
+- cargo test -p openlife-core agent::agent_loop --lib
+- cargo test -p openlife-core agent::plan_mode --lib
+- cargo test -p openlife-core agent::plan_executor --lib
+- cargo test -p openlife-core agent::sub_agent --lib
+- cargo check -q
+```
+
+## P9-7 Prompt
+
+```text
+Execute vNext task P9-7: Minimal Settings And Trace Surface.
+
+Goal:
+- Expose shell governance state without building a terminal UI.
+
+Allowed edit areas:
+- frontend/src/types.ts
+- frontend/src/tauri.ts
+- frontend/src/test/mocks/tauri.ts
+- frontend/src/components/RunTracePanel.tsx
+- frontend/src/components/RunTracePanel.test.tsx
+- minimal Settings tab files if config plumbing exists
+
+Constraints:
+- No terminal emulator.
+- No shell command input box.
+- No redesign.
+
+Verification:
+- pnpm --dir frontend test -- --run RunTracePanel tauri
+- pnpm --dir frontend typecheck
+```

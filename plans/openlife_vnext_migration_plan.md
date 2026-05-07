@@ -240,15 +240,18 @@ Exit criteria:
 
 Goal:
 
-Introduce shell execution only after policy and trace are ready.
+Introduce shell execution only after policy and trace are ready. In the current codebase, `ExecutionSandbox` already exists as a policy skeleton, so Phase 9 should harden and wire that skeleton before exposing a minimal non-interactive executor.
 
 Tasks:
 
-- Define `ExecutionSandbox`.
-- Add deny-read defaults.
-- Add command allowlist and dangerous command denylist.
-- Add cwd, timeout, env allowlist, output limit.
-- Start with explicit user-triggered or scheduled safe operations only.
+- Harden `ExecutionSandbox` validation and keep shell default-off.
+- Add a default-off `shell.run` tool manifest contract.
+- Wire sandbox policy into AppState and `ActionExecutionContext`.
+- Add a non-interactive structured command executor; do not use arbitrary shell strings.
+- Route shell through ToolRuntime/ActionExecutor only.
+- Record started/blocked/completed/failed/timeout trace events.
+- Start with explicit user-triggered safe operations only.
+- Keep scheduled/proactive and sub-agent shell disabled by default.
 - Keep write operations proposal-first.
 
 Exit criteria:
@@ -257,6 +260,7 @@ Exit criteria:
 - Shell attempts are traceable.
 - Secret paths and dangerous commands are blocked.
 - No shell execution can bypass ToolRuntime.
+- No interactive terminal or raw `/bin/sh -c` path exists in the initial implementation.
 
 ## Phase 10: Frontend Agent Workspace
 

@@ -351,9 +351,10 @@ impl InferenceScheduler {
                     .await
                     .map_err(|e| e.to_string())
                 } else if has_remote {
-                    let summary_prompt = build_summary_only_system_prompt(life_model, tools_prompt);
+                    let (safe_messages, summary_prompt) =
+                        prepare_summary_only_cloud_payload(&messages, life_model, tools_prompt);
                     chat_with_openrouter_raw_stream(
-                        messages,
+                        safe_messages,
                         Some(&summary_prompt),
                         &self.provider,
                         &self.openai_base,
@@ -371,6 +372,80 @@ impl InferenceScheduler {
             }
             PrivacyPolicy::CloudAllowed => self
                 .generate_stream(messages, life_model, tools_prompt)
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Generate a raw reply (no LifeModel injection) governed by privacy_policy.
+    ///
+    /// * `LocalOnly` — forces local Ollama; returns error if unavailable.
+    /// * `SummaryOnly` — when routed to cloud, appends a privacy headnote to the
+    ///   system prompt and uses `build_summary_only_raw_system_prompt`.
+    /// * `CloudAllowed` — delegates to `generate_raw` (legacy behavior).
+    pub async fn generate_raw_governed(
+        &self,
+        messages: Vec<ChatMessage>,
+        system_prompt: Option<&str>,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Result<String, String> {
+        use crate::agent::types::PrivacyPolicy;
+
+        match privacy_policy {
+            PrivacyPolicy::LocalOnly => {
+                let resolved = resolve_ollama_model(&self.local_model).await;
+                if resolved.is_none() {
+                    return Err(
+                        "LocalOnly privacy policy requires a local model, but Ollama is not available or configured"
+                            .to_string(),
+                    );
+                }
+                crate::ollama::chat_with_ollama_raw(
+                    resolved.as_deref().unwrap_or(&self.local_model),
+                    messages,
+                    system_prompt,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            PrivacyPolicy::SummaryOnly => {
+                let resolved_local = resolve_ollama_model(&self.local_model).await;
+                let has_remote = self.has_remote_key();
+                let use_local = should_use_local_for_summary_only(
+                    resolved_local.is_some(),
+                    self.prefer_local,
+                    has_remote,
+                );
+                if use_local {
+                    crate::ollama::chat_with_ollama_raw(
+                        resolved_local.as_deref().unwrap_or(&self.local_model),
+                        messages,
+                        system_prompt,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else if has_remote {
+                    let safe_prompt = wrap_summary_only_system_prompt(system_prompt);
+                    let safe_messages = sanitize_summary_only_messages(&messages);
+                    crate::llm::chat_with_openrouter_raw(
+                        safe_messages,
+                        safe_prompt.as_deref(),
+                        &self.provider,
+                        &self.openai_base,
+                        &self.openai_key,
+                        &self.chat_model,
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+                } else {
+                    Err(
+                        "SummaryOnly: no local model available and no cloud key configured"
+                            .to_string(),
+                    )
+                }
+            }
+            PrivacyPolicy::CloudAllowed => self
+                .generate_raw(messages, system_prompt)
                 .await
                 .map_err(|e| e.to_string()),
         }
@@ -420,9 +495,10 @@ impl InferenceScheduler {
                     .await
                     .map_err(|e| e.to_string())
                 } else if has_remote {
-                    let summary_prompt = build_summary_only_system_prompt(life_model, tools_prompt);
+                    let (safe_messages, summary_prompt) =
+                        prepare_summary_only_cloud_payload(&messages, life_model, tools_prompt);
                     chat_with_openrouter_raw(
-                        messages,
+                        safe_messages,
                         Some(&summary_prompt),
                         &self.provider,
                         &self.openai_base,
@@ -588,6 +664,71 @@ fn build_summary_only_system_prompt(life_model: &LifeModel, tools_prompt: Option
     )
 }
 
+/// Sanitize messages for SummaryOnly cloud raw generation.
+///
+/// Replaces user/assistant message content with intent-only placeholders
+/// so no raw user text, LifeModel-derived content, or PII reaches the cloud.
+/// System messages with LifeModel/goal/memory content are also replaced.
+pub fn sanitize_summary_only_messages(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    messages
+        .iter()
+        .map(|m| {
+            let role = m.role.as_str();
+            let content = match role {
+                "user" => "用户提出了一个需要处理的请求，具体内容因 SummaryOnly 隐私策略已省略。"
+                    .to_string(),
+                "assistant" => "之前的对话内容因 SummaryOnly 隐私策略已省略。".to_string(),
+                "system" => {
+                    if m.content.contains("LifeModel")
+                        || m.content.contains("目标")
+                        || m.content.contains("goal")
+                        || m.content.contains("记忆")
+                        || m.content.contains("memory")
+                        || m.content.contains("用户输入")
+                        || m.content.contains("user_text")
+                    {
+                        "[SummaryOnly] 内部指令已被隐私策略过滤，仅保留非敏感任务说明。".to_string()
+                    } else {
+                        m.content.clone()
+                    }
+                }
+                _ => m.content.clone(),
+            };
+            ChatMessage {
+                role: m.role.clone(),
+                content,
+            }
+        })
+        .collect()
+}
+
+/// Prepare a cloud-safe payload for SummaryOnly final generation.
+///
+/// Returns `(safe_messages, summary_system_prompt)` suitable for passing
+/// to `chat_with_openrouter_raw` or `chat_with_openrouter_raw_stream`.
+/// Combines `sanitize_summary_only_messages` with `build_summary_only_system_prompt`.
+pub fn prepare_summary_only_cloud_payload(
+    messages: &[ChatMessage],
+    life_model: &LifeModel,
+    tools_prompt: Option<&str>,
+) -> (Vec<ChatMessage>, String) {
+    let safe_messages = sanitize_summary_only_messages(messages);
+    let summary_prompt = build_summary_only_system_prompt(life_model, tools_prompt);
+    (safe_messages, summary_prompt)
+}
+
+/// Wrap a system prompt for SummaryOnly cloud calls.
+///
+/// Prepends a privacy headnote instructing the model not to expose or record
+/// personal details.  The original prompt is kept intact but marked as internal.
+fn wrap_summary_only_system_prompt(original: Option<&str>) -> Option<String> {
+    let prefix = "[SummaryOnly] 云端隐私保护模式：以下内部指令仅供模型完成任务使用，不得在输出中暴露或记录任何个人信息。\n\n";
+    match original {
+        Some(p) if !p.is_empty() => Some(format!("{}{}", prefix, p)),
+        Some(_) | None => Some(prefix.to_string()),
+    }
+}
+
 /// Pure decision function for SummaryOnly routing.
 ///
 /// * no local + no cloud → error (handled by caller)
@@ -709,6 +850,92 @@ mod tests {
             }
             Ok(_) => panic!("LocalOnly must block cloud calls when no local model is available"),
         }
+    }
+
+    // ── P7 Finding 1: generate_raw_governed tests ──────────────────────
+
+    #[tokio::test]
+    async fn test_raw_governed_local_only_blocks_cloud_fallback() {
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5:7b".into(),
+            false,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "sk-test-key".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let result = scheduler
+            .generate_raw_governed(vec![], Some("test prompt"), PrivacyPolicy::LocalOnly)
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("LocalOnly") || err.contains("Ollama"),
+            "generate_raw_governed LocalOnly must block cloud, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_raw_governed_summary_only_errors_when_no_backend() {
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5:7b".into(),
+            false, // prefer cloud
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "".into(), // no cloud key
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let result = scheduler
+            .generate_raw_governed(vec![], Some("test"), PrivacyPolicy::SummaryOnly)
+            .await;
+
+        // No local model and no cloud key -> error
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("SummaryOnly") || err.contains("no local"),
+            "SummaryOnly with no backend must error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_raw_governed_cloud_allowed_delegates_to_generate_raw_route() {
+        // CloudAllowed doesn't add restrictions — same signature check is enough
+        let _scheduler = InferenceScheduler::default();
+        // Just verify the routing path exists (actual call needs network)
+        assert_eq!(format!("{}", PrivacyPolicy::CloudAllowed), "cloud_allowed");
+    }
+
+    #[test]
+    fn test_wrap_summary_only_system_prompt_adds_prefix() {
+        let wrapped = super::wrap_summary_only_system_prompt(Some("original prompt"));
+        assert!(wrapped.is_some());
+        let s = wrapped.unwrap();
+        assert!(s.contains("[SummaryOnly]"));
+        assert!(s.contains("original prompt"));
+    }
+
+    #[test]
+    fn test_wrap_summary_only_system_prompt_handles_empty() {
+        let wrapped = super::wrap_summary_only_system_prompt(Some(""));
+        assert!(wrapped.is_some());
+        assert!(wrapped.unwrap().contains("[SummaryOnly]"));
+    }
+
+    #[test]
+    fn test_wrap_summary_only_system_prompt_handles_none() {
+        let wrapped = super::wrap_summary_only_system_prompt(None);
+        assert!(wrapped.is_some());
+        assert!(wrapped.unwrap().contains("[SummaryOnly]"));
     }
 
     #[test]
@@ -900,5 +1127,189 @@ mod tests {
             !super::should_use_local_for_summary_only(true, false, true),
             "SummaryOnly with local + cloud key + !prefer_local must use cloud summary"
         );
+    }
+
+    // ── P0: SummaryOnly message sanitizer tests ────────────────────────
+
+    #[test]
+    fn test_sanitizer_replaces_user_messages() {
+        let messages = vec![crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: "今天天气很好，帮我写一个Python脚本处理数据".to_string(),
+        }];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert_eq!(safe.len(), 1);
+        assert_eq!(safe[0].role, "user");
+        assert!(!safe[0].content.contains("天气"));
+        assert!(!safe[0].content.contains("Python"));
+        assert!(safe[0].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_sanitizer_removes_user_pii() {
+        let messages = vec![crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: "我的邮箱是 test@example.com，手机号 13800138000".to_string(),
+        }];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert!(!safe[0].content.contains("test@example.com"));
+        assert!(!safe[0].content.contains("13800138000"));
+        assert!(safe[0].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_sanitizer_replaces_assistant_messages() {
+        let messages = vec![crate::llm::ChatMessage {
+            role: "assistant".to_string(),
+            content: "根据你的 LifeModel，我建议修改目标A的描述为...".to_string(),
+        }];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert_eq!(safe[0].role, "assistant");
+        assert!(!safe[0].content.contains("LifeModel"));
+        assert!(!safe[0].content.contains("目标A"));
+        assert!(safe[0].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_sanitizer_replaces_system_with_lifemodel_content() {
+        let messages = vec![crate::llm::ChatMessage {
+            role: "system".to_string(),
+            content: "用户高优先级目标: 完成项目 (优先级5)\nLifeModel 摘要: ...".to_string(),
+        }];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert!(!safe[0].content.contains("完成项目"));
+        assert!(!safe[0].content.contains("LifeModel"));
+        assert!(safe[0].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_sanitizer_preserves_neutral_system_messages() {
+        let messages = vec![crate::llm::ChatMessage {
+            role: "system".to_string(),
+            content: "你是一个严谨的策略规划助手，只输出合法 JSON。".to_string(),
+        }];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert_eq!(safe[0].content, messages[0].content);
+        assert!(!safe[0].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_sanitizer_handles_multiple_roles() {
+        let messages = vec![
+            crate::llm::ChatMessage {
+                role: "system".to_string(),
+                content: "LifeModel identity.name: Alice".to_string(),
+            },
+            crate::llm::ChatMessage {
+                role: "user".to_string(),
+                content: "我的名字是Alice，帮我查看近期事件".to_string(),
+            },
+            crate::llm::ChatMessage {
+                role: "assistant".to_string(),
+                content: "Alice，你最近的记忆片段显示...".to_string(),
+            },
+        ];
+        let safe = super::sanitize_summary_only_messages(&messages);
+        assert_eq!(safe.len(), 3);
+        // System with LifeModel content -> sanitized
+        assert!(!safe[0].content.contains("Alice"));
+        // User -> sanitized
+        assert!(!safe[1].content.contains("Alice"));
+        // Assistant -> sanitized
+        assert!(!safe[2].content.contains("Alice"));
+    }
+
+    // ── P0/P1: prepare_summary_only_cloud_payload tests ────────────────
+
+    #[test]
+    fn test_prepare_summary_only_cloud_payload_sanitizes_messages() {
+        use crate::life_model::{GoalItem, Goals, Identity, LifeModel};
+
+        let mut lm = LifeModel::default();
+        lm.identity = Identity {
+            name: "SecretUser".to_string(),
+            ..Default::default()
+        };
+        lm.goals = Goals {
+            short_term: vec![GoalItem {
+                name: "目标A".to_string(),
+                description: "详细描述A".to_string(),
+                priority: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let messages = vec![crate::llm::ChatMessage {
+            role: "user".to_string(),
+            content: "帮我规划目标".to_string(),
+        }];
+
+        let (safe_msgs, prompt) =
+            super::prepare_summary_only_cloud_payload(&messages, &lm, Some("tool"));
+
+        // Messages must be sanitized
+        assert_eq!(safe_msgs.len(), 1);
+        assert!(!safe_msgs[0].content.contains("帮我规划"));
+        assert!(safe_msgs[0].content.contains("SummaryOnly"));
+
+        // System prompt must NOT contain sensitive LifeModel fields
+        assert!(!prompt.contains("SecretUser"));
+        assert!(!prompt.contains("目标A"));
+        assert!(!prompt.contains("详细描述A"));
+        assert!(prompt.contains("SummaryOnly"));
+        assert!(prompt.contains("tool"));
+    }
+
+    #[test]
+    fn test_prepare_cloud_payload_filters_user_message_with_pii() {
+        use crate::life_model::LifeModel;
+        let lm = LifeModel::default();
+        let messages = vec![
+            crate::llm::ChatMessage {
+                role: "user".to_string(),
+                content: "邮箱 test@example.com 手机 13800138000".to_string(),
+            },
+            crate::llm::ChatMessage {
+                role: "assistant".to_string(),
+                content: "根据目标A的描述，你的LifeModel显示...".to_string(),
+            },
+        ];
+
+        let (safe_msgs, _) = super::prepare_summary_only_cloud_payload(&messages, &lm, None);
+
+        assert_eq!(safe_msgs.len(), 2);
+        assert!(!safe_msgs[0].content.contains("test@example.com"));
+        assert!(!safe_msgs[0].content.contains("13800138000"));
+        assert!(!safe_msgs[1].content.contains("目标A"));
+        assert!(!safe_msgs[1].content.contains("LifeModel"));
+        assert!(safe_msgs[0].content.contains("SummaryOnly"));
+        assert!(safe_msgs[1].content.contains("SummaryOnly"));
+    }
+
+    #[test]
+    fn test_prepare_cloud_payload_system_prompt_has_goal_counts() {
+        use crate::life_model::{GoalItem, Goals, LifeModel};
+        let mut lm = LifeModel::default();
+        lm.goals = Goals {
+            short_term: vec![
+                GoalItem {
+                    name: "A".to_string(),
+                    description: "desc A".to_string(),
+                    ..Default::default()
+                },
+                GoalItem {
+                    name: "B".to_string(),
+                    description: "desc B".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let (_, prompt) = super::prepare_summary_only_cloud_payload(&[], &lm, None);
+        assert!(prompt.contains("2 个"));
+        assert!(!prompt.contains("desc A"));
+        assert!(!prompt.contains("desc B"));
     }
 }

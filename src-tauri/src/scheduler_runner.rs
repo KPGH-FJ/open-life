@@ -160,6 +160,7 @@ async fn execute_scheduled_task(
             "memory.search".into(),
             "proposal.create".into(),
         ],
+        compaction_config: None,
     };
     let agent_loop = {
         let mut al = AgentLoop::new(
@@ -189,15 +190,22 @@ async fn execute_scheduled_task(
     let tools_prompt = String::new();
 
     // ── Resolve AgentSpec for governed execution ──────────────────
-    let agent_spec =
-        crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)
-            .unwrap_or_else(|e| {
-                log::warn!(
-                    "[SchedulerRunner] AgentSpec resolution failed: {}, using fragile default",
-                    e
-                );
-                openlife_core::agent::AgentSpec::default()
-            });
+    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
+        &state.agent_spec_store,
+        None,
+    ) {
+        Ok(spec) => spec,
+        Err(e) => {
+            log::error!(
+                "[SchedulerRunner] AgentSpec resolution failed: {}. Scheduled task execution aborted (fail-closed).",
+                e
+            );
+            return Err(format!(
+                "AgentSpec resolution failed: {}. Scheduled execution requires a valid active main AgentSpec.",
+                e
+            ));
+        }
+    };
     let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
 
     let loop_result = {

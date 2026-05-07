@@ -8,6 +8,7 @@ pub struct ReasoningInput {
     pub task_kind: crate::agent::types::AgentTaskKind,
     pub user_text: String,
     pub session_id: String,
+    pub privacy_policy: Option<crate::agent::types::PrivacyPolicy>,
 }
 
 /// Output from a reasoning strategy.

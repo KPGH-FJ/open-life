@@ -6,6 +6,7 @@ import {
   XCircle,
   RefreshCw,
   FileText,
+  Layers,
 } from "lucide-react";
 import type { AgentRunEvent, AgentRunEventType } from "@/types";
 
@@ -19,10 +20,14 @@ interface Props {
 const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "run.created": <Play size={14} className="text-blue-400" />,
   "context.assembled": <FileText size={14} className="text-slate-400" />,
+  "agent_spec.selected": <FileText size={14} className="text-indigo-400" />,
+  "prompt_stack.assembled": <FileText size={14} className="text-teal-400" />,
+  "context_governance.applied": <FileText size={14} className="text-teal-400" />,
   "model.route_selected": <FileText size={14} className="text-purple-400" />,
   "model.call_started": <Play size={14} className="text-purple-400" />,
   "model.call_completed": <CheckCircle size={14} className="text-green-400" />,
   "model.call_failed": <XCircle size={14} className="text-red-400" />,
+  "model.failed": <XCircle size={14} className="text-red-400" />,
   "tool.call_started": <Play size={14} className="text-emerald-400" />,
   "tool.call_blocked": <AlertTriangle size={14} className="text-amber-400" />,
   "tool.call_completed": <CheckCircle size={14} className="text-emerald-400" />,
@@ -50,6 +55,7 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.continuation_requested": <Play size={14} className="text-emerald-400" />,
   "plan.action_replayed": <RefreshCw size={14} className="text-green-400" />,
   "plan.action_replay_requested": <Play size={14} className="text-amber-400" />,
+  "compaction.created": <Layers size={14} className="text-orange-400" />,
   "run.completed": <CheckCircle size={14} className="text-green-400" />,
   "run.failed": <XCircle size={14} className="text-red-400" />,
   unknown: <FileText size={14} className="text-slate-500" />,

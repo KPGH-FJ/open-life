@@ -16,6 +16,7 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
+- **vNext P8 可以收口，当前进入 P9 Shell/Sandbox 规划与开发**：P8 已将长对话/长 AgentRun 的上下文压缩、proposal/observation 保留与 `compaction.created` trace 接入；P9 聚焦 `ExecutionSandbox` 治理下的默认关闭、非交互式、可追踪 shell 能力。
 - **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
 - **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。
@@ -118,9 +119,16 @@ vNext 的重点包括：
 4. [OpenLife vNext Core Primitives and Boundaries](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_core_primitives_and_boundaries.md)
 5. [OpenLife vNext Migration Plan](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_migration_plan.md)
 6. [OpenLife vNext P0/P1 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p0_p1_task_specs.md)
-7. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
-8. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
-9. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
+7. [OpenLife vNext P2/P3 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p2_p3_task_specs.md)
+8. [OpenLife vNext P4 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p4_task_specs.md)
+9. [OpenLife vNext P5 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p5_task_specs.md)
+10. [OpenLife vNext P6 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p6_task_specs.md)
+11. [OpenLife vNext P7 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p7_task_specs.md)
+12. [OpenLife vNext P8 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p8_task_specs.md)
+13. [OpenLife vNext P9 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p9_task_specs.md)
+14. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
+15. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
+16. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
 
 ### 现有架构背景
 

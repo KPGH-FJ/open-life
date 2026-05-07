@@ -199,10 +199,12 @@ impl AgentRuntime {
             )
         })?;
 
+        let privacy_policy = resolve_privacy_policy(task, spec);
         let reasoning_input = ReasoningInput {
             task_kind: task.kind,
             user_text: task.user_text.clone(),
             session_id: task.session_id.clone(),
+            privacy_policy: Some(privacy_policy),
         };
 
         let run_id = Uuid::new_v4().to_string();
@@ -313,6 +315,7 @@ impl AgentRuntime {
             task_kind: task.kind,
             user_text: task.user_text.clone(),
             session_id: task.session_id.clone(),
+            privacy_policy: None,
         };
 
         // 5. Execute reasoning
@@ -432,6 +435,17 @@ pub enum AgentRuntimeError {
     ContextAssembly(String),
     StrategyNotFound(String),
     Reasoning(ReasoningError),
+}
+
+/// Resolve the effective privacy policy for a task execution.
+///
+/// Task-level override (`task.privacy_policy`) takes precedence over
+/// the AgentSpec default (`spec.privacy_policy`).
+pub fn resolve_privacy_policy(
+    task: &AgentTask,
+    spec: &AgentSpec,
+) -> crate::agent::types::PrivacyPolicy {
+    task.privacy_policy.unwrap_or(spec.privacy_policy)
 }
 
 impl AgentRuntimeError {
@@ -757,8 +771,9 @@ mod tests {
         let mut task = create_test_task();
         task.layer = crate::layer_router::Layer::L1;
 
-        // main.default has empty prompt_block_ids by default
-        let spec = AgentSpec::default_main_spec();
+        // Use a spec with explicitly empty prompt_block_ids
+        let mut spec = AgentSpec::default_main_spec();
+        spec.prompt_block_ids = vec![];
 
         let output = runtime
             .execute_task_with_spec(
@@ -967,5 +982,94 @@ mod tests {
 
         let strategy_err = AgentRuntimeError::StrategyNotFound("direct".to_string());
         assert!(!strategy_err.is_governance_failure());
+    }
+
+    // ── P7 Finding 4: default spec prompt_block_trace tests ─────────────
+
+    #[tokio::test]
+    async fn test_default_main_spec_produces_non_empty_prompt_block_trace() {
+        let life_model = create_test_life_model();
+        let scheduler = InferenceScheduler::new(
+            "llama3.2".to_string(),
+            true,
+            "openai".to_string(),
+            "https://api.openai.com/v1".to_string(),
+            "".to_string(),
+            "gpt-4".to_string(),
+            "text-embedding-3-small".to_string(),
+            false,
+        );
+        let runtime =
+            AgentRuntime::with_config(life_model, scheduler, AgentRuntimeConfig::default());
+        let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+
+        let mut task = create_test_task();
+        task.layer = crate::layer_router::Layer::L1;
+
+        let spec = AgentSpec::default_main_spec();
+        assert!(
+            !spec.prompt_block_ids.is_empty(),
+            "precondition: default spec must have baseline blocks"
+        );
+
+        let output = runtime
+            .execute_task_with_spec(
+                &task,
+                &create_test_life_model(),
+                "",
+                None,
+                vec![],
+                PrivacyEngine::new(),
+                &spec,
+                &registry,
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !output.prompt_block_trace.is_empty(),
+            "default spec with baseline blocks must produce non-empty prompt_block_trace"
+        );
+        assert_eq!(output.agent_spec_id, Some("main.default".to_string()));
+    }
+
+    // ── P2: task privacy override tests ──────────────────────────────────
+
+    #[test]
+    fn test_resolve_privacy_policy_uses_task_override() {
+        let mut task = create_test_task();
+        task.privacy_policy = Some(crate::agent::types::PrivacyPolicy::LocalOnly);
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::CloudAllowed;
+        let resolved = resolve_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::LocalOnly);
+    }
+
+    #[test]
+    fn test_resolve_privacy_policy_falls_back_to_spec() {
+        let task = create_test_task(); // privacy_policy = None
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::SummaryOnly;
+        let resolved = resolve_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::SummaryOnly);
+    }
+
+    #[test]
+    fn test_resolve_privacy_policy_task_override_summary_over_local() {
+        let mut task = create_test_task();
+        task.privacy_policy = Some(crate::agent::types::PrivacyPolicy::SummaryOnly);
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::LocalOnly;
+        let resolved = resolve_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::SummaryOnly);
+    }
+
+    #[test]
+    fn test_resolve_privacy_policy_task_none_uses_spec_cloud_allowed() {
+        let task = create_test_task();
+        let mut spec = AgentSpec::default_main_spec();
+        spec.privacy_policy = crate::agent::types::PrivacyPolicy::CloudAllowed;
+        let resolved = resolve_privacy_policy(&task, &spec);
+        assert_eq!(resolved, crate::agent::types::PrivacyPolicy::CloudAllowed);
     }
 }
