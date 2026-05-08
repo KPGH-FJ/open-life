@@ -11,6 +11,12 @@ import {
   Edit2,
   Hammer,
   SlidersHorizontal,
+  Info,
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  Bot,
+  GitBranch,
 } from "lucide-react";
 import {
   acceptProposal,
@@ -23,6 +29,7 @@ import {
   getConfig,
   type AgentProposal,
   type AppConfig,
+  type SystemDiagnostics,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
 
@@ -40,6 +47,44 @@ function riskClass(risk: AgentProposal["riskLevel"]): string {
   if (risk === "high" || risk === "critical") return "border-rose-200 bg-rose-50 text-rose-800";
   if (risk === "medium") return "border-amber-200 bg-amber-50 text-amber-800";
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
+}
+
+function sourceLabel(source: AgentProposal["source"]): { label: string; icon: React.ReactNode } {
+  const labels: Record<string, { label: string; icon: React.ReactNode }> = {
+    builder_review: { label: "Builder 构建", icon: <Hammer size={10} /> },
+    calibration_run: { label: "Calibration 校准", icon: <SlidersHorizontal size={10} /> },
+    feedback_evolution: { label: "反馈进化", icon: <RefreshCw size={10} /> },
+    memory_governance: { label: "记忆治理", icon: <FileText size={10} /> },
+    skill_runtime: { label: "Skill 运行", icon: <Bot size={10} /> },
+    proactive_agent: { label: "主动建议", icon: <Bot size={10} /> },
+    plugin: { label: "Plugin", icon: <GitBranch size={10} /> },
+    manual: { label: "手动", icon: <Edit2 size={10} /> },
+  };
+  return labels[source] || { label: source, icon: <FileText size={10} /> };
+}
+
+function beforeAfterSummary(before: unknown, after: unknown): string {
+  if (before === null || before === undefined) return `新增：${valuePreview(after).slice(0, 60)}`;
+  const beforeStr = valuePreview(before);
+  const afterStr = valuePreview(after);
+  if (beforeStr.length < 60 && afterStr.length < 60) {
+    return `${beforeStr} → ${afterStr}`;
+  }
+  return `从 ${beforeStr.slice(0, 40)}… 变更为 ${afterStr.slice(0, 40)}…`;
+}
+
+function evidenceSummary(proposal: AgentProposal): string {
+  const parts: string[] = [];
+  if (proposal.confidence >= 0.8) parts.push("高置信度");
+  else if (proposal.confidence >= 0.5) parts.push("中等置信度");
+  else parts.push("低置信度");
+  if (proposal.source) {
+    parts.push(`来源：${proposal.source}`);
+  }
+  if (proposal.reason.length > 0) {
+    parts.push(`依据：${proposal.reason.slice(0, 80)}`);
+  }
+  return parts.join(" · ");
 }
 
 const TYPE_OPTIONS = [
@@ -80,8 +125,9 @@ export default function ProposalReviewPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [batchAccepting, setBatchAccepting] = useState(false);
-  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [safePaths, setSafePaths] = useState<string[]>([]);
+  const [expandedEvidence, setExpandedEvidence] = useState<Set<string>>(new Set());
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -458,16 +504,101 @@ export default function ProposalReviewPage() {
                                     ? "Skill"
                                     : proposal.source}
                               {proposal.runId && (
-                                <a
-                                  href={`#/runs/${proposal.runId}`}
+                                <Link
+                                  to={`/runs/${proposal.runId}`}
                                   className="text-stone-500 hover:text-stone-700 hover:underline"
                                   title={`查看来源 Run: ${proposal.runId}`}
                                 >
                                   #{proposal.runId.slice(0, 8)}
-                                </a>
+                                </Link>
                               )}
                             </span>
                           )}
+                        </div>
+
+                        {/* Evidence & Source Context */}
+                        <div className="mt-3 border-t border-stone-100 pt-3 space-y-2">
+                          {/* Source badge with clear distinction */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
+                              {sourceLabel(proposal.source).icon}
+                              {sourceLabel(proposal.source).label}
+                            </span>
+                            {proposal.runId && (
+                              <Link
+                                to={`/runs/${proposal.runId}`}
+                                className="inline-flex items-center gap-1 text-[11px] text-blue-600 hover:text-blue-800 hover:underline"
+                              >
+                                <Info size={10} />
+                                Run #{proposal.runId.slice(0, 8)}
+                              </Link>
+                            )}
+                            {(proposal.riskLevel === "high" ||
+                              proposal.riskLevel === "critical") && (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 border border-rose-200 px-2.5 py-1 text-[11px] text-rose-700">
+                                <AlertCircle size={10} />
+                                高风险 — 需谨慎审查
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Before/After comparison */}
+                          {(proposal.before !== undefined || proposal.after !== undefined) && (
+                            <div className="rounded-lg bg-stone-50 border border-stone-200 p-3">
+                              <button
+                                onClick={() => {
+                                  const next = new Set(expandedEvidence);
+                                  if (next.has(proposal.id)) next.delete(proposal.id);
+                                  else next.add(proposal.id);
+                                  setExpandedEvidence(next);
+                                }}
+                                className="w-full flex items-center justify-between text-xs text-stone-600"
+                              >
+                                <span className="font-medium flex items-center gap-1.5">
+                                  <GitBranch size={12} />
+                                  变更摘要
+                                </span>
+                                {expandedEvidence.has(proposal.id) ? (
+                                  <ChevronUp size={14} />
+                                ) : (
+                                  <ChevronDown size={14} />
+                                )}
+                              </button>
+                              {expandedEvidence.has(proposal.id) ? (
+                                <div className="mt-2 space-y-2 text-xs">
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                    <div className="rounded bg-white border border-stone-100 p-2">
+                                      <div className="text-[10px] text-stone-400 mb-1">变更前</div>
+                                      <pre className="text-stone-600 whitespace-pre-wrap break-all">
+                                        {valuePreview(proposal.before ?? "(空)")}
+                                      </pre>
+                                    </div>
+                                    <div className="rounded bg-white border border-stone-100 p-2">
+                                      <div className="text-[10px] text-stone-400 mb-1">变更后</div>
+                                      <pre className="text-stone-600 whitespace-pre-wrap break-all">
+                                        {valuePreview(proposal.after)}
+                                      </pre>
+                                    </div>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="mt-1 text-stone-500 text-[11px]">
+                                  {beforeAfterSummary(proposal.before, proposal.after)}
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Evidence summary */}
+                          <div className="rounded-lg bg-blue-50/50 border border-blue-100 p-2.5">
+                            <div className="flex items-center gap-1.5 text-[10px] text-blue-600 font-medium mb-1">
+                              <FileText size={10} />
+                              Evidence 上下文
+                            </div>
+                            <div className="text-[11px] text-blue-800 leading-relaxed">
+                              {evidenceSummary(proposal)}
+                            </div>
+                          </div>
                         </div>
                         {proposal.proposalType === "tool_permission" && proposal.after && (
                           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px] text-stone-500">

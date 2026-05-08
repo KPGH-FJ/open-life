@@ -70,8 +70,9 @@ use commands::feedback::{
     save_feedback,
 };
 use commands::plan::{
-    cancel_agent_plan, confirm_agent_plan, continue_agent_plan, execute_agent_plan, get_agent_plan,
-    list_agent_plans_for_run, list_agent_plans_for_session, reject_agent_plan, retry_agent_plan,
+    cancel_agent_plan, confirm_agent_plan, continue_agent_plan, edit_agent_plan,
+    execute_agent_plan, get_agent_plan, list_agent_plans_for_run, list_agent_plans_for_session,
+    reject_agent_plan, retry_agent_plan,
 };
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
@@ -3002,6 +3003,7 @@ pub fn run() {
             execute_agent_plan,
             retry_agent_plan,
             continue_agent_plan,
+            edit_agent_plan,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

@@ -1348,6 +1348,21 @@ export async function continueAgentPlan(planId: string): Promise<PlanOperationRe
   return safeInvoke<PlanOperationResult>("continue_agent_plan", { planId });
 }
 
+export interface EditPlanRequest {
+  goal?: string;
+  assumptions?: string[];
+  missingContext?: string[];
+  successCriteria?: string[];
+  rollbackPlan?: string | null;
+}
+
+export async function editAgentPlan(
+  planId: string,
+  edit: EditPlanRequest
+): Promise<PlanOperationResult> {
+  return safeInvoke<PlanOperationResult>("edit_agent_plan", { planId, plan_id: planId, edit });
+}
+
 export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRun[]> {
   return listAgentRuns(limit, offset);
 }

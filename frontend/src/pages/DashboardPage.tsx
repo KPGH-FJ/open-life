@@ -19,6 +19,10 @@ import {
   Tag,
   Compass,
   Sparkles,
+  ListOrdered,
+  ShieldCheck,
+  Bot,
+  History,
 } from "lucide-react";
 import type {
   LifeModel,
@@ -27,6 +31,7 @@ import type {
   StateAlert,
   CustomStateDimension,
   LifeModelVersion,
+  AgentPlan,
 } from "../types";
 import {
   getLifeModel,
@@ -52,6 +57,7 @@ import {
   getPendingProposals,
   listAgentRuns,
   getProactiveSuggestions,
+  listAgentPlansForRun,
   type CapabilityGap,
   type AlignmentIssue,
   type SystemDiagnostics,
@@ -314,6 +320,8 @@ export default function DashboardPage() {
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
   const [proactiveSuggestions, setProactiveSuggestions] = useState<ProactiveSuggestion[]>([]);
+  const [recentPlans, setRecentPlans] = useState<AgentPlan[]>([]);
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const navigate = useNavigate();
 
   const warningText = (label: string, error: unknown) =>
@@ -449,8 +457,12 @@ export default function DashboardPage() {
       warnings.push(warningText("待处理提案", e));
     }
     try {
-      const runs = await listAgentRuns(5, 0);
-      setRecentRuns(runs);
+      const runs = await listAgentRuns(20, 0);
+      setRecentRuns(runs.slice(0, 5));
+      const planResults = await Promise.all(
+        runs.slice(0, 5).map(run => listAgentPlansForRun(run.id).catch(() => [] as AgentPlan[]))
+      );
+      setRecentPlans(planResults.flat().slice(0, 5));
     } catch (e) {
       warnings.push(warningText("最近运行", e));
     }
@@ -461,6 +473,7 @@ export default function DashboardPage() {
       warnings.push(warningText("主动建议", e));
     }
     setLoadWarnings(warnings);
+    setWorkspaceLoading(false);
   };
 
   const handleMemorySearch = async () => {
@@ -869,6 +882,259 @@ export default function DashboardPage() {
         {/* Workspace Overview */}
         <WorkspaceOverview />
 
+        {/* ── Agent Workspace ───────────────────────────────────────────── */}
+        <section className="rounded-2xl border border-stone-200 bg-white/90 p-5">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2">
+              <Bot size={18} className="text-stone-700" />
+              <span className="font-semibold text-stone-900">Agent Workspace</span>
+            </div>
+            <button
+              onClick={refreshAll}
+              className="text-xs text-stone-500 hover:text-stone-700 flex items-center gap-1"
+            >
+              <RefreshCw size={12} />
+              刷新
+            </button>
+          </div>
+
+          {workspaceLoading ? (
+            <div className="space-y-3 animate-pulse">
+              <div className="h-16 bg-stone-100 rounded-xl" />
+              <div className="h-16 bg-stone-100 rounded-xl" />
+              <div className="h-12 bg-stone-100 rounded-xl" />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {/* Recent Run Summary */}
+              <div className="rounded-xl border border-stone-100 bg-stone-50/50 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                    <History size={14} />
+                    最近运行
+                  </div>
+                  <Link
+                    to="/runs"
+                    className="text-xs text-stone-500 hover:text-stone-700 flex items-center gap-1"
+                  >
+                    全部 <ArrowRight size={12} />
+                  </Link>
+                </div>
+                {recentRuns.length === 0 ? (
+                  <div className="text-xs text-stone-400 py-2">
+                    暂无运行记录。开始对话或构建 LifeModel。
+                  </div>
+                ) : (
+                  <div className="grid gap-2">
+                    {recentRuns.slice(0, 4).map(run => (
+                      <Link
+                        key={run.id}
+                        to={`/runs/${run.id}`}
+                        className="flex items-center gap-3 rounded-lg bg-white border border-stone-100 px-3 py-2 hover:shadow-sm transition group text-xs"
+                      >
+                        <span
+                          className={`shrink-0 w-2 h-2 rounded-full ${
+                            run.status === "completed"
+                              ? "bg-emerald-400"
+                              : run.status === "running"
+                                ? "bg-blue-400 animate-pulse"
+                                : run.status === "failed"
+                                  ? "bg-red-400"
+                                  : "bg-amber-400"
+                          }`}
+                        />
+                        <span className="font-medium text-stone-700 w-16 shrink-0">
+                          {run.kind === "conversation"
+                            ? "Chat"
+                            : run.kind === "builder"
+                              ? "Build"
+                              : run.kind === "planning"
+                                ? "Plan"
+                                : run.kind === "tool_execution"
+                                  ? "Tool"
+                                  : run.kind}
+                        </span>
+                        <span className="text-stone-500 truncate flex-1">
+                          {run.userInput?.slice(0, 50) || run.outputPreview?.slice(0, 50) || "—"}
+                        </span>
+                        <span className="text-stone-400 shrink-0">
+                          {run.status === "running"
+                            ? "进行中"
+                            : run.status === "completed"
+                              ? "完成"
+                              : run.status === "failed"
+                                ? "失败"
+                                : run.status}
+                        </span>
+                        {run.generatedProposals.length > 0 && (
+                          <span className="text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded text-[10px]">
+                            {run.generatedProposals.length}提案
+                          </span>
+                        )}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Plan Status + Pending Proposals Row */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Plan Status */}
+                <div className="rounded-xl border border-stone-100 bg-stone-50/50 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                      <ListOrdered size={14} />
+                      最近计划
+                    </div>
+                    <Link
+                      to="/runs"
+                      className="text-xs text-stone-500 hover:text-stone-700 flex items-center gap-1"
+                    >
+                      查看 <ArrowRight size={12} />
+                    </Link>
+                  </div>
+                  {recentPlans.length === 0 ? (
+                    <div className="text-xs text-stone-400 py-2">
+                      暂无计划。通过对话中的规划功能创建。
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {recentPlans.slice(0, 3).map(plan => (
+                        <Link
+                          key={plan.id}
+                          to={plan.runId ? `/runs/${plan.runId}` : "/runs"}
+                          className="flex items-center gap-2 rounded-lg bg-white border border-stone-100 px-3 py-2 hover:shadow-sm transition text-xs"
+                        >
+                          <span
+                            className={`shrink-0 w-1.5 h-1.5 rounded-full ${
+                              plan.status === "completed"
+                                ? "bg-emerald-400"
+                                : plan.status === "executing"
+                                  ? "bg-blue-400"
+                                  : plan.status === "confirmed"
+                                    ? "bg-indigo-400"
+                                    : plan.status === "failed"
+                                      ? "bg-red-400"
+                                      : plan.status === "rejected"
+                                        ? "bg-stone-400"
+                                        : "bg-amber-400"
+                            }`}
+                          />
+                          <span className="text-stone-700 truncate flex-1">
+                            {plan.goal.slice(0, 60)}
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded ${
+                              plan.riskLevel === "high" || plan.riskLevel === "critical"
+                                ? "bg-red-50 text-red-600"
+                                : "bg-stone-100 text-stone-500"
+                            }`}
+                          >
+                            {plan.status}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Pending Proposals */}
+                <div className="rounded-xl border border-stone-100 bg-stone-50/50 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="text-sm font-medium text-stone-700 flex items-center gap-2">
+                      <ShieldCheck size={14} />
+                      待处理提案
+                    </div>
+                    <Link
+                      to="/review"
+                      className="text-xs text-stone-500 hover:text-stone-700 flex items-center gap-1"
+                    >
+                      审查 <ArrowRight size={12} />
+                    </Link>
+                  </div>
+                  {pendingProposals.length === 0 ? (
+                    <div className="text-xs text-stone-400 py-2">
+                      暂无待处理提案。
+                      {diagnostics?.high_risk_pending_proposal_count &&
+                      diagnostics.high_risk_pending_proposal_count > 0
+                        ? ` ${diagnostics.high_risk_pending_proposal_count} 个高风险提案需要关注。`
+                        : ""}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {pendingProposals.slice(0, 3).map(proposal => (
+                        <Link
+                          key={proposal.id}
+                          to="/review"
+                          className="flex items-center gap-2 rounded-lg bg-white border border-stone-100 px-3 py-2 hover:shadow-sm transition text-xs"
+                        >
+                          <span
+                            className={`shrink-0 w-1.5 h-1.5 rounded-full ${
+                              proposal.riskLevel === "high" || proposal.riskLevel === "critical"
+                                ? "bg-red-400"
+                                : proposal.riskLevel === "medium"
+                                  ? "bg-amber-400"
+                                  : "bg-emerald-400"
+                            }`}
+                          />
+                          <span className="text-stone-700 truncate flex-1">
+                            {proposal.reason.slice(0, 60)}
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded ${
+                              proposal.riskLevel === "high" || proposal.riskLevel === "critical"
+                                ? "bg-red-50 text-red-600"
+                                : "bg-stone-100 text-stone-500"
+                            }`}
+                          >
+                            {proposal.affectedPath.split(".").slice(-1)[0] || proposal.proposalType}
+                          </span>
+                        </Link>
+                      ))}
+                      {pendingProposals.length > 3 && (
+                        <div className="text-xs text-stone-400 text-center">
+                          还有 {pendingProposals.length - 3} 个提案
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Next Actions */}
+              <div className="rounded-xl border border-stone-100 bg-stone-50/50 p-4">
+                <div className="text-sm font-medium text-stone-700 mb-3">下一步行动</div>
+                {nextActions.length === 0 ? (
+                  <div className="text-xs text-stone-400 py-2">系统状态正常。可以开始新对话。</div>
+                ) : (
+                  <div className="grid gap-2 md:grid-cols-2">
+                    {nextActions.slice(0, 4).map(action => (
+                      <Link
+                        key={action.title}
+                        to={action.to}
+                        className="flex items-center justify-between gap-2 rounded-lg bg-white border border-stone-100 px-3 py-2 hover:shadow-sm transition group text-xs"
+                      >
+                        <span className="text-stone-700 truncate">{action.title}</span>
+                        <ArrowRight
+                          size={12}
+                          className="text-stone-400 group-hover:text-indigo-500 shrink-0"
+                        />
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Stale / Error State */}
+              {loadWarnings.length > 0 && (
+                <div className="rounded-lg bg-amber-50 border border-amber-100 px-3 py-2 text-xs text-amber-800">
+                  部分数据加载失败（{loadWarnings.length} 项）。部分面板可能显示不完整。
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
         <section className="relative overflow-hidden rounded-3xl border border-stone-200 bg-[#fbf7ef] p-6 shadow-sm">
           <div className="absolute -right-10 -top-16 h-52 w-52 rounded-full bg-amber-200/40 blur-2xl" />
           <div className="absolute -bottom-20 left-1/3 h-48 w-48 rounded-full bg-emerald-200/30 blur-2xl" />
@@ -1170,59 +1436,6 @@ export default function DashboardPage() {
             </Link>
           </div>
         )}
-
-        {/* Workspace Overview */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <Link
-            to="/review"
-            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
-          >
-            <div className="flex items-center justify-between">
-              <div className="font-semibold text-gray-800 text-sm">待处理提案</div>
-              <div className="text-xs text-gray-500">Review</div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-1">
-              <span className="text-2xl font-bold text-indigo-600">{pendingProposals.length}</span>
-              <span className="text-sm text-gray-500">个待确认</span>
-            </div>
-            {pendingProposals.length > 0 && (
-              <div className="mt-1 text-xs text-gray-500 truncate">
-                最新: {pendingProposals[0].affectedPath || pendingProposals[0].proposalType}
-              </div>
-            )}
-          </Link>
-          <Link
-            to="/runs"
-            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
-          >
-            <div className="flex items-center justify-between">
-              <div className="font-semibold text-gray-800 text-sm">最近运行</div>
-              <div className="text-xs text-gray-500">Runs</div>
-            </div>
-            <div className="mt-2 flex items-baseline gap-1">
-              <span className="text-2xl font-bold text-emerald-600">{recentRuns.length}</span>
-              <span className="text-sm text-gray-500">条记录</span>
-            </div>
-            {recentRuns.length > 0 && recentRuns[0].outputPreview && (
-              <div className="mt-1 text-xs text-gray-500 truncate">
-                最新: {recentRuns[0].outputPreview}
-              </div>
-            )}
-          </Link>
-          <Link
-            to="/chat"
-            className="bg-white border rounded-xl p-4 hover:shadow-sm transition-shadow"
-          >
-            <div className="flex items-center justify-between">
-              <div className="font-semibold text-gray-800 text-sm">新对话</div>
-              <div className="text-xs text-gray-500">Chat</div>
-            </div>
-            <div className="mt-2 text-sm text-gray-600">与 Agent 开始新的对话</div>
-            <div className="mt-1 text-xs text-indigo-600 flex items-center gap-1">
-              开始对话 <ArrowRight size={12} />
-            </div>
-          </Link>
-        </div>
 
         {/* Proactive Suggestions */}
         {proactiveSuggestions.length > 0 && (

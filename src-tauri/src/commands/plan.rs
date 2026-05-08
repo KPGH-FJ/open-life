@@ -64,6 +64,28 @@ pub async fn confirm_agent_plan(
             .ok_or_else(|| AppError::not_found("Plan not found"))?
     };
 
+    // Legal-state guard: only Draft and Published can be confirmed.
+    match plan.status {
+        openlife_core::agent::PlanStatus::Draft | openlife_core::agent::PlanStatus::Published => {}
+        _ => {
+            return Ok(PlanOperationResult {
+                plan_id,
+                run_id: plan.run_id,
+                operation: "confirm".to_string(),
+                success: false,
+                status: plan.status,
+                steps_completed: None,
+                steps_failed: None,
+                deviations: vec![],
+                review_verdict: None,
+                message: Some(format!(
+                    "cannot confirm plan in status {:?} — only draft/published plans can be confirmed",
+                    plan.status
+                )),
+            });
+        }
+    }
+
     plan.confirm();
 
     {
@@ -102,6 +124,28 @@ pub async fn reject_agent_plan(
             .map_err(AppError::from)?
             .ok_or_else(|| AppError::not_found("Plan not found"))?
     };
+
+    // Legal-state guard: only Draft and Published can be rejected.
+    match plan.status {
+        openlife_core::agent::PlanStatus::Draft | openlife_core::agent::PlanStatus::Published => {}
+        _ => {
+            return Ok(PlanOperationResult {
+                plan_id,
+                run_id: plan.run_id,
+                operation: "reject".to_string(),
+                success: false,
+                status: plan.status,
+                steps_completed: None,
+                steps_failed: None,
+                deviations: vec![],
+                review_verdict: None,
+                message: Some(format!(
+                    "cannot reject plan in status {:?} — only draft/published plans can be rejected",
+                    plan.status
+                )),
+            });
+        }
+    }
 
     plan.reject();
 
@@ -799,6 +843,128 @@ pub async fn continue_agent_plan(
     })
 }
 
+/// Request body for edit_agent_plan — only safe editable fields.
+/// toolIntents and steps are NOT editable (execution capability must not change via edit).
+#[derive(Debug, serde::Deserialize)]
+pub struct EditPlanRequest {
+    goal: Option<String>,
+    assumptions: Option<Vec<String>>,
+    #[serde(rename = "missingContext")]
+    missing_context: Option<Vec<String>>,
+    #[serde(rename = "successCriteria")]
+    success_criteria: Option<Vec<String>>,
+    #[serde(rename = "rollbackPlan")]
+    rollback_plan: Option<Option<String>>,
+}
+
+// ── Legal-state helpers ──────────────────────────────────────────────
+
+fn plan_can_confirm_or_reject(status: openlife_core::agent::PlanStatus) -> bool {
+    matches!(
+        status,
+        openlife_core::agent::PlanStatus::Draft | openlife_core::agent::PlanStatus::Published
+    )
+}
+
+fn plan_can_edit(status: openlife_core::agent::PlanStatus) -> bool {
+    plan_can_confirm_or_reject(status)
+}
+
+fn apply_safe_plan_edit(plan: &mut AgentPlan, edit: &EditPlanRequest) -> PlanOperationResult {
+    let plan_id = plan.id.clone();
+    let run_id = plan.run_id.clone();
+    let original_status = plan.status;
+
+    if !plan_can_edit(original_status) {
+        return PlanOperationResult {
+            plan_id,
+            run_id,
+            operation: "edit".to_string(),
+            success: false,
+            status: original_status,
+            steps_completed: None,
+            steps_failed: None,
+            deviations: vec![],
+            review_verdict: None,
+            message: Some(format!(
+                "cannot edit plan in status {:?} — only draft/published plans can be edited",
+                original_status
+            )),
+        };
+    }
+
+    // Apply only safe fields
+    if let Some(ref goal) = edit.goal {
+        plan.goal = goal.clone();
+    }
+    if let Some(ref assumptions) = edit.assumptions {
+        plan.assumptions = assumptions.clone();
+    }
+    if let Some(ref missing_context) = edit.missing_context {
+        plan.missing_context = missing_context.clone();
+    }
+    if let Some(ref success_criteria) = edit.success_criteria {
+        plan.success_criteria = success_criteria.clone();
+    }
+    if let Some(ref rollback_plan) = edit.rollback_plan {
+        plan.rollback_plan = rollback_plan.clone();
+    }
+
+    // Security constraints:
+    // 1. Never lower risk_level
+    // 2. Never disable requires_confirmation
+    // (These are ensured by not exposing them in EditPlanRequest)
+
+    // If the plan was published, revert to draft to force re-confirmation
+    if original_status == openlife_core::agent::PlanStatus::Published {
+        plan.status = openlife_core::agent::PlanStatus::Draft;
+    }
+
+    plan.updated_at = chrono::Utc::now();
+
+    PlanOperationResult {
+        plan_id,
+        run_id,
+        operation: "edit".to_string(),
+        success: true,
+        status: plan.status,
+        steps_completed: None,
+        steps_failed: None,
+        deviations: vec![],
+        review_verdict: None,
+        message: Some("plan edited successfully".to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn edit_agent_plan(
+    plan_id: String,
+    edit: EditPlanRequest,
+    state: State<'_, Arc<AppState>>,
+) -> Result<PlanOperationResult, AppError> {
+    let plan_store = state
+        .plan_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("PlanStore not available"))?;
+
+    let mut plan = {
+        let store = plan_store.lock().unwrap();
+        store
+            .get_plan(&plan_id)
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::not_found("Plan not found"))?
+    };
+
+    let result = apply_safe_plan_edit(&mut plan, &edit);
+
+    if result.success {
+        let store = plan_store.lock().unwrap();
+        store.update_plan(&plan).map_err(AppError::from)?;
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,7 +1227,165 @@ mod tests {
         assert_eq!(plan.agent_spec_id, Some("main.custom".to_string()));
     }
 
-    // ── Phase 1: retry state consistency ────────────────────────────
+    // ── Legal-state guard tests ──────────────────────────────────────
+
+    #[test]
+    fn test_plan_can_confirm_or_reject_helper() {
+        use openlife_core::agent::PlanStatus;
+        assert!(plan_can_confirm_or_reject(PlanStatus::Draft));
+        assert!(plan_can_confirm_or_reject(PlanStatus::Published));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Confirmed));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Executing));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Completed));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Rejected));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Cancelled));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::Failed));
+        assert!(!plan_can_confirm_or_reject(PlanStatus::FailedReview));
+    }
+
+    #[test]
+    fn test_plan_can_edit_helper() {
+        use openlife_core::agent::PlanStatus;
+        assert!(plan_can_edit(PlanStatus::Draft));
+        assert!(plan_can_edit(PlanStatus::Published));
+        assert!(!plan_can_edit(PlanStatus::Confirmed));
+        assert!(!plan_can_edit(PlanStatus::Executing));
+        assert!(!plan_can_edit(PlanStatus::Completed));
+        assert!(!plan_can_edit(PlanStatus::Rejected));
+        assert!(!plan_can_edit(PlanStatus::Cancelled));
+        assert!(!plan_can_edit(PlanStatus::Failed));
+        assert!(!plan_can_edit(PlanStatus::FailedReview));
+    }
+
+    #[test]
+    fn test_apply_safe_plan_edit_rejects_terminal_states() {
+        let terminal_states = [
+            openlife_core::agent::PlanStatus::Confirmed,
+            openlife_core::agent::PlanStatus::Executing,
+            openlife_core::agent::PlanStatus::Completed,
+            openlife_core::agent::PlanStatus::Rejected,
+            openlife_core::agent::PlanStatus::Cancelled,
+            openlife_core::agent::PlanStatus::Failed,
+            openlife_core::agent::PlanStatus::FailedReview,
+        ];
+        for status in &terminal_states {
+            let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
+            plan.status = *status;
+            let before = plan.updated_at;
+
+            let edit = EditPlanRequest {
+                goal: Some("new goal".into()),
+                assumptions: None,
+                missing_context: None,
+                success_criteria: None,
+                rollback_plan: None,
+            };
+            let result = apply_safe_plan_edit(&mut plan, &edit);
+
+            assert!(!result.success, "edit should fail for status {:?}", status);
+            assert_eq!(result.status, *status, "status unchanged for {:?}", status);
+            assert_eq!(
+                plan.updated_at, before,
+                "updated_at unchanged for {:?}",
+                status
+            );
+            assert_eq!(plan.goal, "test", "goal unchanged for {:?}", status);
+        }
+    }
+
+    #[test]
+    fn test_apply_safe_plan_edit_updates_draft_safely() {
+        let mut plan = AgentPlan::new("old goal", openlife_core::agent::RiskLevel::Low);
+        let original_id = plan.id.clone();
+        let original_created = plan.created_at;
+
+        let edit = EditPlanRequest {
+            goal: Some("new goal".into()),
+            assumptions: Some(vec!["assumption A".into()]),
+            missing_context: Some(vec!["missing ctx".into()]),
+            success_criteria: Some(vec!["criterion 1".into()]),
+            rollback_plan: None,
+        };
+        let result = apply_safe_plan_edit(&mut plan, &edit);
+
+        assert!(result.success);
+        assert_eq!(result.status, openlife_core::agent::PlanStatus::Draft);
+        assert_eq!(plan.goal, "new goal");
+        assert_eq!(plan.assumptions, vec!["assumption A"]);
+        assert_eq!(plan.missing_context, vec!["missing ctx"]);
+        assert_eq!(plan.success_criteria, vec!["criterion 1"]);
+        // Immutable fields unchanged
+        assert_eq!(plan.id, original_id);
+        assert_eq!(plan.created_at, original_created);
+        assert!(plan.confirmed_at.is_none());
+        assert!(plan.completed_at.is_none());
+    }
+
+    #[test]
+    fn test_apply_safe_plan_edit_reverts_published_to_draft() {
+        let mut plan = AgentPlan::new("pub", openlife_core::agent::RiskLevel::Low);
+        plan.publish();
+        assert_eq!(plan.status, openlife_core::agent::PlanStatus::Published);
+
+        let edit = EditPlanRequest {
+            goal: Some("updated".into()),
+            assumptions: None,
+            missing_context: None,
+            success_criteria: None,
+            rollback_plan: None,
+        };
+        let result = apply_safe_plan_edit(&mut plan, &edit);
+
+        assert!(result.success);
+        // Published plan reverts to draft
+        assert_eq!(plan.status, openlife_core::agent::PlanStatus::Draft);
+        assert_eq!(plan.goal, "updated");
+    }
+
+    #[test]
+    fn test_apply_safe_plan_edit_ignores_status_confirmed_at() {
+        // Verify that edit cannot change critical execution fields
+        let mut plan = AgentPlan::new("initial", openlife_core::agent::RiskLevel::Low);
+        let original_id = plan.id.clone();
+        let original_run_id = plan.run_id.clone();
+        let original_created = plan.created_at;
+
+        let edit = EditPlanRequest {
+            goal: Some("edited".into()),
+            assumptions: None,
+            missing_context: None,
+            success_criteria: None,
+            rollback_plan: None,
+        };
+        apply_safe_plan_edit(&mut plan, &edit);
+
+        assert_eq!(plan.id, original_id);
+        assert_eq!(plan.run_id, original_run_id);
+        assert_eq!(plan.created_at, original_created);
+        assert!(plan.confirmed_at.is_none());
+        assert!(plan.completed_at.is_none());
+    }
+
+    #[test]
+    fn test_apply_safe_plan_edit_does_not_change_risk_level() {
+        let mut plan = AgentPlan::new("risky", openlife_core::agent::RiskLevel::High);
+        let original_risk = plan.risk_level;
+        let original_requires = plan.requires_confirmation;
+
+        let edit = EditPlanRequest {
+            goal: Some("changed".into()),
+            assumptions: None,
+            missing_context: None,
+            success_criteria: None,
+            rollback_plan: None,
+        };
+        apply_safe_plan_edit(&mut plan, &edit);
+
+        assert_eq!(plan.risk_level, original_risk);
+        assert_eq!(plan.requires_confirmation, original_requires);
+    }
+
+    // ── Phase 1 / P7 legacy tests ────────────────────────────────────
 
     #[test]
     fn test_retry_with_missing_plan_bound_spec_preserves_failed_status() {

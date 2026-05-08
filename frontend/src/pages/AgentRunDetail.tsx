@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { getAgentRun, deleteAgentRun, replayAgentAction, type AgentRun } from "../tauri";
+import {
+  getAgentRun,
+  deleteAgentRun,
+  replayAgentAction,
+  listAgentRunEvents,
+  type AgentRun,
+} from "../tauri";
+import type { AgentRunEvent } from "../types";
 import {
   ArrowLeft,
   Activity,
@@ -15,7 +22,11 @@ import {
   Eye,
   Zap,
   ListOrdered,
+  History,
 } from "lucide-react";
+import RunTracePanel from "../components/RunTracePanel";
+import ToolObservationPanel from "../components/ToolObservationPanel";
+import PlanPanel from "../components/PlanPanel";
 
 function statusIcon(status: string) {
   switch (status) {
@@ -54,6 +65,8 @@ export default function AgentRunDetail() {
   const [run, setRun] = useState<AgentRun | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [events, setEvents] = useState<AgentRunEvent[]>([]);
+  const [showTrace, setShowTrace] = useState(false);
 
   useEffect(() => {
     if (runId) {
@@ -64,8 +77,12 @@ export default function AgentRunDetail() {
   async function loadRun(id: string) {
     try {
       setLoading(true);
-      const data = await getAgentRun(id);
+      const [data, evts] = await Promise.all([
+        getAgentRun(id),
+        listAgentRunEvents(id).catch(() => [] as AgentRunEvent[]),
+      ]);
       setRun(data);
+      setEvents(evts);
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -363,10 +380,32 @@ export default function AgentRunDetail() {
             </div>
           )}
 
+          {/* AgentRunEvent Timeline */}
+          {events.length > 0 && (
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-stone-700 mb-2 flex items-center gap-2">
+                <History size={14} />
+                事件时间线 ({events.length})
+              </h3>
+              <RunTracePanel
+                events={events}
+                runId={run.id}
+                show={showTrace}
+                onToggle={() => setShowTrace(!showTrace)}
+              />
+            </div>
+          )}
+
+          {/* Tool Observation Panel */}
+          <ToolObservationPanel run={run} />
+
+          {/* Plan Panel */}
+          <PlanPanel runId={run.id} />
+
           {(run.actions.length > 0 || run.observations.length > 0) && (
             <div className="mb-6">
               <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                执行时间线 ({run.actions.length + run.observations.length})
+                详细执行时间线 ({run.actions.length + run.observations.length})
               </h3>
               <div className="space-y-2">
                 {(() => {

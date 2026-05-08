@@ -369,17 +369,17 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
-      return Promise.resolve(null as T);
+      return Promise.resolve(mockAgentRuns[0] as T);
     case "list_agent_runs":
-      return Promise.resolve([] as T);
+      return Promise.resolve(mockAgentRuns as T);
     case "list_agent_runs_for_session":
       return Promise.resolve([] as T);
     case "get_last_model_error":
       return Promise.resolve(null as T);
     case "get_pending_proposals":
-      return Promise.resolve([] as T);
+      return Promise.resolve(mockPendingProposals as T);
     case "list_proposals":
-      return Promise.resolve([] as T);
+      return Promise.resolve(mockPendingProposals as T);
     case "batch_accept_low_risk_proposals":
       return Promise.resolve(0 as T);
     case "accept_proposal":
@@ -866,8 +866,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve(mockAgentRunEvents as T);
     case "get_agent_plan":
       return Promise.resolve(mockAgentPlan as T);
-    case "list_agent_plans_for_run":
-      return Promise.resolve([mockAgentPlan] as T);
+    case "list_agent_plans_for_run": {
+      const rid = (_args as any)?.runId || (_args as any)?.run_id || "unknown";
+      return Promise.resolve([
+        { ...mockAgentPlan, id: `${mockAgentPlan.id}-${rid}`, runId: rid },
+      ] as T);
+    }
     case "list_agent_plans_for_session":
       return Promise.resolve([mockAgentPlan] as T);
     case "confirm_agent_plan":
@@ -923,6 +927,15 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         deviations: [],
         message: "no blocked actions to continue",
       } as T);
+    case "edit_agent_plan":
+      return Promise.resolve({
+        planId: "mock-plan-1",
+        operation: "edit",
+        success: true,
+        status: "published",
+        deviations: [],
+        message: "plan edited successfully",
+      } as T);
     // ── AgentSpec mocks ──────────────────────────────────────────────
     case "get_agent_spec": {
       const id = (_args as any)?.specId || (_args as any)?.spec_id;
@@ -943,6 +956,129 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       return Promise.resolve({} as T);
   }
 });
+
+export const mockPendingProposals = [
+  {
+    id: "proposal-1",
+    runId: "run-001",
+    proposalType: "goal_update" as const,
+    source: "chat" as const,
+    sourceDetail: "ChatConversation",
+    affectedPath: "goals.short_term[0].progress",
+    before: 0.5,
+    after: 0.7,
+    reason: "用户提到已完成项目设计阶段，建议更新项目进度",
+    confidence: 0.85,
+    riskLevel: "low" as const,
+    status: "pending" as const,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "proposal-2",
+    runId: "run-001",
+    proposalType: "memory_write" as const,
+    source: "memory_governance" as const,
+    affectedPath: "memory.tier2",
+    before: null,
+    after: { content: "用户偏好清晨工作" },
+    reason: "检测到重复的行为模式",
+    confidence: 0.72,
+    riskLevel: "medium" as const,
+    status: "pending" as const,
+    createdAt: new Date().toISOString(),
+  },
+  {
+    id: "proposal-3",
+    runId: "run-004",
+    proposalType: "external_write_action" as const,
+    source: "builder_review" as const,
+    affectedPath: "file:///home/user/documents/report.md",
+    before: null,
+    after: { content_hash: "abc123", size_bytes: 500, operation: "write" },
+    reason: "Builder 生成了报告草稿，建议写入安全目录",
+    confidence: 0.9,
+    riskLevel: "high" as const,
+    status: "pending" as const,
+    createdAt: new Date().toISOString(),
+  },
+];
+
+// ── AgentRun mock data ─────────────────────────────────────────────────
+
+export const mockAgentRuns = [
+  {
+    id: "run-001",
+    taskId: "task-1",
+    sessionId: "session-1",
+    status: "completed" as const,
+    kind: "conversation" as const,
+    userInput: "帮我分析一下最近的工作状态",
+    contextSummary: {
+      lifeModelEmpty: false,
+      includedLifeModelSections: ["identity", "goals", "state"],
+      memoryHitCount: 3,
+      memorySources: ["chat", "builder"],
+      usedToolsPrompt: true,
+      redactionApplied: false,
+      redactionLevel: "none",
+    },
+    modelRoute: {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      routeType: "cloud_direct",
+      preferLocal: false,
+      localModel: "llama3",
+      reason: "tools prompt requires cloud LLM",
+      privacyLevel: "cloud_allowed",
+      retryCount: 0,
+    },
+    outputPreview: "根据你的LifeModel，最近的工作状态整体不错...",
+    error: undefined,
+    generatedProposals: ["proposal-1"],
+    actions: [],
+    observations: [],
+    stepCount: 3,
+    toolCallCount: 1,
+    startedAt: new Date(Date.now() - 3600000).toISOString(),
+    finishedAt: new Date(Date.now() - 3590000).toISOString(),
+  },
+  {
+    id: "run-002",
+    taskId: "task-2",
+    sessionId: "session-2",
+    status: "completed" as const,
+    kind: "planning" as const,
+    userInput: "帮我规划下周的学习计划",
+    outputPreview: "已为你生成了下周学习计划...",
+    error: undefined,
+    generatedProposals: [],
+    actions: [],
+    observations: [],
+    stepCount: 2,
+    toolCallCount: 0,
+    startedAt: new Date(Date.now() - 86400000).toISOString(),
+    finishedAt: new Date(Date.now() - 86390000).toISOString(),
+  },
+  {
+    id: "run-003",
+    taskId: "task-3",
+    sessionId: "session-3",
+    status: "failed" as const,
+    kind: "tool_execution" as const,
+    userInput: "读取日志文件",
+    error: {
+      message: "文件不在允许的 safe_paths 中",
+      phase: "permission_check",
+      recoverable: true,
+    },
+    generatedProposals: [],
+    actions: [],
+    observations: [],
+    toolCallCount: 1,
+    startedAt: new Date(Date.now() - 172800000).toISOString(),
+    finishedAt: new Date(Date.now() - 172799000).toISOString(),
+  },
+];
 
 // ── AgentRunEvent mock data for timeline contract ─────────────────────
 
@@ -1088,11 +1224,11 @@ export const mockAgentRunEvents: AgentRunEvent[] = [
     createdAt: "2026-05-06T10:00:06.5Z",
   },
   {
-    id: "evt-compaction-created-001",
+    id: "evt-compaction-002",
     runId: "run-001",
     eventType: "compaction.created",
     actor: "runtime",
-    summary: "Context compacted: 25 -> 8 messages (4500 -> 600 tokens)",
+    summary: "Second compaction: 25 -> 8 messages (4500 -> 600 tokens)",
     payload: {
       compaction_id: "c1",
       run_id: "run-001",

@@ -48,7 +48,7 @@ const mockEvents: AgentRunEvent[] = [
     actor: "agent",
     phase: "reasoning",
     summary: "Calling deepseek-chat",
-    payload: { provider: "deepseek" },
+    payload: { provider: "deepseek", model: "deepseek-chat", step: 1 },
     createdAt: "2026-05-06T10:00:01Z",
   },
   {
@@ -57,7 +57,7 @@ const mockEvents: AgentRunEvent[] = [
     eventType: "model.failed",
     actor: "runtime",
     summary: "Model call failed: LocalOnly blocked cloud",
-    payload: { error: "LocalOnly privacy policy requires a local model" },
+    payload: { error: "LocalOnly privacy policy requires a local model", recoverable: false },
     createdAt: "2026-05-06T10:00:01.5Z",
   },
   {
@@ -66,7 +66,7 @@ const mockEvents: AgentRunEvent[] = [
     eventType: "tool.call_blocked",
     actor: "runtime",
     summary: "email.read blocked",
-    payload: { tool: "email.read" },
+    payload: { tool: "email.read", reason: "declarative-only" },
     createdAt: "2026-05-06T10:00:02Z",
   },
   {
@@ -75,7 +75,7 @@ const mockEvents: AgentRunEvent[] = [
     eventType: "plan.created",
     actor: "agent",
     summary: "Plan created: Analyze project",
-    payload: { plan_id: "plan-1" },
+    payload: { plan_id: "plan-1", goal: "Analyze project structure", risk_level: "low" },
     createdAt: "2026-05-06T10:00:03Z",
   },
   {
@@ -116,6 +116,29 @@ const mockEvents: AgentRunEvent[] = [
     payload: { stop_reason: "no_tools" },
     createdAt: "2026-05-06T10:00:05Z",
   },
+  {
+    id: "evt-redacted",
+    runId: "run-001",
+    eventType: "model.call_completed",
+    actor: "agent",
+    summary: "Model returned with data redaction",
+    payload: { reply_len: 512 },
+    redaction: {
+      redacted: true,
+      reason: "PII detected in model output",
+      fieldsRemoved: ["email", "phone"],
+    },
+    createdAt: "2026-05-06T10:00:04.5Z",
+  },
+  {
+    id: "evt-truncated",
+    runId: "run-001",
+    eventType: "tool.call_completed",
+    actor: { tool: "file.read" },
+    summary: "file.read completed with truncated output",
+    payload: { tool: "file.read", output_truncated: true, truncated: true, content_length: 50000 },
+    createdAt: "2026-05-06T10:00:05.5Z",
+  },
 ];
 
 describe("RunTracePanel", () => {
@@ -128,7 +151,7 @@ describe("RunTracePanel", () => {
 
   it("shows event count in collapsed state", () => {
     render(<RunTracePanel events={mockEvents} runId="run-001" show={false} onToggle={() => {}} />);
-    expect(screen.getByText(/11 events/)).toBeDefined();
+    expect(screen.getByText(/13 events/)).toBeDefined();
     expect(screen.getByText(/run-001/)).toBeDefined();
   });
 
@@ -150,8 +173,6 @@ describe("RunTracePanel", () => {
 
   it("shows actor labels correctly", () => {
     render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
-    // Actor labels appear as "by runtime", "by agent", etc.
-    // Each word segment renders in its own text node, so check container text
     const panel = document.querySelector(".border-slate-700\\/50");
     if (panel) {
       const text = panel.textContent || "";
@@ -168,7 +189,7 @@ describe("RunTracePanel", () => {
         runId: "run-001",
         eventType: "unknown",
         actor: "runtime",
-        summary: "Future cuscene event",
+        summary: "Future event type",
         payload: {},
         createdAt: "2026-05-06T10:00:01Z",
       },
@@ -176,7 +197,7 @@ describe("RunTracePanel", () => {
     render(
       <RunTracePanel events={unknownEvents} runId="run-001" show={true} onToggle={() => {}} />
     );
-    expect(screen.getByText("Future cuscene event")).toBeDefined();
+    expect(screen.getByText("Future event type")).toBeDefined();
   });
 
   it("toggles expansion when clicked", async () => {
@@ -188,14 +209,11 @@ describe("RunTracePanel", () => {
       <RunTracePanel events={mockEvents} runId="run-001" show={show} onToggle={onToggle} />
     );
 
-    // Initially collapsed — no event summaries
     expect(screen.queryByText("Agent run created")).toBeNull();
 
-    // Click to expand
-    const button = screen.getByRole("button");
+    const button = screen.getByTestId("run-trace-toggle");
     await userEvent.click(button);
 
-    // Rerender with new state
     rerender(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={onToggle} />);
 
     expect(screen.getByText("Agent run created")).toBeDefined();
@@ -222,5 +240,276 @@ describe("RunTracePanel", () => {
     render(<RunTracePanel events={shellEvents} runId="run-001" show={true} onToggle={() => {}} />);
     expect(screen.getByText("shell.blocked")).toBeDefined();
     expect(screen.getByText("shell.run blocked: shell execution is disabled")).toBeDefined();
+  });
+
+  it("renders shell.completed event as governed tool event", () => {
+    const shellEvents: AgentRunEvent[] = [
+      {
+        id: "evt-shell-2",
+        runId: "run-001",
+        eventType: "shell.completed",
+        actor: { tool: "shell.run" },
+        summary: "shell.run completed: ls /tmp",
+        payload: { command: "ls", args: ["/tmp"], exit_code: 0, output_truncated: true },
+        createdAt: "2026-05-07T10:00:05Z",
+      },
+    ];
+    render(<RunTracePanel events={shellEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    expect(screen.getByText("shell.completed")).toBeDefined();
+  });
+
+  it("shows redaction metadata badge on events with redaction", () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    const redactionBadges = screen.getAllByText("脱敏");
+    expect(redactionBadges.length).toBeGreaterThan(0);
+  });
+
+  it("shows truncated output marker on events with truncated payload", () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    const truncatedBadges = screen.getAllByText("已截断");
+    expect(truncatedBadges.length).toBeGreaterThan(0);
+  });
+
+  it("expands event detail panel on click showing payload metadata", async () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+
+    const modelStartedBtn = screen.getByTestId("event-row-evt-2");
+    await userEvent.click(modelStartedBtn);
+
+    expect(screen.getByText("事件载荷")).toBeDefined();
+  });
+
+  it("shows redaction detail in expanded panel", async () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+
+    const redactedBtn = screen.getByTestId("event-row-evt-redacted");
+    await userEvent.click(redactedBtn);
+
+    expect(screen.getByText("脱敏信息")).toBeDefined();
+    expect(screen.getByText(/PII detected in model output/)).toBeDefined();
+    expect(screen.getByText(/email, phone/)).toBeDefined();
+  });
+
+  it("shows truncated marker detail in expanded panel", async () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+
+    const truncatedBtn = screen.getByTestId("event-row-evt-truncated");
+    await userEvent.click(truncatedBtn);
+
+    expect(screen.getByText(/输出已截断/)).toBeDefined();
+  });
+
+  it("applies visual border classes for event grouping", () => {
+    render(<RunTracePanel events={mockEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    // Model events use purple left border
+    const modelEvent = screen.getByTestId("event-row-evt-2");
+    expect(modelEvent.parentElement?.className).toContain("border-l-purple-400");
+    // Plan events use cyan left border
+    const planEvent = screen.getByTestId("event-row-evt-4");
+    expect(planEvent.parentElement?.className).toContain("border-l-cyan-400");
+  });
+
+  it("does not crash when payload has non-serializable values", () => {
+    const trickyEvents: AgentRunEvent[] = [
+      {
+        id: "evt-tricky",
+        runId: "run-001",
+        eventType: "observation.created",
+        actor: "agent",
+        summary: "Tricky observation",
+        payload: { circular: "manually handled" },
+        createdAt: "2026-05-06T10:00:01Z",
+      },
+    ];
+    render(<RunTracePanel events={trickyEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    expect(screen.getByText("Tricky observation")).toBeDefined();
+  });
+
+  it("hides sensitive payload fields when event is redacted", async () => {
+    const redactedEmail: AgentRunEvent[] = [
+      {
+        id: "evt-redact-email",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Model reply with email",
+        payload: { reply: "ok", email: "alice@example.com", phone: "+8613900000000" },
+        redaction: { redacted: true, reason: "PII detected", fieldsRemoved: ["email"] },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(
+      <RunTracePanel events={redactedEmail} runId="run-001" show={true} onToggle={() => {}} />
+    );
+
+    await userEvent.click(screen.getByTestId("event-row-evt-redact-email"));
+
+    // Sensitive values must NOT appear in DOM
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    expect(panelHtml).not.toContain("alice@example.com");
+    expect(panelHtml).not.toContain("+8613900000000");
+
+    // [已隐藏] placeholder appears for redacted/sensitive fields
+    const hiddenTexts = screen.getAllByText(/已隐藏/);
+    expect(hiddenTexts.length).toBeGreaterThan(0);
+  });
+
+  it("non-redacted payloads still display safe summary values", async () => {
+    const normalEvent: AgentRunEvent[] = [
+      {
+        id: "evt-normal",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Normal model reply",
+        payload: { reply_len: 256, provider: "deepseek" },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={normalEvent} runId="run-001" show={true} onToggle={() => {}} />);
+
+    await userEvent.click(screen.getByTestId("event-row-evt-normal"));
+
+    expect(screen.getByText(/reply_len/)).toBeDefined();
+    expect(screen.getByText(/deepseek/)).toBeDefined();
+    expect(screen.queryByText("[已隐藏]")).toBeNull();
+  });
+
+  it("hides sensitive key values even when not in fieldsRemoved list", async () => {
+    const tokenLeak: AgentRunEvent[] = [
+      {
+        id: "evt-token",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Model reply with hidden token",
+        payload: { api_key: "sk-secret-key-123", model: "deepseek-chat" },
+        redaction: { redacted: true, reason: "credentials stripped", fieldsRemoved: [] },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={tokenLeak} runId="run-001" show={true} onToggle={() => {}} />);
+
+    await userEvent.click(screen.getByTestId("event-row-evt-token"));
+
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    expect(panelHtml).not.toContain("sk-secret-key-123");
+    const hiddenTexts = screen.getAllByText(/已隐藏/);
+    expect(hiddenTexts.length).toBeGreaterThan(0);
+    // Non-sensitive keys still shown
+    expect(panelHtml).toContain("deepseek-chat");
+  });
+
+  it("hides nested email/token in redacted events", async () => {
+    const nestedEvent: AgentRunEvent[] = [
+      {
+        id: "evt-nested",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Nested sensitive data",
+        payload: {
+          result: {
+            email: "alice@example.com",
+            token: "sk-secret-nested",
+            safe_field: "public info",
+          },
+        },
+        redaction: { redacted: true, reason: "PII in result", fieldsRemoved: [] },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={nestedEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-nested"));
+
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    expect(panelHtml).not.toContain("alice@example.com");
+    expect(panelHtml).not.toContain("sk-secret-nested");
+    expect(panelHtml).toContain("public info");
+  });
+
+  it("respects dot-path fieldsRemoved for nested fields", async () => {
+    const dotPathEvent: AgentRunEvent[] = [
+      {
+        id: "evt-dotpath",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Dot path redaction",
+        payload: {
+          data: { secret_field: "should-be-hidden", visible_field: "ok" },
+        },
+        redaction: {
+          redacted: true,
+          reason: "path redaction",
+          fieldsRemoved: ["data.secret_field"],
+        },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={dotPathEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-dotpath"));
+
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    expect(panelHtml).not.toContain("should-be-hidden");
+    expect(panelHtml).toContain("ok");
+    expect(screen.getAllByText(/已隐藏/).length).toBeGreaterThan(0);
+  });
+
+  it("fieldsRemoved pointing to subtree hides entire subtree", async () => {
+    const subtreeEvent: AgentRunEvent[] = [
+      {
+        id: "evt-subtree",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Subtree redaction",
+        payload: {
+          life_model: { name: "John", secret_token: "xyz", visible: "yes" },
+          other: "safe",
+        },
+        redaction: {
+          redacted: true,
+          reason: "life_model subtree",
+          fieldsRemoved: ["life_model"],
+        },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={subtreeEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-subtree"));
+
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    // Entire life_model subtree hidden
+    expect(panelHtml).not.toContain("John");
+    expect(panelHtml).not.toContain("secret_token");
+    expect(panelHtml).not.toContain("yes");
+    // Non-redacted field visible
+    expect(panelHtml).toContain("safe");
+  });
+
+  it("non-redacted nested payloads display safe summaries", async () => {
+    const normalNested: AgentRunEvent[] = [
+      {
+        id: "evt-normal-nested",
+        runId: "run-001",
+        eventType: "model.call_completed",
+        actor: "agent",
+        summary: "Normal nested data",
+        payload: {
+          stats: { latency_ms: 123, tokens: 50 },
+          provider: "deepseek",
+        },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={normalNested} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-normal-nested"));
+
+    const panelHtml = document.querySelector(".bg-slate-950\\/50")?.innerHTML ?? "";
+    expect(panelHtml).toContain("latency_ms");
+    expect(panelHtml).toContain("123");
+    expect(panelHtml).toContain("deepseek");
+    expect(panelHtml).not.toContain("[已隐藏]");
   });
 });
