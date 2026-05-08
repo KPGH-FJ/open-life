@@ -257,7 +257,15 @@ fn urlencoding(s: &str) -> String {
             {
                 c.to_string()
             }
-            c => format!("%{:02X}", c as u8),
+            c => {
+                let mut buf = [0u8; 4];
+                let encoded = c.encode_utf8(&mut buf);
+                encoded
+                    .bytes()
+                    .map(|b| format!("%{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join("")
+            }
         })
         .collect()
 }
@@ -304,8 +312,18 @@ fn build_ics_event(after: &Value) -> String {
          SUMMARY:{title}\r\n\
          DESCRIPTION:{description}\r\n\
          END:VEVENT\r\n\
-         END:VCALENDAR\r\n"
+         END:VCALENDAR\r\n",
+        title = ics_escape_text(title),
+        description = ics_escape_text(description),
     )
+}
+
+fn ics_escape_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
 }
 
 /// Replace path-unsafe characters in a filename.
@@ -926,9 +944,11 @@ async fn apply_proposal_to_state(
                     let ics_content = build_ics_event(&after);
                     let ics_filename = format!("{}.ics", sanitize_filename(title));
                     let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
-                    if let Err(e) = std::fs::write(&ics_path, &ics_content) {
+                    if let Err(e) =
+                        safe_write_utf8(&ics_path.to_string_lossy(), &ics_content, &safe_paths)
+                    {
                         log::warn!(
-                            "[proposal] Failed to write ICS file '{}': {}",
+                            "[proposal] Failed to write ICS file '{}' via safe path: {}",
                             ics_path.display(),
                             e
                         );
@@ -1006,7 +1026,8 @@ async fn apply_proposal_to_state(
                 }
 
                 let export_path = export_dir.join(filename);
-                match std::fs::write(&export_path, content) {
+                let path_lossy = export_path.to_string_lossy();
+                match safe_write_utf8(path_lossy.as_ref(), content, &safe_paths) {
                     Ok(_) => Ok(patch_result_for_proposal(
                         proposal,
                         true,
@@ -1888,9 +1909,10 @@ mod tests {
 
         let safe_path = temp_dir.path().join("safe");
         std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path_canonical = safe_path.canonicalize().unwrap();
         {
             let mut cfg = state.config.lock().await;
-            cfg.system.safe_paths = vec![safe_path.to_string_lossy().to_string()];
+            cfg.system.safe_paths = vec![safe_path_canonical.to_string_lossy().to_string()];
         }
 
         let proposal = AgentProposal::new(

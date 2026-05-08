@@ -261,6 +261,7 @@ export default function ChatPage() {
   const streamingRafRef = useRef<number | null>(null);
   const diagnosticsRef = useRef<SystemDiagnostics | null>(null);
   const streamErrorHandledRef = useRef(false);
+  const lastDoneRunIdRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const currentRunIdRef = useRef<string | null>(currentRunId);
@@ -342,7 +343,10 @@ export default function ChatPage() {
         setDiagnostics(diag);
         setPreferLocal(cfg.preferLocal);
       } catch {
-        // silently ignore
+        setDiagnostics({
+          chat_ready: false,
+          readiness_issues: ["无法连接后端服务，请检查应用是否正常运行"],
+        } as SystemDiagnostics);
       }
     })();
   }, []);
@@ -350,7 +354,20 @@ export default function ChatPage() {
   useEffect(() => {
     getLifeModel()
       .then(setModel)
-      .catch(() => {});
+      .catch(() => {
+        setDiagnostics(
+          prev =>
+            ({
+              ...prev,
+              life_model_ready: false,
+              model_empty: true,
+              beta_readiness_issues: [
+                ...(prev?.beta_readiness_issues || []),
+                "LifeModel 加载失败，请检查数据目录权限",
+              ],
+            }) as SystemDiagnostics
+        );
+      });
     refreshPendingProposals();
   }, []);
 
@@ -478,11 +495,18 @@ export default function ChatPage() {
       );
       unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
+          if (event.payload.run_id && lastDoneRunIdRef.current === event.payload.run_id) return;
+          lastDoneRunIdRef.current = event.payload.run_id ?? null;
           flushStreaming();
-          setMessages(prev => [
-            ...prev,
-            { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },
-          ]);
+          setMessages(prev => {
+            const hasRun =
+              event.payload.run_id && prev.some(m => m.run_id === event.payload.run_id);
+            if (hasRun) return prev;
+            return [
+              ...prev,
+              { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },
+            ];
+          });
           setStreamingReply("");
           setSending(false);
           setReasoningTrace(event.payload.reasoning_trace ?? null);
@@ -644,7 +668,7 @@ export default function ChatPage() {
         if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
           // 保持 requires_confirmation: true，让用户去 Review Center 授权
           console.warn("Tool call still needs authorization:", errMsg);
-          throw e; // 抛出错误让 ToolCallCard 显示提示
+          return;
         }
         // 其他错误才标记为失败
         setToolCalls(prev =>
@@ -830,6 +854,16 @@ export default function ChatPage() {
     const lastUser =
       lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
     if (!lastUser || sending) return;
+    if (diagnosticsRef.current && !diagnosticsRef.current.chat_ready) {
+      setMessages(prev => [
+        ...prev,
+        {
+          role: "assistant",
+          content: formatChatRuntimeError(new Error("chat not ready"), diagnosticsRef.current),
+        },
+      ]);
+      return;
+    }
     const lastUserIndex = messages.map(m => m.role).lastIndexOf("user");
     const retryMessages = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex + 1) : [lastUser];
     setStreamInterrupted(false);
@@ -1306,7 +1340,7 @@ export default function ChatPage() {
                   <div className="space-y-2">
                     {toolCalls.map((call, idx) => (
                       <ToolCallCard
-                        key={idx}
+                        key={call.action_id ?? call.name + idx}
                         call={call}
                         onExecute={() => handleExecuteToolCall(idx)}
                       />

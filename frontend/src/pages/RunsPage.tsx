@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listAgentRuns, deleteAgentRun, type AgentRun } from "../tauri";
 import {
@@ -61,11 +61,7 @@ export default function RunsPage() {
   const [page, setPage] = useState(0);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    loadRuns();
-  }, [showTrash]);
-
-  async function loadRuns() {
+  const loadRuns = useCallback(async () => {
     try {
       setLoading(true);
       const data = await listAgentRuns(100, 0);
@@ -76,7 +72,11 @@ export default function RunsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    loadRuns();
+  }, [loadRuns, showTrash]);
 
   const filteredRuns = runs.filter(run => {
     // Trash filter
@@ -125,14 +125,17 @@ export default function RunsPage() {
 
   async function handleBatchDelete() {
     if (!confirm(`确定要删除选中的 ${selectedRuns.size} 条记录吗？`)) return;
-    try {
-      for (const runId of selectedRuns) {
-        await deleteAgentRun(runId);
-      }
-      setSelectedRuns(new Set());
-      await loadRuns();
-    } catch (e) {
-      setError(String(e));
+    let failed = 0;
+    const results = await Promise.allSettled(
+      Array.from(selectedRuns).map(id => deleteAgentRun(id))
+    );
+    for (const r of results) {
+      if (r.status === "rejected") failed++;
+    }
+    setSelectedRuns(new Set());
+    await loadRuns();
+    if (failed > 0) {
+      setError(`${failed} 条记录删除失败`);
     }
   }
 

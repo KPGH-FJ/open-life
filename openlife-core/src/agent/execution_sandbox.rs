@@ -318,7 +318,11 @@ impl ExecutionSandbox {
     // ── Legacy path helpers (non-canonicalize, for deny-only checks) ──
 
     /// Check whether a path is within the allowed safe_paths.
-    /// Prefer `validate_path_in_sandbox` for security-critical checks.
+    ///
+    /// **WARNING**: This method uses simple prefix matching without canonicalization
+    /// or symlink defense. Do not use for security-critical checks. Always prefer
+    /// `validate_path_in_sandbox` which performs full canonicalization and symlink
+    /// validation against the sandbox boundary.
     pub fn is_path_in_safe_paths(&self, path: &str) -> bool {
         self.safe_paths.iter().any(|safe| path.starts_with(safe))
     }

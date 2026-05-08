@@ -276,7 +276,7 @@ export default function AgentRunDetail() {
               <h3 className="text-sm font-semibold text-amber-700 mb-2">警告</h3>
               <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800 space-y-1">
                 {run.warnings.map((warning, idx) => (
-                  <div key={idx} className="flex items-start gap-2">
+                  <div key={warning + idx} className="flex items-start gap-2">
                     <AlertTriangle size={14} className="text-amber-500 mt-0.5 shrink-0" />
                     <span>{warning}</span>
                   </div>
@@ -329,7 +329,7 @@ export default function AgentRunDetail() {
               <div className="space-y-1">
                 {run.statusUpdates.map((update, idx) => (
                   <div
-                    key={idx}
+                    key={update.timestamp + update.phase + idx}
                     className="flex items-start gap-3 text-sm py-1.5 px-3 rounded-lg hover:bg-stone-50 transition"
                   >
                     <div className="flex-shrink-0 w-16 text-xs text-stone-400">

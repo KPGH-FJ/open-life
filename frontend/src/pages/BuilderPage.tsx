@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import {
   Hammer,
   Footprints,
@@ -349,6 +349,7 @@ export default function BuilderPage() {
       setBuilderError(buildSafeModeBlockedMessage("新的构建写入", diagnostics));
       return;
     }
+    if (loading) return;
     setMode(selected);
     setSessionId(sid);
     setLoading(true);
@@ -652,12 +653,12 @@ export default function BuilderPage() {
                   应用都会被拦截。
                 </div>
               </div>
-              <a
-                href="#/settings"
+              <Link
+                to="/settings"
                 className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
               >
                 去恢复控制台 <ArrowRight size={15} />
-              </a>
+              </Link>
             </div>
           </div>
         )}

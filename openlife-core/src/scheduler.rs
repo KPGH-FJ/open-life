@@ -186,6 +186,8 @@ impl InferenceScheduler {
                 system_prompt,
             )
             .await
+        } else if !self.has_remote_key() {
+            anyhow::bail!("未配置云端 API Key，也没有可用的本地模型")
         } else {
             crate::llm::chat_with_openrouter_raw(
                 messages,

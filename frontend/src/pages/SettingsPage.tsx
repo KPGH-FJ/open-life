@@ -33,6 +33,7 @@ import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
 import { isSafeMode } from "../utils/safeMode";
+import { readableError } from "../utils/error";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
 import PluginSection from "./settings/PluginSection";
 import OverviewTab from "./settings/tabs/OverviewTab";
@@ -514,15 +515,6 @@ export default function SettingsPage() {
       </div>
     </div>
   );
-}
-
-function readableError(e: unknown): string {
-  if (typeof e === "string") return e;
-  if (e && typeof e === "object") {
-    if ("message" in e && typeof (e as any).message === "string") return (e as any).message;
-    if ("error" in e && typeof (e as any).error === "string") return (e as any).error;
-  }
-  return String(e);
 }
 
 function redactLocalPathsFromText(text: string): string {
