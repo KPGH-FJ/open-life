@@ -1267,6 +1267,11 @@ async fn send_message_with_agent_loop(
 
     let network_policy = cfg.system.network_policy.clone();
 
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &cfg.system.safe_paths,
+    );
+
     let loop_result = {
         let (reg, audit) = state.get_mcp_state().await;
         let permission_store = state.tool_permission_store.lock().await;
@@ -1291,7 +1296,9 @@ async fn send_message_with_agent_loop(
         .with_life_model(&life_model)
         .with_memory_store(&memory_store)
         .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_network_policy(&network_policy);
+        .with_network_policy(&network_policy)
+        .with_execution_sandbox(&execution_sandbox)
+        .with_agent_spec(&agent_spec);
         if let Some(ref store) = proposal_store_guard {
             action_ctx = action_ctx.with_proposal_store(store);
         }
@@ -1799,6 +1806,11 @@ async fn start_stream_message_with_agent_loop(
 
     let network_policy = cfg.system.network_policy.clone();
 
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &cfg.system.safe_paths,
+    );
+
     // Create streaming callback with run_id placeholder (will be updated after AgentLoop starts)
     let callback = Arc::new(TauriStreamingCallback {
         app_handle: app_handle.clone(),
@@ -1842,7 +1854,9 @@ async fn start_stream_message_with_agent_loop(
         .with_life_model(&life_model)
         .with_memory_store(&memory_store)
         .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_network_policy(&network_policy);
+        .with_network_policy(&network_policy)
+        .with_execution_sandbox(&execution_sandbox)
+        .with_agent_spec(&agent_spec);
         if let Some(ref store) = proposal_store_guard {
             action_ctx = action_ctx.with_proposal_store(store);
         }

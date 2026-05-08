@@ -5,6 +5,7 @@ use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
+use std::collections::HashMap;
 
 use super::helpers::{
     canonical_tool_source, filesystem_access_error, is_path_in_safe_paths, normalize_tool_name,
@@ -14,6 +15,7 @@ use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
+use crate::agent::shell_executor::{ShellCommandRequest, ShellExecutor};
 use crate::agent::types::{
     AgentAction, AgentEventActor, AgentObservation, AgentProposal, AgentRunEvent,
     AgentRunEventType, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
@@ -58,6 +60,11 @@ impl super::ActionExecutor {
 
         // 2. Inspect PII
         let inspection = ctx.registry.inspect_call_arguments(tool_name, &args);
+
+        // ── P9: shell.run governed execution ──────────────────────────
+        if tool_name == "shell.run" {
+            return self.execute_shell_run(&args, ctx, &request, manifest.as_ref(), &inspection);
+        }
 
         // 3. Check permission with canonical decision order:
         //    unknown -> blocked
@@ -680,5 +687,574 @@ impl super::ActionExecutor {
         );
 
         Some(Ok(result))
+    }
+
+    /// P9: Governed shell.run execution through ActionExecutor only.
+    ///
+    /// Checks in order:
+    /// 1. manifest exists
+    /// 2. manifest enabled && !declarative_only
+    /// 3. sandbox.bash_enabled == true
+    /// 4. permission policy
+    /// 5. ShellExecutor validation
+    ///
+    /// Records AgentRunEvent for every outcome (blocked/started/completed/failed/timeout).
+    fn execute_shell_run(
+        &self,
+        args: &Value,
+        ctx: &ActionExecutionContext<'_>,
+        request: &AgentActionRequest,
+        manifest: Option<&ToolManifest>,
+        inspection: &McpArgumentInspection,
+    ) -> Result<ActionExecutionResult> {
+        let tool_name = "shell.run";
+
+        // Record tool.call_blocked helper
+        let record_blocked = |reason: &str, payload: serde_json::Value| {
+            if let (Some(event_store), Some(ref run_id)) =
+                (ctx.event_store.as_ref(), &request.source_run_id)
+            {
+                let event = AgentRunEvent::new(
+                    run_id,
+                    AgentRunEventType::ToolCallBlocked,
+                    AgentEventActor::Tool(tool_name.to_string()),
+                    format!("shell.run blocked: {}", reason),
+                    payload,
+                );
+                let _ = event_store.append_event(&event);
+            }
+        };
+
+        // ── 1. Manifest check ──────────────────────────────────────────
+        let manifest = match manifest {
+            Some(m) => m,
+            None => {
+                let reason = "shell.run tool is not registered";
+                record_blocked(reason, serde_json::json!({"reason": reason}));
+                return Ok(self.build_blocked_result(
+                    tool_name, args, request, reason, false, None,
+                ));
+            }
+        };
+
+        if !manifest.enabled {
+            let reason = "shell.run is disabled in manifest";
+            record_blocked(reason, serde_json::json!({"reason": reason}));
+            return Ok(self.build_blocked_result(
+                tool_name, args, request, reason, false, Some(manifest),
+            ));
+        }
+
+        if manifest.declarative_only {
+            let reason = "shell.run is declarative-only (no executor available)";
+            record_blocked(reason, serde_json::json!({"reason": reason}));
+            return Ok(self.build_blocked_result(
+                tool_name, args, request, reason, false, Some(manifest),
+            ));
+        }
+
+        // ── 2. Sandbox check ───────────────────────────────────────────
+        let sandbox = ctx.execution_sandbox;
+        if !sandbox.bash_enabled {
+            let reason = "shell execution is disabled (sandbox.bash_enabled = false)";
+            record_blocked(reason, serde_json::json!({
+                "reason": reason,
+                "bash_enabled": false,
+            }));
+            return Ok(self.build_blocked_result(
+                tool_name, args, request, reason, false, Some(manifest),
+            ));
+        }
+
+        // ── 3. AgentSpec gate ──────────────────────────────────────────
+        // AgentSpec is mandatory for shell.run; missing spec = fail-closed.
+        match ctx.agent_spec {
+            Some(spec) if spec.is_tool_allowed(tool_name) => {
+                // AgentSpec allows — continue to permission check.
+            }
+            Some(_) => {
+                let reason = "AgentSpec denied shell.run";
+                record_blocked(reason, serde_json::json!({
+                    "reason": reason,
+                    "agent_spec_id": ctx.agent_spec.map(|s| s.id.clone()),
+                }));
+                return Ok(self.build_blocked_result(
+                    tool_name, args, request, reason, false, Some(manifest),
+                ));
+            }
+            None => {
+                let reason = "AgentSpec missing: cannot execute shell.run without governed AgentSpec";
+                record_blocked(reason, serde_json::json!({
+                    "reason": reason,
+                }));
+                return Ok(self.build_blocked_result(
+                    tool_name, args, request, reason, false, Some(manifest),
+                ));
+            }
+        }
+
+        // ── 4. Permission check ────────────────────────────────────────
+        let source = canonical_tool_source(manifest);
+        let perm_decision = if self.config.consume_allow_once {
+            ctx.permission_store.check(
+                &manifest.name,
+                &source,
+                &manifest.risk_level,
+                &manifest.action_type,
+                &manifest.capabilities,
+            )
+        } else {
+            ctx.permission_store.peek(
+                &manifest.name,
+                &source,
+                &manifest.risk_level,
+                &manifest.action_type,
+                &manifest.capabilities,
+            )
+        }
+        .unwrap_or(ToolPermissionDecision {
+            allowed: false,
+            requires_confirmation: true,
+            decision: "ask_every_time".into(),
+            reason: "permission check failed".into(),
+            policy_id: None,
+        });
+
+        if !perm_decision.allowed {
+            let needs_confirmation = perm_decision.requires_confirmation
+                || manifest.requires_confirmation
+                || inspection.requires_confirmation;
+            let reason = if perm_decision.requires_confirmation {
+                "shell.run requires user permission confirmation"
+            } else {
+                "shell.run permission denied"
+            };
+
+            record_blocked(&reason, serde_json::json!({
+                "reason": reason,
+                "needs_confirmation": needs_confirmation,
+                "permission_decision": perm_decision.decision,
+            }));
+
+            if needs_confirmation {
+                // Auto-generate ToolPermission Proposal
+                if let Some(result) = self.create_tool_permission_proposal(
+                    request,
+                    ctx,
+                    tool_name,
+                    args,
+                    Some(manifest),
+                    &perm_decision,
+                ) {
+                    return result;
+                }
+            }
+
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                args,
+                inspection,
+                &perm_decision,
+                Some(manifest),
+                request,
+            );
+            let status = if needs_confirmation {
+                ActionExecutionStatus::NeedsConfirmation
+            } else {
+                ActionExecutionStatus::Blocked
+            };
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status,
+                stop_reason: Some(if needs_confirmation {
+                    "shell_needs_confirmation".to_string()
+                } else {
+                    "shell_blocked".to_string()
+                }),
+            });
+        }
+
+        // ── 4. Build ShellCommandRequest ────────────────────────────────
+        let command = args
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let cmd_args: Vec<String> = args
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let cwd = args.get("cwd").and_then(|v| v.as_str()).map(String::from);
+        let env: HashMap<String, String> = args
+            .get("env")
+            .and_then(|v| v.as_object())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let shell_request = ShellCommandRequest {
+            command: command.to_string(),
+            args: cmd_args,
+            cwd,
+            env,
+            reason: args
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+        };
+
+        // ── 5. Execute via ShellExecutor ────────────────────────────────
+        let executor = ShellExecutor::new(sandbox.clone());
+
+        // Record tool.call_started
+        if let (Some(event_store), Some(ref run_id)) =
+            (ctx.event_store.as_ref(), &request.source_run_id)
+        {
+            let event = AgentRunEvent::new(
+                run_id,
+                AgentRunEventType::ToolCallStarted,
+                AgentEventActor::Tool(tool_name.to_string()),
+                format!("shell.run executing command: {}", command),
+                serde_json::json!({
+                    "command": command,
+                    "args": shell_request.args,
+                    "cwd": shell_request.cwd,
+                }),
+            );
+            let _ = event_store.append_event(&event);
+        }
+
+        let (status, output, error_msg) = match executor.execute(&shell_request) {
+            Ok(output) => {
+                let truncated = output.truncated || output.timed_out;
+                let status_str = if output.timed_out {
+                    ActionExecutionStatus::Failed
+                } else if output.exit_code != 0 {
+                    ActionExecutionStatus::Succeeded // non-zero exit is still a completed execution
+                } else {
+                    ActionExecutionStatus::Succeeded
+                };
+
+                let output_json = serde_json::json!({
+                    "stdout": output.stdout,
+                    "stderr": output.stderr,
+                    "exit_code": output.exit_code,
+                    "timed_out": output.timed_out,
+                    "truncated": truncated,
+                    "elapsed_ms": output.elapsed_ms,
+                });
+
+                if let (Some(event_store), Some(ref run_id)) =
+                    (ctx.event_store.as_ref(), &request.source_run_id)
+                {
+                    let event_type = if output.timed_out {
+                        AgentRunEventType::ToolCallFailed
+                    } else {
+                        AgentRunEventType::ToolCallCompleted
+                    };
+                    let summary = if output.timed_out {
+                        format!("shell.run timed out after {} ms: {}", output.elapsed_ms, command)
+                    } else {
+                        format!("shell.run completed: {} (exit={})", command, output.exit_code)
+                    };
+                    let event = AgentRunEvent::new(
+                        run_id,
+                        event_type,
+                        AgentEventActor::Tool(tool_name.to_string()),
+                        summary,
+                        output_json.clone(),
+                    );
+                    let _ = event_store.append_event(&event);
+                }
+
+                (status_str, Some(output_json.to_string()), None)
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if let (Some(event_store), Some(ref run_id)) =
+                    (ctx.event_store.as_ref(), &request.source_run_id)
+                {
+                    let event = AgentRunEvent::new(
+                        run_id,
+                        AgentRunEventType::ToolCallFailed,
+                        AgentEventActor::Tool(tool_name.to_string()),
+                        format!("shell.run failed: {}", err_str),
+                        serde_json::json!({
+                            "command": command,
+                            "error": err_str,
+                        }),
+                    );
+                    let _ = event_store.append_event(&event);
+                }
+                (
+                    ActionExecutionStatus::Failed,
+                    None,
+                    Some(err_str),
+                )
+            }
+        };
+
+        // ── 6. Build result ────────────────────────────────────────────
+        let now = chrono::Utc::now();
+        let action_id = format!(
+            "action-shell-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+
+        let obs_content = if let Some(ref out) = output {
+            format!("[shell.run] {} executed: {}", command, out)
+        } else if let Some(ref err) = error_msg {
+            format!("[shell.run] {} failed: {}", command, err)
+        } else {
+            format!("[shell.run] {} executed", command)
+        };
+
+        let tool_scope = Some(ToolActionScope {
+            tool_name: tool_name.to_string(),
+            tool_id: manifest.id.clone(),
+            source: canonical_tool_source(manifest),
+            risk_level: manifest.risk_level.clone(),
+            capabilities: manifest.capabilities.clone(),
+            action_type: manifest.action_type.clone(),
+            requires_confirmation: false,
+            allowed: status != ActionExecutionStatus::Failed,
+        });
+
+        let status_str: &str = match status {
+            ActionExecutionStatus::Succeeded => "succeeded",
+            ActionExecutionStatus::Failed => "failed",
+            ActionExecutionStatus::Blocked => "blocked",
+            ActionExecutionStatus::NeedsConfirmation => "needs_confirmation",
+        };
+
+        let action = AgentAction {
+            id: action_id.clone(),
+            action_type: request.action_type.clone(),
+            target: Some(tool_name.to_string()),
+            input: args.clone(),
+            output: output
+                .as_ref()
+                .map(|s: &String| serde_json::json!({"text": s})),
+            status: status_str.to_string(),
+            permission_decision: Some(perm_decision.decision),
+            tool_scope,
+            started_at: Some(now),
+            finished_at: Some(now),
+            error: error_msg.clone(),
+            timestamp: now,
+        };
+
+        let observation = AgentObservation {
+            id: format!(
+                "observation-shell-{}-{}",
+                request.step_index,
+                now.timestamp_nanos_opt().unwrap_or_default()
+            ),
+            action_id: Some(action_id),
+            content: obs_content,
+            source: canonical_tool_source(manifest),
+            structured_result: Some(serde_json::json!({
+                "success": status == ActionExecutionStatus::Succeeded,
+                "status": status_str,
+                "truncated": output.as_ref().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s).ok()
+                        .and_then(|v| v.get("truncated").cloned())
+                }).unwrap_or(serde_json::Value::Bool(false)),
+                "timed_out": output.as_ref().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(s).ok()
+                        .and_then(|v| v.get("timed_out").cloned())
+                }).unwrap_or(serde_json::Value::Bool(false)),
+            })),
+            timestamp: now,
+        };
+
+        let stop_reason = if status == ActionExecutionStatus::Failed {
+            Some("shell_execution_failed".to_string())
+        } else {
+            None
+        };
+
+        Ok(ActionExecutionResult {
+            action,
+            observation,
+            status,
+            stop_reason,
+        })
+    }
+
+    /// Build a blocked ActionExecutionResult for early-return paths.
+    fn build_blocked_result(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        request: &AgentActionRequest,
+        reason: &str,
+        needs_confirmation: bool,
+        manifest: Option<&ToolManifest>,
+    ) -> ActionExecutionResult {
+        let now = chrono::Utc::now();
+        let action_id = format!(
+            "action-shell-blocked-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let status_str = if needs_confirmation {
+            "needs_confirmation"
+        } else {
+            "blocked"
+        };
+
+        let tool_scope = manifest.map(|m| ToolActionScope {
+            tool_name: m.name.clone(),
+            tool_id: m.id.clone(),
+            source: canonical_tool_source(m),
+            risk_level: m.risk_level.clone(),
+            capabilities: m.capabilities.clone(),
+            action_type: m.action_type.clone(),
+            requires_confirmation: needs_confirmation,
+            allowed: false,
+        });
+
+        let action = AgentAction {
+            id: action_id.clone(),
+            action_type: request.action_type.clone(),
+            target: Some(tool_name.to_string()),
+            input: args.clone(),
+            output: None,
+            status: status_str.to_string(),
+            permission_decision: Some("deny".to_string()),
+            tool_scope,
+            started_at: Some(now),
+            finished_at: Some(now),
+            error: Some(reason.to_string()),
+            timestamp: now,
+        };
+
+        let observation = AgentObservation {
+            id: format!(
+                "observation-shell-blocked-{}-{}",
+                request.step_index,
+                now.timestamp_nanos_opt().unwrap_or_default()
+            ),
+            action_id: Some(action_id),
+            content: format!("[shell.run] blocked: {}", reason),
+            source: manifest
+                .map(canonical_tool_source)
+                .unwrap_or_else(|| "builtin".to_string()),
+            structured_result: Some(serde_json::json!({
+                "success": false,
+                "status": status_str,
+                "blocked_reason": reason,
+            })),
+            timestamp: now,
+        };
+
+        let status = if needs_confirmation {
+            ActionExecutionStatus::NeedsConfirmation
+        } else {
+            ActionExecutionStatus::Blocked
+        };
+
+        ActionExecutionResult {
+            action,
+            observation,
+            status,
+            stop_reason: Some("shell_blocked".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::action_executor::ActionExecutorConfig;
+    use crate::mcp::McpRegistry;
+    use crate::mcp_audit::McpAuditStore;
+    use crate::privacy::PrivacyEngine;
+    use crate::tool_permissions::ToolPermissionStore;
+
+    // ── P9-5: ActionExecutor shell.run governed path tests ───────────
+
+    #[test]
+    fn test_shell_run_disabled_sandbox_records_blocked() {
+        let mut reg = McpRegistry::new();
+        reg.register_default_builtins();
+        let ps = ToolPermissionStore::new_in_memory().unwrap();
+        let audit =
+            McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool.db"));
+        let pe = PrivacyEngine::new();
+        let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
+        let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+            .with_execution_sandbox(&sandbox)
+            .with_event_store(event_store.clone());
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = crate::agent::AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "shell.run".into(),
+            input: serde_json::json!({"arguments": {"command": "echo", "args": ["hello"]}}),
+            source_run_id: Some("test-run-1".into()),
+            step_index: 0,
+        };
+        let result = executor.execute(request, &ctx).unwrap();
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result
+            .action
+            .error
+            .unwrap_or_default()
+            .contains("disabled"));
+
+        let events = event_store.list_events_by_run("test-run-1").unwrap();
+        let has_blocked = events.iter().any(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallBlocked
+            )
+        });
+        assert!(has_blocked, "blocked event must be recorded by ActionExecutor");
+    }
+
+    #[test]
+    fn test_shell_run_manifest_disabled_blocks_in_action_executor() {
+        let mut reg = McpRegistry::new();
+        reg.register_default_builtins();
+        let ps = ToolPermissionStore::new_in_memory().unwrap();
+        let audit =
+            McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool2.db"));
+        let pe = PrivacyEngine::new();
+        // Shell enabled sandbox, but manifest is disabled by default
+        let tmp = std::env::temp_dir().to_string_lossy().to_string();
+        let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp],
+            command_allowlist: vec!["echo".into()],
+            ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+        };
+        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+            .with_execution_sandbox(&sandbox);
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = crate::agent::AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "shell.run".into(),
+            input: serde_json::json!({"arguments": {"command": "echo", "args": ["test"]}}),
+            source_run_id: None,
+            step_index: 0,
+        };
+        let result = executor.execute(request, &ctx).unwrap();
+        // Manifest is disabled → blocked at the manifest check
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result.action.error.unwrap_or_default().contains("disabled"));
     }
 }

@@ -153,6 +153,36 @@ fn default_network_default_decision() -> String {
     "ask".to_string()
 }
 
+/// Serializable sandbox policy carried in the system config.
+/// Defaults to disabled and empty. Enabling shell still requires
+/// manifest, AgentSpec, and permission policy to all allow it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionSandboxConfig {
+    #[serde(default)]
+    pub bash_enabled: bool,
+    #[serde(default)]
+    pub safe_paths: Vec<String>,
+    #[serde(default)]
+    pub command_allowlist: Vec<String>,
+    #[serde(default)]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub max_output_bytes: usize,
+}
+
+impl Default for ExecutionSandboxConfig {
+    fn default() -> Self {
+        Self {
+            bash_enabled: false,
+            safe_paths: Vec::new(),
+            command_allowlist: Vec::new(),
+            timeout_ms: 30_000,
+            max_output_bytes: 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     #[serde(default = "default_ollama_cache_ttl_seconds")]
@@ -195,6 +225,9 @@ pub struct SystemConfig {
     /// Base URL for SearXNG instance (e.g. "https://searx.example.com")
     #[serde(default)]
     pub searxng_url: String,
+    /// P9 execution sandbox policy (default disabled, no shell)
+    #[serde(default)]
+    pub execution_sandbox: ExecutionSandboxConfig,
 }
 
 impl Default for SystemConfig {
@@ -214,6 +247,7 @@ impl Default for SystemConfig {
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
             searxng_url: String::new(),
+            execution_sandbox: ExecutionSandboxConfig::default(),
         }
     }
 }

@@ -1921,3 +1921,183 @@ Verification:
 - rg -n "openlife_vnext_p9_task_specs|P9-0|P9-1|P9-2|P9-3|P9-4|P9-5|P9-6|P9-7|ExecutionSandbox-Governed Shell" AGENTS.md README.md plans
 - git diff --name-only contains documentation files only.
 ```
+
+## P10 Global Prompt
+
+```text
+You are working on OpenLife vNext P10: Frontend Agent Workspace.
+
+Read first:
+- AGENTS.md
+- plans/openlife_vnext_p10_task_specs.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_architecture_principles.md
+
+Global rules:
+- Execute exactly one P10 task spec.
+- Do not rewrite ChatPage wholesale.
+- Preserve Chat streaming stability.
+- Do not add terminal UI or shell command input.
+- Do not expose shell.run in generic tools_prompt or normal Chat UI.
+- Do not change backend runtime semantics unless the task explicitly allows a
+  small read-only DTO/query addition.
+- Keep all mutations proposal-first or routed through existing governed plan
+  operations.
+- Add focused frontend tests for new states and interactions.
+```
+
+## P10-0 Prompt
+
+```text
+Execute vNext task P10-0: Documentation And Entry Sync.
+
+Goal:
+- Make P10 discoverable and AI-coding-ready.
+- State that P9 Shell/Sandbox core is closed and P10 Frontend Agent Workspace is current.
+- Make P10 non-goals explicit: no ChatPage rewrite, no terminal UI, no shell enablement UX, no backend runtime migration.
+
+Allowed edit areas:
+- AGENTS.md
+- README.md
+- plans/openlife_vnext_p10_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+
+Verification:
+- rg -n "openlife_vnext_p10_task_specs|P10-0|P10-1|P10-2|P10-3|P10-4|P10-5|Frontend Agent Workspace" AGENTS.md README.md plans
+- git diff --name-only contains documentation files only.
+```
+
+## P10-1 Prompt
+
+```text
+Execute vNext task P10-1: Agent Workspace Information Architecture.
+
+Goal:
+- Define the frontend workspace shell for recent runs, plans, tools, proposals, and next actions.
+
+Allowed edit areas:
+- frontend/src/App.tsx
+- frontend/src/pages/DashboardPage.tsx
+- frontend/src/pages/RunsPage.tsx
+- frontend/src/pages/ChatPage.tsx only for links/embedding points
+- shared frontend components and tests
+- frontend/src/tauri.ts / mocks only for typed wrappers around existing commands
+
+Constraints:
+- No broad ChatPage rewrite.
+- No terminal UI or shell command input.
+- No backend mutation behavior.
+- UI should be operational and dense, not a landing page.
+
+Verification:
+- pnpm --dir frontend test -- --run App Dashboard Runs tauri
+- pnpm --dir frontend typecheck
+```
+
+## P10-2 Prompt
+
+```text
+Execute vNext task P10-2: Run Timeline And Event Detail Surface.
+
+Goal:
+- Upgrade runtime trace from compact rows into a useful run inspection experience.
+
+Allowed edit areas:
+- frontend/src/components/RunTracePanel.tsx
+- frontend/src/components/RunTracePanel.test.tsx
+- frontend/src/pages/RunsPage.tsx
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+
+Constraints:
+- Do not add new backend event types unless truly required.
+- Do not display unbounded stdout/stderr.
+- Shell events render as governed tool events only; no command entry UI.
+
+Verification:
+- pnpm --dir frontend test -- --run RunTracePanel Runs tauri
+- pnpm --dir frontend typecheck
+```
+
+## P10-3 Prompt
+
+```text
+Execute vNext task P10-3: Tool Observation Panel.
+
+Goal:
+- Make tool calls and observations explainable to users.
+
+Allowed edit areas:
+- frontend/src/pages/RunsPage.tsx
+- frontend/src/components/ToolCallCard.tsx
+- new small frontend components
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+
+Constraints:
+- No new execution controls.
+- No direct replay/retry button unless it calls an existing governed command and is covered by tests.
+- Large outputs are collapsed and bounded.
+
+Verification:
+- pnpm --dir frontend test -- --run Runs ToolCallCard tauri
+- pnpm --dir frontend typecheck
+```
+
+## P10-4 Prompt
+
+```text
+Execute vNext task P10-4: Proposal Evidence And Review Context.
+
+Goal:
+- Help users review proposals with source/evidence context.
+
+Allowed edit areas:
+- Review/Proposal frontend components
+- frontend/src/pages/ChatPage.tsx for banner link/context only
+- frontend/src/pages/RunsPage.tsx
+- frontend/src/types.ts
+- frontend/src/tauri.ts / mocks if existing proposal DTO wrappers need fields
+
+Constraints:
+- Do not add direct apply bypasses.
+- Do not expose raw sensitive memory evidence.
+- Backend changes should be read-only DTO additions only if existing data is unavailable.
+
+Verification:
+- pnpm --dir frontend test -- --run Proposal Chat Runs tauri
+- pnpm --dir frontend typecheck
+- Backend tests only if DTO commands change.
+```
+
+## P10-5 Prompt
+
+```text
+Execute vNext task P10-5: Plan Confirmation And Operations Surface.
+
+Goal:
+- Make confirmed plan execution usable from the frontend without changing plan runtime semantics.
+
+Allowed edit areas:
+- plan-related frontend components/pages
+- frontend/src/tauri.ts
+- frontend/src/types.ts
+- frontend/src/test/mocks/tauri.ts
+- minimal read-only backend DTO normalization only if required
+
+Constraints:
+- Do not implement rollback unless ADR 0011 is accepted and a separate task is created.
+- Do not add shell plan execution UI.
+- Do not make illegal terminal-state operations available.
+
+Verification:
+- pnpm --dir frontend test -- --run Plan Runs Chat tauri
+- pnpm --dir frontend typecheck
+- cargo test -p openlife-tauri commands::plan --lib if command DTOs change.
+```

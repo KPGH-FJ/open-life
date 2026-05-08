@@ -544,8 +544,9 @@ impl McpRegistry {
             "write",
         );
 
-        // P9: shell.run — default-off, declarative-only, high-risk.
-        // No executor yet. Must be explicitly enabled via sandbox + AgentSpec.
+        // P9: shell.run — default-off, governed by ActionExecutor.
+        // enabled=false keeps it out of the model tools prompt.
+        // declarative_only=false allows ActionExecutor to invoke ShellExecutor.
         self.register_builtin(
             ToolManifest {
                 id: "shell.run".into(),
@@ -581,13 +582,13 @@ impl McpRegistry {
                 ],
                 requires_confirmation: true,
                 enabled: false,
-                declarative_only: true,
+                declarative_only: false,
                 action_type: "external_side_effect".into(),
                 tags: vec!["shell".into(), "execution".into(), "p9".into()],
             },
             Box::new(|_args| {
                 Err(anyhow::anyhow!(
-                    "shell.run is declarative-only and cannot execute yet"
+                    "shell.run must be executed through ActionExecutor"
                 ))
             }),
         );
@@ -705,6 +706,21 @@ impl McpRegistry {
     pub fn register_builtin(&mut self, manifest: ToolManifest, func: BuiltinFn) {
         self.builtins.insert(manifest.name.clone(), func);
         self.builtin_manifests.push(manifest);
+    }
+
+    /// Runtime override to enable or disable a builtin manifest.
+    /// Only affects the manifest metadata (enabled flag); does not bypass
+    /// the ActionExecutor or change the model tools prompt.
+    /// Used for governed runtime enable of shell.run after all other
+    /// sandbox/permission/AgentSpec gates are verified.
+    pub fn set_builtin_manifest_enabled(&mut self, tool_name: &str, enabled: bool) {
+        if let Some(manifest) = self
+            .builtin_manifests
+            .iter_mut()
+            .find(|m| m.name == tool_name || m.id == tool_name)
+        {
+            manifest.enabled = enabled;
+        }
     }
 
     /// Remove built-in tools by source (e.g., remove all plugin tools).
@@ -923,8 +939,74 @@ impl McpRegistry {
         let mut lines = vec!["\n你可以使用以下工具:\n".to_string()];
         for m in manifests
             .iter()
-            .filter(|m| m.enabled && !m.declarative_only)
+            .filter(|m| m.enabled && !m.declarative_only && m.name != "shell.run")
         {
+            lines.push(format!("- {}: {}", m.name, m.description));
+        }
+        if lines.len() == 1 {
+            return "".into();
+        }
+        lines.push(
+            "\n如果需要使用工具，只回复一个合法 JSON 对象，不要使用 markdown 代码块，不要附加解释。格式：{\"tool_calls\": [{\"name\": \"web.search\", \"arguments\": {\"query\": \"今天日期\"}}]} 或 {\"tool_calls\": [{\"name\": \"web.fetch\", \"arguments\": {\"url\": \"https://example.com\"}}]}。工具名必须完整匹配上面的名称，URL 必须包含 http:// 或 https://。"
+                .into(),
+        );
+        lines.join("\n")
+    }
+
+    // ── Governed prompt helpers ────────────────────────────────────────
+
+    /// Get a prompt that includes shell.run only when all governance gates pass.
+    /// Uses `peek` (non-consuming) on the permission store so `allow_once`
+    /// policies remain available for the ActionExecutor to consume later.
+    pub fn tools_prompt_governed(
+        &self,
+        shell_model_callable: bool,
+        sandbox: &crate::agent::execution_sandbox::ExecutionSandbox,
+        agent_spec: &crate::agent::types::AgentSpec,
+        permission_store: &crate::tool_permissions::ToolPermissionStore,
+    ) -> String {
+        let manifests = self.list_manifests();
+        if manifests.is_empty() {
+            return "".into();
+        }
+        let mut lines = vec!["\n你可以使用以下工具:\n".to_string()];
+        for m in manifests.iter().filter(|m| {
+            // Standard filter: enabled and not declarative-only
+            if !m.enabled || m.declarative_only {
+                return false;
+            }
+            // shell.run requires all governance gates
+            if m.name == "shell.run" {
+                if !shell_model_callable {
+                    return false;
+                }
+                if !sandbox.bash_enabled {
+                    return false;
+                }
+                if !agent_spec.is_tool_allowed("shell.run") {
+                    return false;
+                }
+                // Permission check via peek (non-consuming)
+                let source = crate::tool_manifest::ToolSource::BuiltIn.to_string();
+                let perm = permission_store
+                    .peek(
+                        "shell.run",
+                        &source,
+                        &m.risk_level,
+                        &m.action_type,
+                        &m.capabilities,
+                    )
+                    .unwrap_or(crate::tool_permissions::ToolPermissionDecision {
+                        allowed: false,
+                        requires_confirmation: true,
+                        decision: "error".into(),
+                        reason: "permission peek failed".into(),
+                        policy_id: None,
+                    });
+                return perm.allowed && !perm.requires_confirmation;
+            }
+            true // non-shell tools pass unconditionally
+        }) {
             lines.push(format!("- {}: {}", m.name, m.description));
         }
         if lines.len() == 1 {
@@ -1138,9 +1220,11 @@ mod tests {
             .find(|m| m.name == "shell.run")
             .unwrap();
         assert!(!manifest.enabled, "shell.run must be disabled by default");
+        // P9: declarative_only is false so ActionExecutor can route to ShellExecutor.
+        // enabled=false keeps it out of model tools prompt.
         assert!(
-            manifest.declarative_only,
-            "shell.run must be declarative-only by default"
+            !manifest.declarative_only,
+            "shell.run must not be declarative-only (executable via ActionExecutor)"
         );
         // Not in model-callable tools prompt
         let prompt = registry.tools_prompt();
@@ -1151,15 +1235,18 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_run_blocked_by_declarative_only() {
+    fn test_shell_run_disabled_out_of_model_prompt() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
             .into_iter()
             .find(|m| m.name == "shell.run")
             .unwrap();
-        assert!(manifest.declarative_only);
-        // Declarative-only tools are filtered from is_model_callable
+        // P9: blocking is through enabled=false — the tool is not model-callable
+        // because it is disabled in the manifest. declarative_only=false means
+        // ActionExecutor can still route to ShellExecutor when all gates pass.
+        assert!(!manifest.enabled, "shell.run must be disabled by default");
+        assert!(!manifest.declarative_only);
         let prompt = registry.tools_prompt();
         assert!(!prompt.contains("shell.run"));
     }
@@ -1173,8 +1260,189 @@ mod tests {
             .find(|m| m.name == "shell.run")
             .unwrap();
         assert!(!manifest.enabled);
-        assert!(manifest.declarative_only);
-        // Even if we try to execute via manifest, it will be blocked by
-        // declarative_only check in execute_manifest or return error.
+        // P9: shell.run is not declarative-only anymore — it can execute via
+        // ActionExecutor when manifest/sandbox/permission/AgentSpec all allow.
+        // But by default it is disabled (not model-callable).
+        assert!(!manifest.declarative_only);
+        // Builtin closure blocks direct registry calls:
+        let result = registry.execute_manifest(&manifest, serde_json::json!({"command": "echo", "args": ["hi"]}));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ActionExecutor"),
+            "shell.run must be executed through ActionExecutor"
+        );
+    }
+
+    #[test]
+    fn test_shell_run_remains_disabled_by_default() {
+        let registry = McpRegistry::new();
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        assert!(!manifest.enabled);
+    }
+
+    #[test]
+    fn test_runtime_enable_makes_manifest_enabled() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        assert!(manifest.enabled);
+        assert!(!manifest.declarative_only);
+    }
+
+    #[test]
+    fn test_builtin_closure_still_blocks_direct_execution_after_runtime_enable() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let manifest = registry
+            .list_manifests()
+            .into_iter()
+            .find(|m| m.name == "shell.run")
+            .unwrap();
+        // Direct registry execution must still be blocked even when enabled
+        let result = registry.execute_manifest(&manifest, serde_json::json!({"command": "echo", "args": ["hi"]}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("ActionExecutor"));
+    }
+
+    // ── P9 prompt governance tests ───────────────────────────────────────
+
+    #[test]
+    fn test_default_tools_prompt_excludes_shell_run() {
+        let registry = McpRegistry::new();
+        let prompt = registry.tools_prompt();
+        assert!(!prompt.contains("shell.run"), "default prompt must exclude shell.run");
+        assert!(prompt.contains("web.search"), "non-shell tools must still appear");
+    }
+
+    #[test]
+    fn test_generic_tools_prompt_excludes_shell_even_when_runtime_enabled() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let prompt = registry.tools_prompt();
+        assert!(
+            !prompt.contains("shell.run"),
+            "even runtime-enabled shell.run must be excluded from generic tools_prompt"
+        );
+        assert!(prompt.contains("web.search"), "non-shell tools must still appear");
+    }
+
+    fn make_enabled_sandbox_for_prompt() -> crate::agent::execution_sandbox::ExecutionSandbox {
+        let tmp = std::env::temp_dir().to_string_lossy().to_string();
+        let mut s = crate::agent::execution_sandbox::ExecutionSandbox::default();
+        s.bash_enabled = true;
+        s.cwd = tmp.clone();
+        s.safe_paths = vec![tmp];
+        s
+    }
+
+    fn make_shell_allowing_agentspec() -> crate::agent::types::AgentSpec {
+        let mut spec = crate::agent::types::AgentSpec::default();
+        spec.allowed_tools = vec!["shell.run".into(), "web.search".into()];
+        spec
+    }
+
+    #[test]
+    fn test_governed_tools_prompt_excludes_shell_when_sandbox_disabled() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
+        let agent_spec = make_shell_allowing_agentspec();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let prompt = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
+        assert!(!prompt.contains("shell.run"), "sandbox disabled → exclude shell.run");
+    }
+
+    #[test]
+    fn test_governed_tools_prompt_excludes_shell_when_agentspec_denies() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let sandbox = make_enabled_sandbox_for_prompt();
+        let mut spec = crate::agent::types::AgentSpec::default();
+        spec.allowed_tools = vec!["goal.read".into()]; // no shell.run
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let prompt = registry.tools_prompt_governed(true, &sandbox, &spec, &ps);
+        assert!(!prompt.contains("shell.run"), "AgentSpec denies → exclude shell.run");
+    }
+
+    #[test]
+    fn test_governed_tools_prompt_excludes_shell_when_permission_not_granted() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let sandbox = make_enabled_sandbox_for_prompt();
+        let agent_spec = make_shell_allowing_agentspec();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        // No grant → peek returns allowed=false for high-risk tool
+        let prompt = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
+        assert!(
+            !prompt.contains("shell.run"),
+            "no permission grant → exclude shell.run"
+        );
+    }
+
+    #[test]
+    fn test_governed_tools_prompt_includes_shell_when_all_gates_pass() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let sandbox = make_enabled_sandbox_for_prompt();
+        let agent_spec = make_shell_allowing_agentspec();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        // Grant allow_once so peek returns allowed=true
+        ps.grant(
+            "shell.run",
+            "builtin",
+            "high",
+            "external_side_effect",
+            crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+            None,
+        )
+        .unwrap();
+        let prompt = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
+        assert!(
+            prompt.contains("shell.run"),
+            "all gates pass → shell.run must appear in governed prompt"
+        );
+        assert!(prompt.contains("web.search"), "non-shell tools must also appear");
+    }
+
+    #[test]
+    fn test_governed_prompt_does_not_consume_allow_once() {
+        let mut registry = McpRegistry::new();
+        registry.set_builtin_manifest_enabled("shell.run", true);
+        let sandbox = make_enabled_sandbox_for_prompt();
+        let agent_spec = make_shell_allowing_agentspec();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        ps.grant(
+            "shell.run",
+            "builtin",
+            "high",
+            "external_side_effect",
+            crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+            None,
+        )
+        .unwrap();
+        // Generate prompt twice — allow_once should survive both calls
+        let prompt1 = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
+        assert!(prompt1.contains("shell.run"), "first prompt must include shell.run");
+        let prompt2 = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
+        assert!(prompt2.contains("shell.run"), "allow_once must survive second peek");
+        // Now call check() — this should consume it
+        let source = "builtin";
+        let perm = ps
+            .check("shell.run", source, "high", "external_side_effect", &[
+                "write".into(), "filesystem".into(), "external_side_effect".into(),
+            ])
+            .unwrap();
+        assert!(perm.allowed, "allow_once should still be available for ActionExecutor");
     }
 }

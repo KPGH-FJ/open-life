@@ -151,6 +151,47 @@ impl Default for ExecutionSandbox {
 }
 
 impl ExecutionSandbox {
+    /// Build an ExecutionSandbox from the system config's sandbox policy.
+    /// Falls back to safe_paths from the system config when sandbox
+    /// safe_paths are empty.
+    pub fn from_config(
+        config: &crate::config::ExecutionSandboxConfig,
+        system_safe_paths: &[String],
+    ) -> Self {
+        let safe_paths = if config.safe_paths.is_empty() {
+            system_safe_paths.to_vec()
+        } else {
+            config.safe_paths.clone()
+        };
+        let mut sandbox = Self::default();
+        sandbox.bash_enabled = config.bash_enabled;
+        sandbox.safe_paths = safe_paths;
+        // Only override allowlist when config provides an explicit non-empty list.
+        // An empty config list preserves the conservative default (fail-closed),
+        // preventing unrestricted command execution.
+        if !config.command_allowlist.is_empty() {
+            sandbox.command_allowlist = config.command_allowlist.clone();
+        }
+        sandbox.timeout_ms = if config.timeout_ms > 0 {
+            config.timeout_ms
+        } else {
+            30_000
+        };
+        sandbox.max_output_bytes = if config.max_output_bytes > 0 {
+            config.max_output_bytes
+        } else {
+            1024 * 1024
+        };
+        sandbox
+    }
+
+    /// Always-disabled sandbox for paths that must not execute shell.
+    pub fn always_disabled() -> Self {
+        let mut s = Self::default();
+        s.bash_enabled = false;
+        s
+    }
+
     // ── Path validation (canonicalize-based) ──────────────────────────
 
     /// Canonicalize a list of path strings. Paths that cannot be resolved
@@ -348,7 +389,11 @@ impl ExecutionSandbox {
             ));
         }
 
-        if !self.command_allowlist.is_empty() && !self.is_command_allowed(command) {
+        // Fail-closed: empty allowlist blocks all commands.
+        if self.command_allowlist.is_empty() {
+            return Err("command allowlist is empty: all commands blocked".into());
+        }
+        if !self.is_command_allowed(command) {
             return Err(format!(
                 "command '{}' is not in the allowed command list",
                 command.split_whitespace().next().unwrap_or(command)
@@ -945,5 +990,98 @@ mod tests {
         assert!(!sandbox.is_command_dangerous("cat"));
         assert!(!sandbox.is_command_dangerous("echo"));
         assert!(!sandbox.is_command_dangerous("/bin/echo")); // echo not in denylist
+    }
+
+    // ── from_config tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_missing_config_yields_disabled_sandbox() {
+        let config = crate::config::ExecutionSandboxConfig::default();
+        let sandbox = ExecutionSandbox::from_config(&config, &[]);
+        assert!(!sandbox.bash_enabled, "default sandbox must be disabled");
+        assert!(
+            sandbox.safe_paths.is_empty(),
+            "no safe_paths configured → empty"
+        );
+    }
+
+    #[test]
+    fn test_configured_safe_paths_feed_sandbox() {
+        let config = crate::config::ExecutionSandboxConfig {
+            bash_enabled: false,
+            safe_paths: vec!["/my/sandbox".into()],
+            command_allowlist: vec![],
+            timeout_ms: 60_000,
+            max_output_bytes: 512 * 1024,
+        };
+        let sandbox = ExecutionSandbox::from_config(&config, &[]);
+        assert!(!sandbox.bash_enabled);
+        assert_eq!(sandbox.safe_paths, vec!["/my/sandbox"]);
+        assert_eq!(sandbox.timeout_ms, 60_000);
+        assert_eq!(sandbox.max_output_bytes, 512 * 1024);
+    }
+
+    #[test]
+    fn test_from_config_derives_safe_paths_from_system() {
+        let config = crate::config::ExecutionSandboxConfig {
+            bash_enabled: false,
+            safe_paths: vec![],
+            ..Default::default()
+        };
+        let system_safe = vec!["/workspace".to_string(), "/home/user".to_string()];
+        let sandbox = ExecutionSandbox::from_config(&config, &system_safe);
+        assert_eq!(sandbox.safe_paths, system_safe);
+    }
+
+    #[test]
+    fn test_from_config_sandbox_safe_paths_override_system() {
+        let config = crate::config::ExecutionSandboxConfig {
+            bash_enabled: false,
+            safe_paths: vec!["/explicit_sandbox".into()],
+            ..Default::default()
+        };
+        let system_safe = vec!["/workspace".to_string()];
+        let sandbox = ExecutionSandbox::from_config(&config, &system_safe);
+        // Sandbox safe_paths take priority over system fallback
+        assert_eq!(sandbox.safe_paths, vec!["/explicit_sandbox"]);
+    }
+
+    // ── command_allowlist fail-closed tests ─────────────────────────────
+
+    #[test]
+    fn test_from_config_empty_command_allowlist_keeps_default_allowlist() {
+        let config = crate::config::ExecutionSandboxConfig {
+            bash_enabled: true,
+            command_allowlist: vec![], // empty — should preserve defaults
+            ..Default::default()
+        };
+        let sandbox = ExecutionSandbox::from_config(&config, &[]);
+        // Default allowlist should be preserved
+        assert!(!sandbox.command_allowlist.is_empty());
+        assert!(sandbox.command_allowlist.contains(&"echo".into()));
+        assert!(sandbox.command_allowlist.contains(&"cat".into()));
+    }
+
+    #[test]
+    fn test_empty_allowlist_blocks_all_commands() {
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.command_allowlist = vec![]; // manually cleared
+        // Even safe commands are blocked when allowlist is empty
+        let result = sandbox.validate("echo", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_explicit_command_allowlist_overrides_default() {
+        let config = crate::config::ExecutionSandboxConfig {
+            bash_enabled: false,
+            command_allowlist: vec!["echo".into(), "date".into()],
+            ..Default::default()
+        };
+        let sandbox = ExecutionSandbox::from_config(&config, &[]);
+        assert_eq!(sandbox.command_allowlist, vec!["echo", "date"]);
+        assert!(!sandbox.command_allowlist.contains(&"cat".into())); // default cat not present
     }
 }

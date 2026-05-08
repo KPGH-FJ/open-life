@@ -186,19 +186,30 @@ Tests:
 Acceptance:
 
 - Streaming remains stable.
-- Run timeline displays event data.
-- Tool panel displays observations.
-- Proposal panel displays evidence links.
-- Plan UI supports confirm/edit/reject.
+- Agent Workspace gives users one operational surface for recent runs, plans,
+  tools, proposals, and next actions.
+- Run timeline displays event data with safe detail inspection.
+- Tool panel displays bounded observations, risk/tool scope, and block reasons.
+- Proposal panel displays evidence/source links without exposing sensitive raw
+  context.
+- Plan UI supports confirm/edit/reject and legal cancel/retry affordances.
+- P9 shell remains default-off: no terminal UI, no generic prompt exposure, no
+  scheduled/proactive/sub-agent shell enablement.
 
 Tests:
 
+- workspace route/surface rendering
+- workspace loading/empty/error states
 - ChatPage streaming regression
 - pending proposal banner regression
 - run timeline rendering
+- event detail rendering with redaction/truncation metadata
 - tool observation rendering
+- blocked tool observation rendering
 - memory evidence rendering
 - plan confirmation interaction
+- plan operation legal-state button gating
+- generic prompt excludes `shell.run` regression
 
 ## P5: Governed Plan Operations and Recovery
 

@@ -16,7 +16,7 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **vNext P8 可以收口，当前进入 P9 Shell/Sandbox 规划与开发**：P8 已将长对话/长 AgentRun 的上下文压缩、proposal/observation 保留与 `compaction.created` trace 接入；P9 聚焦 `ExecutionSandbox` 治理下的默认关闭、非交互式、结构化命令执行能力。P9 不引入交互式终端、`/bin/sh -c` 原始 shell 字符串、定时/主动 shell、子 Agent shell。写入仍走 Proposal-first。
+- **vNext P9 Shell/Sandbox 核心收口，当前进入 P10 Frontend Agent Workspace 规划与开发**：P9 已将 `shell.run` 收敛到 `ExecutionSandbox`、ToolRuntime、AgentSpec、Permission 和 append-only trace 的默认关闭治理链路；P10 聚焦前端 Agent Workspace，让用户能看见 run timeline、tool observations、proposal evidence、plan confirmation 与下一步行动。P10 不引入终端 UI、不启用普通 Chat shell、不重写 ChatPage。
 - **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
 - **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。
@@ -126,9 +126,10 @@ vNext 的重点包括：
 11. [OpenLife vNext P7 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p7_task_specs.md)
 12. [OpenLife vNext P8 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p8_task_specs.md)
 13. [OpenLife vNext P9 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p9_task_specs.md)
-14. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
-15. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
-16. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
+14. [OpenLife vNext P10 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p10_task_specs.md)
+15. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
+16. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
+17. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
 
 ### 现有架构背景
 
@@ -257,12 +258,11 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 
 当前开发重心已转向 vNext Agent Framework Upgrade：
 
-1. 审阅并接受首批 ADR：AgentRunEvent、PromptStack、ToolRuntime、LifeModel risk、MemoryEvidence、Cloud privacy。
-2. 按 [P0/P1 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p0_p1_task_specs.md) 执行第一批小步迁移。
-3. 先做 runtime trace 和 execution path convergence，不急于实现 SubAgent 或 Bash。
-4. 建立 PromptStack/system prompt 架构，避免新增散落 prompt。
-5. 将 Memory 升级为 LifeModel evolution 的证据层，但所有 evolution 只生成 Proposal，不直接改 LifeModel。
-6. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为每个阶段设置门控。
+1. 按 [P10 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p10_task_specs.md) 建立 Frontend Agent Workspace。
+2. 优先让 run timeline、tool observations、proposal evidence、plan confirmation 可见可操作。
+3. 保持 Chat streaming 稳定，不做 ChatPage 大重构。
+4. 保持 P9 shell 治理默认关闭，不加入终端 UI 或普通 Chat shell。
+5. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为每个 P10 子任务设置门控。
 
 ## 常见问题
 

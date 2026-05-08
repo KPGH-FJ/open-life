@@ -270,18 +270,33 @@ Make the UI reflect the framework: runs, plans, tools, proposals, memory evidenc
 
 Tasks:
 
-- Split ChatPage incrementally.
-- Add Plan view.
-- Add Run event timeline.
-- Add Tool/Observation panel.
-- Add Memory evidence display for LifeModel proposals.
-- Add Proposal review improvements.
+- Establish Agent Workspace information architecture.
+- Split ChatPage only through incremental extraction and links, not a rewrite.
+- Upgrade Run event timeline and safe event detail inspection.
+- Add Tool/Observation panel for bounded tool outputs, block reasons, and risk scope.
+- Add MemoryEvidence / proposal evidence display for LifeModel proposals.
+- Add Plan confirmation and legal operations surface.
+- Preserve P9 shell defaults: no terminal UI, no normal Chat shell prompt.
 
 Exit criteria:
 
 - Users can see what the agent understood, planned, used, called, proposed, and changed.
 - Frontend state remains stable under streaming.
 - No backend runtime migration is bundled with large UI rewrites.
+- P9 shell governance remains intact.
+
+Task source:
+
+- `plans/openlife_vnext_p10_task_specs.md`
+
+Suggested execution order:
+
+- P10-0 documentation sync.
+- P10-1 Agent Workspace information architecture.
+- P10-2 Run timeline and event detail.
+- P10-3 Tool observation panel.
+- P10-4 Proposal evidence and review context.
+- P10-5 Plan confirmation and operations surface.
 
 ## Work Ordering Rules
 

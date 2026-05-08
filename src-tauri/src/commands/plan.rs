@@ -209,6 +209,7 @@ pub async fn execute_agent_plan(
         network_policy: Some(&network_policy),
         event_store: event_store.clone(),
         execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     // Resolve stored AgentSpec: plan-bound spec first, then stored default.
@@ -363,6 +364,7 @@ pub async fn retry_agent_plan(
         network_policy: Some(&network_policy),
         event_store: event_store.clone(),
         execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     // Spec resolved, context built — now atomically reset plan for retry.

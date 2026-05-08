@@ -93,6 +93,8 @@ pub struct ActionExecutionContext<'a> {
     pub calendar_ics_paths: &'a [String],
     /// Sandbox policy for shell execution (default-off)
     pub execution_sandbox: &'a crate::agent::execution_sandbox::ExecutionSandbox,
+    /// AgentSpec governing tool execution (required for shell.run gate)
+    pub agent_spec: Option<&'a crate::agent::types::AgentSpec>,
 }
 
 impl<'a> ActionExecutionContext<'a> {
@@ -119,6 +121,7 @@ impl<'a> ActionExecutionContext<'a> {
             network_policy: None,
             calendar_ics_paths: &[],
             execution_sandbox: &DISABLED_SANDBOX,
+            agent_spec: None,
         }
     }
 
@@ -127,6 +130,14 @@ impl<'a> ActionExecutionContext<'a> {
         sandbox: &'a crate::agent::execution_sandbox::ExecutionSandbox,
     ) -> Self {
         self.execution_sandbox = sandbox;
+        self
+    }
+
+    pub fn with_agent_spec(
+        mut self,
+        spec: &'a crate::agent::types::AgentSpec,
+    ) -> Self {
+        self.agent_spec = Some(spec);
         self
     }
 

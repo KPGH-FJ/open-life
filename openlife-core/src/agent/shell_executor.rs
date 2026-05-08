@@ -1,7 +1,6 @@
-use crate::agent::execution_sandbox::{ExecutionSandbox, PathAccessKind};
+use crate::agent::execution_sandbox::{ExecutionSandbox, PathAccessKind, WritePolicy};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -94,7 +93,10 @@ const INTERPRETER_DENYLIST: &[&str] = &[
     "osascript",
 ];
 
-const DANGEROUS_FIND_FLAGS: &[&str] = &["-delete", "-exec", "-execdir", "-ok", "-okdir"];
+const DANGEROUS_FIND_FLAGS: &[&str] = &[
+    "-delete", "-exec", "-execdir", "-ok", "-okdir",
+    "-fprint", "-fprintf", "-fls", "-fprint0", "-printf",
+];
 
 /// Commands whose positional non-flag args are treated as file-path operands
 /// and must be validated against the sandbox.
@@ -157,6 +159,38 @@ fn has_shell_metacharacters(text: &str) -> bool {
         || text.contains('}')
         || text.contains('[')
         || text.contains(']')
+}
+
+/// Drain a pipe into a shared buffer with max-byte truncation.
+/// Runs in a dedicated thread so the child process never blocks on
+/// a full pipe buffer (pipe deadlock prevention for P9).
+/// When the buffer reaches max_bytes, the thread continues to drain
+/// (read and discard) to prevent the child from receiving SIGPIPE,
+/// so the timeout path remains responsible for termination.
+fn drain_pipe(
+    mut reader: impl std::io::Read,
+    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    max_bytes: usize,
+) {
+    let mut chunk = [0u8; 8192];
+    let limit = if max_bytes > 0 { max_bytes } else { usize::MAX };
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                let mut guard = match buf.lock() {
+                    Ok(g) => g,
+                    Err(_) => break,
+                };
+                let space = limit.saturating_sub(guard.len());
+                if space > 0 {
+                    let take = n.min(space);
+                    guard.extend_from_slice(&chunk[..take]);
+                }
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 pub struct ShellExecutor {
@@ -262,6 +296,20 @@ impl ShellExecutor {
             }
         }
 
+        // 4a2. WritePolicy gate — enforced before any operand validation.
+        // Denied: no shell execution at all (all commands blocked).
+        if self.sandbox.write_policy == WritePolicy::Denied {
+            return Err(ShellExecutionError::OperandBlocked(
+                "write_policy is Denied: shell execution is not permitted".into(),
+            ));
+        }
+        // ProposalFirst: shell may execute read-only commands only.
+        // Write-capable commands are filtered out by the allowlist (read-only
+        // primitives only), and redirects are caught by metacharacter filtering.
+        // Dangerous find flags (-fprint/-fprintf/-fls/-delete/-exec etc.) are
+        // caught above. Future iterations may add a command-level allowlist for
+        // ProposalFirst if the allowlist ever includes write-capable commands.
+
         // 4b. Validate path operands for cat/head/tail/wc/ls
         if is_path_operand_command(cmd_basename) {
             for arg in &request.args {
@@ -280,19 +328,17 @@ impl ShellExecutor {
             }
         }
 
-        // 4c. Validate grep file operands (arg[0] is pattern, arg[1..] are files)
+        // 4c. Validate grep file operands (arg[0] is pattern, arg[1..] are files).
+        // Flags (starting with '-') are filtered by is_positional_path_arg below.
+        // We skip arg[0] unconditionally — when it's a flag, it still gets filtered;
+        // when it's the pattern, we correctly skip it.
         if cmd_basename == "grep" {
-            let file_args = if request
+            let file_args: Vec<&String> = request
                 .args
-                .first()
-                .map(|a| a.starts_with('-'))
-                .unwrap_or(false)
-            {
-                request.args.iter().skip(1)
-            } else {
-                request.args.iter().skip(1)
-            };
-            let file_args: Vec<&String> = file_args.filter(|a| is_positional_path_arg(a)).collect();
+                .iter()
+                .skip(1)
+                .filter(|a| is_positional_path_arg(a))
+                .collect();
 
             for arg in &file_args {
                 let full_path = resolve_operand_path(effective_cwd, arg);
@@ -346,7 +392,7 @@ impl ShellExecutor {
             }
         }
 
-        // ── 7. Spawn with timeout ────────────────────────────────────
+        // ── 7. Spawn with timeout and non-blocking pipe reads ────────
         let start = Instant::now();
         let max_bytes = if self.sandbox.max_output_bytes > 0 {
             self.sandbox.max_output_bytes
@@ -359,85 +405,52 @@ impl ShellExecutor {
             .spawn()
             .map_err(|e| ShellExecutionError::SpawnFailed(e.to_string()))?;
 
+        // Take ownership of stdout/stderr so we can spawn reader threads.
+        // This prevents pipe deadlock: the child can keep writing because
+        // a reader thread continuously drains the pipe.
+        let child_stdout = child.stdout.take();
+        let child_stderr = child.stderr.take();
+
+        let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let stdout_thread = child_stdout.map(|out| {
+            let buf = stdout_buf.clone();
+            let max = max_bytes;
+            std::thread::spawn(move || drain_pipe(out, buf, max))
+        });
+        let stderr_thread = child_stderr.map(|err| {
+            let buf = stderr_buf.clone();
+            let max = max_bytes;
+            std::thread::spawn(move || drain_pipe(err, buf, max))
+        });
+
         let poll_interval = Duration::from_millis(50);
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(status)) => {
-                    let elapsed = start.elapsed().as_millis() as u64;
-                    let mut stdout = Vec::new();
-                    let mut stderr = Vec::new();
-                    let mut stdout_truncated = false;
-                    let mut stderr_truncated = false;
-
-                    if let Some(mut out) = child.stdout.take() {
-                        let limit = if max_bytes > 0 { max_bytes } else { usize::MAX };
-                        let mut buf = [0u8; 8192];
-                        loop {
-                            match out.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    let space = limit.saturating_sub(stdout.len());
-                                    let take = n.min(space);
-                                    stdout.extend_from_slice(&buf[..take]);
-                                    if stdout.len() >= limit {
-                                        stdout_truncated = true;
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-                    if let Some(mut err) = child.stderr.take() {
-                        let limit = if max_bytes > 0 { max_bytes } else { usize::MAX };
-                        let mut buf = [0u8; 8192];
-                        loop {
-                            match err.read(&mut buf) {
-                                Ok(0) => break,
-                                Ok(n) => {
-                                    let space = limit.saturating_sub(stderr.len());
-                                    let take = n.min(space);
-                                    stderr.extend_from_slice(&buf[..take]);
-                                    if stderr.len() >= limit {
-                                        stderr_truncated = true;
-                                        break;
-                                    }
-                                }
-                                Err(_) => break,
-                            }
-                        }
-                    }
-
-                    return Ok(ShellCommandOutput {
-                        stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                        exit_code: status.code().unwrap_or(-1),
-                        timed_out: false,
-                        truncated: stdout_truncated || stderr_truncated,
-                        elapsed_ms: elapsed,
-                    });
-                }
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     if start.elapsed() >= timeout {
                         let _ = child.kill();
                         let _ = child.wait();
+                        // Join reader threads after kill
+                        if let Some(t) = stdout_thread {
+                            let _ = t.join();
+                        }
+                        if let Some(t) = stderr_thread {
+                            let _ = t.join();
+                        }
                         let elapsed = start.elapsed().as_millis() as u64;
-
-                        let mut stdout = Vec::new();
-                        let mut stderr = Vec::new();
-                        if let Some(mut out) = child.stdout.take() {
-                            let _ = out.read_to_end(&mut stdout);
-                        }
-                        if let Some(mut err) = child.stderr.take() {
-                            let _ = err.read_to_end(&mut stderr);
-                        }
-
+                        let stdout_vec = stdout_buf.lock().unwrap().clone();
+                        let stderr_vec = stderr_buf.lock().unwrap().clone();
+                        let truncated =
+                            stdout_vec.len() >= max_bytes || stderr_vec.len() >= max_bytes;
                         return Ok(ShellCommandOutput {
-                            stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                            stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                            stdout: String::from_utf8_lossy(&stdout_vec).into_owned(),
+                            stderr: String::from_utf8_lossy(&stderr_vec).into_owned(),
                             exit_code: -1,
                             timed_out: true,
-                            truncated: stdout.len() >= max_bytes || stderr.len() >= max_bytes,
+                            truncated,
                             elapsed_ms: elapsed,
                         });
                     }
@@ -448,7 +461,30 @@ impl ShellExecutor {
                     return Err(ShellExecutionError::IoError(e.to_string()));
                 }
             }
+        };
+
+        // Process exited normally — join reader threads and collect output.
+        if let Some(t) = stdout_thread {
+            let _ = t.join();
         }
+        if let Some(t) = stderr_thread {
+            let _ = t.join();
+        }
+
+        let elapsed = start.elapsed().as_millis() as u64;
+        let stdout_vec = stdout_buf.lock().unwrap().clone();
+        let stderr_vec = stderr_buf.lock().unwrap().clone();
+
+        let truncated = stdout_vec.len() >= max_bytes || stderr_vec.len() >= max_bytes;
+
+        Ok(ShellCommandOutput {
+            stdout: String::from_utf8_lossy(&stdout_vec).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr_vec).into_owned(),
+            exit_code: status.code().unwrap_or(-1),
+            timed_out: false,
+            truncated,
+            elapsed_ms: elapsed,
+        })
     }
 }
 
@@ -1372,5 +1408,242 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("interpreter") || err.contains("blocked"));
+    }
+
+    // ── Output truncation & pipe safety tests ────────────────────────────
+
+    #[test]
+    fn test_large_output_does_not_block() {
+        let tmp = tmp_dir();
+        // Create a large temp file (256KB) so cat produces well over the pipe buffer.
+        let large_file = format!("{}/p9_large_output.txt", tmp);
+        let content = "ABCDEFGH".repeat(32 * 1024); // 256KB
+        std::fs::write(&large_file, &content).unwrap();
+
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.command_allowlist = vec!["cat".into()];
+        sandbox.timeout_ms = 10_000;
+        sandbox.max_output_bytes = 64 * 1024; // 64KB limit, file is 256KB
+
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "cat".into(),
+            args: vec![large_file.clone()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let start = Instant::now();
+        let result = executor.execute(&req);
+        let elapsed = start.elapsed().as_millis();
+        let _ = std::fs::remove_file(&large_file);
+        assert!(
+            elapsed < 5000,
+            "large output should not block: took {} ms (possible pipe deadlock)",
+            elapsed
+        );
+        assert!(result.is_ok(), "expected ok, got: {:?}", result.err());
+        let output = result.unwrap();
+        // 256KB input, 64KB limit → truncated should be true
+        assert!(output.truncated);
+        assert!(!output.timed_out);
+    }
+
+    #[test]
+    fn test_output_truncated_at_max_bytes() {
+        let tmp = tmp_dir();
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.command_allowlist = vec!["yes".into()];
+        sandbox.timeout_ms = 3_000;
+        sandbox.max_output_bytes = 200; // tiny limit
+
+        let executor = ShellExecutor::new(sandbox);
+        // "yes" outputs an infinite stream of "y\n" — will be killed by timeout
+        let req = ShellCommandRequest {
+            command: "yes".into(),
+            args: vec![],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_ok(), "expected ok, got: {:?}", result.err());
+        let output = result.unwrap();
+        assert!(output.timed_out);
+        assert!(output.truncated);
+        assert!(output.stdout.len() <= 200);
+        assert_eq!(output.exit_code, -1);
+    }
+
+    #[test]
+    fn test_truncated_metadata_correct() {
+        let tmp = tmp_dir();
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.command_allowlist = vec!["echo".into()];
+        sandbox.timeout_ms = 30_000;
+        sandbox.max_output_bytes = 5;
+
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "echo".into(),
+            args: vec!["hello_world_truncated".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // "hello_world_truncated\n" = 22 bytes, limit is 5
+        assert!(output.truncated);
+        assert!(output.stdout.len() <= 5);
+        assert!(!output.timed_out);
+        assert!(output.elapsed_ms > 0);
+        assert_eq!(output.exit_code, 0);
+    }
+
+    // ── find write-flag rejection tests ─────────────────────────────────
+
+    #[test]
+    fn test_find_fprint_rejected() {
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "find".into(),
+            args: vec![tmp_dir(), "-fprint".into(), "/tmp/p9_output.txt".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("fprint") || err.contains("dangerous"));
+    }
+
+    #[test]
+    fn test_find_fprintf_rejected() {
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "find".into(),
+            args: vec![tmp_dir(), "-fprintf".into(), "/tmp/p9_fmt.txt".into(), "%p\n".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("fprintf") || err.contains("dangerous"));
+    }
+
+    #[test]
+    fn test_find_fls_rejected() {
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "find".into(),
+            args: vec![tmp_dir(), "-fls".into(), "/tmp/p9_ls.txt".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("fls") || err.contains("dangerous"));
+    }
+
+    // ── WritePolicy enforcement tests ────────────────────────────────────
+
+    #[test]
+    fn test_write_policy_denied_blocks_all_shell() {
+        let tmp = tmp_dir();
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.write_policy = WritePolicy::Denied;
+        sandbox.command_allowlist = vec!["echo".into(), "date".into()];
+
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "echo".into(),
+            args: vec!["hello".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("Denied") || err.contains("not permitted"));
+    }
+
+    #[test]
+    fn test_write_policy_proposal_first_allows_read_commands() {
+        let tmp = tmp_dir();
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.write_policy = WritePolicy::ProposalFirst;
+        sandbox.command_allowlist = vec!["echo".into(), "date".into()];
+
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "echo".into(),
+            args: vec!["read-only-test".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: Some("read-only shell execution test".into()),
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_ok(), "expected ok, got: {:?}", result.err());
+        assert!(result.unwrap().stdout.contains("read-only-test"));
+    }
+
+    #[test]
+    fn test_deny_write_priority_over_safe_paths() {
+        let tmp = tmp_dir();
+        let write_target = format!("{}/p9_write_target.txt", tmp);
+        std::fs::write(&write_target, "original").unwrap();
+
+        let mut sandbox = ExecutionSandbox::default();
+        sandbox.bash_enabled = true;
+        sandbox.cwd = tmp.clone();
+        sandbox.safe_paths = vec![tmp.clone()];
+        sandbox.deny_write_patterns = vec![format!("{}/**", tmp)];
+        sandbox.command_allowlist = vec!["echo".into()];
+
+        let executor = ShellExecutor::new(sandbox);
+        // Even though /tmp is in safe_paths, deny_write_patterns covers all of /tmp.
+        // cwd validation should reject because cwd matches deny-write.
+        let req = ShellCommandRequest {
+            command: "echo".into(),
+            args: vec!["blocked".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_file(&write_target);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("deny") || err.contains("cwd") || err.contains("Denied"),
+            "expected block, got: {}",
+            err
+        );
     }
 }

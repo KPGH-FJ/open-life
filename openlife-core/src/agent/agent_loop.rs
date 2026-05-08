@@ -1783,6 +1783,7 @@ mod tests {
                 calendar_ics_paths: &[],
                 event_store: None,
                 execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+                agent_spec: None,
             }
         }
     }

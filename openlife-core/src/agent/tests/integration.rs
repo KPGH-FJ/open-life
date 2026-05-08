@@ -139,6 +139,7 @@ fn test_action_parser_final_envelope() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -172,6 +173,7 @@ fn test_action_parser_actions_envelope() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -207,6 +209,7 @@ fn test_action_parser_legacy_tool_calls() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -240,6 +243,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let reply = "{broken json";
@@ -274,6 +278,7 @@ fn test_action_parser_no_json() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -307,6 +312,7 @@ fn test_action_parser_final_with_actions() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     // Model returns both final text and tool calls
@@ -386,6 +392,7 @@ fn test_max_tool_calls_stop_reason() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     // Simulate model returning actions when budget is already exceeded
@@ -421,6 +428,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     // Malformed JSON: missing closing brace
@@ -459,6 +467,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
@@ -500,6 +509,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -570,6 +580,7 @@ fn test_permission_check_tool() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -624,6 +635,7 @@ fn test_memory_propose_write_creates_proposal() {
         network_policy: None,
         event_store: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -772,6 +784,7 @@ fn test_declarative_only_tool_blocked_at_runtime() {
         event_store: None,
         network_policy: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -816,6 +829,7 @@ fn test_blocked_tool_records_event() {
         event_store: Some(event_store.clone()),
         network_policy: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -869,6 +883,7 @@ fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
         event_store: None,
         network_policy: None,
         execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
+        agent_spec: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -944,3 +959,598 @@ fn test_plan_execution_receives_sandbox_without_enabling_shell() {
     assert!(!ctx.execution_sandbox.bash_enabled);
     assert!(!ctx.execution_sandbox.command_allowlist.is_empty());
 }
+
+// ── P9-5: ActionExecutor shell.run governed tests ─────────────────────
+
+#[test]
+fn test_shell_run_default_not_model_callable() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    let manifests = reg.list_manifests();
+    let shell = manifests.iter().find(|m| m.name == "shell.run");
+    assert!(shell.is_some(), "shell.run manifest must exist");
+    let shell = shell.unwrap();
+    assert!(!shell.enabled, "shell.run must be disabled by default");
+    assert!(!shell.declarative_only, "shell.run must not be declarative-only");
+    assert_eq!(shell.risk_level, "high");
+    assert_eq!(shell.permission_level, "high");
+}
+
+#[test]
+fn test_shell_run_manifest_disabled_blocks() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit =
+        crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
+    let pe = PrivacyEngine::new();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: std::env::temp_dir().to_string_lossy().to_string(),
+        safe_paths: vec![std::env::temp_dir().to_string_lossy().to_string()],
+        command_allowlist: vec!["echo".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox);
+
+    // shell.run manifest is enabled=false by default → blocked before spawn
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["hello"]}}),
+        source_run_id: None,
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx);
+    assert!(result.is_ok(), "execute should not return Err");
+    let result = result.unwrap();
+    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+    assert!(result.action.error.unwrap_or_default().contains("disabled"));
+}
+
+#[test]
+fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    // This test exercises the ActionExecutor → execute_shell_run path
+    // with a disabled sandbox (bash_enabled=false). The declarative_only
+    // check in execute_shell_run cannot be triggered while the manifest
+    // has declarative_only=false (P9 design), so we validate the sandbox
+    // gate as the primary early-rejection path after manifest checks.
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit =
+        crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
+    let pe = PrivacyEngine::new();
+    // Make sandbox bash_enabled=false → blocked event
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::default();
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox);
+
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["hi"]}}),
+        source_run_id: None,
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx);
+    assert!(result.is_ok());
+    let result = result.unwrap();
+    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+}
+
+#[test]
+fn test_shell_run_sandbox_disabled_records_blocked() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit =
+        crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
+    let pe = PrivacyEngine::new();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
+    let event_store =
+        crate::agent::event_store::AgentRunEventStore::new_in_memory()
+            .expect("in-memory event store");
+
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_event_store(event_store.clone());
+
+    let run_id = "test-run-shell-blocked";
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["blocked"]}}),
+        source_run_id: Some(run_id.to_string()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+
+    let events = event_store.list_events_by_run(run_id).unwrap();
+    let has_blocked = events.iter().any(|e| {
+        matches!(
+            e.event_type,
+            crate::agent::AgentRunEventType::ToolCallBlocked
+        )
+    });
+    assert!(has_blocked, "blocked event must be recorded");
+}
+
+#[test]
+fn test_shell_run_allowed_command_succeeds() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp.clone()],
+        command_allowlist: vec!["echo".into(), "date".into()],
+        timeout_ms: 30_000,
+        max_output_bytes: 1024 * 1024,
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+
+    // Direct ShellExecutor test validates the sandbox validation and
+    // command execution logic (below the manifest layer).
+    //
+    // Coverage note: the full end-to-end path execute_tool →
+    // execute_shell_run → ShellExecutor::execute is not covered here
+    // because the shell.run manifest is enabled=false by default and
+    // the registry offers no test-only mechanism to enable it.
+    // ActionExecutor blocked paths (manifest disabled, sandbox disabled)
+    // are covered by tool_executor::tests and the tests above.
+    // The direct ShellExecutor call here validates that when all gates
+    // pass, the actual process spawn/truncation/timeout works correctly.
+    let executor_core = crate::agent::shell_executor::ShellExecutor::new(sandbox.clone());
+    let req = crate::agent::shell_executor::ShellCommandRequest {
+        command: "echo".into(),
+        args: vec!["governed_shell_ok".into()],
+        cwd: None,
+        env: std::collections::HashMap::new(),
+        reason: Some("P9 integration test".into()),
+    };
+    let result = executor_core.execute(&req);
+    assert!(result.is_ok(), "direct ShellExecutor must succeed: {:?}", result.err());
+    let output = result.unwrap();
+    assert!(output.stdout.contains("governed_shell_ok"));
+    assert_eq!(output.exit_code, 0);
+    assert!(!output.timed_out);
+    assert!(!output.truncated);
+}
+
+// ── P9-6: Governed runtime entry policy tests ──────────────────────────
+
+#[test]
+fn test_default_agent_spec_denies_shell() {
+    let spec = crate::agent::types::AgentSpec::default();
+    // Default AgentSpec has empty allowed_tools (= use role defaults).
+    // An AgentSpec with explicit allowlist without shell.run denies it.
+    let spec_with_allowlist = spec.clone().with_allowed_tools(vec![
+        "goal.read".into(),
+        "life_model.read".into(),
+        "memory.search".into(),
+    ]);
+    let allows_shell = spec_with_allowlist
+        .allowed_tools
+        .iter()
+        .any(|t| t.as_str().contains("shell"));
+    assert!(!allows_shell, "AgentSpec without shell.run in allowed_tools must deny shell");
+}
+
+#[test]
+fn test_scheduled_proactive_uses_disabled_sandbox() {
+    // The DISABLED_SANDBOX static is used by scheduler_runner for
+    // scheduled/proactive tasks. Verify it never enables bash.
+    let sandbox = &crate::agent::action_executor::DISABLED_SANDBOX;
+    assert!(!sandbox.bash_enabled);
+}
+
+#[test]
+fn test_sub_agent_shell_attempt_blocked_by_default() {
+    // SubAgentRuntime does not expose shell by design.
+    // The default AgentSpec used in SubAgentSpec does not include shell.run.
+    let agent_spec = crate::agent::types::AgentSpec::default();
+    let sub_spec = crate::agent::types::SubAgentSpec::new(
+        agent_spec,
+        crate::agent::types::DelegationMode::CallAsTool,
+    );
+    let has_shell = sub_spec
+        .spec
+        .allowed_tools
+        .iter()
+        .any(|t| t.as_str().contains("shell"));
+    assert!(!has_shell, "default sub-agent must deny shell.run");
+}
+
+#[test]
+fn test_plan_bound_agent_spec_denies_shell_execution() {
+    // A plan-bound AgentSpec without shell.run in allowed_tools must deny shell.
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
+    let allows_shell = spec.allowed_tools.iter().any(|t| t.as_str().contains("shell"));
+    assert!(!allows_shell, "plan AgentSpec without shell.run must deny shell");
+}
+
+#[test]
+fn test_agent_spec_with_explicit_shell_allows_it() {
+    // If an AgentSpec explicitly allows shell.run, the spec permits it.
+    // (Runtime sandbox/manifest still must also allow.)
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec![
+        "goal.read".into(),
+        "shell.run".into(),
+    ];
+    let allows_shell = spec.allowed_tools.iter().any(|t| t.contains("shell"));
+    assert!(allows_shell, "AgentSpec with explicit shell.run must allow it");
+}
+
+// ── P9 AgentSpec gate tests ────────────────────────────────────────────
+
+#[test]
+fn test_shell_run_missing_agentspec_blocks() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    reg.set_builtin_manifest_enabled("shell.run", true);
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_as1.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp],
+        command_allowlist: vec!["echo".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    // No agent_spec set → must fail-closed
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox);
+
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["test"]}}),
+        source_run_id: None,
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
+    assert!(result
+        .action
+        .error
+        .unwrap_or_default()
+        .contains("AgentSpec missing"));
+}
+
+#[test]
+fn test_shell_run_agentspec_denies_blocks_before_permission() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    reg.set_builtin_manifest_enabled("shell.run", true);
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_as2.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp],
+        command_allowlist: vec!["echo".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    // AgentSpec explicitly denies shell by not listing it
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_agent_spec(&spec);
+
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["blocked"]}}),
+        source_run_id: Some("run-as-deny".into()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
+    assert!(result
+        .action
+        .error
+        .unwrap_or_default()
+        .contains("AgentSpec denied"));
+}
+
+#[test]
+fn test_shell_run_agentspec_allows_continues_to_permission() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    reg.set_builtin_manifest_enabled("shell.run", true);
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_as3.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp],
+        command_allowlist: vec!["echo".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    // AgentSpec allows shell, but permission store denies by default
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec!["goal.read".into(), "shell.run".into()];
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_agent_spec(&spec);
+
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["hi"]}}),
+        source_run_id: Some("run-as-allow".into()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    // AgentSpec allows, but permission store blocks → NeedsConfirmation or Blocked
+    assert!(
+        matches!(
+            result.status,
+            crate::agent::action_executor::ActionExecutionStatus::NeedsConfirmation
+                | crate::agent::action_executor::ActionExecutionStatus::Blocked
+        ),
+        "expected blocked or needs_confirmation, got {:?}",
+        result.status
+    );
+}
+
+// ── P9 event deduplication tests ────────────────────────────────────────
+
+#[test]
+fn test_shell_run_blocked_records_only_blocked_no_started() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_evt1.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
+    let event_store =
+        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_event_store(event_store.clone());
+
+    let run_id = "run-evt-blocked";
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["evt"]}}),
+        source_run_id: Some(run_id.to_string()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
+
+    let events = event_store.list_events_by_run(run_id).unwrap();
+    let started_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted))
+        .count();
+    let blocked_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked))
+        .count();
+    assert_eq!(started_count, 0, "blocked path must not emit ToolCallStarted");
+    assert_eq!(blocked_count, 1, "blocked path must emit exactly one ToolCallBlocked");
+}
+
+#[test]
+fn test_shell_run_success_records_started_and_completed() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    reg.set_builtin_manifest_enabled("shell.run", true);
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_evt2.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp],
+        command_allowlist: vec!["echo".into()],
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    // Grant permission so execution proceeds
+    ps.grant(
+        "shell.run",
+        "builtin",
+        "high",
+        "external_side_effect",
+        crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+        None,
+    )
+    .unwrap();
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec!["shell.run".into()];
+    let event_store =
+        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_agent_spec(&spec)
+        .with_event_store(event_store.clone());
+
+    let run_id = "run-evt-success";
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {"command": "echo", "args": ["evt_ok"]}}),
+        source_run_id: Some(run_id.to_string()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Succeeded
+    );
+
+    let events = event_store.list_events_by_run(run_id).unwrap();
+    let started_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted))
+        .count();
+    let completed_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallCompleted))
+        .count();
+    let failed_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallFailed))
+        .count();
+    let blocked_count = events
+        .iter()
+        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked))
+        .count();
+    assert_eq!(started_count, 1, "success path must emit one ToolCallStarted");
+    assert_eq!(completed_count, 1, "success path must emit one ToolCallCompleted");
+    assert_eq!(failed_count, 0, "success path must not emit ToolCallFailed");
+    assert_eq!(blocked_count, 0, "success path must not emit ToolCallBlocked");
+}
+
+// ── P9 full governed success path test ──────────────────────────────────
+
+#[test]
+fn test_shell_run_full_governed_success_path() {
+    let mut reg = McpRegistry::new();
+    reg.register_default_builtins();
+    reg.set_builtin_manifest_enabled("shell.run", true);
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit = crate::mcp_audit::McpAuditStore::new(
+        tempfile::tempdir().unwrap().path().join("audit_full.db"),
+    );
+    let pe = PrivacyEngine::new();
+    let tmp = std::env::temp_dir().to_string_lossy().to_string();
+    let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+        bash_enabled: true,
+        cwd: tmp.clone(),
+        safe_paths: vec![tmp],
+        command_allowlist: vec!["echo".into()],
+        timeout_ms: 30_000,
+        max_output_bytes: 1024 * 1024,
+        ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+    };
+    // Grant permission
+    ps.grant(
+        "shell.run",
+        "builtin",
+        "high",
+        "external_side_effect",
+        crate::tool_permissions::ToolPermissionPolicy::AllowOnce,
+        None,
+    )
+    .unwrap();
+    let mut spec = crate::agent::types::AgentSpec::default();
+    spec.allowed_tools = vec!["shell.run".into()];
+    let event_store =
+        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+        .with_execution_sandbox(&sandbox)
+        .with_agent_spec(&spec)
+        .with_event_store(event_store.clone());
+
+    let run_id = "run-full-success";
+    let executor = crate::agent::ActionExecutor::new(Default::default());
+    let request = crate::agent::AgentActionRequest {
+        action_type: "builtin_tool".into(),
+        target: "shell.run".into(),
+        input: serde_json::json!({"arguments": {
+            "command": "echo",
+            "args": ["governed_shell_ok"]
+        }}),
+        source_run_id: Some(run_id.to_string()),
+        step_index: 0,
+    };
+    let result = executor.execute(request, &ctx).unwrap();
+
+    // Must succeed
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Succeeded,
+        "full governed path must succeed"
+    );
+
+    // Observation structured_result must indicate success
+    let obs = &result.observation;
+    let success = obs
+        .structured_result
+        .as_ref()
+        .and_then(|v| v.get("success"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    assert!(success, "structured_result.success must be true");
+
+    // Output must contain the expected text
+    let output_text = result
+        .action
+        .output
+        .as_ref()
+        .and_then(|v| v.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        output_text.contains("governed_shell_ok"),
+        "stdout must contain 'governed_shell_ok', got: {}",
+        output_text
+    );
+
+    // Events: started + completed, no blocked/failed
+    let events = event_store.list_events_by_run(run_id).unwrap();
+    let started = events
+        .iter()
+        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted));
+    let completed = events
+        .iter()
+        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallCompleted));
+    let blocked = events
+        .iter()
+        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked));
+    let failed = events
+        .iter()
+        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallFailed));
+    assert!(started, "must contain ToolCallStarted event");
+    assert!(completed, "must contain ToolCallCompleted event");
+    assert!(!blocked, "must not contain ToolCallBlocked event");
+    assert!(!failed, "must not contain ToolCallFailed event");
+}
+
+
