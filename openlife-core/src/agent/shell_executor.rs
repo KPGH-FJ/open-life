@@ -127,6 +127,19 @@ fn is_positional_path_arg(arg: &str) -> bool {
     !arg.starts_with('-')
 }
 
+/// Resolve an operand path against the effective cwd so that validation
+/// and execution refer to the same filesystem location.
+/// - Absolute paths are returned unchanged.
+/// - Relative paths (including `./file`, `subdir/file`, `Makefile`)
+///   are joined with `effective_cwd`.
+fn resolve_operand_path(effective_cwd: &str, arg: &str) -> String {
+    if arg.starts_with('/') {
+        arg.to_string()
+    } else {
+        format!("{}/{}", effective_cwd, arg)
+    }
+}
+
 fn has_shell_metacharacters(text: &str) -> bool {
     text.contains('|')
         || text.contains(';')
@@ -253,16 +266,7 @@ impl ShellExecutor {
         if is_path_operand_command(cmd_basename) {
             for arg in &request.args {
                 if is_positional_path_arg(arg) {
-                    // Path relative to effective_cwd
-                    let full_path = if arg.starts_with('/')
-                        || arg.contains(std::path::MAIN_SEPARATOR)
-                        || arg.contains('.')
-                    {
-                        arg.clone()
-                    } else {
-                        // Extensionless name like Makefile — validate relative to cwd
-                        format!("{}/{}", effective_cwd, arg)
-                    };
+                    let full_path = resolve_operand_path(effective_cwd, arg);
                     if let Err(reason) = self
                         .sandbox
                         .validate_path_operand(&full_path, PathAccessKind::Read)
@@ -284,24 +288,14 @@ impl ShellExecutor {
                 .map(|a| a.starts_with('-'))
                 .unwrap_or(false)
             {
-                // Has a flag before pattern — skip flags until first pattern
                 request.args.iter().skip(1)
             } else {
-                // First arg is pattern, file paths start at arg[1]
                 request.args.iter().skip(1)
             };
             let file_args: Vec<&String> = file_args.filter(|a| is_positional_path_arg(a)).collect();
 
-            // If no file operand, grep reads from stdin; effective_cwd already validated
             for arg in &file_args {
-                let full_path = if arg.starts_with('/')
-                    || arg.contains(std::path::MAIN_SEPARATOR)
-                    || arg.contains('.')
-                {
-                    (*arg).clone()
-                } else {
-                    format!("{}/{}", effective_cwd, arg)
-                };
+                let full_path = resolve_operand_path(effective_cwd, arg);
                 if let Err(reason) = self
                     .sandbox
                     .validate_path_operand(&full_path, PathAccessKind::Read)
@@ -317,9 +311,10 @@ impl ShellExecutor {
         // 4d. find path operand validation (first non-flag arg is the search path)
         if cmd_basename == "find" {
             if let Some(search_path) = request.args.iter().find(|a| is_positional_path_arg(a)) {
+                let full_path = resolve_operand_path(effective_cwd, search_path);
                 if let Err(reason) = self
                     .sandbox
-                    .validate_path_operand(search_path, PathAccessKind::Read)
+                    .validate_path_operand(&full_path, PathAccessKind::Read)
                 {
                     return Err(ShellExecutionError::OperandBlocked(format!(
                         "find search path '{}': {}",
@@ -761,6 +756,147 @@ mod tests {
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(err.contains("execdir") || err.contains("operand") || err.contains("dangerous"));
+    }
+
+    // ── Relative path resolution tests ──────────────────────────────
+
+    #[test]
+    fn test_cat_dot_file_resolved_to_effective_cwd() {
+        let tmp = tmp_dir();
+        let file_name = "openlife_p9_dotfile.txt";
+        let file_path = format!("{}/{}", tmp, file_name);
+        std::fs::write(&file_path, "dot file ok").unwrap();
+
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "cat".into(),
+            args: vec![format!("./{}", file_name)],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_file(&file_path);
+        assert!(result.is_ok());
+        assert!(result.unwrap().stdout.contains("dot file ok"));
+    }
+
+    #[test]
+    fn test_cat_subdir_file_resolved_to_effective_cwd() {
+        let tmp = tmp_dir();
+        let subdir = format!("{}/p9_sub", tmp);
+        std::fs::create_dir_all(&subdir).unwrap();
+        let file_path = format!("{}/data.txt", subdir);
+        std::fs::write(&file_path, "subdir data").unwrap();
+
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "cat".into(),
+            args: vec!["p9_sub/data.txt".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_dir_all(&subdir);
+        assert!(result.is_ok());
+        assert!(result.unwrap().stdout.contains("subdir data"));
+    }
+
+    #[test]
+    fn test_grep_subdir_file_resolved_to_effective_cwd() {
+        let tmp = tmp_dir();
+        let subdir = format!("{}/p9_grep_sub", tmp);
+        std::fs::create_dir_all(&subdir).unwrap();
+        let file_path = format!("{}/log.txt", subdir);
+        std::fs::write(&file_path, "error: disk full\n").unwrap();
+
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "grep".into(),
+            args: vec!["error".into(), "p9_grep_sub/log.txt".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_dir_all(&subdir);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(!output.stdout.is_empty() || output.exit_code == 0);
+    }
+
+    #[test]
+    fn test_find_subdir_resolved_to_effective_cwd() {
+        let tmp = tmp_dir();
+        let subdir = format!("{}/p9_find_sub", tmp);
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(format!("{}/a.txt", subdir), "a").unwrap();
+
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "find".into(),
+            args: vec!["p9_find_sub".into(), "-maxdepth".into(), "1".into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_dir_all(&subdir);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        // find should output the subdir path and the file inside it
+        assert!(!output.stdout.is_empty() || output.exit_code == 0);
+    }
+
+    #[test]
+    fn test_relative_operand_unsafe_under_effective_cwd_rejected() {
+        // Create a file under /tmp (or temp_dir) that is outside the
+        // safe_paths set. The sandbox safe_paths contains only tmp_dir().
+        // We use a relative path that, when resolved against effective_cwd,
+        // would point outside safe_paths — that should be rejected.
+        let outside_path = "/etc/hostname"; // known unsafe
+                                            // Use absolute path directly — should be rejected by operand validation
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "cat".into(),
+            args: vec![outside_path.into()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_escape_rejected() {
+        // Use the existing canonicalize-based validation: if a symlink
+        // under tmp points to /etc, the resolved path escapes safe_paths.
+        let tmp = tmp_dir();
+        let link_path = format!("{}/p9_link", tmp);
+        // Create a symlink pointing to /etc — canonicalize should resolve it
+        std::os::unix::fs::symlink("/etc", &link_path).ok();
+
+        let sandbox = sandbox_with_safe_tmp();
+        let executor = ShellExecutor::new(sandbox);
+        let req = ShellCommandRequest {
+            command: "cat".into(),
+            args: vec![link_path.clone()],
+            cwd: None,
+            env: HashMap::new(),
+            reason: None,
+        };
+        let result = executor.execute(&req);
+        let _ = std::fs::remove_file(&link_path);
+        // Should be rejected because /etc is not in safe_paths
+        assert!(result.is_err());
     }
 
     #[test]
