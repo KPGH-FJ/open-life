@@ -1,4 +1,4 @@
-use crate::agent::ModelRouteTrace;
+use crate::agent::{ModelRouteDecision, ModelRouteTrace};
 use crate::life_model::LifeModel;
 use crate::llm::{
     chat_with_openrouter, chat_with_openrouter_raw, chat_with_openrouter_raw_stream,
@@ -42,6 +42,22 @@ impl Default for InferenceScheduler {
 }
 
 impl InferenceScheduler {
+    async fn route_chat_with_model_router(
+        &self,
+        tools_prompt: Option<&str>,
+    ) -> Option<Result<ModelRouteDecision>> {
+        let router = self.model_router.as_ref()?;
+        let mut router = router.clone();
+
+        if router.is_availability_stale() {
+            if let Err(err) = router.check_availability().await {
+                eprintln!("[ModelRouter] Provider availability check failed: {}", err);
+            }
+        }
+
+        Some(router.route_chat(tools_prompt, self.prefer_local))
+    }
+
     fn has_remote_key(&self) -> bool {
         !self.effective_api_key().trim().is_empty()
     }
@@ -112,15 +128,27 @@ impl InferenceScheduler {
         life_model: &LifeModel,
         tools_prompt: Option<&str>,
     ) -> Result<String> {
-        // Use ModelRouter if available (experimental)
-        if let Some(ref router) = self.model_router {
-            let decision = router.route_chat(tools_prompt, self.prefer_local)?;
+        // Use ModelRouter if available. If it cannot produce a route, fall back to the
+        // legacy local/cloud decision so an empty router cache does not break chat.
+        if let Some(route_result) = self.route_chat_with_model_router(tools_prompt).await {
+            let decision = match route_result {
+                Ok(decision) => decision,
+                Err(err) => {
+                    eprintln!(
+                        "[ModelRouter] Route failed: {}; falling back to legacy",
+                        err
+                    );
+                    return self
+                        .generate_legacy(messages, life_model, tools_prompt)
+                        .await;
+                }
+            };
             eprintln!(
                 "[ModelRouter] Route decision: provider={}, model={}, reason={}",
                 decision.provider, decision.model, decision.reason
             );
 
-            if decision.provider == "ollama" {
+            return if decision.provider == "ollama" {
                 let resolved_local_model = resolve_ollama_model(&self.local_model).await;
                 chat_with_ollama(
                     resolved_local_model.as_deref().unwrap_or(&self.local_model),
@@ -139,32 +167,41 @@ impl InferenceScheduler {
                     &self.chat_model,
                 )
                 .await
-            }
-        } else {
-            // Legacy routing logic
-            let resolved_local_model = resolve_ollama_model(&self.local_model).await;
-            let ollama_available = resolved_local_model.is_some();
-            let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
+            };
+        }
 
-            if use_local {
-                chat_with_ollama(
-                    resolved_local_model.as_deref().unwrap_or(&self.local_model),
-                    messages,
-                    life_model,
-                )
-                .await
-            } else {
-                chat_with_openrouter(
-                    messages,
-                    life_model,
-                    tools_prompt,
-                    &self.provider,
-                    &self.openai_base,
-                    &self.openai_key,
-                    &self.chat_model,
-                )
-                .await
-            }
+        self.generate_legacy(messages, life_model, tools_prompt)
+            .await
+    }
+
+    async fn generate_legacy(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+    ) -> Result<String> {
+        let resolved_local_model = resolve_ollama_model(&self.local_model).await;
+        let ollama_available = resolved_local_model.is_some();
+        let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
+
+        if use_local {
+            chat_with_ollama(
+                resolved_local_model.as_deref().unwrap_or(&self.local_model),
+                messages,
+                life_model,
+            )
+            .await
+        } else {
+            chat_with_openrouter(
+                messages,
+                life_model,
+                tools_prompt,
+                &self.provider,
+                &self.openai_base,
+                &self.openai_key,
+                &self.chat_model,
+            )
+            .await
         }
     }
 
@@ -208,15 +245,27 @@ impl InferenceScheduler {
         life_model: &LifeModel,
         tools_prompt: Option<&str>,
     ) -> Result<StreamResult> {
-        // Use ModelRouter if available (experimental)
-        if let Some(ref router) = self.model_router {
-            let decision = router.route_chat(tools_prompt, self.prefer_local)?;
+        // Use ModelRouter if available. If it cannot produce a route, fall back to the
+        // legacy local/cloud decision so an empty router cache does not break chat.
+        if let Some(route_result) = self.route_chat_with_model_router(tools_prompt).await {
+            let decision = match route_result {
+                Ok(decision) => decision,
+                Err(err) => {
+                    eprintln!(
+                        "[ModelRouter] Stream route failed: {}; falling back to legacy",
+                        err
+                    );
+                    return self
+                        .generate_stream_legacy(messages, life_model, tools_prompt)
+                        .await;
+                }
+            };
             eprintln!(
                 "[ModelRouter] Stream route decision: provider={}, model={}, reason={}",
                 decision.provider, decision.model, decision.reason
             );
 
-            if decision.provider == "ollama" {
+            return if decision.provider == "ollama" {
                 let resolved_local_model = resolve_ollama_model(&self.local_model).await;
                 let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
                 chat_with_ollama_raw_stream(
@@ -238,35 +287,44 @@ impl InferenceScheduler {
                     &self.chat_model,
                 )
                 .await
-            }
-        } else {
-            // Legacy routing logic
-            let resolved_local_model = resolve_ollama_model(&self.local_model).await;
-            let ollama_available = resolved_local_model.is_some();
-            let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
+            };
+        }
 
-            if use_local {
-                let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
-                chat_with_ollama_raw_stream(
-                    resolved_local_model.as_deref().unwrap_or(&self.local_model),
-                    messages,
-                    Some(&system_prompt),
-                )
-                .await
-            } else if !self.has_remote_key() {
-                Ok(self.missing_backend_stream_message())
-            } else {
-                chat_with_openrouter_stream(
-                    messages,
-                    life_model,
-                    tools_prompt,
-                    &self.provider,
-                    &self.openai_base,
-                    &self.openai_key,
-                    &self.chat_model,
-                )
-                .await
-            }
+        self.generate_stream_legacy(messages, life_model, tools_prompt)
+            .await
+    }
+
+    async fn generate_stream_legacy(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+    ) -> Result<StreamResult> {
+        let resolved_local_model = resolve_ollama_model(&self.local_model).await;
+        let ollama_available = resolved_local_model.is_some();
+        let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
+
+        if use_local {
+            let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+            chat_with_ollama_raw_stream(
+                resolved_local_model.as_deref().unwrap_or(&self.local_model),
+                messages,
+                Some(&system_prompt),
+            )
+            .await
+        } else if !self.has_remote_key() {
+            Ok(self.missing_backend_stream_message())
+        } else {
+            chat_with_openrouter_stream(
+                messages,
+                life_model,
+                tools_prompt,
+                &self.provider,
+                &self.openai_base,
+                &self.openai_key,
+                &self.chat_model,
+            )
+            .await
         }
     }
 
