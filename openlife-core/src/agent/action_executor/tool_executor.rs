@@ -731,9 +731,7 @@ impl super::ActionExecutor {
             None => {
                 let reason = "shell.run tool is not registered";
                 record_blocked(reason, serde_json::json!({"reason": reason}));
-                return Ok(self.build_blocked_result(
-                    tool_name, args, request, reason, false, None,
-                ));
+                return Ok(self.build_blocked_result(tool_name, args, request, reason, false, None));
             }
         };
 
@@ -741,7 +739,12 @@ impl super::ActionExecutor {
             let reason = "shell.run is disabled in manifest";
             record_blocked(reason, serde_json::json!({"reason": reason}));
             return Ok(self.build_blocked_result(
-                tool_name, args, request, reason, false, Some(manifest),
+                tool_name,
+                args,
+                request,
+                reason,
+                false,
+                Some(manifest),
             ));
         }
 
@@ -749,7 +752,12 @@ impl super::ActionExecutor {
             let reason = "shell.run is declarative-only (no executor available)";
             record_blocked(reason, serde_json::json!({"reason": reason}));
             return Ok(self.build_blocked_result(
-                tool_name, args, request, reason, false, Some(manifest),
+                tool_name,
+                args,
+                request,
+                reason,
+                false,
+                Some(manifest),
             ));
         }
 
@@ -757,12 +765,20 @@ impl super::ActionExecutor {
         let sandbox = ctx.execution_sandbox;
         if !sandbox.bash_enabled {
             let reason = "shell execution is disabled (sandbox.bash_enabled = false)";
-            record_blocked(reason, serde_json::json!({
-                "reason": reason,
-                "bash_enabled": false,
-            }));
+            record_blocked(
+                reason,
+                serde_json::json!({
+                    "reason": reason,
+                    "bash_enabled": false,
+                }),
+            );
             return Ok(self.build_blocked_result(
-                tool_name, args, request, reason, false, Some(manifest),
+                tool_name,
+                args,
+                request,
+                reason,
+                false,
+                Some(manifest),
             ));
         }
 
@@ -774,21 +790,38 @@ impl super::ActionExecutor {
             }
             Some(_) => {
                 let reason = "AgentSpec denied shell.run";
-                record_blocked(reason, serde_json::json!({
-                    "reason": reason,
-                    "agent_spec_id": ctx.agent_spec.map(|s| s.id.clone()),
-                }));
+                record_blocked(
+                    reason,
+                    serde_json::json!({
+                        "reason": reason,
+                        "agent_spec_id": ctx.agent_spec.map(|s| s.id.clone()),
+                    }),
+                );
                 return Ok(self.build_blocked_result(
-                    tool_name, args, request, reason, false, Some(manifest),
+                    tool_name,
+                    args,
+                    request,
+                    reason,
+                    false,
+                    Some(manifest),
                 ));
             }
             None => {
-                let reason = "AgentSpec missing: cannot execute shell.run without governed AgentSpec";
-                record_blocked(reason, serde_json::json!({
-                    "reason": reason,
-                }));
+                let reason =
+                    "AgentSpec missing: cannot execute shell.run without governed AgentSpec";
+                record_blocked(
+                    reason,
+                    serde_json::json!({
+                        "reason": reason,
+                    }),
+                );
                 return Ok(self.build_blocked_result(
-                    tool_name, args, request, reason, false, Some(manifest),
+                    tool_name,
+                    args,
+                    request,
+                    reason,
+                    false,
+                    Some(manifest),
                 ));
             }
         }
@@ -830,11 +863,14 @@ impl super::ActionExecutor {
                 "shell.run permission denied"
             };
 
-            record_blocked(&reason, serde_json::json!({
-                "reason": reason,
-                "needs_confirmation": needs_confirmation,
-                "permission_decision": perm_decision.decision,
-            }));
+            record_blocked(
+                reason,
+                serde_json::json!({
+                    "reason": reason,
+                    "needs_confirmation": needs_confirmation,
+                    "permission_decision": perm_decision.decision,
+                }),
+            );
 
             if needs_confirmation {
                 // Auto-generate ToolPermission Proposal
@@ -876,10 +912,7 @@ impl super::ActionExecutor {
         }
 
         // ── 4. Build ShellCommandRequest ────────────────────────────────
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
         let cmd_args: Vec<String> = args
             .get("args")
             .and_then(|v| v.as_array())
@@ -937,8 +970,6 @@ impl super::ActionExecutor {
                 let truncated = output.truncated || output.timed_out;
                 let status_str = if output.timed_out {
                     ActionExecutionStatus::Failed
-                } else if output.exit_code != 0 {
-                    ActionExecutionStatus::Succeeded // non-zero exit is still a completed execution
                 } else {
                     ActionExecutionStatus::Succeeded
                 };
@@ -961,9 +992,15 @@ impl super::ActionExecutor {
                         AgentRunEventType::ToolCallCompleted
                     };
                     let summary = if output.timed_out {
-                        format!("shell.run timed out after {} ms: {}", output.elapsed_ms, command)
+                        format!(
+                            "shell.run timed out after {} ms: {}",
+                            output.elapsed_ms, command
+                        )
                     } else {
-                        format!("shell.run completed: {} (exit={})", command, output.exit_code)
+                        format!(
+                            "shell.run completed: {} (exit={})",
+                            command, output.exit_code
+                        )
                     };
                     let event = AgentRunEvent::new(
                         run_id,
@@ -994,11 +1031,7 @@ impl super::ActionExecutor {
                     );
                     let _ = event_store.append_event(&event);
                 }
-                (
-                    ActionExecutionStatus::Failed,
-                    None,
-                    Some(err_str),
-                )
+                (ActionExecutionStatus::Failed, None, Some(err_str))
             }
         };
 
@@ -1189,8 +1222,7 @@ mod tests {
         let mut reg = McpRegistry::new();
         reg.register_default_builtins();
         let ps = ToolPermissionStore::new_in_memory().unwrap();
-        let audit =
-            McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool.db"));
+        let audit = McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool.db"));
         let pe = PrivacyEngine::new();
         let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
         let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
@@ -1208,11 +1240,7 @@ mod tests {
         };
         let result = executor.execute(request, &ctx).unwrap();
         assert_eq!(result.status, ActionExecutionStatus::Blocked);
-        assert!(result
-            .action
-            .error
-            .unwrap_or_default()
-            .contains("disabled"));
+        assert!(result.action.error.unwrap_or_default().contains("disabled"));
 
         let events = event_store.list_events_by_run("test-run-1").unwrap();
         let has_blocked = events.iter().any(|e| {
@@ -1221,7 +1249,10 @@ mod tests {
                 crate::agent::AgentRunEventType::ToolCallBlocked
             )
         });
-        assert!(has_blocked, "blocked event must be recorded by ActionExecutor");
+        assert!(
+            has_blocked,
+            "blocked event must be recorded by ActionExecutor"
+        );
     }
 
     #[test]
@@ -1229,8 +1260,7 @@ mod tests {
         let mut reg = McpRegistry::new();
         reg.register_default_builtins();
         let ps = ToolPermissionStore::new_in_memory().unwrap();
-        let audit =
-            McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool2.db"));
+        let audit = McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool2.db"));
         let pe = PrivacyEngine::new();
         // Shell enabled sandbox, but manifest is disabled by default
         let tmp = std::env::temp_dir().to_string_lossy().to_string();

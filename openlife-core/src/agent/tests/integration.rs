@@ -971,7 +971,10 @@ fn test_shell_run_default_not_model_callable() {
     assert!(shell.is_some(), "shell.run manifest must exist");
     let shell = shell.unwrap();
     assert!(!shell.enabled, "shell.run must be disabled by default");
-    assert!(!shell.declarative_only, "shell.run must not be declarative-only");
+    assert!(
+        !shell.declarative_only,
+        "shell.run must not be declarative-only"
+    );
     assert_eq!(shell.risk_level, "high");
     assert_eq!(shell.permission_level, "high");
 }
@@ -1006,7 +1009,10 @@ fn test_shell_run_manifest_disabled_blocks() {
     let result = executor.execute(request, &ctx);
     assert!(result.is_ok(), "execute should not return Err");
     let result = result.unwrap();
-    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
     assert!(result.action.error.unwrap_or_default().contains("disabled"));
 }
 
@@ -1039,7 +1045,10 @@ fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
     let result = executor.execute(request, &ctx);
     assert!(result.is_ok());
     let result = result.unwrap();
-    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
 }
 
 #[test]
@@ -1051,9 +1060,8 @@ fn test_shell_run_sandbox_disabled_records_blocked() {
         crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
     let pe = PrivacyEngine::new();
     let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
-    let event_store =
-        crate::agent::event_store::AgentRunEventStore::new_in_memory()
-            .expect("in-memory event store");
+    let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory()
+        .expect("in-memory event store");
 
     let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
         .with_execution_sandbox(&sandbox)
@@ -1069,7 +1077,10 @@ fn test_shell_run_sandbox_disabled_records_blocked() {
         step_index: 0,
     };
     let result = executor.execute(request, &ctx).unwrap();
-    assert_eq!(result.status, crate::agent::action_executor::ActionExecutionStatus::Blocked);
+    assert_eq!(
+        result.status,
+        crate::agent::action_executor::ActionExecutionStatus::Blocked
+    );
 
     let events = event_store.list_events_by_run(run_id).unwrap();
     let has_blocked = events.iter().any(|e| {
@@ -1117,7 +1128,11 @@ fn test_shell_run_allowed_command_succeeds() {
         reason: Some("P9 integration test".into()),
     };
     let result = executor_core.execute(&req);
-    assert!(result.is_ok(), "direct ShellExecutor must succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "direct ShellExecutor must succeed: {:?}",
+        result.err()
+    );
     let output = result.unwrap();
     assert!(output.stdout.contains("governed_shell_ok"));
     assert_eq!(output.exit_code, 0);
@@ -1141,7 +1156,10 @@ fn test_default_agent_spec_denies_shell() {
         .allowed_tools
         .iter()
         .any(|t| t.as_str().contains("shell"));
-    assert!(!allows_shell, "AgentSpec without shell.run in allowed_tools must deny shell");
+    assert!(
+        !allows_shell,
+        "AgentSpec without shell.run in allowed_tools must deny shell"
+    );
 }
 
 #[test]
@@ -1174,8 +1192,14 @@ fn test_plan_bound_agent_spec_denies_shell_execution() {
     // A plan-bound AgentSpec without shell.run in allowed_tools must deny shell.
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
-    let allows_shell = spec.allowed_tools.iter().any(|t| t.as_str().contains("shell"));
-    assert!(!allows_shell, "plan AgentSpec without shell.run must deny shell");
+    let allows_shell = spec
+        .allowed_tools
+        .iter()
+        .any(|t| t.as_str().contains("shell"));
+    assert!(
+        !allows_shell,
+        "plan AgentSpec without shell.run must deny shell"
+    );
 }
 
 #[test]
@@ -1183,12 +1207,12 @@ fn test_agent_spec_with_explicit_shell_allows_it() {
     // If an AgentSpec explicitly allows shell.run, the spec permits it.
     // (Runtime sandbox/manifest still must also allow.)
     let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec![
-        "goal.read".into(),
-        "shell.run".into(),
-    ];
+    spec.allowed_tools = vec!["goal.read".into(), "shell.run".into()];
     let allows_shell = spec.allowed_tools.iter().any(|t| t.contains("shell"));
-    assert!(allows_shell, "AgentSpec with explicit shell.run must allow it");
+    assert!(
+        allows_shell,
+        "AgentSpec with explicit shell.run must allow it"
+    );
 }
 
 // ── P9 AgentSpec gate tests ────────────────────────────────────────────
@@ -1338,8 +1362,7 @@ fn test_shell_run_blocked_records_only_blocked_no_started() {
     );
     let pe = PrivacyEngine::new();
     let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
-    let event_store =
-        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
     let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
         .with_execution_sandbox(&sandbox)
         .with_event_store(event_store.clone());
@@ -1362,14 +1385,30 @@ fn test_shell_run_blocked_records_only_blocked_no_started() {
     let events = event_store.list_events_by_run(run_id).unwrap();
     let started_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallStarted
+            )
+        })
         .count();
     let blocked_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallBlocked
+            )
+        })
         .count();
-    assert_eq!(started_count, 0, "blocked path must not emit ToolCallStarted");
-    assert_eq!(blocked_count, 1, "blocked path must emit exactly one ToolCallBlocked");
+    assert_eq!(
+        started_count, 0,
+        "blocked path must not emit ToolCallStarted"
+    );
+    assert_eq!(
+        blocked_count, 1,
+        "blocked path must emit exactly one ToolCallBlocked"
+    );
 }
 
 #[test]
@@ -1402,8 +1441,7 @@ fn test_shell_run_success_records_started_and_completed() {
     .unwrap();
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["shell.run".into()];
-    let event_store =
-        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
     let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
         .with_execution_sandbox(&sandbox)
         .with_agent_spec(&spec)
@@ -1427,24 +1465,53 @@ fn test_shell_run_success_records_started_and_completed() {
     let events = event_store.list_events_by_run(run_id).unwrap();
     let started_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallStarted
+            )
+        })
         .count();
     let completed_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallCompleted))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallCompleted
+            )
+        })
         .count();
     let failed_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallFailed))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallFailed
+            )
+        })
         .count();
     let blocked_count = events
         .iter()
-        .filter(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked))
+        .filter(|e| {
+            matches!(
+                e.event_type,
+                crate::agent::AgentRunEventType::ToolCallBlocked
+            )
+        })
         .count();
-    assert_eq!(started_count, 1, "success path must emit one ToolCallStarted");
-    assert_eq!(completed_count, 1, "success path must emit one ToolCallCompleted");
+    assert_eq!(
+        started_count, 1,
+        "success path must emit one ToolCallStarted"
+    );
+    assert_eq!(
+        completed_count, 1,
+        "success path must emit one ToolCallCompleted"
+    );
     assert_eq!(failed_count, 0, "success path must not emit ToolCallFailed");
-    assert_eq!(blocked_count, 0, "success path must not emit ToolCallBlocked");
+    assert_eq!(
+        blocked_count, 0,
+        "success path must not emit ToolCallBlocked"
+    );
 }
 
 // ── P9 full governed success path test ──────────────────────────────────
@@ -1481,8 +1548,7 @@ fn test_shell_run_full_governed_success_path() {
     .unwrap();
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["shell.run".into()];
-    let event_store =
-        crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
+    let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
     let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
         .with_execution_sandbox(&sandbox)
         .with_agent_spec(&spec)
@@ -1535,22 +1601,32 @@ fn test_shell_run_full_governed_success_path() {
 
     // Events: started + completed, no blocked/failed
     let events = event_store.list_events_by_run(run_id).unwrap();
-    let started = events
-        .iter()
-        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallStarted));
-    let completed = events
-        .iter()
-        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallCompleted));
-    let blocked = events
-        .iter()
-        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallBlocked));
-    let failed = events
-        .iter()
-        .any(|e| matches!(e.event_type, crate::agent::AgentRunEventType::ToolCallFailed));
+    let started = events.iter().any(|e| {
+        matches!(
+            e.event_type,
+            crate::agent::AgentRunEventType::ToolCallStarted
+        )
+    });
+    let completed = events.iter().any(|e| {
+        matches!(
+            e.event_type,
+            crate::agent::AgentRunEventType::ToolCallCompleted
+        )
+    });
+    let blocked = events.iter().any(|e| {
+        matches!(
+            e.event_type,
+            crate::agent::AgentRunEventType::ToolCallBlocked
+        )
+    });
+    let failed = events.iter().any(|e| {
+        matches!(
+            e.event_type,
+            crate::agent::AgentRunEventType::ToolCallFailed
+        )
+    });
     assert!(started, "must contain ToolCallStarted event");
     assert!(completed, "must contain ToolCallCompleted event");
     assert!(!blocked, "must not contain ToolCallBlocked event");
     assert!(!failed, "must not contain ToolCallFailed event");
 }
-
-

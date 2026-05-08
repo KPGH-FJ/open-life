@@ -94,8 +94,8 @@ const INTERPRETER_DENYLIST: &[&str] = &[
 ];
 
 const DANGEROUS_FIND_FLAGS: &[&str] = &[
-    "-delete", "-exec", "-execdir", "-ok", "-okdir",
-    "-fprint", "-fprintf", "-fls", "-fprint0", "-printf",
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls", "-fprint0",
+    "-printf",
 ];
 
 /// Commands whose positional non-flag args are treated as file-path operands
@@ -1536,7 +1536,12 @@ mod tests {
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
             command: "find".into(),
-            args: vec![tmp_dir(), "-fprintf".into(), "/tmp/p9_fmt.txt".into(), "%p\n".into()],
+            args: vec![
+                tmp_dir(),
+                "-fprintf".into(),
+                "/tmp/p9_fmt.txt".into(),
+                "%p\n".into(),
+            ],
             cwd: None,
             env: HashMap::new(),
             reason: None,

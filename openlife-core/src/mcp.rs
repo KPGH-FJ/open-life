@@ -1265,13 +1265,13 @@ mod tests {
         // But by default it is disabled (not model-callable).
         assert!(!manifest.declarative_only);
         // Builtin closure blocks direct registry calls:
-        let result = registry.execute_manifest(&manifest, serde_json::json!({"command": "echo", "args": ["hi"]}));
+        let result = registry.execute_manifest(
+            &manifest,
+            serde_json::json!({"command": "echo", "args": ["hi"]}),
+        );
         assert!(result.is_err());
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("ActionExecutor"),
+            result.unwrap_err().to_string().contains("ActionExecutor"),
             "shell.run must be executed through ActionExecutor"
         );
     }
@@ -1310,7 +1310,10 @@ mod tests {
             .find(|m| m.name == "shell.run")
             .unwrap();
         // Direct registry execution must still be blocked even when enabled
-        let result = registry.execute_manifest(&manifest, serde_json::json!({"command": "echo", "args": ["hi"]}));
+        let result = registry.execute_manifest(
+            &manifest,
+            serde_json::json!({"command": "echo", "args": ["hi"]}),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ActionExecutor"));
     }
@@ -1321,8 +1324,14 @@ mod tests {
     fn test_default_tools_prompt_excludes_shell_run() {
         let registry = McpRegistry::new();
         let prompt = registry.tools_prompt();
-        assert!(!prompt.contains("shell.run"), "default prompt must exclude shell.run");
-        assert!(prompt.contains("web.search"), "non-shell tools must still appear");
+        assert!(
+            !prompt.contains("shell.run"),
+            "default prompt must exclude shell.run"
+        );
+        assert!(
+            prompt.contains("web.search"),
+            "non-shell tools must still appear"
+        );
     }
 
     #[test]
@@ -1334,7 +1343,10 @@ mod tests {
             !prompt.contains("shell.run"),
             "even runtime-enabled shell.run must be excluded from generic tools_prompt"
         );
-        assert!(prompt.contains("web.search"), "non-shell tools must still appear");
+        assert!(
+            prompt.contains("web.search"),
+            "non-shell tools must still appear"
+        );
     }
 
     fn make_enabled_sandbox_for_prompt() -> crate::agent::execution_sandbox::ExecutionSandbox {
@@ -1360,7 +1372,10 @@ mod tests {
         let agent_spec = make_shell_allowing_agentspec();
         let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
         let prompt = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
-        assert!(!prompt.contains("shell.run"), "sandbox disabled → exclude shell.run");
+        assert!(
+            !prompt.contains("shell.run"),
+            "sandbox disabled → exclude shell.run"
+        );
     }
 
     #[test]
@@ -1372,7 +1387,10 @@ mod tests {
         spec.allowed_tools = vec!["goal.read".into()]; // no shell.run
         let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
         let prompt = registry.tools_prompt_governed(true, &sandbox, &spec, &ps);
-        assert!(!prompt.contains("shell.run"), "AgentSpec denies → exclude shell.run");
+        assert!(
+            !prompt.contains("shell.run"),
+            "AgentSpec denies → exclude shell.run"
+        );
     }
 
     #[test]
@@ -1412,7 +1430,10 @@ mod tests {
             prompt.contains("shell.run"),
             "all gates pass → shell.run must appear in governed prompt"
         );
-        assert!(prompt.contains("web.search"), "non-shell tools must also appear");
+        assert!(
+            prompt.contains("web.search"),
+            "non-shell tools must also appear"
+        );
     }
 
     #[test]
@@ -1433,16 +1454,33 @@ mod tests {
         .unwrap();
         // Generate prompt twice — allow_once should survive both calls
         let prompt1 = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
-        assert!(prompt1.contains("shell.run"), "first prompt must include shell.run");
+        assert!(
+            prompt1.contains("shell.run"),
+            "first prompt must include shell.run"
+        );
         let prompt2 = registry.tools_prompt_governed(true, &sandbox, &agent_spec, &ps);
-        assert!(prompt2.contains("shell.run"), "allow_once must survive second peek");
+        assert!(
+            prompt2.contains("shell.run"),
+            "allow_once must survive second peek"
+        );
         // Now call check() — this should consume it
         let source = "builtin";
         let perm = ps
-            .check("shell.run", source, "high", "external_side_effect", &[
-                "write".into(), "filesystem".into(), "external_side_effect".into(),
-            ])
+            .check(
+                "shell.run",
+                source,
+                "high",
+                "external_side_effect",
+                &[
+                    "write".into(),
+                    "filesystem".into(),
+                    "external_side_effect".into(),
+                ],
+            )
             .unwrap();
-        assert!(perm.allowed, "allow_once should still be available for ActionExecutor");
+        assert!(
+            perm.allowed,
+            "allow_once should still be available for ActionExecutor"
+        );
     }
 }

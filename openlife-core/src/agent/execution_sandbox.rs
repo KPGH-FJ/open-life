@@ -163,9 +163,11 @@ impl ExecutionSandbox {
         } else {
             config.safe_paths.clone()
         };
-        let mut sandbox = Self::default();
-        sandbox.bash_enabled = config.bash_enabled;
-        sandbox.safe_paths = safe_paths;
+        let mut sandbox = Self {
+            bash_enabled: config.bash_enabled,
+            safe_paths,
+            ..Default::default()
+        };
         // Only override allowlist when config provides an explicit non-empty list.
         // An empty config list preserves the conservative default (fail-closed),
         // preventing unrestricted command execution.
@@ -187,9 +189,10 @@ impl ExecutionSandbox {
 
     /// Always-disabled sandbox for paths that must not execute shell.
     pub fn always_disabled() -> Self {
-        let mut s = Self::default();
-        s.bash_enabled = false;
-        s
+        Self {
+            bash_enabled: false,
+            ..Default::default()
+        }
     }
 
     // ── Path validation (canonicalize-based) ──────────────────────────
@@ -1067,7 +1070,7 @@ mod tests {
         let mut sandbox = ExecutionSandbox::default();
         sandbox.bash_enabled = true;
         sandbox.command_allowlist = vec![]; // manually cleared
-        // Even safe commands are blocked when allowlist is empty
+                                            // Even safe commands are blocked when allowlist is empty
         let result = sandbox.validate("echo", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));

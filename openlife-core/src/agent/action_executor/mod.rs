@@ -133,10 +133,7 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
-    pub fn with_agent_spec(
-        mut self,
-        spec: &'a crate::agent::types::AgentSpec,
-    ) -> Self {
+    pub fn with_agent_spec(mut self, spec: &'a crate::agent::types::AgentSpec) -> Self {
         self.agent_spec = Some(spec);
         self
     }
