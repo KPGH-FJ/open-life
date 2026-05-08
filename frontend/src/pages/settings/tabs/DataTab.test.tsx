@@ -68,4 +68,18 @@ describe("DataTab", () => {
     render(<DataTab {...baseProps} evolutionResult="已应用规则 2 条" />);
     expect(screen.getByText("已应用规则 2 条")).toBeInTheDocument();
   });
+
+  it("renders recovery guidance section", () => {
+    render(<DataTab {...baseProps} />);
+    expect(screen.getByText(/恢复指引/)).toBeInTheDocument();
+    expect(screen.getByText(/Safe Mode/)).toBeInTheDocument();
+    expect(screen.getByText(/Proposal 应用失败/)).toBeInTheDocument();
+    expect(screen.getByText(/备份与快照/)).toBeInTheDocument();
+    expect(screen.getByText(/Safe Path 写入/)).toBeInTheDocument();
+  });
+
+  it("shows privacy note for diagnostic export", () => {
+    render(<DataTab {...baseProps} />);
+    expect(screen.getByText(/诊断报告导出.*默认不包含原始敏感内容/)).toBeInTheDocument();
+  });
 });

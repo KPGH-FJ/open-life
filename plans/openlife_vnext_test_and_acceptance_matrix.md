@@ -211,6 +211,36 @@ Tests:
 - plan operation legal-state button gating
 - generic prompt excludes `shell.run` regression
 
+## Phase 11: Beta Trial Readiness
+
+Acceptance:
+
+- P10 is documented as accepted and P11 is the current phase.
+- Trial path matrix covers clean-profile and existing-profile use.
+- Settings / Workspace exposes actionable readiness and recovery state.
+- Smoke checklist covers first launch, model configuration, LifeModel build,
+  Chat Proposal, Proposal Review, Runs/Trace, plan inspection, backup/export,
+  and Safe Mode recovery.
+- Recovery guidance covers proposal apply failures, safe paths, backups,
+  snapshots, and diagnostics.
+- Feedback / diagnostic export excludes raw sensitive content by default.
+- P9 shell remains default-off: no terminal UI, no generic prompt exposure, no
+  scheduled/proactive/sub-agent shell enablement.
+- `make ci` passes before any trial build.
+
+Tests:
+
+- documentation discovery for P11 task specs and trial matrix
+- readiness console ready / partial / blocked / safe-mode states
+- clean-profile smoke checklist
+- existing-profile smoke checklist
+- provider configuration diagnostic state
+- proposal apply failure remains pending with clear message
+- backup/export/import or documented manual recovery drill
+- diagnostic export redaction
+- run/proposal ids included in feedback context without raw private data
+- generic prompt excludes `shell.run` regression
+
 ## P5: Governed Plan Operations and Recovery
 
 Acceptance:

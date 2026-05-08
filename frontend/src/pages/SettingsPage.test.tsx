@@ -125,7 +125,7 @@ describe("SettingsPage", () => {
     renderSettings();
 
     expect(await screen.findByText(/试用路径 Checklist/)).toBeInTheDocument();
-    expect(screen.getByText(/聊天不可用/)).toBeInTheDocument();
+    expect(screen.getAllByText(/聊天不可用/).length).toBeGreaterThanOrEqual(1);
   });
 
   it("exports data with optional app version metadata", async () => {

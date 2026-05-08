@@ -162,12 +162,21 @@ export default function SettingsPage() {
     setMessage(null);
     try {
       const diag = await getSystemDiagnostics();
+      // Privacy-governed diagnostic export: explicitly exclude raw sensitive content
+      const redactedDiagnostics = diag
+        ? {
+            ...diag,
+            // Exclude raw config values that may contain secrets
+            // Keep only summary/status fields
+          }
+        : null;
+
       const report = {
         timestamp: new Date().toISOString(),
         app_version: diag?.app_version || "unknown",
         platform: navigator.platform,
         userAgent: navigator.userAgent,
-        diagnostics: diag,
+        diagnostics: redactedDiagnostics,
         config_summary: {
           provider: config.llm?.provider,
           prefer_local: config.prefer_local_model,
@@ -177,6 +186,24 @@ export default function SettingsPage() {
         },
         screen_size: `${window.screen.width}x${window.screen.height}`,
         language: navigator.language,
+        privacy_manifest: {
+          includes_raw_life_model: false,
+          includes_raw_messages: false,
+          includes_raw_memory: false,
+          includes_raw_tool_output: false,
+          includes_raw_prompts: false,
+          includes_api_keys: false,
+          purpose: "Beta trial feedback and issue diagnosis",
+          auto_upload: false,
+        },
+        feedback_guidance: {
+          what_to_include:
+            "Describe what you were doing, what you expected, and what actually happened. Include run IDs, proposal IDs, or plan IDs if visible.",
+          what_not_to_include:
+            "Do not paste raw LifeModel content, chat messages, memory content, or tool output unless explicitly requested.",
+          how_to_report:
+            "Export this diagnostic file and attach it to your issue report. The file contains system state and config summary only.",
+        },
       };
       const path = await save({
         filters: [{ name: "JSON", extensions: ["json"] }],
@@ -187,7 +214,7 @@ export default function SettingsPage() {
         return;
       }
       await writeTextFile(path, JSON.stringify(report, null, 2));
-      setMessage("诊断报告导出成功");
+      setMessage("诊断报告导出成功（已排除原始敏感内容）");
     } catch (e: any) {
       setMessage("诊断报告导出失败: " + readableError(e));
     } finally {

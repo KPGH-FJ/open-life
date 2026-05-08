@@ -16,7 +16,7 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **vNext P9 Shell/Sandbox 核心收口，当前进入 P10 Frontend Agent Workspace 规划与开发**：P9 已将 `shell.run` 收敛到 `ExecutionSandbox`、ToolRuntime、AgentSpec、Permission 和 append-only trace 的默认关闭治理链路；P10 聚焦前端 Agent Workspace，让用户能看见 run timeline、tool observations、proposal evidence、plan confirmation 与下一步行动。P10 不引入终端 UI、不启用普通 Chat shell、不重写 ChatPage。
+- **vNext P10 Frontend Agent Workspace 已通过验收，当前进入 P11 Beta Trial Readiness**：P9 已将 `shell.run` 收敛到 `ExecutionSandbox`、ToolRuntime、AgentSpec、Permission 和 append-only trace 的默认关闭治理链路；P10 已让用户能看见 run timeline、tool observations、proposal evidence、plan confirmation 与下一步行动。P11 聚焦试用就绪：试用路径矩阵、诊断/恢复、冒烟验收、反馈闭环与 Beta 发布门控。P11 不引入终端 UI、不启用普通 Chat shell、不重写 ChatPage、不扩大 runtime 权限。
 - **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
 - **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。
@@ -127,9 +127,11 @@ vNext 的重点包括：
 12. [OpenLife vNext P8 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p8_task_specs.md)
 13. [OpenLife vNext P9 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p9_task_specs.md)
 14. [OpenLife vNext P10 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p10_task_specs.md)
-15. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
-16. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
-17. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
+15. [OpenLife vNext P11 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p11_task_specs.md)
+16. [OpenLife vNext P11 Trial Path Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p11_trial_path_matrix.md)
+17. [OpenLife vNext Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md)
+18. [OpenLife AI Coding Governance](/Users/fujing/Desktop/偶来福/plans/openlife_ai_coding_governance.md)
+19. [ADR Backlog](/Users/fujing/Desktop/偶来福/plans/adr/README.md)
 
 ### 现有架构背景
 
@@ -227,6 +229,32 @@ make ci
 Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
 ```
 
+## Beta 试用指南
+
+OpenLife 当前处于 **P11 Beta Trial Readiness** 阶段。如果你是测试人员，请按以下步骤进行试用：
+
+1. **阅读试用路径矩阵**：[`plans/openlife_vnext_p11_trial_path_matrix.md`](plans/openlife_vnext_p11_trial_path_matrix.md)
+   - 包含 clean profile 和 existing profile 的 must-pass smoke 路径
+   - 每个路径有具体步骤、预期结果、失败信号和恢复指引
+   - 附带测试报告模板
+
+2. **从 Settings 开始**：打开 Settings → Overview，检查 Beta Readiness Checklist
+   - 绿色 = 该项就绪
+   - 琥珀色 = 部分就绪，按指引修复
+   - 红色 = 阻塞项，必须先解决
+
+3. **按顺序执行 smoke 路径**：
+   - S1: 首次启动与诊断
+   - S2: 模型配置
+   - S3: 快速构建 LifeModel
+   - S4: 对话生成 Proposal
+   - S5: Proposal 审阅与应用
+   - S6: Run Trace 检查
+   - S7: Plan 检查
+   - S8: 备份/导出与 Safe Mode 恢复
+
+4. **反馈问题**：使用测试报告模板记录结果，包含 run ID / proposal ID / plan ID。
+
 ## 最近完成的重要更新
 
 ### Phase 1-3: Agent Runtime 基础设施
@@ -254,15 +282,20 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
+### vNext P10: Frontend Agent Workspace
+- ✅ Workspace / Runs / AgentRunDetail 已能组织 recent runs、plans、tools、proposals 和 next actions。
+- ✅ Run timeline、tool observation、proposal evidence、plan operations 已接入前端工作区。
+- ✅ P10 推荐验收与完整 `make ci` 已通过。
+
 ## 当前重要开发方向
 
-当前开发重心已转向 vNext Agent Framework Upgrade：
+当前开发重心已转向 **P11 Beta Trial Readiness**：
 
-1. 按 [P10 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p10_task_specs.md) 建立 Frontend Agent Workspace。
-2. 优先让 run timeline、tool observations、proposal evidence、plan confirmation 可见可操作。
-3. 保持 Chat streaming 稳定，不做 ChatPage 大重构。
+1. 按 [P11 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p11_task_specs.md) 建立 Beta 试用路径矩阵。
+2. 按 [P11 Trial Path Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p11_trial_path_matrix.md) 明确首次启动、模型配置、LifeModel 构建、Chat Proposal、Review Apply、Runs Trace、Recovery 的 must-pass smoke 路径。
+3. 强化 Settings / Workspace 的试用就绪诊断、Safe Mode 指引和恢复入口。
 4. 保持 P9 shell 治理默认关闭，不加入终端 UI 或普通 Chat shell。
-5. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为每个 P10 子任务设置门控。
+5. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为 P11 设置门控，并以 `make ci` 作为最终发布门槛。
 
 ## 常见问题
 

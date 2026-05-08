@@ -12,26 +12,109 @@ You are working on OpenLife vNext Agent Framework.
 Read first:
 - AGENTS.md
 - plans/openlife_vnext_migration_plan.md
-- plans/openlife_vnext_p2_p3_task_specs.md
-- plans/openlife_vnext_p4_task_specs.md
-- plans/openlife_vnext_p8_task_specs.md
+- plans/openlife_vnext_p11_task_specs.md
 - plans/openlife_vnext_test_and_acceptance_matrix.md
 - plans/openlife_ai_coding_governance.md
 - relevant ADR files under plans/adr/
 
-Current phase: P8 Compaction can close. P9 ExecutionSandbox-Governed Shell Execution is next.
+Current phase: P10 Frontend Agent Workspace has passed acceptance. P11 Beta Trial Readiness is next.
 
 Rules:
 - Execute exactly one task spec.
 - Edit only allowed files.
 - Do not implement non-goals.
-- Do not introduce SubAgentRuntime before its task.
-- Do not introduce Bash/Shell before ExecutionSandbox task.
+- Do not expand SubAgentRuntime, Bash/Shell, or runtime authority during P11.
 - Do not bypass ToolRuntime, Proposal, PromptStack, or AgentRunEvent.
-- For P9: shell is default-off, no interactive terminal, no /bin/sh -c, no raw shell strings, structured command input only, no scheduled/sub-agent shell by default.
+- For P11: focus on trial paths, diagnostics, recovery, smoke checks, and privacy-governed feedback.
+- P9 shell remains default-off: no interactive terminal, no generic chat shell, no scheduled/proactive/sub-agent shell.
 - Add tests for new behavior.
 - Run verification commands.
 - Report changed files, tests run, results, and residual risks.
+```
+
+## P11 Global Prompt
+
+```text
+You are working on OpenLife vNext P11: Beta Trial Readiness.
+
+Read first:
+- AGENTS.md
+- README.md
+- plans/openlife_vnext_p11_task_specs.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0009-execution-sandbox-bash.md
+
+Goal:
+- Prepare OpenLife for repeatable internal trial use after P10 acceptance.
+- Make first launch, model configuration, LifeModel build, Chat Proposal,
+  Proposal Review, Runs/Trace, plan inspection, recovery, and feedback
+  diagnosable and testable.
+
+Rules:
+- Execute exactly one P11 task spec.
+- Do not rewrite ChatPage.
+- Do not enable normal chat shell, terminal UI, scheduled shell, proactive shell,
+  or sub-agent shell.
+- Do not add new runtime privileges without a separate ADR and task spec.
+- Keep mutations proposal-first or behind existing governed operations.
+- Prefer diagnostics, checklists, and recovery paths over new runtime features.
+- Add tests for any changed UI or command contract.
+- Run the verification commands listed in the task spec.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P11-0 Prompt
+
+```text
+Execute vNext task P11-0: Documentation And Phase Sync.
+
+Use:
+- plans/openlife_vnext_p11_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+
+Goal:
+- Mark P10 as accepted.
+- Make P11 Beta Trial Readiness discoverable from README, AGENTS, migration
+  plan, acceptance matrix, and coding prompts.
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+- Do not introduce a new runtime feature.
+
+Verification:
+- rg -n "openlife_vnext_p11_task_specs|P11|Beta Trial Readiness|P10 .*complete|P10 .*完成" AGENTS.md README.md plans
+- git diff --name-only contains documentation files only.
+```
+
+## P11-1 Prompt
+
+```text
+Execute vNext task P11-1: Trial Path Matrix.
+
+Use:
+- plans/openlife_vnext_p11_task_specs.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+- README.md
+
+Goal:
+- Create a repeatable trial path matrix for clean-profile and existing-profile
+  testing.
+- Cover first launch, provider setup, LifeModel build, Chat Proposal, Review
+  Apply, Runs/Trace, plan inspection, backup/export, and Safe Mode recovery.
+
+Constraints:
+- Documentation/checklist first.
+- Do not change runtime behavior.
+- Do not add shell or privileged execution controls.
+
+Verification:
+- Trial scripts can be followed without reading source code.
+- Every script has setup, steps, expected result, failure signals, and recovery.
 ```
 
 ## P1 Carry-Over Prompt

@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：Agent Framework Beta 已形成可运行骨架，下一大阶段进入 **vNext Agent Framework Upgrade**。P9 Shell/Sandbox 核心已收口，当前进入 **P10 Frontend Agent Workspace**：在不重写 ChatPage、不加入终端 UI、不改变 P9 shell 默认关闭治理的前提下，把 run timeline、tool observations、proposal evidence、plan confirmation 和下一步行动组织成可用的前端 Agent Workspace。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。vNext 的目标是把 OpenLife 升级为 `LifeModel-governed Personal Agent Framework`，优先建立 AgentRunEvent、PromptStack、ToolRuntime hardening、MemoryEvidence、AgentSpec/AgentPlan 与 AI coding governance。`make ci` 为发布门控。
+- **当前阶段**：Agent Framework Beta 已形成可运行骨架，下一大阶段进入 **vNext Agent Framework Upgrade**。P9 Shell/Sandbox 核心已收口，P10 Frontend Agent Workspace 已通过验收，当前进入 **P11 Beta Trial Readiness**：在不重写 ChatPage、不加入终端 UI、不改变 P9 shell 默认关闭治理、不扩大 runtime 权限的前提下，把试用路径矩阵、诊断/恢复、冒烟验收、反馈闭环和 Beta 发布门控准备好。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。vNext 的目标是把 OpenLife 升级为 `LifeModel-governed Personal Agent Framework`，优先建立 AgentRunEvent、PromptStack、ToolRuntime hardening、MemoryEvidence、AgentSpec/AgentPlan 与 AI coding governance。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -31,16 +31,18 @@
 12. [`plans/openlife_vnext_p8_task_specs.md`](plans/openlife_vnext_p8_task_specs.md)：P8 Compaction, Long-Context Continuity, and Privacy-Governed Summary Trace 任务规格。
 13. [`plans/openlife_vnext_p9_task_specs.md`](plans/openlife_vnext_p9_task_specs.md)：P9 ExecutionSandbox-Governed Shell Execution 任务规格。
 14. [`plans/openlife_vnext_p10_task_specs.md`](plans/openlife_vnext_p10_task_specs.md)：P10 Frontend Agent Workspace 任务规格。
-15. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
-16. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
-17. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
-18. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed，ADR 0012 为 P7 AgentSpec store/runtime selection proposed。
-19. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
-20. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
-21. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
-22. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
-23. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-24. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+15. [`plans/openlife_vnext_p11_task_specs.md`](plans/openlife_vnext_p11_task_specs.md)：P11 Beta Trial Readiness 任务规格。
+16. [`plans/openlife_vnext_p11_trial_path_matrix.md`](plans/openlife_vnext_p11_trial_path_matrix.md)：P11 Beta 试用路径矩阵。
+17. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
+18. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
+19. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
+20. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed，ADR 0012 为 P7 AgentSpec store/runtime selection proposed。
+21. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
+22. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
+23. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
+24. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
+25. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+26. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
@@ -722,6 +724,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | vNext P8 任务 | [`plans/openlife_vnext_p8_task_specs.md`](plans/openlife_vnext_p8_task_specs.md) | Compaction、长上下文连续性与隐私治理摘要 trace 任务规格 |
 | vNext P9 任务 | [`plans/openlife_vnext_p9_task_specs.md`](plans/openlife_vnext_p9_task_specs.md) | ExecutionSandbox 治理下的默认关闭、非交互式 shell 执行任务规格 |
 | vNext P10 任务 | [`plans/openlife_vnext_p10_task_specs.md`](plans/openlife_vnext_p10_task_specs.md) | Frontend Agent Workspace：run timeline、tool observations、proposal evidence、plan confirmation |
+| vNext P11 任务 | [`plans/openlife_vnext_p11_task_specs.md`](plans/openlife_vnext_p11_task_specs.md) | Beta Trial Readiness：试用路径矩阵、诊断/恢复、冒烟验收、反馈闭环 |
+| vNext P11 试用矩阵 | [`plans/openlife_vnext_p11_trial_path_matrix.md`](plans/openlife_vnext_p11_trial_path_matrix.md) | clean/existing profile 的 must-pass smoke 路径和报告模板 |
 | vNext Agent 提示词 | [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md) | 后续 AI coding 可复用提示词 |
 | vNext 验收矩阵 | [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md) | 每阶段测试和验收门控 |
 | AI Coding Governance | [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md) | ADR-first 和 AI coding 协作规则 |
@@ -786,6 +790,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-06 | **P7 文档准备**：新增 `openlife_vnext_p7_task_specs.md`、ADR 0012 AgentSpec store/runtime selection 草案，并将 P7 AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 接入迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-07 | **P9 规划准备**：P8 Compaction 可以收口；新增 `openlife_vnext_p9_task_specs.md`，将 ExecutionSandbox-Governed Shell Execution 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-08 | **P10 规划准备**：P9 Shell/Sandbox 核心收口；新增 `openlife_vnext_p10_task_specs.md`，将 Frontend Agent Workspace 接入 README、AGENTS、验收矩阵和 Agent coding prompts | AI Agent |
+| 2026-05-08 | **P11 开发前准备**：P10 Frontend Agent Workspace 已验收；新增 `openlife_vnext_p11_task_specs.md`，将 Beta Trial Readiness 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 
 ---
 

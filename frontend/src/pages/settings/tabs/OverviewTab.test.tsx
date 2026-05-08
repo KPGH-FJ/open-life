@@ -49,6 +49,32 @@ describe("OverviewTab", () => {
     chat_session_count: 3,
     pending_builder_review_sessions: 0,
     config_source: "file",
+    beta_ready: true,
+    beta_readiness_issues: [],
+    builder_completion: {
+      identity: 80,
+      goals: 75,
+      capabilities: 70,
+      state: 65,
+      overall: 72.5,
+      lowest_dimension: "state",
+    },
+    data_files: {
+      messages_db_exists: true,
+      messages_db_size_mb: 1.2,
+      vectors_db_exists: true,
+      vectors_db_size_mb: 0.8,
+      mcp_audit_db_exists: true,
+      mcp_audit_db_size_mb: 0.1,
+      config_yaml_exists: true,
+      life_model_yaml_exists: true,
+    },
+    ollama_models: [{ name: "llama3", size_mb: 4500 }],
+    agent_run_count: 5,
+    agent_run_store_status: "ok",
+    pending_proposal_count: 0,
+    high_risk_pending_proposal_count: 0,
+    proposal_store_status: "ok",
   };
 
   const baseProps = {

@@ -264,6 +264,8 @@ Exit criteria:
 
 ## Phase 10: Frontend Agent Workspace
 
+Status: completed and accepted on 2026-05-08.
+
 Goal:
 
 Make the UI reflect the framework: runs, plans, tools, proposals, memory evidence, and context.
@@ -297,6 +299,59 @@ Suggested execution order:
 - P10-3 Tool observation panel.
 - P10-4 Proposal evidence and review context.
 - P10-5 Plan confirmation and operations surface.
+
+## Phase 11: Beta Trial Readiness
+
+Goal:
+
+Move from a completed framework/workspace milestone to a repeatable internal
+trial. P11 should make the app launchable, diagnosable, recoverable, and
+feedback-ready for real testing without expanding runtime authority.
+
+Tasks:
+
+- Mark P10 as complete across standard project entry points.
+- Define a trial path matrix covering first launch, model configuration,
+  LifeModel build, Chat Proposal, Proposal Review, Run Trace, Plan inspection,
+  data export, backup, and Safe Mode recovery.
+- Add or refine a Beta readiness console in Settings / Workspace.
+- Create a clean-profile and existing-profile smoke checklist.
+- Exercise recovery and data-safety flows for proposal apply failures, backups,
+  snapshots, safe paths, and diagnostics.
+- Add a privacy-governed feedback / diagnostic export loop.
+
+Non-goals:
+
+- No ChatPage rewrite.
+- No normal chat shell, terminal UI, scheduled shell, proactive shell, or
+  sub-agent shell enablement.
+- No new runtime privileges without a separate ADR and task spec.
+- No automatic rollback implementation before ADR 0011 is accepted.
+
+Exit criteria:
+
+- A tester can follow the trial path matrix without reading source code.
+- Readiness/diagnostic state is visible and actionable.
+- Clean-profile and existing-profile smoke paths pass.
+- Recovery guidance covers Safe Mode, backups, proposal failures, and safe-path
+  writes.
+- Feedback export excludes raw sensitive content by default.
+- P9 shell guarantees remain unchanged.
+- `make ci` passes.
+
+Task source:
+
+- `plans/openlife_vnext_p11_task_specs.md`
+- `plans/openlife_vnext_p11_trial_path_matrix.md`
+
+Suggested execution order:
+
+- P11-0 Documentation and phase sync.
+- P11-1 Trial path matrix.
+- P11-2 Trial readiness console.
+- P11-3 End-to-end smoke checklist.
+- P11-4 Recovery and data safety drill.
+- P11-5 Feedback and trial telemetry loop.
 
 ## Work Ordering Rules
 
@@ -343,6 +398,7 @@ Next planning source after P0/P1:
 - See `plans/openlife_vnext_p5_task_specs.md`.
 - See `plans/openlife_vnext_p6_task_specs.md`.
 - See `plans/openlife_vnext_p7_task_specs.md`.
+- See `plans/openlife_vnext_p11_task_specs.md`.
 - See `plans/openlife_vnext_agent_coding_prompts.md`.
 - ADR 0007-0010 are accepted. P4 starts from confirmed plan execution and Chat trace UI integration.
 

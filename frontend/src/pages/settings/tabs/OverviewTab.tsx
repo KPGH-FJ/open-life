@@ -129,6 +129,93 @@ export default function OverviewTab({
     },
   ];
 
+  // ---- Beta Readiness Checklist (P11-2) ----
+  const readinessState = diagnostics?.beta_ready
+    ? "ready"
+    : safeMode
+      ? "safe-mode"
+      : diagnostics?.chat_ready
+        ? "partial"
+        : "blocked";
+
+  const readinessItems = [
+    {
+      id: "model-provider",
+      label: "模型/Provider 就绪",
+      ok: diagnostics?.chat_ready ?? false,
+      detail: diagnostics?.chat_ready
+        ? `${diagnostics?.cloud_provider ?? "本地"} 可用`
+        : (diagnostics?.readiness_issues[0] ?? "未配置可用模型"),
+      action: "配置模型",
+      href: "#provider",
+    },
+    {
+      id: "life-model",
+      label: "LifeModel 状态",
+      ok: Boolean(diagnostics?.life_model_ready && !diagnostics?.model_empty),
+      detail: diagnostics?.model_empty ? "人生模型为空，建议先构建" : "LifeModel 可读取且非空",
+      action: diagnostics?.model_empty ? "去构建" : "查看模型",
+      href: diagnostics?.model_empty ? "#/builder" : "#/",
+    },
+    {
+      id: "data-health",
+      label: "数据健康",
+      ok: !(safeMode || diagnostics?.database_status === "degraded"),
+      detail: safeMode
+        ? "Safe Mode: 数据环境存在风险"
+        : diagnostics?.database_status === "degraded"
+          ? "数据库降级运行"
+          : "数据文件正常",
+      action: safeMode ? "查看恢复" : "查看数据",
+      href: "#data-health",
+    },
+    {
+      id: "pending-proposals",
+      label: "待处理提案",
+      ok: (diagnostics?.pending_proposal_count ?? 0) === 0,
+      detail:
+        (diagnostics?.pending_proposal_count ?? 0) > 0
+          ? `${diagnostics?.pending_proposal_count} 个待处理${
+              (diagnostics?.high_risk_pending_proposal_count ?? 0) > 0
+                ? `（含 ${diagnostics?.high_risk_pending_proposal_count} 个高风险）`
+                : ""
+            }`
+          : "无待处理提案",
+      action: (diagnostics?.pending_proposal_count ?? 0) > 0 ? "去审阅" : "查看",
+      href: "#/review",
+    },
+    {
+      id: "agent-runs",
+      label: "AgentRun 记录",
+      ok: (diagnostics?.agent_run_count ?? 0) > 0,
+      detail:
+        (diagnostics?.agent_run_count ?? 0) > 0
+          ? `${diagnostics?.agent_run_count} 条运行记录`
+          : "暂无运行记录",
+      action: "查看 Runs",
+      href: "#/runs",
+    },
+    {
+      id: "backup-snapshot",
+      label: "备份/快照可用性",
+      ok: (diagnostics?.snapshot_count ?? 0) > 0,
+      detail:
+        (diagnostics?.snapshot_count ?? 0) > 0
+          ? `${diagnostics?.snapshot_count} 个快照已创建`
+          : "尚未创建快照，建议先导出备份",
+      action: (diagnostics?.snapshot_count ?? 0) > 0 ? "查看版本" : "去导出",
+      href: (diagnostics?.snapshot_count ?? 0) > 0 ? "#/versions" : "#data-tab",
+    },
+    {
+      id: "diagnostic-export",
+      label: "诊断导出",
+      ok: true,
+      detail: "可随时导出诊断报告",
+      action: "导出诊断",
+      href: "#data-tab",
+    },
+  ];
+
   const betaFlow = [
     {
       title: "1. 完成设置与诊断",
@@ -229,6 +316,98 @@ export default function OverviewTab({
 
   return (
     <>
+      {/* Beta Readiness State Banner */}
+      <section className="space-y-4">
+        <div
+          className={classNames(
+            "rounded-2xl border p-4",
+            readinessState === "ready"
+              ? "border-emerald-200 bg-emerald-50/60"
+              : readinessState === "safe-mode"
+                ? "border-red-200 bg-red-50/60"
+                : readinessState === "partial"
+                  ? "border-amber-200 bg-amber-50/60"
+                  : "border-rose-200 bg-rose-50/60"
+          )}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-stone-900">Beta Readiness 状态</div>
+              <div className="mt-1 text-xs text-stone-500">
+                {readinessState === "ready"
+                  ? "所有核心检查项通过，可以开始完整试用。"
+                  : readinessState === "safe-mode"
+                    ? "Safe Mode: 数据环境存在风险，请先导出备份并修复。"
+                    : readinessState === "partial"
+                      ? "核心链路可用，但仍有项待完善。"
+                      : "存在阻塞项，请先修复以下问题。"}
+              </div>
+            </div>
+            <span
+              className={classNames(
+                "rounded-full px-2 py-1 text-xs font-medium shrink-0",
+                readinessState === "ready"
+                  ? "bg-emerald-100 text-emerald-700"
+                  : readinessState === "safe-mode"
+                    ? "bg-red-100 text-red-700"
+                    : readinessState === "partial"
+                      ? "bg-amber-100 text-amber-700"
+                      : "bg-rose-100 text-rose-700"
+              )}
+            >
+              {readinessState === "ready"
+                ? "就绪"
+                : readinessState === "safe-mode"
+                  ? "Safe Mode"
+                  : readinessState === "partial"
+                    ? "部分就绪"
+                    : "阻塞"}
+            </span>
+          </div>
+
+          {/* Readiness Items */}
+          <div className="mt-4 space-y-2">
+            {readinessItems.map(item => (
+              <div
+                key={item.id}
+                className="flex items-center gap-3 rounded-xl border border-white bg-white/75 px-3 py-2"
+              >
+                <div
+                  className={classNames(
+                    "flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold",
+                    item.ok ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+                  )}
+                >
+                  {item.ok ? "✓" : "!"}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-stone-800">{item.label}</div>
+                  <div className="truncate text-xs text-stone-500">{item.detail}</div>
+                </div>
+                <a
+                  href={item.href}
+                  className="shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                >
+                  {item.action}
+                </a>
+              </div>
+            ))}
+          </div>
+
+          {/* Beta Readiness Issues */}
+          {diagnostics && diagnostics.beta_readiness_issues.length > 0 && (
+            <div className="mt-3 rounded-lg bg-white/70 p-3">
+              <div className="text-xs font-medium text-amber-800">试用就绪建议：</div>
+              <ul className="mt-1 list-disc space-y-1 pl-4 text-xs text-amber-700">
+                {diagnostics.beta_readiness_issues.map(issue => (
+                  <li key={issue}>{issue}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </section>
+
       {/* Trial Checklist */}
       <section className="space-y-4">
         <div

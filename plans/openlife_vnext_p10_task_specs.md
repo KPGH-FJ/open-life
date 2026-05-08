@@ -2,7 +2,13 @@
 
 Date: 2026-05-08
 
-Status: draft
+Status: accepted
+
+Acceptance:
+
+- P10 Frontend Agent Workspace passed recommended verification and full
+  `make ci` on 2026-05-08.
+- Current follow-up phase: `plans/openlife_vnext_p11_task_specs.md`.
 
 Package:
 
