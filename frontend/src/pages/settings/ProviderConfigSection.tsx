@@ -104,13 +104,40 @@ export default function ProviderConfigSection({
     });
   };
 
+  const humanizeTestError = (raw: string): string => {
+    const lower = raw.toLowerCase();
+    if (
+      lower.includes("401") ||
+      lower.includes("unauthorized") ||
+      lower.includes("invalid api key")
+    )
+      return "API Key 无效或未保存，请检查 Key 是否正确并点击保存";
+    if (lower.includes("403") || lower.includes("forbidden") || lower.includes("insufficient"))
+      return "API Key 权限不足或余额不足，请检查账户状态";
+    if (lower.includes("404") || lower.includes("not found") || lower.includes("model"))
+      return "模型名未找到，请检查 Chat Model 名称是否正确";
+    if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("deadline"))
+      return "连接超时，请检查 Base URL 和网络连接";
+    if (
+      lower.includes("dns") ||
+      lower.includes("resolve") ||
+      lower.includes("refused") ||
+      lower.includes("connect")
+    )
+      return "无法连接到服务器，请检查 Base URL 和网络";
+    return raw;
+  };
+
   const handleTestApiKey = async () => {
     setApiTestLoading(true);
     try {
       const res = await testLlmConnection(config);
-      setApiTestResult({ ok: res.ok, text: `${res.provider}: ${res.message}` });
+      setApiTestResult({
+        ok: res.ok,
+        text: `${res.provider}: ${res.ok ? res.message : humanizeTestError(res.message)}`,
+      });
     } catch (e: any) {
-      setApiTestResult({ ok: false, text: e.message || "测试失败" });
+      setApiTestResult({ ok: false, text: humanizeTestError(e.message || "测试失败") });
     } finally {
       setApiTestLoading(false);
     }

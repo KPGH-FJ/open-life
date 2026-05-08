@@ -353,6 +353,59 @@ Suggested execution order:
 - P11-4 Recovery and data safety drill.
 - P11-5 Feedback and trial telemetry loop.
 
+## Phase 12: Beta Release Candidate and User Trial Delivery
+
+Goal:
+
+Move from internal trial readiness to a small-scope real-user Beta Release
+Candidate. P12 should make OpenLife handoff-ready for testers: user guide,
+release build drill, first-run polish, and recorded go/no-go acceptance.
+
+Tasks:
+
+- Mark P11 / P11.1 as accepted across standard project entry points.
+- Create a user-facing trial guide that does not require source-code or
+  architecture knowledge.
+- Run and document a desktop release build drill.
+- Polish first-run golden path friction across Settings, Builder, Chat, Review,
+  Runs, and diagnostic export without broad rewrites.
+- Fill a Beta RC acceptance report using the P11 trial matrix.
+
+Non-goals:
+
+- No ChatPage rewrite.
+- No normal chat shell, terminal UI, scheduled shell, proactive shell, or
+  sub-agent shell enablement.
+- No new runtime privileges without a separate ADR and task spec.
+- No automatic diagnostic upload or raw private data export.
+- No public app-store release claim unless signing/notarization is completed
+  and separately accepted.
+
+Exit criteria:
+
+- A tester can launch the app, follow the user trial guide, and report feedback
+  without reading source code.
+- Release build command has been attempted and result recorded.
+- Clean-profile and existing-profile smoke results are recorded in the RC
+  report.
+- Diagnostics export remains privacy-governed and path-redacted.
+- No untriaged P0/P1 trial blocker remains.
+- P9 shell guarantees remain unchanged.
+- `make ci` passes.
+
+Task source:
+
+- `plans/openlife_vnext_p12_task_specs.md`
+- `plans/openlife_vnext_p12_beta_rc_acceptance_report.md`
+
+Suggested execution order:
+
+- P12-0 Documentation and phase sync.
+- P12-1 User trial guide.
+- P12-2 Release build drill.
+- P12-3 First-run golden path polish.
+- P12-4 Beta RC acceptance run.
+
 ## Work Ordering Rules
 
 - Do not start sub-agent implementation before ToolRuntime and AgentRunEvent hardening.

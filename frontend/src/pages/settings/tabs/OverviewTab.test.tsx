@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import OverviewTab from "./OverviewTab";
@@ -91,6 +91,7 @@ describe("OverviewTab", () => {
     setRebuildResult: vi.fn(),
     tierResult: null,
     setTierResult: vi.fn(),
+    onNavigateTab: vi.fn(),
   };
 
   it("renders data file health section", () => {
@@ -118,5 +119,57 @@ describe("OverviewTab", () => {
       </MemoryRouter>
     );
     expect(screen.getByText(/核心链路已就绪/)).toBeInTheDocument();
+  });
+
+  it("calls onNavigateTab when readiness model-provider action is clicked", () => {
+    const onNav = vi.fn();
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} onNavigateTab={onNav} />
+      </MemoryRouter>
+    );
+    const configBtns = screen.getAllByText("配置模型");
+    fireEvent.click(configBtns[0]);
+    expect(onNav).toHaveBeenCalledWith("provider", undefined);
+  });
+
+  it("calls onNavigateTab with anchor when trial cloud model action is clicked", () => {
+    const onNav = vi.fn();
+    const diag = { ...defaultDiagnostics, cloud_api_configured: false, chat_ready: false };
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} diagnostics={diag as any} onNavigateTab={onNav} />
+      </MemoryRouter>
+    );
+    const buttons = screen.getAllByText("配置模型");
+    fireEvent.click(buttons[1]);
+    expect(onNav).toHaveBeenCalledWith("provider", "llm-settings");
+  });
+
+  it("calls onNavigateTab when data health action is clicked", () => {
+    const onNav = vi.fn();
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} onNavigateTab={onNav} />
+      </MemoryRouter>
+    );
+    const dataBtns = screen.getAllByText("查看数据");
+    fireEvent.click(dataBtns[0]);
+    expect(onNav).toHaveBeenCalledWith("data", "data-health");
+  });
+
+  it("renders HashRouter Link for /chat and /review routes", () => {
+    render(
+      <MemoryRouter>
+        <OverviewTab {...baseProps} />
+      </MemoryRouter>
+    );
+    const chatLinks = screen.getAllByText("去对话");
+    const chatLink = chatLinks[0].closest("a");
+    expect(chatLink).toBeTruthy();
+    expect(chatLink?.getAttribute("href")).toBe("/chat");
+
+    const reviewLinks = screen.getAllByText("查看").filter(el => el.closest("a"));
+    expect(reviewLinks.length).toBeGreaterThan(0);
   });
 });

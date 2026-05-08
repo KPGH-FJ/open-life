@@ -162,7 +162,15 @@ export default function RunsPage() {
   if (error) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-red-500">{error}</div>
+        <div className="text-center">
+          <div className="text-red-500 mb-3">{error}</div>
+          <button
+            onClick={() => loadRuns()}
+            className="text-sm px-3 py-1.5 rounded-md bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
+          >
+            重试
+          </button>
+        </div>
       </div>
     );
   }

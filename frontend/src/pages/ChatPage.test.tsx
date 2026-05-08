@@ -354,7 +354,7 @@ describe("ChatPage", () => {
       </BrowserRouter>
     );
 
-    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    const textarea = await screen.findByPlaceholderText(/设置页配置模型/);
     await screen.findByText("需要配置");
 
     fireEvent.change(textarea, { target: { value: "普通消息" } });

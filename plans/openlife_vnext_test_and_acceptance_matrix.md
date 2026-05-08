@@ -241,6 +241,35 @@ Tests:
 - run/proposal ids included in feedback context without raw private data
 - generic prompt excludes `shell.run` regression
 
+## Phase 12: Beta Release Candidate and User Trial Delivery
+
+Acceptance:
+
+- P11 / P11.1 is documented as accepted and P12 is current.
+- User-facing trial guide exists and avoids architecture/source-code dependency.
+- Release build drill is attempted and recorded.
+- Beta RC acceptance report records clean-profile and existing-profile smoke
+  results.
+- Diagnostic export remains explicit-whitelist, privacy-governed, and local
+  path redacted.
+- P9 shell remains default-off: no terminal UI, no generic prompt exposure, no
+  scheduled/proactive/sub-agent shell enablement.
+- No untriaged P0/P1 trial blocker remains.
+- `make ci` passes before handoff to testers.
+
+Tests:
+
+- documentation discovery for P12 task specs and RC report
+- user trial guide link/discovery check
+- diagnostic export redaction regression, including quoted paths and `path=...`
+  values
+- readiness action navigation regression
+- first-run / Settings Overview smoke
+- release build command attempted and result recorded in RC report
+- P11 clean-profile smoke results recorded
+- P11 existing-profile smoke results recorded
+- generic prompt excludes `shell.run` regression
+
 ## P5: Governed Plan Operations and Recovery
 
 Acceptance:

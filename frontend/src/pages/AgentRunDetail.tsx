@@ -139,7 +139,15 @@ export default function AgentRunDetail() {
   if (!run) {
     return (
       <div className="h-full flex items-center justify-center">
-        <div className="text-stone-500">运行记录不存在</div>
+        <div className="text-center">
+          <div className="text-stone-500 mb-3">运行记录不存在</div>
+          <button
+            onClick={() => navigate("/runs")}
+            className="text-sm px-3 py-1.5 rounded-md bg-stone-100 text-stone-700 hover:bg-stone-200 border"
+          >
+            返回 Runs 列表
+          </button>
+        </div>
       </div>
     );
   }

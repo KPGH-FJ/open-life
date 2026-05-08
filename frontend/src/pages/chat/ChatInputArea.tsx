@@ -153,7 +153,11 @@ export default function ChatInputArea({
               }
             }}
             rows={2}
-            placeholder="输入消息，按 Enter 发送..."
+            placeholder={
+              diagnostics?.chat_ready
+                ? "输入消息，按 Enter 发送..."
+                : "请先前往设置页配置模型后端..."
+            }
             className="flex-1 resize-none border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <button

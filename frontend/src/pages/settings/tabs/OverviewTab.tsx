@@ -32,6 +32,36 @@ interface OverviewTabProps {
   setRebuildLoading: (v: boolean) => void;
   rebuildResult: string | null;
   setRebuildResult: (v: string | null) => void;
+  onNavigateTab: (tabId: string, anchorId?: string) => void;
+}
+
+type NavTarget = { tab: string; anchor?: string };
+
+function NavButton({
+  nav,
+  label,
+  onNavigateTab,
+  className,
+}: {
+  nav: NavTarget;
+  label: string;
+  onNavigateTab: (tabId: string, anchorId?: string) => void;
+  className?: string;
+}) {
+  return (
+    <button
+      onClick={e => {
+        e.preventDefault();
+        onNavigateTab(nav.tab, nav.anchor);
+      }}
+      className={
+        className ??
+        "shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50 cursor-pointer"
+      }
+    >
+      {label}
+    </button>
+  );
 }
 
 export default function OverviewTab({
@@ -47,6 +77,7 @@ export default function OverviewTab({
   setRebuildLoading,
   rebuildResult,
   setRebuildResult,
+  onNavigateTab,
 }: OverviewTabProps) {
   // ---- Data file health ----
   const df = diagnostics?.data_files;
@@ -73,7 +104,7 @@ export default function OverviewTab({
         ? `${diagnostics?.cloud_provider ?? "云端"} 已配置${diagnostics?.config_source === "env_var" ? "（来自环境变量）" : ""}`
         : "还没有可用的云端 API Key",
       action: "配置模型",
-      href: "#llm-settings",
+      nav: { tab: "provider", anchor: "llm-settings" } as NavTarget,
     },
     {
       label: "本地模型",
@@ -82,7 +113,7 @@ export default function OverviewTab({
         ? `${diagnostics?.resolved_local_model || diagnostics?.local_model} 在线`
         : "Ollama 离线，若走本地模型需要先启动",
       action: "查看本地配置",
-      href: "#local-model-settings",
+      nav: { tab: "provider", anchor: "local-model-settings" } as NavTarget,
     },
     {
       label: "人生模型",
@@ -103,7 +134,7 @@ export default function OverviewTab({
             ? "继续 Builder"
             : "去构建"
         : "查看模型",
-      href: diagnostics?.model_empty ? "#/builder" : "#/",
+      href: "/" + (diagnostics?.model_empty ? "builder" : ""),
     },
     {
       label: "数据文件",
@@ -115,7 +146,7 @@ export default function OverviewTab({
             ? "部分数据文件缺失"
             : "等待诊断",
       action: "查看数据",
-      href: "#data-health",
+      nav: { tab: "data", anchor: "data-health" } as NavTarget,
     },
     {
       label: "对话验证",
@@ -125,7 +156,7 @@ export default function OverviewTab({
           ? `${diagnostics?.chat_session_count} 个会话`
           : "还没有完成过一轮对话",
       action: "去对话",
-      href: "#/chat",
+      href: "/chat",
     },
   ];
 
@@ -147,7 +178,7 @@ export default function OverviewTab({
         ? `${diagnostics?.cloud_provider ?? "本地"} 可用`
         : (diagnostics?.readiness_issues[0] ?? "未配置可用模型"),
       action: "配置模型",
-      href: "#provider",
+      nav: { tab: "provider" } as NavTarget,
     },
     {
       id: "life-model",
@@ -155,7 +186,7 @@ export default function OverviewTab({
       ok: Boolean(diagnostics?.life_model_ready && !diagnostics?.model_empty),
       detail: diagnostics?.model_empty ? "人生模型为空，建议先构建" : "LifeModel 可读取且非空",
       action: diagnostics?.model_empty ? "去构建" : "查看模型",
-      href: diagnostics?.model_empty ? "#/builder" : "#/",
+      href: "/" + (diagnostics?.model_empty ? "builder" : ""),
     },
     {
       id: "data-health",
@@ -167,7 +198,7 @@ export default function OverviewTab({
           ? "数据库降级运行"
           : "数据文件正常",
       action: safeMode ? "查看恢复" : "查看数据",
-      href: "#data-health",
+      nav: { tab: "data", anchor: "data-health" } as NavTarget,
     },
     {
       id: "pending-proposals",
@@ -182,7 +213,7 @@ export default function OverviewTab({
             }`
           : "无待处理提案",
       action: (diagnostics?.pending_proposal_count ?? 0) > 0 ? "去审阅" : "查看",
-      href: "#/review",
+      href: "/review",
     },
     {
       id: "agent-runs",
@@ -193,7 +224,7 @@ export default function OverviewTab({
           ? `${diagnostics?.agent_run_count} 条运行记录`
           : "暂无运行记录",
       action: "查看 Runs",
-      href: "#/runs",
+      href: "/runs",
     },
     {
       id: "backup-snapshot",
@@ -204,15 +235,16 @@ export default function OverviewTab({
           ? `${diagnostics?.snapshot_count} 个快照已创建`
           : "尚未创建快照，建议先导出备份",
       action: (diagnostics?.snapshot_count ?? 0) > 0 ? "查看版本" : "去导出",
-      href: (diagnostics?.snapshot_count ?? 0) > 0 ? "#/versions" : "#data-tab",
+      href: (diagnostics?.snapshot_count ?? 0) > 0 ? "/versions" : undefined,
+      nav: (diagnostics?.snapshot_count ?? 0) > 0 ? undefined : ({ tab: "data" } as NavTarget),
     },
     {
       id: "diagnostic-export",
       label: "诊断导出",
       ok: true,
-      detail: "可随时导出诊断报告",
+      detail: "可随时导出诊断报告（不含 API Key 和私人内容）",
       action: "导出诊断",
-      href: "#data-tab",
+      nav: { tab: "data" } as NavTarget,
     },
   ];
 
@@ -225,7 +257,7 @@ export default function OverviewTab({
       detail: diagnostics?.chat_ready
         ? "模型后端已经可用，基础运行环境通过。"
         : "先把本地或云端模型跑通，避免进入聊天页后才发现不能用。",
-      to: "#llm-settings",
+      nav: { tab: "provider", anchor: "llm-settings" } as NavTarget,
       action: "检查模型配置",
     },
     {
@@ -238,7 +270,7 @@ export default function OverviewTab({
             ? `Builder 里还有 ${diagnostics?.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，比重新开始更合适。`
             : "Builder 还没形成最小模型，当前很多建议仍会偏通用。"
         : "人生模型已可读取，个性化能力开始成立。",
-      to: "#/builder",
+      href: "/builder",
       action: diagnostics?.model_empty
         ? (diagnostics?.pending_builder_review_sessions ?? 0) > 0
           ? "去审阅"
@@ -254,7 +286,7 @@ export default function OverviewTab({
         (diagnostics?.chat_session_count ?? 0) > 0
           ? `已经完成 ${diagnostics?.chat_session_count ?? 0} 次对话验证。`
           : "至少完成一轮真实对话，才能确认主链路不是只在设置页看起来正常。",
-      to: "#/chat",
+      href: "/chat",
       action: "去对话",
     },
     {
@@ -264,7 +296,7 @@ export default function OverviewTab({
         (diagnostics?.snapshot_count ?? 0) > 0
           ? `已经有 ${diagnostics?.snapshot_count} 个快照，版本安全网已建立。`
           : "至少确认一次快照/回滚路径，Beta 试用才算具备可恢复能力。",
-      to: "#/versions",
+      href: "/versions",
       action: "看版本控制",
     },
   ];
@@ -384,12 +416,16 @@ export default function OverviewTab({
                   <div className="text-sm font-medium text-stone-800">{item.label}</div>
                   <div className="truncate text-xs text-stone-500">{item.detail}</div>
                 </div>
-                <a
-                  href={item.href}
-                  className="shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
-                >
-                  {item.action}
-                </a>
+                {"nav" in item && item.nav ? (
+                  <NavButton nav={item.nav} label={item.action} onNavigateTab={onNavigateTab} />
+                ) : item.href ? (
+                  <Link
+                    to={item.href}
+                    className="shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                  >
+                    {item.action}
+                  </Link>
+                ) : null}
               </div>
             ))}
           </div>
@@ -456,12 +492,16 @@ export default function OverviewTab({
                   <div className="text-sm font-medium text-stone-800">{item.label}</div>
                   <div className="truncate text-xs text-stone-500">{item.detail}</div>
                 </div>
-                <a
-                  href={item.href}
-                  className="shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
-                >
-                  {item.action}
-                </a>
+                {"nav" in item && item.nav ? (
+                  <NavButton nav={item.nav} label={item.action} onNavigateTab={onNavigateTab} />
+                ) : item.href ? (
+                  <Link
+                    to={item.href}
+                    className="shrink-0 rounded-full border border-stone-200 bg-white px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                  >
+                    {item.action}
+                  </Link>
+                ) : null}
               </div>
             ))}
           </div>
@@ -520,12 +560,16 @@ export default function OverviewTab({
                   </span>
                 </div>
                 <div className="mt-3">
-                  <a
-                    href={step.to}
-                    className="inline-flex rounded-full border border-stone-200 bg-white px-3 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
-                  >
-                    {step.action}
-                  </a>
+                  {"nav" in step && step.nav ? (
+                    <NavButton nav={step.nav} label={step.action} onNavigateTab={onNavigateTab} />
+                  ) : step.href ? (
+                    <Link
+                      to={step.href}
+                      className="inline-flex rounded-full border border-stone-200 bg-white px-3 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                    >
+                      {step.action}
+                    </Link>
+                  ) : null}
                 </div>
               </div>
             ))}
@@ -539,12 +583,12 @@ export default function OverviewTab({
           <div className="text-sm font-medium text-gray-700">快速修复</div>
           <div className="flex flex-wrap gap-2">
             {!diagnostics.cloud_api_configured && (
-              <a
-                href="#llm-settings"
+              <NavButton
+                nav={{ tab: "provider", anchor: "llm-settings" }}
+                label="1. 配置 API Key"
+                onNavigateTab={onNavigateTab}
                 className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-700"
-              >
-                1. 配置 API Key
-              </a>
+              />
             )}
             {diagnostics.model_empty && (
               <Link

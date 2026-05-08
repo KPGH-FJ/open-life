@@ -162,21 +162,14 @@ export default function SettingsPage() {
     setMessage(null);
     try {
       const diag = await getSystemDiagnostics();
-      // Privacy-governed diagnostic export: explicitly exclude raw sensitive content
-      const redactedDiagnostics = diag
-        ? {
-            ...diag,
-            // Exclude raw config values that may contain secrets
-            // Keep only summary/status fields
-          }
-        : null;
+      const safeDiagnostics = buildSafeDiagnosticExportPayload(diag);
 
       const report = {
         timestamp: new Date().toISOString(),
         app_version: diag?.app_version || "unknown",
         platform: navigator.platform,
         userAgent: navigator.userAgent,
-        diagnostics: redactedDiagnostics,
+        diagnostics: safeDiagnostics,
         config_summary: {
           provider: config.llm?.provider,
           prefer_local: config.prefer_local_model,
@@ -187,12 +180,17 @@ export default function SettingsPage() {
         screen_size: `${window.screen.width}x${window.screen.height}`,
         language: navigator.language,
         privacy_manifest: {
+          export_strategy: "explicit-whitelist",
           includes_raw_life_model: false,
           includes_raw_messages: false,
           includes_raw_memory: false,
           includes_raw_tool_output: false,
           includes_raw_prompts: false,
           includes_api_keys: false,
+          includes_raw_config: false,
+          includes_local_paths: false,
+          retained_summary_fields:
+            "Boolean readiness flags, numeric counts, provider/model names (non-sensitive), database/file health booleans, startup warnings / readiness issues (local paths redacted to [local-path]), builder completion percentages, userAgent, platform",
           purpose: "Beta trial feedback and issue diagnosis",
           auto_upload: false,
         },
@@ -210,7 +208,6 @@ export default function SettingsPage() {
         defaultPath: `openlife-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
       });
       if (!path) {
-        setExportLoading(false);
         return;
       }
       await writeTextFile(path, JSON.stringify(report, null, 2));
@@ -232,7 +229,6 @@ export default function SettingsPage() {
         defaultPath: "openlife-export.json",
       });
       if (!path) {
-        setExportLoading(false);
         return;
       }
       await writeTextFile(path, JSON.stringify(data, null, 2));
@@ -260,7 +256,6 @@ export default function SettingsPage() {
       });
       const path = Array.isArray(selected) ? selected[0] : selected;
       if (!path) {
-        setImportLoading(false);
         return;
       }
       const text = await readTextFile(path);
@@ -351,6 +346,20 @@ export default function SettingsPage() {
 
   const safeMode = isSafeMode(diagnostics);
 
+  const handleNavigateToTab = (tabId: string, anchorId?: string) => {
+    setActiveTab(tabId);
+    if (anchorId) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const el = document.getElementById(anchorId);
+          if (el) {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        });
+      });
+    }
+  };
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -423,6 +432,7 @@ export default function SettingsPage() {
             setRebuildLoading={setRebuildLoading}
             rebuildResult={rebuildResult}
             setRebuildResult={setRebuildResult}
+            onNavigateTab={handleNavigateToTab}
           />
         )}
 
@@ -513,4 +523,102 @@ function readableError(e: unknown): string {
     if ("error" in e && typeof (e as any).error === "string") return (e as any).error;
   }
   return String(e);
+}
+
+function redactLocalPathsFromText(text: string): string {
+  if (!text) return text;
+
+  return text
+    .replace(
+      /(^|[\s"'=(:：])file:\/\/\/[^,;'"()\[\]<>]+/gi,
+      (_match, prefix) => `${prefix}[local-file-url]`
+    )
+    .replace(
+      /(^|[\s"'=(:：])\\\\[a-zA-Z0-9_.-]+\\[^,;'"()\[\]<>]+/g,
+      (_match, prefix) => `${prefix}[local-path]`
+    )
+    .replace(
+      /(^|[\s"'=(:：])[A-Za-z]:\\[^,;'"()\[\]<>]+/g,
+      (_match, prefix) => `${prefix}[local-path]`
+    )
+    .replace(
+      /(^|[\s"'=(:：])\/[a-zA-Z][^,;'"()\[\]<>]*(?:\/[^,;'"()\[\]<>]+)+/g,
+      (_match, prefix) => `${prefix}[local-path]`
+    );
+}
+
+function redactLocalPathsFromList(values?: string[] | null): string[] {
+  if (!values || values.length === 0) return [];
+  return values.map(v => redactLocalPathsFromText(v));
+}
+
+function buildSafeDiagnosticExportPayload(
+  diag: SystemDiagnostics | null
+): Record<string, unknown> | null {
+  if (!diag) return null;
+
+  return {
+    beta_ready: diag.beta_ready,
+    chat_ready: diag.chat_ready,
+    onboarding_completed: diag.onboarding_completed,
+    cloud_api_configured: diag.cloud_api_configured,
+    cloud_provider: diag.cloud_provider ?? null,
+    config_source: diag.config_source,
+    memory_chunk_count: diag.memory_chunk_count,
+    vector_corrupt_embedding_count: diag.vector_corrupt_embedding_count ?? 0,
+    startup_warnings: redactLocalPathsFromList(diag.startup_warnings),
+    database_status: diag.database_status ?? "unknown",
+    chat_session_count: diag.chat_session_count,
+    agent_run_count: diag.agent_run_count,
+    agent_run_store_status: diag.agent_run_store_status,
+    pending_proposal_count: diag.pending_proposal_count,
+    high_risk_pending_proposal_count: diag.high_risk_pending_proposal_count,
+    proposal_store_status: diag.proposal_store_status,
+    snapshot_count: diag.snapshot_count,
+    life_model_ready: diag.life_model_ready,
+    model_empty: diag.model_empty,
+    ollama_online: diag.ollama_online,
+    local_model: diag.local_model,
+    resolved_local_model: diag.resolved_local_model ?? null,
+    prefer_local_model: diag.prefer_local_model,
+    mcp_server_count: diag.mcp_server_count,
+    mcp_tool_count: diag.mcp_tool_count,
+    mcp_recent_audit_count: diag.mcp_recent_audit_count,
+    mcp_recent_pii_count: diag.mcp_recent_pii_count,
+    unfinished_builder_sessions: diag.unfinished_builder_sessions,
+    pending_builder_review_sessions: diag.pending_builder_review_sessions ?? 0,
+    app_version: diag.app_version,
+    readiness_issues: redactLocalPathsFromList(diag.readiness_issues),
+    beta_readiness_issues: redactLocalPathsFromList(diag.beta_readiness_issues),
+    router: {
+      onnx_available: diag.router.onnx_available,
+      active_backend: diag.router.active_backend,
+    },
+    builder_completion: diag.builder_completion
+      ? {
+          identity: diag.builder_completion.identity,
+          goals: diag.builder_completion.goals,
+          capabilities: diag.builder_completion.capabilities,
+          state: diag.builder_completion.state,
+          overall: diag.builder_completion.overall,
+          lowest_dimension: diag.builder_completion.lowest_dimension,
+        }
+      : null,
+    data_files: diag.data_files
+      ? {
+          messages_db_exists: diag.data_files.messages_db_exists,
+          messages_db_size_mb: diag.data_files.messages_db_size_mb,
+          vectors_db_exists: diag.data_files.vectors_db_exists,
+          vectors_db_size_mb: diag.data_files.vectors_db_size_mb,
+          mcp_audit_db_exists: diag.data_files.mcp_audit_db_exists,
+          mcp_audit_db_size_mb: diag.data_files.mcp_audit_db_size_mb,
+          config_yaml_exists: diag.data_files.config_yaml_exists,
+          life_model_yaml_exists: diag.data_files.life_model_yaml_exists,
+        }
+      : null,
+    ollama_models: (diag.ollama_models ?? []).map(m => ({
+      name: m.name,
+      size_mb: m.size_mb,
+    })),
+  };
 }

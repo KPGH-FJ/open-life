@@ -52,9 +52,9 @@ export default function DataTab({
   return (
     <>
       {/* Data Migration */}
-      <section className="space-y-4 border-t pt-4">
+      <section id="data-health" className="space-y-4 border-t pt-4">
         <h3 className="text-sm font-medium text-gray-700">数字遗产 / 数据迁移</h3>
-        <div className="flex flex-wrap gap-3">
+        <div id="backup-snapshot" className="flex flex-wrap gap-3">
           <button
             onClick={handleExport}
             disabled={exportLoading}
@@ -147,7 +147,7 @@ export default function DataTab({
       </section>
 
       {/* Maintenance */}
-      <section className="space-y-4 border-t pt-4">
+      <section id="diagnostic-export" className="space-y-4 border-t pt-4">
         <h3 className="text-sm font-medium text-gray-700">系统维护</h3>
         <div className="flex flex-wrap gap-3">
           <button

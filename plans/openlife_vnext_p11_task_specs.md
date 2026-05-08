@@ -2,7 +2,7 @@
 
 Date: 2026-05-08
 
-Status: current
+Status: accepted
 
 Package:
 

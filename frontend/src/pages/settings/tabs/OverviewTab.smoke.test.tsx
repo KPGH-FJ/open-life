@@ -81,6 +81,7 @@ const baseProps = {
   setRebuildResult: vi.fn(),
   tierResult: null,
   setTierResult: vi.fn(),
+  onNavigateTab: vi.fn(),
 };
 
 describe("P11 Smoke: OverviewTab readiness states", () => {

@@ -12,24 +12,192 @@ You are working on OpenLife vNext Agent Framework.
 Read first:
 - AGENTS.md
 - plans/openlife_vnext_migration_plan.md
-- plans/openlife_vnext_p11_task_specs.md
+- plans/openlife_vnext_p12_task_specs.md
 - plans/openlife_vnext_test_and_acceptance_matrix.md
 - plans/openlife_ai_coding_governance.md
 - relevant ADR files under plans/adr/
 
-Current phase: P10 Frontend Agent Workspace has passed acceptance. P11 Beta Trial Readiness is next.
+Current phase: P11 / P11.1 Beta Trial Readiness has passed acceptance. P12 Beta Release Candidate and User Trial Delivery is next.
 
 Rules:
 - Execute exactly one task spec.
 - Edit only allowed files.
 - Do not implement non-goals.
-- Do not expand SubAgentRuntime, Bash/Shell, or runtime authority during P11.
+- Do not expand SubAgentRuntime, Bash/Shell, or runtime authority during P12.
 - Do not bypass ToolRuntime, Proposal, PromptStack, or AgentRunEvent.
-- For P11: focus on trial paths, diagnostics, recovery, smoke checks, and privacy-governed feedback.
+- For P12: focus on user trial handoff, release build drill, first-run golden path polish, and RC acceptance reporting.
 - P9 shell remains default-off: no interactive terminal, no generic chat shell, no scheduled/proactive/sub-agent shell.
 - Add tests for new behavior.
 - Run verification commands.
 - Report changed files, tests run, results, and residual risks.
+```
+
+## P12 Global Prompt
+
+```text
+You are working on OpenLife vNext P12: Beta Release Candidate and User Trial Delivery.
+
+Read first:
+- AGENTS.md
+- README.md
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+- plans/openlife_vnext_p12_beta_rc_acceptance_report.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_ai_coding_governance.md
+- plans/adr/0009-execution-sandbox-bash.md
+
+Goal:
+- Prepare OpenLife for small-scope real-user Beta trial handoff after P11/P11.1
+  acceptance.
+- Make the app launchable, buildable, explainable, and testable by users who do
+  not read source code.
+
+Rules:
+- Execute exactly one P12 task spec.
+- Do not rewrite ChatPage.
+- Do not enable normal chat shell, terminal UI, scheduled shell, proactive shell,
+  or sub-agent shell.
+- Do not add new runtime privileges without a separate ADR and task spec.
+- Do not add automatic upload of diagnostics or private data.
+- Keep diagnostics explicit-whitelist and path-redacted.
+- Prefer release readiness, trial guidance, and first-run polish over new
+  framework features.
+- Add tests for any changed UI or command contract.
+- Run the verification commands listed in the task spec.
+- Report changed files, tests run, results, and residual risks.
+```
+
+## P12-0 Prompt
+
+```text
+Execute vNext task P12-0: Documentation And Phase Sync.
+
+Use:
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_migration_plan.md
+- plans/openlife_vnext_test_and_acceptance_matrix.md
+- plans/openlife_vnext_agent_coding_prompts.md
+- plans/openlife_vnext_p12_beta_rc_acceptance_report.md
+
+Goal:
+- Mark P11 / P11.1 as accepted.
+- Make P12 Beta Release Candidate and User Trial Delivery discoverable from
+  README, AGENTS, migration plan, acceptance matrix, and coding prompts.
+
+Constraints:
+- Documentation only.
+- Do not change Rust or TypeScript code.
+- Do not introduce a new runtime feature.
+
+Verification:
+- rg -n "P12|Beta Release Candidate|openlife_vnext_p12_task_specs|P11.*accepted|P11.*验收" AGENTS.md README.md plans
+- git diff --name-only contains documentation files only.
+```
+
+## P12-1 Prompt
+
+```text
+Execute vNext task P12-1: User Trial Guide.
+
+Use:
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+- README.md
+
+Goal:
+- Create or refine a short guide that a tester can follow without reading
+  architecture docs.
+- Cover launch/install, model configuration, LifeModel build, first chat,
+  Proposal Review, Runs inspection, diagnostic export, and feedback reporting.
+
+Constraints:
+- User-facing documentation first.
+- Do not change runtime behavior unless a guide-blocking issue is discovered
+  and scoped separately.
+- Do not include secrets, private data, or raw diagnostic examples.
+
+Verification:
+- Guide can be followed from a clean profile.
+- Guide links to detailed P11 trial matrix for smoke scripts.
+```
+
+## P12-2 Prompt
+
+```text
+Execute vNext task P12-2: Release Build Drill.
+
+Use:
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_p12_beta_rc_acceptance_report.md
+- README.md
+
+Goal:
+- Attempt the desktop release build.
+- Record command, result, artifact path, and blockers in the RC report.
+
+Constraints:
+- Do not commit signing credentials.
+- Do not weaken Tauri/security capabilities to make a build pass.
+- Fix only focused, low-risk build blockers.
+
+Verification:
+- make ci
+- pnpm --dir frontend build
+- cargo tauri build or the repo's documented release build command
+- RC report records exact result.
+```
+
+## P12-3 Prompt
+
+```text
+Execute vNext task P12-3: First-Run Golden Path Polish.
+
+Use:
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+- README.md
+
+Goal:
+- Remove trial-blocking friction from first launch, Settings readiness, Builder,
+  Chat, Review Center, Runs, and diagnostic export.
+
+Constraints:
+- No broad UI rewrite.
+- No ChatPage rewrite.
+- No new runtime authority or model calls just for polish.
+- Keep P9 shell default-off.
+
+Verification:
+- frontend tests for changed surfaces
+- pnpm --dir frontend typecheck
+- make ci
+```
+
+## P12-4 Prompt
+
+```text
+Execute vNext task P12-4: Beta RC Acceptance Run.
+
+Use:
+- plans/openlife_vnext_p12_task_specs.md
+- plans/openlife_vnext_p12_beta_rc_acceptance_report.md
+- plans/openlife_vnext_p11_trial_path_matrix.md
+
+Goal:
+- Fill the Beta RC acceptance report.
+- Record clean-profile and existing-profile smoke results.
+- Make an explicit go / no-go / conditional-go decision.
+
+Constraints:
+- Do not claim release readiness without evidence.
+- No untriaged P0/P1 blocker may remain.
+- Document signing/notarization blockers honestly if they exist.
+
+Verification:
+- make ci
+- release build command attempted and recorded
+- P11 trial matrix results recorded in the RC report
 ```
 
 ## P11 Global Prompt
