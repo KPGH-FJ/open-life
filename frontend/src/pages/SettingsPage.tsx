@@ -14,6 +14,8 @@ import {
   rotateMcpAuditKey,
   getPrivacyPolicy,
   setPrivacyPolicy,
+  getDefaultAgentSpec,
+  updateAgentSpec,
   type ExportPayload,
   type HotMemoryCache,
   type PrivacyPolicy,
@@ -28,6 +30,7 @@ import {
   type PluginRecord,
   type ToolManifest,
 } from "../tauri";
+import type { AgentSpec, PrivacyPolicy as AgentPrivacyPolicy } from "../types";
 import { LayoutDashboard, Cpu, Shield, Database, Puzzle } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
@@ -103,6 +106,8 @@ export default function SettingsPage() {
   const [toolManifests, setToolManifests] = useState<ToolManifest[]>([]);
   const [securityLoading, setSecurityLoading] = useState(false);
   const [securityMessage, setSecurityMessage] = useState<string | null>(null);
+  const [agentSpec, setAgentSpec] = useState<AgentSpec | null>(null);
+  const [agentSpecSaving, setAgentSpecSaving] = useState(false);
   const [activeTab, setActiveTab] = useState<string>("overview");
 
   useEffect(() => {
@@ -122,7 +127,7 @@ export default function SettingsPage() {
   }, []);
 
   const refreshAllDiagnostics = async () => {
-    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests] =
+    const [router, modelRouter, diag, cache, policy, permissions, pluginRecords, manifests, spec] =
       await Promise.all([
         getRouterStatus().catch(() => null),
         getModelRouterStatus().catch(() => null),
@@ -132,6 +137,7 @@ export default function SettingsPage() {
         listToolPermissions().catch(() => []),
         listPlugins().catch(() => []),
         listToolManifests().catch(() => []),
+        getDefaultAgentSpec().catch(() => null),
       ]);
     setRouterStatus(router);
     setModelRouterStatus(modelRouter);
@@ -141,6 +147,7 @@ export default function SettingsPage() {
     setToolPermissions(permissions);
     setPlugins(pluginRecords);
     setToolManifests(manifests);
+    setAgentSpec(spec);
     return diag;
   };
 
@@ -345,6 +352,21 @@ export default function SettingsPage() {
     }
   };
 
+  const handleUpdateAgentSpecPrivacy = async (policy: AgentPrivacyPolicy) => {
+    if (!agentSpec) return;
+    setAgentSpecSaving(true);
+    try {
+      const updated = { ...agentSpec, privacyPolicy: policy };
+      await updateAgentSpec(updated);
+      setAgentSpec(updated);
+      setSecurityMessage("Agent 隐私策略已更新，下次对话生效");
+    } catch (e: any) {
+      setSecurityMessage("Agent 隐私策略更新失败: " + readableError(e));
+    } finally {
+      setAgentSpecSaving(false);
+    }
+  };
+
   const safeMode = isSafeMode(diagnostics);
 
   const handleNavigateToTab = (tabId: string, anchorId?: string) => {
@@ -445,6 +467,9 @@ export default function SettingsPage() {
             diagnostics={diagnostics}
             routerStatus={routerStatus}
             modelRouterStatus={modelRouterStatus}
+            agentSpec={agentSpec}
+            agentSpecSaving={agentSpecSaving}
+            onUpdateAgentSpecPrivacy={handleUpdateAgentSpecPrivacy}
           />
         )}
 

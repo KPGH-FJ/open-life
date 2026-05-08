@@ -47,6 +47,9 @@ describe("ProviderTab", () => {
             diagnostics={mockDiagnostics}
             routerStatus={null}
             modelRouterStatus={null}
+            agentSpec={null}
+            agentSpecSaving={false}
+            onUpdateAgentSpecPrivacy={vi.fn()}
           />
         </MemoryRouter>
       );
@@ -71,6 +74,9 @@ describe("ProviderTab", () => {
               } as any
             }
             modelRouterStatus={null}
+            agentSpec={null}
+            agentSpecSaving={false}
+            onUpdateAgentSpecPrivacy={vi.fn()}
           />
         </MemoryRouter>
       );

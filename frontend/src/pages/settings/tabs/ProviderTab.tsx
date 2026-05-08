@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import ProviderConfigSection from "../ProviderConfigSection";
 import type { AppConfig, SystemDiagnostics, RouterStatus, ModelRouterStatus } from "../../../tauri";
+import type { AgentSpec, PrivacyPolicy as AgentPrivacyPolicy } from "../../../types";
 
 function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
@@ -12,6 +13,9 @@ interface ProviderTabProps {
   diagnostics: SystemDiagnostics | null;
   routerStatus: RouterStatus | null;
   modelRouterStatus: ModelRouterStatus | null;
+  agentSpec: AgentSpec | null;
+  agentSpecSaving: boolean;
+  onUpdateAgentSpecPrivacy: (policy: AgentPrivacyPolicy) => Promise<void>;
 }
 
 export default function ProviderTab({
@@ -20,10 +24,50 @@ export default function ProviderTab({
   diagnostics,
   routerStatus,
   modelRouterStatus,
+  agentSpec,
+  agentSpecSaving,
+  onUpdateAgentSpecPrivacy,
 }: ProviderTabProps) {
   return (
     <>
       <ProviderConfigSection config={config} onConfigChange={setConfig} diagnostics={diagnostics} />
+
+      {/* Agent Privacy Policy */}
+      <section className="space-y-4 border-t pt-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium text-gray-700">Agent 隐私策略</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              控制对话数据是否可以发送到云端模型。
+              {agentSpec && (
+                <span className="ml-1">
+                  当前：<span className="font-medium">{agentSpec.privacyPolicy}</span>
+                </span>
+              )}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <select
+            value={agentSpec?.privacyPolicy ?? "local_only"}
+            onChange={e =>
+              onUpdateAgentSpecPrivacy(e.target.value as AgentPrivacyPolicy)
+            }
+            disabled={!agentSpec || agentSpecSaving}
+            className="rounded-lg border border-gray-200 px-3 py-2 text-sm disabled:opacity-50"
+          >
+            <option value="local_only">仅本地 (LocalOnly) — 数据不出设备，需 Ollama</option>
+            <option value="summary_only">摘要上云 (SummaryOnly) — 仅摘要信息上云</option>
+            <option value="cloud_allowed">允许上云 (CloudAllowed) — 完整上下文可上云</option>
+          </select>
+          {agentSpecSaving && (
+            <span className="text-xs text-gray-500">保存中...</span>
+          )}
+        </div>
+        <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
+          <p>选择「仅本地」需要本地启动 Ollama 服务。选择「允许上云」后需要配置云端 API Key。</p>
+        </div>
+      </section>
 
       {/* Router */}
       <section className="space-y-4 border-t pt-4">
