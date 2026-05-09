@@ -126,6 +126,11 @@ struct AgentLoopContext<'a> {
 const USER_REQUEST_START: &str = "[BEGIN USER REQUEST]";
 const USER_REQUEST_END: &str = "[END USER REQUEST]";
 
+fn should_hold_streaming_reply(pending: &str) -> bool {
+    let trimmed = pending.trim_start();
+    trimmed.is_empty() || trimmed.starts_with('{') || trimmed.starts_with("```")
+}
+
 /// Wrap user content in boundary markers to mitigate prompt injection.
 /// Affects messages with role == "user" and the standalone user_text field.
 fn wrap_user_content(task: &mut AgentTask) {
@@ -1141,11 +1146,24 @@ impl AgentLoop {
             .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
 
         let mut reply = String::new();
+        let mut pending_visible_reply = String::new();
+        let mut visible_stream_started = false;
         loop {
             match stream.next().await {
                 Some(Ok(chunk)) => {
-                    callback.on_chunk(&chunk, 0, "generating").await;
                     reply.push_str(&chunk);
+                    if visible_stream_started {
+                        callback.on_chunk(&chunk, 0, "generating").await;
+                    } else {
+                        pending_visible_reply.push_str(&chunk);
+                        if !should_hold_streaming_reply(&pending_visible_reply) {
+                            visible_stream_started = true;
+                            callback
+                                .on_chunk(&pending_visible_reply, 0, "generating")
+                                .await;
+                            pending_visible_reply.clear();
+                        }
+                    }
                 }
                 Some(Err(e)) => {
                     eprintln!("[AgentLoop] Stream chunk error: {}", e);
@@ -1842,6 +1860,15 @@ mod tests {
     }
 
     // ── parse_agent_reply tests ──────────────────────────────────────────
+
+    #[test]
+    fn streaming_reply_holds_structured_tool_json() {
+        assert!(should_hold_streaming_reply(""));
+        assert!(should_hold_streaming_reply("  \n"));
+        assert!(should_hold_streaming_reply("{\"tool_calls\":["));
+        assert!(should_hold_streaming_reply("```json\n{\"tool_calls\":["));
+        assert!(!should_hold_streaming_reply("我先查一下最新信息。"));
+    }
 
     #[test]
     fn parse_final_only_no_json() {

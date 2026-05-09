@@ -1563,9 +1563,7 @@ export interface PatchApplyResult {
   error?: string;
 }
 
-export async function acceptProposal(
-  proposalId: string
-): Promise<{
+export async function acceptProposal(proposalId: string): Promise<{
   success: boolean;
   patchResult: PatchApplyResult;
   patch_result?: PatchApplyResult;

@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// MCP Tool definition
@@ -49,7 +50,7 @@ struct JsonRpcError {
 /// MCP Client using Stdio transport
 pub struct McpClient {
     child: Arc<Mutex<Child>>,
-    request_id: Arc<Mutex<u64>>,
+    request_id: Arc<AtomicU64>,
     pub command: String,
     pub args: Vec<String>,
 }
@@ -98,7 +99,7 @@ impl McpClient {
 
         Ok(Self {
             child: Arc::new(Mutex::new(child)),
-            request_id: Arc::new(Mutex::new(1)),
+            request_id: Arc::new(AtomicU64::new(1)),
             command: command.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
         })
@@ -112,10 +113,7 @@ impl McpClient {
     }
 
     fn next_id(&self) -> u64 {
-        let mut id = self.request_id.lock().unwrap();
-        let current = *id;
-        *id += 1;
-        current
+        self.request_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// List available tools from the MCP server

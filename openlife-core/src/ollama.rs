@@ -17,10 +17,7 @@ pub struct OllamaChatResponse {
     pub done: bool,
 }
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Mutex,
-};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 struct OllamaCache {
@@ -29,7 +26,7 @@ struct OllamaCache {
     resolved_model: Option<String>,
 }
 
-static OLLAMA_CACHE: Mutex<Option<OllamaCache>> = Mutex::new(None);
+static OLLAMA_CACHE: parking_lot::Mutex<Option<OllamaCache>> = parking_lot::Mutex::new(None);
 static OLLAMA_CACHE_TTL_SECONDS: AtomicU64 = AtomicU64::new(10);
 
 /// Set the Ollama cache TTL in seconds.
@@ -80,7 +77,7 @@ pub async fn list_ollama_models() -> Vec<(String, u64)> {
 /// Falls back to the first installed model so fresh trials can still proceed.
 pub async fn resolve_ollama_model(model: &str) -> Option<String> {
     {
-        let guard = OLLAMA_CACHE.lock().unwrap();
+        let guard = OLLAMA_CACHE.lock();
         if let Some(ref c) = *guard {
             if c.model == model && c.checked_at.elapsed() < get_ollama_cache_ttl() {
                 return c.resolved_model.clone();
@@ -122,7 +119,7 @@ pub async fn resolve_ollama_model(model: &str) -> Option<String> {
         }
         _ => None,
     };
-    let mut guard = OLLAMA_CACHE.lock().unwrap();
+    let mut guard = OLLAMA_CACHE.lock();
     *guard = Some(OllamaCache {
         checked_at: Instant::now(),
         model: model.to_string(),

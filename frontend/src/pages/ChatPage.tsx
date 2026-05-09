@@ -461,6 +461,7 @@ export default function ChatPage() {
 
   // Register stream listeners once per session to avoid leaks
   useEffect(() => {
+    let disposed = false;
     let unlistenStart: (() => void) | null = null;
     let unlistenChunk: (() => void) | null = null;
     let unlistenDone: (() => void) | null = null;
@@ -468,23 +469,23 @@ export default function ChatPage() {
     let unlistenPlanDone: (() => void) | null = null;
 
     (async () => {
-      unlistenStart = await listen<StreamMessageStartPayload>(
-        "stream-message-start",
-        async event => {
-          if (event.payload.session_id === currentSessionId) {
-            setReasoningTrace(event.payload.reasoning_trace ?? null);
-            setCurrentRunId(event.payload.run_id);
-            setToolCalls(
-              (event.payload.tool_calls ?? []).map(call => ({
-                ...call,
-                run_id: event.payload.run_id,
-              }))
-            );
-            await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
-          }
+      const start = await listen<StreamMessageStartPayload>("stream-message-start", async event => {
+        if (event.payload.session_id === currentSessionId) {
+          setReasoningTrace(event.payload.reasoning_trace ?? null);
+          setCurrentRunId(event.payload.run_id);
+          setToolCalls(
+            (event.payload.tool_calls ?? []).map(call => ({
+              ...call,
+              run_id: event.payload.run_id,
+            }))
+          );
+          await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
         }
-      );
-      unlistenChunk = await listen<{ session_id: string; chunk: string }>(
+      });
+      if (disposed) start();
+      else unlistenStart = start;
+
+      const chunk = await listen<{ session_id: string; chunk: string }>(
         "stream-message-chunk",
         event => {
           if (event.payload.session_id === currentSessionId) {
@@ -493,7 +494,10 @@ export default function ChatPage() {
           }
         }
       );
-      unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
+      if (disposed) chunk();
+      else unlistenChunk = chunk;
+
+      const done = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
           if (event.payload.run_id && lastDoneRunIdRef.current === event.payload.run_id) return;
           lastDoneRunIdRef.current = event.payload.run_id ?? null;
@@ -530,7 +534,10 @@ export default function ChatPage() {
             .catch(() => {});
         }
       });
-      unlistenError = await listen<{ session_id: string; run_id?: string; error: string }>(
+      if (disposed) done();
+      else unlistenDone = done;
+
+      const error = await listen<{ session_id: string; run_id?: string; error: string }>(
         "stream-message-error",
         async event => {
           if (event.payload.session_id === currentSessionId) {
@@ -551,7 +558,10 @@ export default function ChatPage() {
           }
         }
       );
-      unlistenPlanDone = await listen<{
+      if (disposed) error();
+      else unlistenError = error;
+
+      const planDone = await listen<{
         run_id: string;
         plan_id: string;
         success: boolean;
@@ -567,9 +577,12 @@ export default function ChatPage() {
           .catch(() => {});
         refreshAgentRuns(currentSessionIdRef.current);
       });
+      if (disposed) planDone();
+      else unlistenPlanDone = planDone;
     })();
 
     return () => {
+      disposed = true;
       flushStreaming();
       if (unlistenStart) unlistenStart();
       if (unlistenChunk) unlistenChunk();

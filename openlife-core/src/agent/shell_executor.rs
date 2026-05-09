@@ -169,7 +169,7 @@ fn has_shell_metacharacters(text: &str) -> bool {
 /// so the timeout path remains responsible for termination.
 fn drain_pipe(
     mut reader: impl std::io::Read,
-    buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    buf: std::sync::Arc<parking_lot::Mutex<Vec<u8>>>,
     max_bytes: usize,
 ) {
     let mut chunk = [0u8; 8192];
@@ -178,10 +178,7 @@ fn drain_pipe(
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => {
-                let mut guard = match buf.lock() {
-                    Ok(g) => g,
-                    Err(_) => break,
-                };
+                let mut guard = buf.lock();
                 let space = limit.saturating_sub(guard.len());
                 if space > 0 {
                     let take = n.min(space);
@@ -411,8 +408,8 @@ impl ShellExecutor {
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
 
-        let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stdout_buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let stderr_buf = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
 
         let stdout_thread = child_stdout.map(|out| {
             let buf = stdout_buf.clone();
@@ -441,8 +438,8 @@ impl ShellExecutor {
                             let _ = t.join();
                         }
                         let elapsed = start.elapsed().as_millis() as u64;
-                        let stdout_vec = stdout_buf.lock().unwrap().clone();
-                        let stderr_vec = stderr_buf.lock().unwrap().clone();
+                        let stdout_vec = stdout_buf.lock().clone();
+                        let stderr_vec = stderr_buf.lock().clone();
                         let truncated =
                             stdout_vec.len() >= max_bytes || stderr_vec.len() >= max_bytes;
                         return Ok(ShellCommandOutput {
@@ -472,8 +469,8 @@ impl ShellExecutor {
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let stdout_vec = stdout_buf.lock().unwrap().clone();
-        let stderr_vec = stderr_buf.lock().unwrap().clone();
+        let stdout_vec = stdout_buf.lock().clone();
+        let stderr_vec = stderr_buf.lock().clone();
 
         let truncated = stdout_vec.len() >= max_bytes || stderr_vec.len() >= max_bytes;
 

@@ -27,6 +27,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 ring = "0.17"
 log = "0.4"
+parking_lot = "0.12"
 
 [dev-dependencies]
 criterion = "0.8.2"
