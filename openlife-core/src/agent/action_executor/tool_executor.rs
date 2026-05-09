@@ -678,13 +678,23 @@ impl super::ActionExecutor {
             return None;
         }
 
-        let result = self.build_proposal_required_action(
+        let mut result = self.build_proposal_required_action(
             request.clone(),
             &format!(
                 "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
                 tool_name, proposal.id
             ),
         );
+        result.action.tool_scope = manifest.map(|m| ToolActionScope {
+            tool_name: m.name.clone(),
+            tool_id: m.id.clone(),
+            source: canonical_tool_source(m),
+            risk_level: m.risk_level.clone(),
+            capabilities: m.capabilities.clone(),
+            action_type: m.action_type.clone(),
+            requires_confirmation: true,
+            allowed: false,
+        });
 
         Some(Ok(result))
     }
@@ -1286,5 +1296,46 @@ mod tests {
         // Manifest is disabled → blocked at the manifest check
         assert_eq!(result.status, ActionExecutionStatus::Blocked);
         assert!(result.action.error.unwrap_or_default().contains("disabled"));
+    }
+
+    #[test]
+    fn test_tool_permission_proposal_action_keeps_tool_scope_for_replay() {
+        let mut reg = McpRegistry::new();
+        reg.register_default_builtins();
+        let ps = ToolPermissionStore::new_in_memory().unwrap();
+        ps.grant(
+            "web.search",
+            "builtin",
+            "medium",
+            "read",
+            crate::tool_permissions::ToolPermissionPolicy::AskEveryTime,
+            None,
+        )
+        .unwrap();
+        let audit = McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool3.db"));
+        let pe = PrivacyEngine::new();
+        let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
+            .with_proposal_store(&proposal_store);
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = crate::agent::AgentActionRequest {
+            action_type: "mcp_tool".into(),
+            target: "web.search".into(),
+            input: serde_json::json!({"arguments": {"query": "重庆万象城"}}),
+            source_run_id: Some("test-run-2".into()),
+            step_index: 0,
+        };
+        let result = executor.execute(request, &ctx).unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::NeedsConfirmation);
+        let scope = result
+            .action
+            .tool_scope
+            .expect("proposal-required action must retain tool_scope for replay");
+        assert_eq!(scope.tool_name, "web.search");
+        assert_eq!(scope.source, "builtin");
+        assert_eq!(scope.risk_level, "medium");
+        assert_eq!(scope.action_type, "read");
     }
 }

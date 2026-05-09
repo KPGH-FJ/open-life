@@ -1249,21 +1249,9 @@ pub(crate) async fn accept_proposal_with_state(
                 find_replayable_action_id_for_tool_permission(state, run_id, &proposal.after)
                     .await?
             {
-                response["continued_run_id"] = serde_json::Value::String(run_id.to_string());
-                response["continued_action_id"] = serde_json::Value::String(action_id.clone());
-                match crate::commands::agent::replay_action_internal(run_id, &action_id, state)
-                    .await
-                {
-                    Ok(action) => {
-                        response["continued"] = serde_json::Value::Bool(true);
-                        response["continued_action"] =
-                            serde_json::to_value(action).unwrap_or(serde_json::Value::Null);
-                    }
-                    Err(err) => {
-                        response["continued"] = serde_json::Value::Bool(false);
-                        response["continue_error"] = serde_json::Value::String(err.to_string());
-                    }
-                }
+                response["can_continue"] = serde_json::Value::Bool(true);
+                response["continue_run_id"] = serde_json::Value::String(run_id.to_string());
+                response["continue_action_id"] = serde_json::Value::String(action_id);
             }
         }
     }

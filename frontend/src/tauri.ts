@@ -1571,15 +1571,10 @@ export async function acceptProposal(
   patch_result?: PatchApplyResult;
   canContinue?: boolean;
   can_continue?: boolean;
-  continued?: boolean;
-  continuedRunId?: string;
-  continued_run_id?: string;
-  continuedActionId?: string;
-  continued_action_id?: string;
-  continuedAction?: AgentAction;
-  continued_action?: AgentAction;
-  continueError?: string;
-  continue_error?: string;
+  continueRunId?: string;
+  continue_run_id?: string;
+  continueActionId?: string;
+  continue_action_id?: string;
 }> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
