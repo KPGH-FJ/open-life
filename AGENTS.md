@@ -143,7 +143,7 @@
 │
 ├── src-tauri/                    # Tauri 应用壳
 │   ├── Cargo.toml                # Tauri 依赖 + bin 定义
-│   ├── tauri.conf.json           # Tauri 配置（identifier: ai.openlife.app）
+│   ├── tauri.conf.json           # Tauri 配置（identifier: ai.openlife.desktop）
 │   ├── capabilities/default.json # Tauri 权限声明
 │   └── src/
 │       ├── main.rs               # 桌面应用入口
@@ -449,7 +449,7 @@ VectorStore.search(query_embedding, top_k=5)
 7. **Ollama 缓存 10 秒**：`ollama.rs` 每 10 秒缓存一次模型可用性检查，状态变化不会立即反映。
 8. **向量记忆 tier 维护**：`vectors.rs` 定期运行 `run_tier_maintenance()`，高频访问 chunk 晋升 tier，低频降级。
 9. **HashRouter 强制使用**：前端必须使用 `HashRouter` 而非 `BrowserRouter`，因为 Tauri 桌面应用基于 `file://` 协议。
-10. **数据目录统一**：应用数据目录已统一为 `ai.openlife.app`（与 `tauri.conf.json` 的 `identifier` 一致），macOS 路径为 `~/Library/Application Support/ai.openlife.app/`。旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
+10. **数据目录统一**：应用数据目录已统一为 `ai.openlife.desktop`，macOS 路径为 `~/Library/Application Support/ai.openlife.desktop/`。如果你曾使用旧版本数据目录 `com.openlife.app` 或 `ai.openlife.app`，请将其中的数据手动复制到 `ai.openlife.desktop`。
 
 ### Tool Taxonomy（Beta 工具分类）
 
@@ -524,7 +524,7 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 
 配置优先级：**环境变量 > `config.yaml` > 代码默认值**
 
-运行时配置文件路径（macOS）：`~/Library/Application Support/ai.openlife.app/config.yaml`
+运行时配置文件路径（macOS）：`~/Library/Application Support/ai.openlife.desktop/config.yaml`
 
 ### SystemConfig 配置项
 
@@ -636,7 +636,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 1. **reqwest 版本不一致**：`openlife-core` 使用 `reqwest 0.11`，`src-tauri` 使用 `reqwest 0.12`。目前编译通过，但建议统一版本以避免潜在兼容性问题。
 2. ~~Ollama 缓存固定 10 秒~~ **已修复**：`ollama_cache_ttl_seconds` 已加入 `SystemConfig`，可通过 `config.yaml` 配置，默认仍为 10 秒。
-3. ~~数据目录与 Tauri identifier 不一致~~ **已修复**：数据目录已统一为 `ai.openlife.app`。旧版本数据如需迁移请手动复制。
+3. ~~数据目录与 Tauri identifier 不一致~~ **已修复**：数据目录已统一为 `ai.openlife.desktop`。如果你曾使用旧版本数据目录 `com.openlife.app` 或 `ai.openlife.app`，请将其中的数据手动复制到 `ai.openlife.desktop`。
 4. **MCP 审计日志单独数据库**：`mcp_audit.db` 与 `messages.db`/`vectors.db` 分开存储，这是设计上的隔离，但备份/迁移时容易遗漏。
 
 ### 常见陷阱

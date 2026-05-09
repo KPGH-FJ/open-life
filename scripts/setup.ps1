@@ -160,7 +160,7 @@ Write-Info "  - OPENAI_API_KEY (备选): https://platform.openai.com/api-keys"
 
 # Step 5: 初始化数据目录
 Write-Step "Step 5/5: 初始化数据存储"
-$dataDir = Join-Path $env:LOCALAPPDATA "ai.openlife.app"
+$dataDir = Join-Path $env:LOCALAPPDATA "ai.openlife.desktop"
 if (-not (Test-Path $dataDir)) {
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     Write-Success "创建数据目录: $dataDir"

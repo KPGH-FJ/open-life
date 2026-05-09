@@ -27,7 +27,15 @@ pub struct AgentLoopConfig {
     pub max_steps: u32,
     pub max_tool_calls: u32,
     pub timeout_seconds: u64,
+    /// If `true`, write-proposal tools (e.g. file.write_proposal, memory.propose_write)
+    /// may appear in the tool prompt and be executable. If `false`, the caller should
+    /// exclude write tools from the tool prompt. Currently hardcoded to `true` in the
+    /// Tauri Chat command; there is no runtime enforcement inside the AgentLoop.
     pub allow_writes: bool,
+    /// If `true`, model calls may be routed to cloud providers. If `false`, the caller
+    /// should restrict routing to local-only (Ollama). Currently hardcoded to `true`
+    /// in the Tauri Chat command; the actual routing is governed by the privacy_policy
+    /// and ModelRouter, not directly checked inside the AgentLoop.
     pub allow_cloud: bool,
     pub shutdown_notify: Option<Arc<tokio::sync::Notify>>,
     /// Specialized role for tool selection and system prompt tuning
@@ -822,6 +830,9 @@ impl AgentLoop {
                 if ctx.run.reasoning_trace.is_none() {
                     ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
                 }
+                if ctx.run.model_route.is_none() {
+                    ctx.run.model_route = gen.model_route.clone();
+                }
 
                 let reply = gen.reply;
 
@@ -1024,6 +1035,26 @@ impl AgentLoop {
         } else {
             Some(actx.tools_prompt)
         };
+
+        let route = self.scheduler.preview_chat_route(tools_prompt).await;
+        self.try_record_event(
+            run_id,
+            AgentRunEventType::ModelRouteSelected,
+            AgentEventActor::Agent,
+            format!(
+                "Model route selected: {} ({}) via {}",
+                route.model, route.provider, route.route_type
+            ),
+            serde_json::json!({
+                "provider": route.provider,
+                "model": route.model,
+                "route_type": route.route_type,
+                "prefer_local": route.prefer_local,
+                "privacy_level": route.privacy_level.to_string(),
+                "reason": route.reason,
+            }),
+        );
+
         let reply = self
             .scheduler
             .generate_governed(
@@ -1038,6 +1069,7 @@ impl AgentLoop {
         Ok(GeneratedAgentResponse {
             runtime_output,
             reply,
+            model_route: Some(route),
         })
     }
 
@@ -1078,6 +1110,25 @@ impl AgentLoop {
             Some(actx.tools_prompt)
         };
 
+        let route = self.scheduler.preview_chat_route(tools_prompt).await;
+        self.try_record_event(
+            run_id,
+            AgentRunEventType::ModelRouteSelected,
+            AgentEventActor::Agent,
+            format!(
+                "Model route selected: {} ({}) via {}",
+                route.model, route.provider, route.route_type
+            ),
+            serde_json::json!({
+                "provider": route.provider,
+                "model": route.model,
+                "route_type": route.route_type,
+                "prefer_local": route.prefer_local,
+                "privacy_level": route.privacy_level.to_string(),
+                "reason": route.reason,
+            }),
+        );
+
         let mut stream = self
             .scheduler
             .generate_stream_governed(
@@ -1107,6 +1158,7 @@ impl AgentLoop {
         Ok(GeneratedAgentResponse {
             runtime_output,
             reply,
+            model_route: Some(route),
         })
     }
 
@@ -1681,6 +1733,7 @@ impl AgentLoop {
 struct GeneratedAgentResponse {
     runtime_output: AgentRuntimeOutput,
     reply: String,
+    model_route: Option<crate::agent::types::ModelRouteTrace>,
 }
 
 /// One-shot JSON self-repair prompt sent to the model when its previous
@@ -2912,6 +2965,32 @@ mod tests {
             .join(" ");
         assert!(!all_content.contains("abc123"));
         assert!(!all_content.contains("user@example.com"));
+    }
+
+    // ── P12: AgentLoopConfig governance fields ─────────────────────────
+    // Verifies the default allow_writes / allow_cloud values.
+    // These are currently not enforced inside the AgentLoop; enforcement
+    // (if added) must keep proposal-generation tools available.
+
+    #[test]
+    fn test_agent_loop_config_defaults_allow_writes_and_cloud() {
+        let cfg = AgentLoopConfig::default();
+        assert!(cfg.allow_writes, "allow_writes should default to true");
+        assert!(cfg.allow_cloud, "allow_cloud should default to true");
+    }
+
+    #[test]
+    fn test_agent_loop_config_can_disable_writes_for_planning() {
+        let cfg = AgentLoopConfig {
+            allow_writes: false,
+            allow_cloud: false,
+            ..Default::default()
+        };
+        assert!(!cfg.allow_writes);
+        assert!(!cfg.allow_cloud);
+        // Planner role is still available — proposal-generation tools
+        // remain accessible via AgentRole instruction, not this flag.
+        assert_eq!(cfg.role, AgentRole::default());
     }
 }
 

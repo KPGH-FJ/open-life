@@ -1,12 +1,14 @@
 # OpenLife vNext P12 Beta RC Acceptance Report
 
-Date: 2026-05-08
+Date: 2026-05-09
 
-Tester: AI Agent (P12 automated delivery)
+Tester: AI Agent (P12 RC fix package)
 
-Build / Commit: 8a32668 feat(p11): complete Beta Trial Readiness phase
+Build / Commit: dacac16 fix: refresh model router providers before chat routing
 
 Platform: Darwin 22.6.0 arm64 (macOS Apple Silicon)
+
+P12 RC Fix Package: Applied 2026-05-09 addressing P1/P2 review findings. No ChatPage rewrite, no shell enablement, no runtime authority expansion.
 
 Release Artifact:
 - `target/aarch64-apple-darwin/release/bundle/macos/OpenLife.app` (25MB DMG)
@@ -28,13 +30,15 @@ and P12-4 acceptance run.
 
 | Check | Command / Evidence | Result | Notes |
 |---|---|---|---|
-| CI gate | `make ci` | pass | 733 Rust tests + 60 Tauri tests + frontend build + typecheck + format-check + lockfile-check all passed |
+| CI gate | `make ci` | pass | 735 Rust + 60 Tauri + 214 frontend tests; typecheck + format-check + lockfile-check + frontend build all passed (post P12 RC fix package) |
 | Frontend build | `pnpm --dir frontend build` | pass | Vite production build: 1653 modules, ~200KB gzipped main bundle |
 | Release build | `cargo tauri build --target aarch64-apple-darwin` | pass | Native aarch64 build succeeded (1m 28s after initial full compile of 4m 46s) |
 | Artifact path | `target/aarch64-apple-darwin/release/bundle/` | pass | OpenLife.app + OpenLife_0.1.0_aarch64.dmg (25MB) |
 | Signing / notarization | N/A | blocked | No signing certificates configured. macOS requires manual "Open Anyway" in Security & Privacy. This is expected for RC stage. |
 
 Note: Universal binary (`--target universal-apple-darwin`) failed because x86_64-apple-darwin target is not installed. This is a platform setup issue, not a code issue. Rust cross-compilation target is installable via `rustup target add x86_64-apple-darwin`.
+
+Bundle identifier changed from `ai.openlife.app` to `ai.openlife.desktop` to avoid macOS `.app` suffix warning; all hardcoded data directory paths synced in `storage.rs`, `a2a_server.rs`, `mcp_audit.rs`. Existing pre-RC data directories require manual copy if needed.
 
 ## Privacy Verification
 
@@ -90,10 +94,22 @@ Note: Universal binary (`--target universal-apple-darwin`) failed because x86_64
 | P3 | macOS universal binary requires x86_64 target | Only aarch64 native build available. Intel Mac users need separate build or Rosetta. | Install target: `rustup target add x86_64-apple-darwin` and rebuild. | Dev |
 | P3 | Windows/Linux not tested | Trial limited to macOS until platform builds are validated. | Build on respective platforms with `cargo tauri build`. | Dev |
 | P3 | DMG/App not code-signed | macOS Gatekeeper blocks first launch. Users must right-click → Open or go to Security & Privacy. | Instructions in trial guide. | Dev |
-| P2 | Bundle identifier "ai.openlife.app" ends with `.app` | Tauri warning about potential conflict with `.app` extension on macOS. No observed functional impact. | Rename identifier to "ai.openlife.desktop" or similar in tauri.conf.json (cosmetic only). | Dev |
 | P3 | P11-S7 (Plan Inspection) not independently smoke-testable without a completed plan execution | Testers may not encounter plan operations during basic trial. | Plan operations are tested via Rust integration tests. Manual testing requires running plan creation through AgentLoop. | Dev |
+| P3 | Streaming error events may carry placeholder run_id before AgentLoop creates the authoritative run | Error copy still displays correctly, but run detail auto-load may fail for pre-run failures (e.g., AgentSpec resolution failure). Known limitation documented in useChatStreaming.ts. | Error details are still shown to the user. Run trace can be inspected post-hoc via RunsPage. | Dev |
 
 No P0 or P1 issues found.
+
+## P12 RC Fix Package (2026-05-09)
+
+| Fix | File(s) | Summary |
+|---|---|---|
+| 1 | `frontend/.../ProviderTab.tsx` | Prettier formatting applied. |
+| 2 | `frontend/.../ProviderTab.tsx` | Removed misleading `use_agent_loop` interactive checkbox. Replaced with read-only text: "AgentLoop/ReAct Runtime 是当前 Beta 主路径，L2/L3 对话默认启用。" Removed false fallback text. |
+| 3 | `openlife-core/src/agent/agent_loop.rs` | `generate_response()` and `generate_response_streaming()` now call `scheduler.preview_chat_route()` before each model call, record `AgentRunEventType::ModelRouteSelected` event, and set `run.model_route` on the first successful model call. Both streaming and non-streaming paths covered. |
+| 4 | `frontend/.../useChatStreaming.ts` | Removed premature `loadAgentRunForSession` call on `stream-message-start` (which carries a placeholder run_id). `stream-message-done` and `stream-message-error` continue to load with the real run_id. |
+| 5 | `openlife-core/src/agent/agent_loop.rs` | Added doc comments to `AgentLoopConfig.allow_writes` / `allow_cloud` clarifying current hardcoded-true behavior and governance notes. Added two unit tests verifying default values and planner-mode configuration. |
+| 6 | `plans/.../openlife_vnext_p12_beta_rc_acceptance_report.md` | Updated this report: fresh build/commit, fixes summary, added P3 known issue for placeholder run_id in error events.
+| 7 | `tauri.conf.json` + 4 code files + 5 docs | Bundle identifier changed from `ai.openlife.app` to `ai.openlife.desktop` to avoid macOS `.app` suffix warning. All hardcoded data directory paths (`storage.rs`, `a2a_server.rs`, `mcp_audit.rs`, `diagnostics.rs`) synced. `AGENTS.md` migration note reads "一步到位": copy data from `com.openlife.app` or `ai.openlife.app` into `ai.openlife.desktop`. Existing pre-RC data directories require manual copy if needed. Removed P2 known issue. |
 
 ## Go / No-Go Criteria
 

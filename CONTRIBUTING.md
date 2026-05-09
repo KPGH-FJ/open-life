@@ -198,8 +198,8 @@ frontend/src/test/mocks/tauri.ts
 
 ### Q: 数据目录不一致？
 
-统一数据目录：`~/Library/Application Support/ai.openlife.app/`
-旧版本数据在 `com.openlife.app`，如需迁移请手动复制。
+统一数据目录：`~/Library/Application Support/ai.openlife.desktop/`
+如果你曾使用旧版本数据目录 `com.openlife.app` 或 `ai.openlife.app`，请将其中的数据手动复制到 `ai.openlife.desktop`。
 
 ## 资源
 

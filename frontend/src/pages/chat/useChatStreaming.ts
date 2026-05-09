@@ -148,7 +148,6 @@ export function useChatStreaming(opts: UseChatStreamingOpts) {
               run_id: event.payload.run_id,
             }))
           );
-          await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
         }
       }),
       listen<{ session_id: string; chunk: string }>("stream-message-chunk", event => {

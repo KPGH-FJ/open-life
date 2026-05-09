@@ -40,7 +40,7 @@ OpenLife 是一个本地优先的个人 Agent 框架雏形。它围绕你的私�
 
 所有数据存储在本地：
 
-- macOS: `~/Library/Application Support/ai.openlife.app/`
+- macOS: `~/Library/Application Support/ai.openlife.desktop/`
 - 你的 LifeModel、聊天记录、记忆、提案等全部保存在本地 SQLite 数据库中
 - 没有数据自动上传到云端
 
@@ -301,7 +301,7 @@ Settings → **Data** 标签页 → **Export Diagnostics**
 ### 如何备份数据
 
 - Settings → Data → **Export All Data** 导出 JSON 备份
-- 数据默认存储在 `~/Library/Application Support/ai.openlife.app/`（macOS）
+- 数据默认存储在 `~/Library/Application Support/ai.openlife.desktop/`（macOS）
 - 你可以手动复制整个目录作为备份
 
 ---

@@ -32,7 +32,7 @@ cd ..
 # 4. 数据库文件检查
 echo ""
 echo "4️⃣  数据库文件检查..."
-DATA_DIR="$HOME/Library/Application Support/ai.openlife.app"
+DATA_DIR="$HOME/Library/Application Support/ai.openlife.desktop"
 if [ -d "$DATA_DIR" ]; then
     echo "   ✅ 数据目录存在: $DATA_DIR"
     for db in messages.db vectors.db agent_runs.db proposals.db; do

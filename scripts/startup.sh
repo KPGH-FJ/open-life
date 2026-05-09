@@ -293,11 +293,11 @@ init_database() {
 
     local data_dir
     if [ "$(uname)" = "Darwin" ]; then
-        data_dir="${HOME}/Library/Application Support/ai.openlife.app"
+        data_dir="${HOME}/Library/Application Support/ai.openlife.desktop"
     elif [ -n "${XDG_DATA_HOME:-}" ]; then
-        data_dir="${XDG_DATA_HOME}/ai.openlife.app"
+        data_dir="${XDG_DATA_HOME}/ai.openlife.desktop"
     else
-        data_dir="${HOME}/.local/share/ai.openlife.app"
+        data_dir="${HOME}/.local/share/ai.openlife.desktop"
     fi
 
     if [ ! -d "$data_dir" ]; then

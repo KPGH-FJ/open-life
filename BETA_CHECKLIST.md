@@ -110,7 +110,7 @@
 
 - [x] 版本号确认（package.json, Cargo.toml）
 - [x] 数据库迁移兼容性
-- [x] 数据目录统一（ai.openlife.app）
+- [x] 数据目录统一（ai.openlife.desktop）
 - [x] 环境变量模板更新
 
 ## 已知限制（Beta 阶段）

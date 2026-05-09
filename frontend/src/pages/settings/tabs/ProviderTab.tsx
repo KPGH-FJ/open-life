@@ -50,9 +50,7 @@ export default function ProviderTab({
         <div className="flex items-center gap-3">
           <select
             value={agentSpec?.privacyPolicy ?? "local_only"}
-            onChange={e =>
-              onUpdateAgentSpecPrivacy(e.target.value as AgentPrivacyPolicy)
-            }
+            onChange={e => onUpdateAgentSpecPrivacy(e.target.value as AgentPrivacyPolicy)}
             disabled={!agentSpec || agentSpecSaving}
             className="rounded-lg border border-gray-200 px-3 py-2 text-sm disabled:opacity-50"
           >
@@ -60,9 +58,7 @@ export default function ProviderTab({
             <option value="summary_only">摘要上云 (SummaryOnly) — 仅摘要信息上云</option>
             <option value="cloud_allowed">允许上云 (CloudAllowed) — 完整上下文可上云</option>
           </select>
-          {agentSpecSaving && (
-            <span className="text-xs text-gray-500">保存中...</span>
-          )}
+          {agentSpecSaving && <span className="text-xs text-gray-500">保存中...</span>}
         </div>
         <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
           <p>选择「仅本地」需要本地启动 Ollama 服务。选择「允许上云」后需要配置云端 API Key。</p>
@@ -253,24 +249,11 @@ export default function ProviderTab({
             <span className="text-sm text-gray-700">启用 ContextAssembler V2（灰度测试）</span>
           </label>
 
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={config.use_agent_loop ?? false}
-              onChange={e =>
-                setConfig(prev => ({
-                  ...prev,
-                  use_agent_loop: e.target.checked,
-                }))
-              }
-              className="rounded border-gray-300"
-            />
-            <span className="text-sm text-gray-700">启用 AgentLoop（Beta 双轨）</span>
-          </label>
-
-          <div className="text-xs text-gray-500 bg-gray-50 p-3 rounded-lg">
-            <p>AgentLoop 启用后，Chat 将使用新的 ReAct 执行循环。</p>
-            <p>如遇问题可关闭，会自动回退到旧路径。</p>
+          <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            <p className="font-medium">AgentLoop / ReAct Runtime</p>
+            <p className="mt-1 text-xs text-blue-600">
+              AgentLoop/ReAct Runtime 是当前 Beta 主路径，L2/L3 对话默认启用。
+            </p>
           </div>
 
           {/* Safe Paths */}
