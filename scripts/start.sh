@@ -109,8 +109,13 @@ log_success "环境检查通过"
 # 确定构建参数
 case "$TARGET" in
     macos)
-        BUILD_TARGET="universal-apple-darwin"
-        BUILD_NAME="macOS Universal"
+        if [ "$(uname -m)" = "arm64" ]; then
+            BUILD_TARGET="aarch64-apple-darwin"
+            BUILD_NAME="macOS Apple Silicon"
+        else
+            BUILD_TARGET="x86_64-apple-darwin"
+            BUILD_NAME="macOS Intel"
+        fi
         ;;
     linux)
         BUILD_TARGET="x86_64-unknown-linux-gnu"
@@ -135,7 +140,7 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  📦 正在构建 $BUILD_NAME 版本...${NC}"
 echo -e "${GREEN}║                                                              ║${NC}"
 echo -e "${GREEN}║  首次构建可能需要 5-15 分钟，请耐心等待                     ║${NC}"
-echo -e "${GREEN}║  产物将输出到 src-tauri/target/release/bundle/              ║${NC}"
+echo -e "${GREEN}║  产物将输出到 target/$BUILD_TARGET/release/bundle/          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -162,7 +167,7 @@ else
 fi
 
 # 检查构建结果
-BUNDLE_DIR="$TAURI_DIR/target/release/bundle"
+BUNDLE_DIR="$REPO_ROOT/target/$BUILD_TARGET/release/bundle"
 if [ -d "$BUNDLE_DIR" ]; then
     log_step "构建完成！"
     echo ""

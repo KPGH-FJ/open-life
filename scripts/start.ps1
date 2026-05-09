@@ -8,7 +8,7 @@
 #   .\start.ps1
 #
 # 构建产物：
-#   src-tauri\target\release\bundle\
+#   target\release\bundle\
 #
 # 预期时间：
 #   首次构建约 5-15 分钟（取决于机器性能）
@@ -74,7 +74,7 @@ Write-Host "╔═════════════════════�
 Write-Host "║  📦 正在构建 Windows x86_64 版本...                           ║" -ForegroundColor Green
 Write-Host "║                                                              ║" -ForegroundColor Green
 Write-Host "║  首次构建可能需要 5-15 分钟，请耐心等待                     ║" -ForegroundColor Green
-Write-Host "║  产物将输出到 src-tauri\target\release\bundle\               ║" -ForegroundColor Green
+Write-Host "║  产物将输出到 target\release\bundle\                         ║" -ForegroundColor Green
 Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
 Write-Host ""
 
@@ -113,7 +113,7 @@ try {
 }
 
 # 检查构建结果
-$bundleDir = Join-Path $TauriDir "target\release\bundle"
+$bundleDir = Join-Path $RepoRoot "target\release\bundle"
 if (Test-Path $bundleDir) {
     Write-Step "构建完成！"
     Write-Host ""

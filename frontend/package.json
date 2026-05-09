@@ -11,6 +11,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "tauri": "cd .. && cargo tauri",
+    "tauri:build": "cd .. && cargo tauri build",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
