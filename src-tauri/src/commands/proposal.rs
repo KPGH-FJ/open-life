@@ -32,6 +32,130 @@ fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
     }
 }
 
+fn tool_permission_policy_from_after(
+    after: &Value,
+) -> Result<openlife_core::tool_permissions::ToolPermissionPolicy, String> {
+    let policy_value = after
+        .get("policy")
+        .or_else(|| after.get("permission"))
+        .or_else(|| after.get("level"))
+        .or_else(|| after.get("permission_action"))
+        .and_then(Value::as_str)
+        .unwrap_or("allow_until_revoked");
+
+    match policy_value {
+        "allowed" | "allow" | "grant" => {
+            Ok(openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked)
+        }
+        "deny" | "revoke" => Ok(openlife_core::tool_permissions::ToolPermissionPolicy::Deny),
+        "ask_every_time" => Ok(openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime),
+        "allow_once" => Ok(openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce),
+        "allow_until_revoked" => {
+            Ok(openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked)
+        }
+        other => Err(format!("未知 ToolPermission policy: {}", other)),
+    }
+}
+
+async fn find_replayable_action_id_for_tool_permission(
+    state: &Arc<AppState>,
+    run_id: &str,
+    after: &Value,
+) -> Result<Option<String>, String> {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return Ok(None);
+    };
+    let run = {
+        let store = store_arc.lock().await;
+        store
+            .get_run(run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("AgentRun 不存在：{}", run_id))?
+    };
+
+    let tool_name = after
+        .get("tool_name")
+        .or_else(|| after.get("toolName"))
+        .or_else(|| after.get("name"))
+        .and_then(Value::as_str);
+    let source = after.get("source").and_then(Value::as_str);
+    let risk_level = after
+        .get("risk_level")
+        .or_else(|| after.get("riskLevel"))
+        .and_then(Value::as_str);
+    let action_type = after
+        .get("action_type")
+        .or_else(|| after.get("actionType"))
+        .and_then(Value::as_str);
+    let step_index = after
+        .get("blocked_action")
+        .and_then(|v| v.get("step_index"))
+        .and_then(Value::as_u64);
+
+    let pending_actions = run
+        .actions
+        .iter()
+        .filter(|action| action.status == "needs_confirmation");
+
+    let action = pending_actions
+        .filter(|action| {
+            if let Some(step) = step_index {
+                if !action.id.starts_with(&format!("action-{}-", step)) {
+                    return false;
+                }
+            }
+            if let Some(expected_tool) = tool_name {
+                let action_tool = action
+                    .tool_scope
+                    .as_ref()
+                    .map(|scope| scope.tool_name.as_str())
+                    .or(action.target.as_deref());
+                if action_tool != Some(expected_tool) {
+                    return false;
+                }
+            }
+            if let Some(expected_source) = source {
+                if expected_source != "*" {
+                    let action_source = action
+                        .tool_scope
+                        .as_ref()
+                        .map(|scope| scope.source.as_str());
+                    if action_source != Some(expected_source) {
+                        return false;
+                    }
+                }
+            }
+            if let Some(expected_risk) = risk_level {
+                if expected_risk != "*" {
+                    let action_risk = action
+                        .tool_scope
+                        .as_ref()
+                        .map(|scope| scope.risk_level.as_str());
+                    if action_risk != Some(expected_risk) {
+                        return false;
+                    }
+                }
+            }
+            if let Some(expected_action_type) = action_type {
+                if expected_action_type != "*" {
+                    let actual_action_type = action
+                        .tool_scope
+                        .as_ref()
+                        .map(|scope| scope.action_type.as_str())
+                        .unwrap_or(action.action_type.as_str());
+                    if actual_action_type != expected_action_type {
+                        return false;
+                    }
+                }
+            }
+            true
+        })
+        .min_by_key(|action| action.timestamp)
+        .map(|action| action.id.clone());
+
+    Ok(action)
+}
+
 fn patch_result_for_proposal(
     proposal: &AgentProposal,
     success: bool,
@@ -455,21 +579,25 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
             match tool_name {
                 Some(name) if !name.is_empty() => {
                     let permission = after
-                        .get("permission")
+                        .get("policy")
+                        .or_else(|| after.get("permission_action"))
+                        .or_else(|| after.get("permission"))
                         .or_else(|| after.get("level"))
                         .and_then(Value::as_str)
                         .unwrap_or("allow_until_revoked");
                     let valid_permissions = [
                         "allow",
                         "allowed",
+                        "grant",
                         "deny",
+                        "revoke",
                         "ask_every_time",
                         "allow_once",
                         "allow_until_revoked",
                     ];
                     if !valid_permissions.contains(&permission) {
                         return Err(format!(
-                            "ToolPermission Proposal 的 permission 值 '{}' 无效。有效值: allow, deny, ask_every_time, allow_once, allow_until_revoked",
+                            "ToolPermission Proposal 的 policy 值 '{}' 无效。有效值: allow, grant, deny, ask_every_time, allow_once, allow_until_revoked",
                             permission
                         ));
                     }
@@ -711,27 +839,7 @@ async fn apply_proposal_to_state(
                 .or_else(|| after.get("name"))
                 .and_then(Value::as_str)
                 .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
-            let permission = after
-                .get("permission")
-                .or_else(|| after.get("permission_action"))
-                .or_else(|| after.get("policy"))
-                .or_else(|| after.get("level"))
-                .and_then(Value::as_str)
-                .unwrap_or("allow_until_revoked");
-            let policy = match permission {
-                "allowed" | "allow" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
-                }
-                "deny" => openlife_core::tool_permissions::ToolPermissionPolicy::Deny,
-                "ask_every_time" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AskEveryTime
-                }
-                "allow_once" => openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                "allow_until_revoked" => {
-                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
-                }
-                other => return Err(format!("未知 ToolPermission policy: {}", other)),
-            };
+            let policy = tool_permission_policy_from_after(&after)?;
             let source = after.get("source").and_then(Value::as_str).unwrap_or("*");
             let risk_level = after
                 .get("risk_level")
@@ -754,7 +862,7 @@ async fn apply_proposal_to_state(
                 let detail = serde_json::json!({
                     "proposal_id": proposal.id,
                     "tool_name": tool_name,
-                    "permission": permission,
+                    "permission": policy.to_string(),
                     "source_detail": proposal.source_detail,
                 });
                 let detail_text = detail.to_string();
@@ -1133,6 +1241,30 @@ pub(crate) async fn accept_proposal_with_state(
         if let Ok(parsed) = serde_json::from_str::<Value>(&blocked) {
             response["blocked_action"] = parsed;
             response["can_continue"] = serde_json::Value::Bool(true);
+        }
+    }
+    if proposal.proposal_type == ProposalType::ToolPermission {
+        if let Some(run_id) = proposal.run_id.as_deref() {
+            if let Some(action_id) =
+                find_replayable_action_id_for_tool_permission(state, run_id, &proposal.after)
+                    .await?
+            {
+                response["continued_run_id"] = serde_json::Value::String(run_id.to_string());
+                response["continued_action_id"] = serde_json::Value::String(action_id.clone());
+                match crate::commands::agent::replay_action_internal(run_id, &action_id, state)
+                    .await
+                {
+                    Ok(action) => {
+                        response["continued"] = serde_json::Value::Bool(true);
+                        response["continued_action"] =
+                            serde_json::to_value(action).unwrap_or(serde_json::Value::Null);
+                    }
+                    Err(err) => {
+                        response["continued"] = serde_json::Value::Bool(false);
+                        response["continue_error"] = serde_json::Value::String(err.to_string());
+                    }
+                }
+            }
         }
     }
     Ok(response)
@@ -1663,6 +1795,113 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_auto_tool_permission_proposal_uses_policy_not_grant_action() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.builtin.web.search",
+            serde_json::json!({
+                "permission_action": "grant",
+                "tool_name": "web.search",
+                "source": "builtin",
+                "risk_level": "medium",
+                "policy": "allow_until_revoked",
+                "blocked_action": {
+                    "action_type": "read",
+                    "target": "web.search"
+                },
+                "reason": "low-risk read action allowed by default",
+                "auto_generated": true
+            }),
+            "自动生成的工具权限确认",
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let permissions = state.tool_permission_store.lock().await.list().unwrap();
+        assert_eq!(permissions.len(), 1);
+        assert_eq!(permissions[0].tool_name, "web.search");
+        assert_eq!(
+            permissions[0].policy,
+            openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_permission_replay_lookup_matches_pending_action_from_run() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+
+        let mut run = openlife_core::agent::AgentRun::new_chat_run("session-1", "search");
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(openlife_core::agent::AgentAction {
+            id: "action-0-123".to_string(),
+            action_type: "tool_call".to_string(),
+            target: Some("web.search".to_string()),
+            input: serde_json::json!({ "query": "万象城" }),
+            output: None,
+            status: "needs_confirmation".to_string(),
+            permission_decision: Some("ask_every_time".to_string()),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            timestamp: chrono::Utc::now(),
+            tool_scope: Some(openlife_core::agent::ToolActionScope {
+                tool_id: "builtin.web.search".to_string(),
+                tool_name: "web.search".to_string(),
+                source: "builtin".to_string(),
+                risk_level: "medium".to_string(),
+                capabilities: vec!["web".to_string()],
+                action_type: "read".to_string(),
+                requires_confirmation: true,
+                allowed: false,
+            }),
+        });
+        state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+
+        let action_id = find_replayable_action_id_for_tool_permission(
+            &state,
+            &run.id,
+            &serde_json::json!({
+                "tool_name": "web.search",
+                "source": "builtin",
+                "risk_level": "medium",
+                "action_type": "read",
+                "blocked_action": { "step_index": 0 }
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(action_id.as_deref(), Some("action-0-123"));
     }
 
     #[tokio::test]

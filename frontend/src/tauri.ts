@@ -1565,7 +1565,22 @@ export interface PatchApplyResult {
 
 export async function acceptProposal(
   proposalId: string
-): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
+): Promise<{
+  success: boolean;
+  patchResult: PatchApplyResult;
+  patch_result?: PatchApplyResult;
+  canContinue?: boolean;
+  can_continue?: boolean;
+  continued?: boolean;
+  continuedRunId?: string;
+  continued_run_id?: string;
+  continuedActionId?: string;
+  continued_action_id?: string;
+  continuedAction?: AgentAction;
+  continued_action?: AgentAction;
+  continueError?: string;
+  continue_error?: string;
+}> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
 
