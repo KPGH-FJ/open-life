@@ -31,6 +31,8 @@ endif
 
 FRONTEND_RUN = corepack pnpm
 FRONTEND_INSTALL = corepack pnpm install
+CARGO_TARGET_DIR ?= $(HOME)/Library/Caches/OpenLife/cargo-target
+export CARGO_TARGET_DIR
 
 # 默认目标
 .DEFAULT_GOAL := help
@@ -112,7 +114,9 @@ test-rust:
 clean:
 	@echo "🧹 清理构建缓存..."
 	cd frontend && rm -rf dist node_modules/.vite
+	rm -rf target
 	rm -rf src-tauri/target
+	rm -rf "$(CARGO_TARGET_DIR)"
 	@echo "✅ 清理完成"
 
 ## 深度清理（包含 node_modules）
@@ -203,8 +207,15 @@ ci: check-lockfile format-check lint test build-front
 ## 清理 tract crate 编译缓存（解决 rlib format 偶发错误）
 .PHONY: clean-tract
 clean-tract:
-	@echo "🧹 清理 tract 相关 crate 缓存..."
+	@echo "🧹 清理 tract/proc-macro 相关 crate 缓存..."
 	cargo clean -p tract-nnef 2>/dev/null || true
 	cargo clean -p tract-hir 2>/dev/null || true
 	cargo clean -p tauri-utils 2>/dev/null || true
-	@echo "✅ tract 缓存已清理，重新编译即可恢复"
+	cargo clean -p phf_macros 2>/dev/null || true
+	cargo clean -p phf_generator 2>/dev/null || true
+	cargo clean -p unicode_ident 2>/dev/null || true
+	cargo clean -p ucd_trie 2>/dev/null || true
+	cargo clean -p pest_derive 2>/dev/null || true
+	cargo clean -p selectors 2>/dev/null || true
+	cargo clean -p markup5ever 2>/dev/null || true
+	@echo "✅ tract/proc-macro 缓存已清理，重新编译即可恢复"

@@ -4,7 +4,7 @@ import EmptyState from "../../components/EmptyState";
 
 interface ChatSidebarProps {
   sessions: ChatSession[];
-  currentSessionId: string;
+  currentSessionId: string | null;
   editingId: string | null;
   editingTitle: string;
   onSelectSession: (sessionId: string) => void;

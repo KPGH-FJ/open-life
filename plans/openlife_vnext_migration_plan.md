@@ -1,8 +1,14 @@
 # OpenLife vNext Migration Plan
 
-Date: 2026-05-06
+Date: 2026-05-06 (updated 2026-05-10: P0-P12 implementation complete)
 
-This plan turns the Agent Framework upgrade into phased work that can be implemented safely with AI coding support. It is intentionally ordered to avoid adding sub-agents or bash before the runtime is ready to govern them.
+> **Status update (2026-05-10)** : Phases 0-9 outlined below have been implemented as P0-P12
+> task specs. All vNext primitives (AgentRunEvent, PromptStack, ToolRuntime, ExecutionSandbox,
+> MemoryEvidence, AgentSpec/PlanMode/SubAgentRuntime, Compaction, ShellExecutor) are code-complete
+> and tested (799 tests passing). This document is retained as historical architectural reference.
+> The current active plan is [`openlife_post_beta_roadmap.md`](openlife_post_beta_roadmap.md).
+
+This plan turned the Agent Framework upgrade into phased work implemented safely with AI coding support. It was intentionally ordered to avoid adding sub-agents or bash before the runtime was ready to govern them.
 
 ## Migration Goal
 

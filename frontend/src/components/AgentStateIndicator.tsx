@@ -32,7 +32,7 @@ interface AgentStatusUpdate {
 }
 
 interface Props {
-  sessionId: string;
+  sessionId: string | null;
   runId?: string;
   isActive: boolean;
 }

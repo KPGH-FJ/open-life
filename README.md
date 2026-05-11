@@ -12,16 +12,12 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Beta** 阶段：
+当前项目处于 **Agent Framework Beta** 阶段（P12 Beta Release Candidate 已验收）：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **vNext P10 Frontend Agent Workspace 与 P11/P11.1 Beta Trial Readiness 已通过验收，当前进入 P12 Beta Release Candidate**：P9 已将 `shell.run` 收敛到 `ExecutionSandbox`、ToolRuntime、AgentSpec、Permission 和 append-only trace 的默认关闭治理链路；P10 已让用户能看见 run timeline、tool observations、proposal evidence、plan confirmation 与下一步行动；P11 已完成试用路径矩阵、诊断/恢复、冒烟验收、反馈闭环和隐私治理诊断导出。P12 聚焦小范围真实用户试用交付：用户试用指南、桌面发布构建演练、首次启动 golden path polish、RC 验收报告和 go/no-go 判定。P12 不引入终端 UI、不启用普通 Chat shell、不重写 ChatPage、不扩大 runtime 权限。
-- **Execution Tools 分层落地**：Core OS tools 与多类 execution tools 已接入，真实执行能力和 declarative-only 能力必须继续严格区分。
-- **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **AgentLoop 成为主执行路径**：Chat/streaming/fallback/scheduled/proactive 等路径仍需要在 vNext 中进一步收束到统一 runtime 语义。
-- **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
-- **`make ci` 为发布门控**：Rust、前端测试与生产构建共同作为发布门控。
+- **P0-P12 vNext 原语全部实现（2026-05-10 验收）**：AgentRunEvent (29种)、PromptStack (10 Block)、ToolRuntime/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。`make ci` 全绿 806 测试。
+- **当前进入 Post-Beta 架构稳固阶段**：执行路径收敛、文档同步、真实用户试用反馈闭环、LifeModel Evolution 管线闭环。完整计划参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。
 
 下一大阶段是 **vNext Agent Framework Upgrade**。目标不是继续堆页面或工具，而是把 OpenLife 升级为：
 
@@ -29,21 +25,21 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 LifeModel-governed Personal Agent Framework
 ```
 
-vNext 的重点包括：
+vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta 架构稳固**：
 
-- `AgentRunEvent`：append-only runtime trace。
-- `ToolRuntime`：工具元数据、权限、declarative-only 过滤和执行审计。
-- `PromptStack`：system prompt / planning prompt / tool prompt / privacy prompt 的一等架构。
-- `MemoryEvidence`：让记忆成为 LifeModel 进化的证据层，而不只是检索上下文。
-- `AgentSpec / AgentPlan`：为 PlanMode 和 SubAgentRuntime 奠定结构。
-- AI coding governance：高风险边界采用 ADR-first 流程。
+- **执行路径收敛**：统一 lib.rs 的 5+ 条执行入口到单一 facade。
+- **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端。
+- **PromptStack 全路径审计**：消除 ad hoc prompt 碎片。
+- **生产就绪**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构。
+
+完整计划：[`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)
 
 新的架构基准文档见：
 
-- [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
-- [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
-- [OpenLife vNext Architecture Principles](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_architecture_principles.md)
-- [OpenLife vNext Migration Plan](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_migration_plan.md)
+- [OpenLife Agent Framework Architecture](plans/openlife_agent_framework_architecture.md)
+- [OpenLife ReAct Beta Roadmap](plans/openlife_react_beta_roadmap.md)
+- [OpenLife vNext Architecture Principles](plans/openlife_vnext_architecture_principles.md)
+- [OpenLife post-Beta Development Plan](plans/openlife_post_beta_roadmap.md) (当前活跃)
 
 ## 核心能力
 

@@ -200,7 +200,8 @@ pub async fn chat_with_ollama_raw(
     let text = res.text().await.with_context(|| "读取 Ollama 响应失败")?;
 
     if !status.is_success() {
-        return Err(anyhow::anyhow!("Ollama 错误 ({}): {}", status, text));
+        log::debug!("Ollama response body ({}): {}", status, text);
+        return Err(anyhow::anyhow!("Ollama 错误 ({})", status));
     }
 
     let json: serde_json::Value = serde_json::from_str(&text)
@@ -350,18 +351,43 @@ pub async fn ollama_embed(text: &str, model: &str) -> anyhow::Result<Vec<f32>> {
 }
 
 /// Simple deterministic fallback embedding when no API or Ollama is available.
-/// Uses character n-gram hashing into a fixed 384-dim vector.
+/// Uses character n-gram hashing with random-projection-like multi-dimension
+/// scattering to produce a 384-dim vector with reasonable discrimination.
 pub fn fallback_embed(text: &str) -> Vec<f32> {
     const DIM: usize = 384;
     let mut vec = vec![0.0f32; DIM];
     let lower = text.to_lowercase();
-    for window in lower.chars().collect::<Vec<_>>().windows(3) {
-        let mut hash = 0u64;
-        for ch in window {
-            hash = hash.wrapping_mul(31).wrapping_add(*ch as u64);
+    let chars: Vec<char> = lower.chars().collect();
+    if chars.is_empty() {
+        return vec;
+    }
+    // Unigrams + bigrams + trigrams for coverage (single CJK chars still contribute)
+    let mut seen = 0u64;
+    for window in chars
+        .windows(3)
+        .chain(chars.windows(2))
+        .chain(chars.windows(1))
+    {
+        // Seed-specific hashing: each dimension gets a different hash contribution
+        let base = {
+            let mut h = 0u64;
+            for ch in window {
+                h = h
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(*ch as u64 ^ seen);
+            }
+            h
+        };
+        // Spread this ngram across ALL dimensions via a cheap LCG
+        let mut state = base;
+        for item in vec.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // Use sign bit to produce bipolar contribution
+            let val = ((state >> 32) as u32) as f32 / (u32::MAX as f32);
+            let sign = if (state & 1) != 0 { 1.0 } else { -1.0 };
+            *item += sign * val;
         }
-        let idx = (hash as usize) % DIM;
-        vec[idx] += 1.0;
+        seen = seen.wrapping_add(1);
     }
     // L2 normalize
     let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();

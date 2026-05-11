@@ -82,8 +82,8 @@
 ## 质量门控
 
 ### 测试
-- [x] 前端测试 133 passed
-- [x] Rust 测试 290+ passed
+- [x] 前端测试 214 passed
+- [x] Rust 测试 799 passed (737 core + 62 tauri)
 - [x] `make ci` 全部通过
 - [x] 前端生产构建成功
 
@@ -116,16 +116,23 @@
 ## 已知限制（Beta 阶段）
 
 1. **AgentLoop Streaming**: 当前为句子级分块，非真实 token 流
-2. **Tool Execution**: calendar/email 为 declarative-only stub
+2. **Tool Execution**: email.read 为 declarative-only stub (需IMAP); calendar/email/task 其余工具已升级为 P1
 3. **Network Policy**: 仅覆盖 web.fetch/web.search，不影响其他工具
 4. **Memory**: 异步 embedding 在首次写入后延迟生成
 5. **Skill Runtime**: 仅内置 3 个 Skill，不支持外部 Skill 注册
+6. **Universal Binary**: 当前仅 aarch64，x86_64 target 需安装
+7. **Code Signing**: macOS 未签名公证，需手动允许运行
 
-## 下一步（Sprint 9+）
+## 下一步（Post-Beta）
 
+参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)：
+
+- [ ] 执行路径收敛 (lib.rs 瘦身, ExecutionFacade)
+- [ ] PromptStack 全路径审计
+- [ ] LifeModel Evolution 管线端到端闭环
+- [ ] Universal Binary (x86_64 + aarch64)
+- [ ] macOS 代码签名与公证
+- [ ] Windows/Linux 跨平台验证
+- [ ] ChatPage 重构 (解锁 ADR 0010)
 - [ ] 外部 Skill 注册和 Marketplace
-- [ ] 真实 token 级流式输出
-- [ ] 更多 Execution Tools（calendar/email/task）真实实现
-- [ ] 用户反馈数据分析和自动进化
 - [ ] 性能优化（启动速度、内存占用）
-- [ ] 跨平台测试（Windows/Linux）

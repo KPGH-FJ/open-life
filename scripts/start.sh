@@ -43,6 +43,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 TAURI_DIR="$REPO_ROOT/src-tauri"
 TARGET="${1:-auto}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/Library/Caches/OpenLife/cargo-target}"
 
 # 颜色输出
 log_info()    { echo -e "${BLUE}[INFO]${NC}  $1"; }
@@ -145,6 +146,8 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 
 cd "$REPO_ROOT"
+mkdir -p "$CARGO_TARGET_DIR"
+log_info "Cargo 构建缓存: $CARGO_TARGET_DIR"
 
 # 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm symlink）
 if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
@@ -167,7 +170,7 @@ else
 fi
 
 # 检查构建结果
-BUNDLE_DIR="$REPO_ROOT/target/$BUILD_TARGET/release/bundle"
+BUNDLE_DIR="$CARGO_TARGET_DIR/$BUILD_TARGET/release/bundle"
 if [ -d "$BUNDLE_DIR" ]; then
     log_step "构建完成！"
     echo ""

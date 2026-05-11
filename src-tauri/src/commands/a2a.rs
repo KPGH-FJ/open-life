@@ -103,13 +103,14 @@ pub async fn a2a_bridge_local(
 
 #[tauri::command]
 pub async fn a2a_restart_sidecar(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
-    let sidecar = state.a2a_sidecar.lock().await;
-    sidecar.stop().ok();
+    let mut sidecar = state.a2a_sidecar.lock().await;
+    sidecar.stop();
     sidecar.start().await
 }
 
 #[tauri::command]
 pub async fn a2a_stop_sidecar(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
-    let sidecar = state.a2a_sidecar.lock().await;
-    sidecar.stop()
+    let mut sidecar = state.a2a_sidecar.lock().await;
+    sidecar.stop();
+    Ok(())
 }

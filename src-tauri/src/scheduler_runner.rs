@@ -260,9 +260,14 @@ async fn execute_scheduled_task(
 
     // Persist AgentRun
     if let Some(ref store) = state.agent_run_store {
-        if let Ok(store) = store.try_lock() {
-            let run = loop_result.run;
-            let _ = store.create_run(&run);
+        let store = store.lock().await;
+        let run = loop_result.run;
+        if let Err(e) = store.create_run(&run) {
+            log::error!(
+                "[SchedulerRunner] Failed to persist scheduled AgentRun {}: {}",
+                run.id,
+                e
+            );
         }
     }
 

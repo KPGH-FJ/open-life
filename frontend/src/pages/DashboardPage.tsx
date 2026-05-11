@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useReducer, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard,
@@ -261,18 +261,60 @@ function trendBadge(direction: TrendDirection) {
   }
 }
 
-export default function DashboardPage() {
-  const location = useLocation();
-  const [model, setModel] = useState<LifeModel | null>(null);
-  const [memories, setMemories] = useState<Array<{ chunk: any; score: number }>>([]);
-  const [memoryQuery, setMemoryQuery] = useState("");
-  const [feedback, setFeedback] = useState<{
+// ── Consolidated dashboard data state (replaces 14 individual useState calls) ──────
+interface DashboardData {
+  model: LifeModel | null;
+  dimensions: CustomStateDimension[];
+  feedback: {
     total_messages: number;
     total_feedback_up: number;
     total_feedback_down: number;
     session_count: number;
-  } | null>(null);
-  const [memoryCount, setMemoryCount] = useState<number>(0);
+  } | null;
+  memoryCount: number;
+  gaps: CapabilityGap[] | null;
+  alignments: AlignmentIssue[] | null;
+  dailyGoals: DailyGoal[];
+  stateAlerts: StateAlert[];
+  diagnostics: SystemDiagnostics | null;
+  latestVersion: LifeModelVersion | null;
+  pendingProposals: AgentProposal[];
+  recentRuns: AgentRun[];
+  proactiveSuggestions: ProactiveSuggestion[];
+  recentPlans: AgentPlan[];
+}
+
+type DashboardDataAction = { type: "set"; payload: Partial<DashboardData> };
+
+const initialData: DashboardData = {
+  model: null,
+  dimensions: [],
+  feedback: null,
+  memoryCount: 0,
+  gaps: null,
+  alignments: null,
+  dailyGoals: [],
+  stateAlerts: [],
+  diagnostics: null,
+  latestVersion: null,
+  pendingProposals: [],
+  recentRuns: [],
+  proactiveSuggestions: [],
+  recentPlans: [],
+};
+
+function dashboardDataReducer(state: DashboardData, action: DashboardDataAction): DashboardData {
+  switch (action.type) {
+    case "set":
+      return { ...state, ...action.payload };
+  }
+}
+
+export default function DashboardPage() {
+  const location = useLocation();
+  const [data, dispatch] = useReducer(dashboardDataReducer, initialData);
+  const [memories, setMemories] = useState<Array<{ chunk: any; score: number }>>([]);
+  const [memoryQuery, setMemoryQuery] = useState("");
   const [calibration, setCalibration] = useState<{
     period_days: number;
     feedback_up: number;
@@ -285,19 +327,14 @@ export default function DashboardPage() {
   } | null>(null);
   const [calibrationLoading, setCalibrationLoading] = useState(false);
   const [evolutionMsg, setEvolutionMsg] = useState<string | null>(null);
-  const [gaps, setGaps] = useState<CapabilityGap[] | null>(null);
-  const [alignments, setAlignments] = useState<AlignmentIssue[] | null>(null);
 
-  // Daily goals
-  const [dailyGoals, setDailyGoals] = useState<DailyGoal[]>([]);
+  // Daily goals form
   const [addingGoal, setAddingGoal] = useState(false);
   const [newGoalName, setNewGoalName] = useState("");
   const [editingGoalIndex, setEditingGoalIndex] = useState<number | null>(null);
   const [editGoalName, setEditGoalName] = useState("");
 
-  // State
-  const [dimensions, setDimensions] = useState<CustomStateDimension[]>([]);
-  const [stateAlerts, setStateAlerts] = useState<StateAlert[]>([]);
+  // State dimensions
   const [selectedDimension, setSelectedDimension] = useState<string | null>(null);
   const [dimensionHistory, setDimensionHistory] = useState<StateHistoryEntry[]>([]);
   const [showStateModal, setShowStateModal] = useState(false);
@@ -313,14 +350,8 @@ export default function DashboardPage() {
     weekly: boolean;
     monthly: boolean;
   } | null>(null);
-  const [latestVersion, setLatestVersion] = useState<LifeModelVersion | null>(null);
   const [loadWarnings, setLoadWarnings] = useState<string[]>([]);
   const [calibrationError, setCalibrationError] = useState<string | null>(null);
-  const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
-  const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
-  const [recentRuns, setRecentRuns] = useState<AgentRun[]>([]);
-  const [proactiveSuggestions, setProactiveSuggestions] = useState<ProactiveSuggestion[]>([]);
-  const [recentPlans, setRecentPlans] = useState<AgentPlan[]>([]);
   const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const navigate = useNavigate();
 
@@ -386,11 +417,11 @@ export default function DashboardPage() {
   }, [location.state]);
 
   useEffect(() => {
-    if (dimensions.length === 0 || selectedDimension) return;
-    openDimension(dimensions[0].name).catch(e => {
+    if (data.dimensions.length === 0 || selectedDimension) return;
+    openDimension(data.dimensions[0].name).catch(e => {
       setLoadWarnings(prev => [...prev, warningText("状态历史", e)]);
     });
-  }, [dimensions, selectedDimension]);
+  }, [data.dimensions, selectedDimension]);
 
   const dismissCalibrationPrompt = async () => {
     if (calibrationPrompt?.weekly) await markCalibrationShown("weekly");
@@ -402,73 +433,73 @@ export default function DashboardPage() {
     const warnings: string[] = [];
     try {
       const m = await getLifeModel();
-      setModel(m);
-      setDimensions(m.state.custom_dimensions || []);
+      dispatch({ type: "set", payload: { model: m } });
+      dispatch({ type: "set", payload: { dimensions: m.state.custom_dimensions || [] } });
     } catch (e) {
       warnings.push(warningText("人生模型", e));
     }
     try {
-      setFeedback(await getFeedbackSummary());
+      dispatch({ type: "set", payload: { feedback: await getFeedbackSummary() } });
     } catch (e) {
       warnings.push(warningText("反馈统计", e));
     }
     try {
-      setMemoryCount(await countMemoryChunks());
+      dispatch({ type: "set", payload: { memoryCount: await countMemoryChunks() } });
     } catch (e) {
       warnings.push(warningText("记忆统计", e));
     }
     try {
-      setGaps(await goalCapabilityGapReport());
+      dispatch({ type: "set", payload: { gaps: await goalCapabilityGapReport() } });
     } catch (e) {
       warnings.push(warningText("能力缺口", e));
     }
     try {
-      setAlignments(await identityGoalAlignmentReport());
+      dispatch({ type: "set", payload: { alignments: await identityGoalAlignmentReport() } });
     } catch (e) {
       warnings.push(warningText("价值观一致性", e));
     }
     try {
-      setDailyGoals(await getDailyGoals());
+      dispatch({ type: "set", payload: { dailyGoals: await getDailyGoals() } });
     } catch (e) {
       warnings.push(warningText("每日目标", e));
     }
     try {
-      setStateAlerts(await getStateAlerts());
+      dispatch({ type: "set", payload: { stateAlerts: await getStateAlerts() } });
     } catch (e) {
       warnings.push(warningText("状态预警", e));
     }
     try {
-      setDiagnostics(await getSystemDiagnostics());
+      dispatch({ type: "set", payload: { diagnostics: await getSystemDiagnostics() } });
     } catch (e) {
       warnings.push(warningText("系统诊断", e));
     }
     try {
       const snaps = await listSnapshots();
       if (snaps.length > 0) {
-        setLatestVersion(snaps[0]);
+        dispatch({ type: "set", payload: { latestVersion: snaps[0] } });
       }
     } catch (e) {
       warnings.push(warningText("版本快照", e));
     }
     try {
       const proposals = await getPendingProposals(10);
-      setPendingProposals(proposals);
+      dispatch({ type: "set", payload: { pendingProposals: proposals } });
     } catch (e) {
       warnings.push(warningText("待处理提案", e));
     }
     try {
       const runs = await listAgentRuns(20, 0);
-      setRecentRuns(runs.slice(0, 5));
+      dispatch({ type: "set", payload: { recentRuns: runs.slice(0, 5) } });
       const planResults = await Promise.all(
         runs.slice(0, 5).map(run => listAgentPlansForRun(run.id).catch(() => [] as AgentPlan[]))
       );
-      setRecentPlans(planResults.flat().slice(0, 5));
+      dispatch({ type: "set", payload: { recentPlans: planResults.flat().slice(0, 5) } });
     } catch (e) {
       warnings.push(warningText("最近运行", e));
     }
     try {
       const suggestions = await getProactiveSuggestions();
-      setProactiveSuggestions(suggestions);
+      dispatch({ type: "set", payload: { proactiveSuggestions: suggestions } });
     } catch (e) {
       warnings.push(warningText("主动建议", e));
     }
@@ -489,9 +520,9 @@ export default function DashboardPage() {
       const suffix = result.snapshot_version ? ` 已创建快照 ${result.snapshot_version}` : "";
       setEvolutionMsg(`${result.message}${suffix}`);
       const m = await getLifeModel();
-      setModel(m);
+      dispatch({ type: "set", payload: { model: m } });
       const snaps = await listSnapshots();
-      if (snaps.length > 0) setLatestVersion(snaps[0]);
+      if (snaps.length > 0) dispatch({ type: "set", payload: { latestVersion: snaps[0] } });
     } catch (e: any) {
       setEvolutionMsg("微进化执行失败: " + (e?.message || String(e)));
     }
@@ -516,17 +547,17 @@ export default function DashboardPage() {
     await addDailyGoal(newGoalName.trim());
     setNewGoalName("");
     setAddingGoal(false);
-    setDailyGoals(await getDailyGoals());
+    dispatch({ type: "set", payload: { dailyGoals: await getDailyGoals() } });
   };
 
   const onToggleGoal = async (idx: number) => {
     await toggleDailyGoal(idx);
-    setDailyGoals(await getDailyGoals());
+    dispatch({ type: "set", payload: { dailyGoals: await getDailyGoals() } });
   };
 
   const onDeleteGoal = async (idx: number) => {
     await deleteDailyGoal(idx);
-    setDailyGoals(await getDailyGoals());
+    dispatch({ type: "set", payload: { dailyGoals: await getDailyGoals() } });
   };
 
   const startEditGoal = (idx: number, name: string) => {
@@ -538,7 +569,7 @@ export default function DashboardPage() {
     if (!editGoalName.trim()) return;
     await updateDailyGoal(idx, editGoalName.trim(), undefined);
     setEditingGoalIndex(null);
-    setDailyGoals(await getDailyGoals());
+    dispatch({ type: "set", payload: { dailyGoals: await getDailyGoals() } });
   };
 
   // State handlers
@@ -577,15 +608,15 @@ export default function DashboardPage() {
     setStateInputAlertDays("3");
     // refresh
     const m = await getLifeModel();
-    setDimensions(m.state.custom_dimensions || []);
-    setStateAlerts(await getStateAlerts());
+    dispatch({ type: "set", payload: { dimensions: m.state.custom_dimensions || [] } });
+    dispatch({ type: "set", payload: { stateAlerts: await getStateAlerts() } });
     if (selectedDimension === name) {
       setDimensionHistory(await getStateHistory(name, 30));
     }
   };
 
-  const goals = model?.goals ?? null;
-  const capabilities = model?.capabilities ?? null;
+  const goals = data.model?.goals ?? null;
+  const capabilities = data.model?.capabilities ?? null;
 
   const allGoals = useMemo(
     () => [
@@ -615,14 +646,18 @@ export default function DashboardPage() {
     [capabilities]
   );
 
-  const completedDaily = useMemo(() => dailyGoals.filter(g => g.done).length, [dailyGoals]);
-  const selectedDimensionModel = dimensions.find(dim => dim.name === selectedDimension) ?? null;
-  const trendSummary = useMemo(
-    () => summarizeStateDimension(selectedDimensionModel, dimensionHistory, stateAlerts),
-    [selectedDimensionModel, dimensionHistory, stateAlerts]
+  const completedDaily = useMemo(
+    () => data.dailyGoals.filter(g => g.done).length,
+    [data.dailyGoals]
   );
-  // Build recommendations based on model completion
-  const builderCompletion = diagnostics?.builder_completion;
+  const selectedDimensionModel =
+    data.dimensions.find(dim => dim.name === selectedDimension) ?? null;
+  const trendSummary = useMemo(
+    () => summarizeStateDimension(selectedDimensionModel, dimensionHistory, data.stateAlerts),
+    [selectedDimensionModel, dimensionHistory, data.stateAlerts]
+  );
+  // Build recommendations based on data.model completion
+  const builderCompletion = data.diagnostics?.builder_completion;
   const completionThreshold = 60; // Show recommendation if dimension is below 60%
   const dimensionLabels: Record<string, string> = {
     identity: "Identity",
@@ -636,7 +671,7 @@ export default function DashboardPage() {
     : 100;
 
   const builderRecommendations = useMemo(() => {
-    if (!builderCompletion || getModelEmptyState(model, diagnostics)) return [];
+    if (!builderCompletion || getModelEmptyState(data.model, data.diagnostics)) return [];
 
     const recs: Array<{ title: string; detail: string; to: string }> = [];
 
@@ -660,27 +695,29 @@ export default function DashboardPage() {
     }
 
     return recs;
-  }, [builderCompletion, lowestDimension, lowestDimensionValue, model, diagnostics]);
+  }, [builderCompletion, lowestDimension, lowestDimensionValue, data.model, data.diagnostics]);
 
   const nextActions = useMemo(
     () =>
       [
-        diagnostics &&
-        diagnostics.model_empty &&
-        (diagnostics.pending_builder_review_sessions ?? 0) > 0
+        data.diagnostics &&
+        data.diagnostics.model_empty &&
+        (data.diagnostics.pending_builder_review_sessions ?? 0) > 0
           ? {
               title: "先审阅待确认的构建建议",
-              detail: `Builder 里还有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，后续对话才会真正个性化。`,
+              detail: `Builder 里还有 ${data.diagnostics.pending_builder_review_sessions} 个待确认 Review。先把这些建议应用掉，后续对话才会真正个性化。`,
               to: "/builder",
             }
-          : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+          : data.diagnostics &&
+              data.diagnostics.model_empty &&
+              data.diagnostics.unfinished_builder_sessions > 0
             ? {
                 title: "继续未完成的构建会话",
-                detail: `Builder 里还有 ${diagnostics.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，后续对话才会真正个性化。`,
+                detail: `Builder 里还有 ${data.diagnostics.unfinished_builder_sessions} 个待继续或待确认的会话。先把 Review 应用掉，后续对话才会真正个性化。`,
                 to: "/builder",
               }
             : null,
-        getModelEmptyState(model, diagnostics)
+        getModelEmptyState(data.model, data.diagnostics)
           ? {
               title: "先构建人生模型",
               detail: "模型为空时，Chat 和 Dashboard 都只能提供通用建议。",
@@ -688,10 +725,10 @@ export default function DashboardPage() {
             }
           : null,
         ...builderRecommendations.map(r => r as { title: string; detail: string; to: string }),
-        diagnostics && !diagnostics.chat_ready
+        data.diagnostics && !data.diagnostics.chat_ready
           ? {
               title: "修复聊天配置",
-              detail: diagnostics.readiness_issues[0] ?? "本地或云端模型尚未就绪。",
+              detail: data.diagnostics.readiness_issues[0] ?? "本地或云端模型尚未就绪。",
               to: "/settings",
             }
           : null,
@@ -702,43 +739,45 @@ export default function DashboardPage() {
               to: "/calibration",
             }
           : null,
-        latestVersion
+        data.latestVersion
           ? {
               title: "最近快照可回滚",
-              detail: `最近快照是 ${latestVersion.version}，可在版本控制中查看差异。`,
+              detail: `最近快照是 ${data.latestVersion.version}，可在版本控制中查看差异。`,
               to: "/versions",
             }
           : null,
       ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
-    [diagnostics, model, builderRecommendations, calibrationPrompt, latestVersion]
+    [data.diagnostics, data.model, builderRecommendations, calibrationPrompt, data.latestVersion]
   );
 
   const trialRoute = useMemo(
     () =>
       [
-        !diagnostics?.chat_ready
+        !data.diagnostics?.chat_ready
           ? {
               title: "先完成模型与 API 配置",
-              detail: diagnostics?.readiness_issues?.[0] ?? "先让对话后端进入可用状态。",
+              detail: data.diagnostics?.readiness_issues?.[0] ?? "先让对话后端进入可用状态。",
               to: "/settings",
             }
           : null,
-        diagnostics &&
-        diagnostics.model_empty &&
-        (diagnostics.pending_builder_review_sessions ?? 0) > 0
+        data.diagnostics &&
+        data.diagnostics.model_empty &&
+        (data.diagnostics.pending_builder_review_sessions ?? 0) > 0
           ? {
               title: "继续 Builder 中待确认的 Review",
-              detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.pending_builder_review_sessions} 个待确认 Review。先回 Builder 审阅并应用它们，比重新开始更合适。`,
+              detail: `当前人生模型还没真正落库，但你已经有 ${data.diagnostics.pending_builder_review_sessions} 个待确认 Review。先回 Builder 审阅并应用它们，比重新开始更合适。`,
               to: "/builder",
             }
-          : diagnostics && diagnostics.model_empty && diagnostics.unfinished_builder_sessions > 0
+          : data.diagnostics &&
+              data.diagnostics.model_empty &&
+              data.diagnostics.unfinished_builder_sessions > 0
             ? {
                 title: "继续 Builder 中待确认的 Review",
-                detail: `当前人生模型还没真正落库，但你已经有 ${diagnostics.unfinished_builder_sessions} 个未完成构建会话。先回 Builder 应用它们，比重新开始更合适。`,
+                detail: `当前人生模型还没真正落库，但你已经有 ${data.diagnostics.unfinished_builder_sessions} 个未完成构建会话。先回 Builder 应用它们，比重新开始更合适。`,
                 to: "/builder",
               }
             : null,
-        getModelEmptyState(model, diagnostics)
+        getModelEmptyState(data.model, data.diagnostics)
           ? {
               title: "完成第一次人生模型构建",
               detail: "先用快速构建建立最小可用模型，再开始个性化对话。",
@@ -762,28 +801,36 @@ export default function DashboardPage() {
               to: "/calibration",
             }
           : null,
-        latestVersion
+        data.latestVersion
           ? {
               title: "检查最近模型变化",
-              detail: `最近快照 ${latestVersion.version} 已可查看差异和回滚。`,
+              detail: `最近快照 ${data.latestVersion.version} 已可查看差异和回滚。`,
               to: "/versions",
             }
           : null,
       ].filter(Boolean) as Array<{ title: string; detail: string; to: string }>,
-    [diagnostics, model, builderCompletion, lowestDimension, calibrationPrompt, latestVersion]
+    [
+      data.diagnostics,
+      data.model,
+      builderCompletion,
+      lowestDimension,
+      calibrationPrompt,
+      data.latestVersion,
+    ]
   );
 
-  const overallCompletion = diagnostics?.builder_completion?.overall ?? 0;
+  const overallCompletion = data.diagnostics?.builder_completion?.overall ?? 0;
   const actionSignals = [
-    diagnostics && !diagnostics.chat_ready
+    data.diagnostics && !data.diagnostics.chat_ready
       ? {
           label: "运行环境",
           tone: "amber",
           title: "模型后端还没完全就绪",
-          detail: diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深度试用会更顺畅。",
+          detail:
+            data.diagnostics.readiness_issues[0] ?? "先修复配置，再做对话和深度试用会更顺畅。",
         }
       : null,
-    getModelEmptyState(model, diagnostics)
+    getModelEmptyState(data.model, data.diagnostics)
       ? {
           label: "人生模型",
           tone: "indigo",
@@ -802,22 +849,22 @@ export default function DashboardPage() {
               : "模型基础已经够用，可以把重心转到对话、复盘和持续校准。",
         }
       : null,
-    dailyGoals.length > 0
+    data.dailyGoals.length > 0
       ? {
           label: "今日推进",
           tone: "rose",
-          title: `今天还有 ${dailyGoals.length - completedDaily} 个目标待完成`,
+          title: `今天还有 ${data.dailyGoals.length - completedDaily} 个目标待完成`,
           detail:
-            completedDaily < dailyGoals.length
+            completedDaily < data.dailyGoals.length
               ? "先完成一个低阻力的小闭环，通常比重新规划更能带来推进感。"
               : "今日目标已经清空，可以把时间留给反思、校准或下一阶段规划。",
         }
       : null,
-    stateAlerts.length > 0
+    data.stateAlerts.length > 0
       ? {
           label: "状态信号",
           tone: "amber",
-          title: `检测到 ${stateAlerts.length} 条状态预警`,
+          title: `检测到 ${data.stateAlerts.length} 条状态预警`,
           detail: "系统判断你现在更适合先稳住节奏、做状态复盘，而不是继续叠加强刺激任务。",
         }
       : null,
@@ -834,24 +881,24 @@ export default function DashboardPage() {
     rose: "border-rose-100 bg-rose-50 text-rose-900",
   };
   const compassTone =
-    diagnostics && !diagnostics.chat_ready
+    data.diagnostics && !data.diagnostics.chat_ready
       ? "需要先修复运行环境"
-      : getModelEmptyState(model, diagnostics)
+      : getModelEmptyState(data.model, data.diagnostics)
         ? "先让 OpenLife 认识你"
-        : stateAlerts.length > 0
+        : data.stateAlerts.length > 0
           ? "今天适合稳住节奏"
-          : dailyGoals.length > 0 && completedDaily < dailyGoals.length
+          : data.dailyGoals.length > 0 && completedDaily < data.dailyGoals.length
             ? "今天适合推进一个小闭环"
             : "今天可以做一次深度对话";
   const compassDetail =
-    diagnostics && !diagnostics.chat_ready
+    data.diagnostics && !data.diagnostics.chat_ready
       ? "模型后端还没有就绪，先去设置页完成试用检查，会比继续点功能更省时间。"
-      : getModelEmptyState(model, diagnostics)
+      : getModelEmptyState(data.model, data.diagnostics)
         ? "人生模型还是空的。先完成一次快速构建，OpenLife 的建议才会真正围绕你展开。"
-        : stateAlerts.length > 0
-          ? `检测到 ${stateAlerts.length} 条状态预警，建议先降低任务强度，做一次状态复盘。`
-          : dailyGoals.length > 0 && completedDaily < dailyGoals.length
-            ? `今日还有 ${dailyGoals.length - completedDaily} 个目标未完成，适合先完成一个低阻力目标。`
+        : data.stateAlerts.length > 0
+          ? `检测到 ${data.stateAlerts.length} 条状态预警，建议先降低任务强度，做一次状态复盘。`
+          : data.dailyGoals.length > 0 && completedDaily < data.dailyGoals.length
+            ? `今日还有 ${data.dailyGoals.length - completedDaily} 个目标未完成，适合先完成一个低阻力目标。`
             : "当前基础状态不错，可以进入 Chat 做今日规划、目标拆解或一次决策陪跑。";
 
   return (
@@ -869,12 +916,12 @@ export default function DashboardPage() {
               先看状态，再决定下一步。OpenLife 会把功能折叠成行动建议。
             </p>
           </div>
-          {latestVersion && (
+          {data.latestVersion && (
             <div className="flex items-center gap-2 text-sm text-gray-600">
               <Tag size={14} className="text-indigo-500" />
-              <span>版本 {latestVersion.version}</span>
+              <span>版本 {data.latestVersion.version}</span>
               <span className="text-gray-300">·</span>
-              <span className="text-gray-400">{latestVersion.timestamp.slice(0, 10)}</span>
+              <span className="text-gray-400">{data.latestVersion.timestamp.slice(0, 10)}</span>
             </div>
           )}
         </div>
@@ -920,13 +967,13 @@ export default function DashboardPage() {
                     全部 <ArrowRight size={12} />
                   </Link>
                 </div>
-                {recentRuns.length === 0 ? (
+                {data.recentRuns.length === 0 ? (
                   <div className="text-xs text-stone-400 py-2">
                     暂无运行记录。开始对话或构建 LifeModel。
                   </div>
                 ) : (
                   <div className="grid gap-2">
-                    {recentRuns.slice(0, 4).map(run => (
+                    {data.recentRuns.slice(0, 4).map(run => (
                       <Link
                         key={run.id}
                         to={`/runs/${run.id}`}
@@ -993,13 +1040,13 @@ export default function DashboardPage() {
                       查看 <ArrowRight size={12} />
                     </Link>
                   </div>
-                  {recentPlans.length === 0 ? (
+                  {data.recentPlans.length === 0 ? (
                     <div className="text-xs text-stone-400 py-2">
                       暂无计划。通过对话中的规划功能创建。
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {recentPlans.slice(0, 3).map(plan => (
+                      {data.recentPlans.slice(0, 3).map(plan => (
                         <Link
                           key={plan.id}
                           to={plan.runId ? `/runs/${plan.runId}` : "/runs"}
@@ -1052,17 +1099,17 @@ export default function DashboardPage() {
                       审查 <ArrowRight size={12} />
                     </Link>
                   </div>
-                  {pendingProposals.length === 0 ? (
+                  {data.pendingProposals.length === 0 ? (
                     <div className="text-xs text-stone-400 py-2">
                       暂无待处理提案。
-                      {diagnostics?.high_risk_pending_proposal_count &&
-                      diagnostics.high_risk_pending_proposal_count > 0
-                        ? ` ${diagnostics.high_risk_pending_proposal_count} 个高风险提案需要关注。`
+                      {data.diagnostics?.high_risk_pending_proposal_count &&
+                      data.diagnostics.high_risk_pending_proposal_count > 0
+                        ? ` ${data.diagnostics.high_risk_pending_proposal_count} 个高风险提案需要关注。`
                         : ""}
                     </div>
                   ) : (
                     <div className="space-y-2">
-                      {pendingProposals.slice(0, 3).map(proposal => (
+                      {data.pendingProposals.slice(0, 3).map(proposal => (
                         <Link
                           key={proposal.id}
                           to="/review"
@@ -1091,9 +1138,9 @@ export default function DashboardPage() {
                           </span>
                         </Link>
                       ))}
-                      {pendingProposals.length > 3 && (
+                      {data.pendingProposals.length > 3 && (
                         <div className="text-xs text-stone-400 text-center">
-                          还有 {pendingProposals.length - 3} 个提案
+                          还有 {data.pendingProposals.length - 3} 个提案
                         </div>
                       )}
                     </div>
@@ -1190,7 +1237,7 @@ export default function DashboardPage() {
               <div className="rounded-2xl border border-white/70 bg-white/70 p-4">
                 <div className="text-xs text-stone-500">今日目标进度</div>
                 <div className="mt-2 text-2xl font-semibold text-stone-900">
-                  {completedDaily}/{dailyGoals.length}
+                  {completedDaily}/{data.dailyGoals.length}
                 </div>
                 <div className="mt-1 text-xs text-stone-500">完成</div>
               </div>
@@ -1199,12 +1246,12 @@ export default function DashboardPage() {
                 <div className="mt-2 flex items-center gap-2 text-sm font-medium text-stone-800">
                   <Sparkles
                     size={15}
-                    className={diagnostics?.chat_ready ? "text-emerald-600" : "text-amber-600"}
+                    className={data.diagnostics?.chat_ready ? "text-emerald-600" : "text-amber-600"}
                   />
-                  {diagnostics?.chat_ready ? "可对话" : "需配置"}
+                  {data.diagnostics?.chat_ready ? "可对话" : "需配置"}
                 </div>
                 <div className="mt-1 text-xs text-stone-500">
-                  {diagnostics?.cloud_provider ?? "模型后端检测中"}
+                  {data.diagnostics?.cloud_provider ?? "模型后端检测中"}
                 </div>
               </div>
             </div>
@@ -1303,7 +1350,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {diagnostics && isSafeMode(diagnostics) && (
+        {data.diagnostics && isSafeMode(data.diagnostics) && (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
@@ -1311,7 +1358,7 @@ export default function DashboardPage() {
                   Safe Mode：建议先修复数据环境再深度试用
                 </div>
                 <div className="mt-1 text-xs leading-5 text-amber-800">
-                  {getSafeModeReason(diagnostics)}
+                  {getSafeModeReason(data.diagnostics)}
                 </div>
                 <div className="mt-1 text-xs text-amber-700">
                   可以继续查看仪表盘，但若要进行
@@ -1329,15 +1376,15 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {diagnostics && diagnostics.pending_proposal_count > 0 && (
+        {data.diagnostics && data.diagnostics.pending_proposal_count > 0 && (
           <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
             <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
               <div>
                 <div className="text-sm font-semibold text-amber-900">
-                  你有 {diagnostics.pending_proposal_count} 个待确认理解
-                  {diagnostics.high_risk_pending_proposal_count > 0 && (
+                  你有 {data.diagnostics.pending_proposal_count} 个待确认理解
+                  {data.diagnostics.high_risk_pending_proposal_count > 0 && (
                     <span className="ml-2 text-rose-700">
-                      （其中 {diagnostics.high_risk_pending_proposal_count} 个高风险）
+                      （其中 {data.diagnostics.high_risk_pending_proposal_count} 个高风险）
                     </span>
                   )}
                 </div>
@@ -1416,7 +1463,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {getModelEmptyState(model, diagnostics) && (
+        {getModelEmptyState(data.model, data.diagnostics) && (
           <div className="bg-white border rounded-xl p-5 flex flex-col sm:flex-row sm:items-center gap-4">
             <div className="flex-1">
               <div className="font-semibold text-indigo-900 flex items-center gap-2">
@@ -1438,14 +1485,14 @@ export default function DashboardPage() {
         )}
 
         {/* Proactive Suggestions */}
-        {proactiveSuggestions.length > 0 && (
+        {data.proactiveSuggestions.length > 0 && (
           <div className="bg-gradient-to-r from-indigo-50 to-amber-50 border border-indigo-100 rounded-xl p-5">
             <div className="flex items-center gap-2 mb-3">
               <Sparkles size={18} className="text-indigo-500" />
               <span className="font-semibold text-gray-800">OpenLife 建议</span>
             </div>
             <div className="grid gap-2">
-              {proactiveSuggestions.map(s => (
+              {data.proactiveSuggestions.map(s => (
                 <Link
                   key={s.id}
                   to="/chat"
@@ -1504,11 +1551,11 @@ export default function DashboardPage() {
                 <Target size={18} className="text-indigo-600" /> 今日目标
               </div>
               <div className="text-sm text-gray-500">
-                {completedDaily} / {dailyGoals.length} 完成
+                {completedDaily} / {data.dailyGoals.length} 完成
               </div>
             </div>
             <div className="space-y-2">
-              {dailyGoals.map((g, i) => (
+              {data.dailyGoals.map((g, i) => (
                 <div key={i} className="flex items-center gap-3 bg-gray-50 rounded-lg px-3 py-2">
                   <button
                     onClick={() => onToggleGoal(i)}
@@ -1555,7 +1602,7 @@ export default function DashboardPage() {
                   )}
                 </div>
               ))}
-              {dailyGoals.length === 0 && !addingGoal && (
+              {data.dailyGoals.length === 0 && !addingGoal && (
                 <EmptyState
                   title="暂无今日目标"
                   description="添加一个小目标，开启一天的好状态。"
@@ -1595,8 +1642,8 @@ export default function DashboardPage() {
               <Activity size={18} className="text-amber-600" /> 状态预警
             </div>
             <div className="space-y-3">
-              {stateAlerts.length > 0 ? (
-                stateAlerts.slice(0, 3).map((alert, i) => (
+              {data.stateAlerts.length > 0 ? (
+                data.stateAlerts.slice(0, 3).map((alert, i) => (
                   <div key={i} className="bg-amber-50 border border-amber-100 rounded-lg px-3 py-3">
                     <div className="text-sm font-medium text-amber-800">{alert.dimension_name}</div>
                     <div className="text-sm text-amber-700 mt-1">{alert.message}</div>
@@ -1609,8 +1656,10 @@ export default function DashboardPage() {
                   className="py-4"
                 />
               )}
-              {stateAlerts.length > 3 && (
-                <div className="text-xs text-gray-500">还有 {stateAlerts.length - 3} 项预警</div>
+              {data.stateAlerts.length > 3 && (
+                <div className="text-xs text-gray-500">
+                  还有 {data.stateAlerts.length - 3} 项预警
+                </div>
               )}
             </div>
           </div>
@@ -1629,15 +1678,15 @@ export default function DashboardPage() {
             <div className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
               <TrendingUp size={18} className="text-indigo-600" /> 目标-能力缺口
             </div>
-            {gaps && gaps.length > 0 ? (
+            {data.gaps && data.gaps.length > 0 ? (
               <div className="space-y-2">
-                {gaps.slice(0, 5).map((gap, i) => (
+                {data.gaps.slice(0, 5).map((gap, i) => (
                   <div key={i} className="bg-indigo-50 rounded-lg px-3 py-2 text-sm text-gray-800">
                     {gap.goal_name} · {gap.skill_name} · {gap.current_level}/{gap.target_level}
                   </div>
                 ))}
-                {gaps.length > 5 && (
-                  <div className="text-xs text-gray-500">还有 {gaps.length - 5} 项缺口</div>
+                {data.gaps.length > 5 && (
+                  <div className="text-xs text-gray-500">还有 {data.gaps.length - 5} 项缺口</div>
                 )}
               </div>
             ) : (
@@ -1658,14 +1707,14 @@ export default function DashboardPage() {
               </button>
             </div>
             <div className="flex-1 overflow-auto space-y-2">
-              {dimensions.length === 0 && (
+              {data.dimensions.length === 0 && (
                 <EmptyState
                   title="暂无状态维度"
                   description="记录一个自定义状态维度，追踪长期趋势。"
                   className="py-4"
                 />
               )}
-              {dimensions.slice(0, 5).map(dim => (
+              {data.dimensions.slice(0, 5).map(dim => (
                 <div
                   key={dim.name}
                   onClick={() => openDimension(dim.name)}
@@ -1787,27 +1836,29 @@ export default function DashboardPage() {
           <div className="bg-white border rounded-xl p-4">
             <div className="text-xs text-gray-500 mb-1">价值观</div>
             <div className="text-xl font-bold text-purple-700">
-              {model?.identity?.values?.length ?? 0}
+              {data.model?.identity?.values?.length ?? 0}
             </div>
           </div>
           <div className="bg-white border rounded-xl p-4">
             <div className="text-xs text-gray-500 mb-1">记忆</div>
-            <div className="text-xl font-bold text-orange-700">{memoryCount}</div>
+            <div className="text-xl font-bold text-orange-700">{data.memoryCount}</div>
           </div>
           <div className="bg-white border rounded-xl p-4">
             <div className="text-xs text-gray-500 mb-1">消息</div>
-            <div className="text-xl font-bold text-gray-900">{feedback?.total_messages ?? 0}</div>
+            <div className="text-xl font-bold text-gray-900">
+              {data.feedback?.total_messages ?? 0}
+            </div>
           </div>
           <div className="bg-white border rounded-xl p-4">
             <div className="text-xs text-gray-500 mb-1">正向反馈</div>
             <div className="text-xl font-bold text-green-700">
-              {feedback?.total_feedback_up ?? 0}
+              {data.feedback?.total_feedback_up ?? 0}
             </div>
           </div>
           <div className="bg-white border rounded-xl p-4">
             <div className="text-xs text-gray-500 mb-1">负向反馈</div>
             <div className="text-xl font-bold text-rose-700">
-              {feedback?.total_feedback_down ?? 0}
+              {data.feedback?.total_feedback_down ?? 0}
             </div>
           </div>
           <div className="bg-white border rounded-xl p-4">
@@ -1905,8 +1956,8 @@ export default function DashboardPage() {
               <TrendingUp size={18} className="text-indigo-600" /> 目标-能力缺口
             </div>
             <div className="space-y-3">
-              {gaps && gaps.length > 0 ? (
-                gaps.slice(0, 3).map((gap, idx) => (
+              {data.gaps && data.gaps.length > 0 ? (
+                data.gaps.slice(0, 3).map((gap, idx) => (
                   <div
                     key={`${gap.goal_name}-${gap.skill_name}-${idx}`}
                     className="rounded-lg border border-amber-100 bg-amber-50/70 p-3"
@@ -1937,8 +1988,8 @@ export default function DashboardPage() {
               <Tag size={18} className="text-indigo-600" /> 价值观-目标一致性
             </div>
             <div className="space-y-3">
-              {alignments && alignments.length > 0 ? (
-                alignments.slice(0, 3).map((issue, idx) => (
+              {data.alignments && data.alignments.length > 0 ? (
+                data.alignments.slice(0, 3).map((issue, idx) => (
                   <div
                     key={`${issue.goal_name}-${idx}`}
                     className="rounded-lg border border-rose-100 bg-rose-50/70 p-3"

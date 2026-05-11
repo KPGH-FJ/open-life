@@ -277,13 +277,14 @@ fn redact_count(n: usize) -> String {
 }
 
 fn has_pii(text: &str) -> bool {
-    let email_pattern =
-        regex::Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap();
-    let us_phone_pattern = regex::Regex::new(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b").unwrap();
-    let cn_mobile_pattern =
-        regex::Regex::new(r"(?:\+?86[-.\s]?)?1[3-9]\d[-.\s]?\d{4}[-.\s]?\d{4}").unwrap();
+    let email_pattern = regex::Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+        .expect("validated PII regex");
+    let us_phone_pattern =
+        regex::Regex::new(r"\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b").expect("validated PII regex");
+    let cn_mobile_pattern = regex::Regex::new(r"(?:\+?86[-.\s]?)?1[3-9]\d[-.\s]?\d{4}[-.\s]?\d{4}")
+        .expect("validated PII regex");
     let cn_landline_pattern =
-        regex::Regex::new(r"(?:\+?86[-.\s]?)?0\d{2,3}[-.\s]?\d{7,8}").unwrap();
+        regex::Regex::new(r"(?:\+?86[-.\s]?)?0\d{2,3}[-.\s]?\d{7,8}").expect("validated PII regex");
 
     email_pattern.is_match(text)
         || us_phone_pattern.is_match(text)

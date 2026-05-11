@@ -1,30 +1,20 @@
 use crate::errors::AppError;
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 
 pub struct A2ASidecar {
-    child: Mutex<Option<Child>>,
+    child: Option<Child>,
     port: u16,
 }
 
 impl A2ASidecar {
     pub fn new(port: u16) -> Self {
-        Self {
-            child: Mutex::new(None),
-            port,
-        }
+        Self { child: None, port }
     }
 
-    pub async fn start(&self) -> Result<(), AppError> {
-        {
-            let child_lock = self
-                .child
-                .lock()
-                .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
-            if child_lock.is_some() {
-                println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
-                return Ok(());
-            }
+    pub async fn start(&mut self) -> Result<(), AppError> {
+        if self.child.is_some() {
+            println!("[A2A Sidecar] already running - a2a_sidecar.rs:20");
+            return Ok(());
         }
 
         if crate::a2a_server::has_reachable_local_server(self.port).await {
@@ -48,11 +38,7 @@ impl A2ASidecar {
             .spawn()
             .map_err(|e| AppError::internal(format!("Failed to spawn A2A sidecar: {}", e)))?;
 
-        let mut child_lock = self
-            .child
-            .lock()
-            .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
-        *child_lock = Some(child);
+        self.child = Some(child);
         println!(
             "[A2A Sidecar] spawned on port {} - a2a_sidecar.rs:43",
             self.port
@@ -60,27 +46,21 @@ impl A2ASidecar {
         Ok(())
     }
 
-    pub fn stop(&self) -> Result<(), AppError> {
-        let mut child_lock = self
-            .child
-            .lock()
-            .map_err(|e| AppError::internal(format!("mutex poison: {}", e)))?;
-        if let Some(mut child) = child_lock.take() {
+    pub fn stop(&mut self) {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             println!("[A2A Sidecar] stopped - a2a_sidecar.rs:43");
         }
-        Ok(())
     }
 }
 
 impl Drop for A2ASidecar {
     fn drop(&mut self) {
-        let _ = self.stop();
+        self.stop();
     }
 }
 
 fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, AppError> {
-    // 1. env override
     if let Ok(path) = std::env::var("A2A_SERVER_PATH") {
         let p = std::path::PathBuf::from(path);
         if p.exists() {
@@ -88,7 +68,6 @@ fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, AppError> {
         }
     }
 
-    // 2. development path (workspace target/debug)
     let dev_path = std::env::current_dir()
         .map_err(|e| AppError::internal(format!("current_dir failed: {}", e)))?
         .join("target")
@@ -98,7 +77,6 @@ fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, AppError> {
         return Ok(dev_path);
     }
 
-    // 3. same directory as current executable (production sidecar)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sidecar = if cfg!(windows) {

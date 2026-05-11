@@ -38,6 +38,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 VITE_PORT="${PORT:-5173}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/Library/Caches/OpenLife/cargo-target}"
 
 # 加载 .env
 ENV_FILE="$REPO_ROOT/.env"
@@ -85,6 +86,8 @@ echo -e "${GREEN}╚════════════════════
 echo ""
 
 cd "$REPO_ROOT"
+mkdir -p "$CARGO_TARGET_DIR"
+echo -e "${BLUE}[INFO]${NC} Cargo 构建缓存: $CARGO_TARGET_DIR"
 
 # 检查 pnpm（通过 Corepack 调用，避免依赖全局 pnpm symlink）
 if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then

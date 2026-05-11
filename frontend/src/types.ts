@@ -395,8 +395,7 @@ export type AgentRoleKind =
   | "codebase_explorer"
   | "memory_curator"
   | "lifemodel_guardian"
-  | "reviewer"
-  | string;
+  | "reviewer";
 
 export type PrivacyPolicy = "local_only" | "summary_only" | "cloud_allowed";
 

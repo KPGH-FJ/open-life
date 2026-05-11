@@ -1630,3 +1630,103 @@ fn test_shell_run_full_governed_success_path() {
     assert!(!blocked, "must not contain ToolCallBlocked event");
     assert!(!failed, "must not contain ToolCallFailed event");
 }
+
+// ── MemoryEvidence → LifeModel Proposal pipeline test ────────────────
+#[test]
+fn test_memory_evidence_to_proposal_pipeline() {
+    use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
+    use crate::agent::types::{ProposalSource, ProposalType, RiskLevel};
+
+    // Step 1: Create evidence from memory records
+    let evidence = MemoryEvidence::new(
+        vec!["mem-001".to_string(), "mem-002".to_string()],
+        EvidenceType::RecurringGoal,
+        "User consistently expresses interest in learning Rust",
+        "goals.short_term",
+    )
+    .with_confidence(0.85)
+    .with_recency(0.9)
+    .with_source_summary("Mentioned in 5 chats over 2 weeks");
+
+    // Step 2: Evidence → Proposal (with confidence threshold)
+    let proposal = evidence.to_proposal(0.7).unwrap();
+    assert_eq!(proposal.proposal_type, ProposalType::GoalUpdate);
+    assert_eq!(proposal.source, ProposalSource::MemoryGovernance);
+    assert_eq!(proposal.affected_path, "goals.short_term");
+    assert!(proposal.reason.contains("Rust"));
+    assert!(proposal.reason.contains("recurring_goal"));
+    assert_eq!(proposal.confidence, 0.85);
+    assert_eq!(proposal.risk_level, RiskLevel::Medium);
+
+    // Evidence IDs are embedded in the proposal after payload
+    assert_eq!(proposal.after["evidence_id"].as_str().unwrap(), evidence.id);
+    assert_eq!(
+        proposal.after["evidence_type"].as_str().unwrap(),
+        "recurring_goal"
+    );
+
+    // Step 3: Low confidence evidence → None (rejected)
+    let weak = evidence.clone().with_confidence(0.3).to_proposal(0.5);
+    assert!(weak.is_none(), "low confidence evidence should yield None");
+}
+
+#[test]
+fn test_memory_evidence_high_risk_requires_explicit_review_in_proposal() {
+    use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
+    use crate::agent::types::RiskLevel;
+
+    // Identity values are high risk
+    let evidence = MemoryEvidence::new(
+        vec!["mem-003".to_string()],
+        EvidenceType::ValueSignal,
+        "User shifted value from security to adventure",
+        "identity.values",
+    )
+    .with_confidence(0.9)
+    .with_recency(0.95)
+    .with_source_summary("Consistent theme in 8 conversations");
+
+    let proposal = evidence.to_proposal(0.6).unwrap();
+    assert_eq!(proposal.risk_level, RiskLevel::High);
+    assert!(
+        proposal.reason.contains("高风险字段") || proposal.reason.contains("需显"),
+        "High-risk proposal must include explicit review note: {}",
+        proposal.reason
+    );
+}
+
+#[test]
+fn test_memory_evidence_contradiction_halves_confidence() {
+    use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
+
+    let e1 = MemoryEvidence::new(
+        vec!["mem-a".to_string()],
+        EvidenceType::ValueSignal,
+        "User values creativity",
+        "identity.values",
+    );
+
+    let e2 = MemoryEvidence::new(
+        vec!["mem-b".to_string()],
+        EvidenceType::ValueSignal,
+        "User values structure over creativity",
+        "identity.values",
+    )
+    .with_confidence(0.9)
+    .with_contradiction(&e1.id);
+
+    assert!(e2.has_contradictions());
+
+    let proposal = e2.to_proposal(0.4).unwrap();
+    // Contradiction halves confidence (0.9 * 0.5 = 0.45)
+    assert!(
+        (0.4..=0.5).contains(&proposal.confidence),
+        "Confidence should be halved due to contradiction, got {}",
+        proposal.confidence
+    );
+    assert!(
+        proposal.reason.contains("需澄清") || proposal.reason.contains("矛盾"),
+        "Contradiction proposal should mark for clarification: {}",
+        proposal.reason
+    );
+}

@@ -75,47 +75,39 @@ impl ModelRouteDecision {
     }
 }
 
-/// Provider health status with failure tracking.
+/// Unified provider state — availability, health, and model tracking in one struct.
 #[derive(Debug, Clone)]
-pub struct ProviderHealth {
+pub struct ProviderState {
+    pub provider: String,
     pub available: bool,
     pub latency_ms: Option<u64>,
     pub last_error: Option<String>,
-    pub last_check_at: std::time::Instant,
+    pub last_checked: chrono::DateTime<chrono::Utc>,
+    pub health_is_estimated: bool,
+    pub models: Vec<String>,
     pub consecutive_failures: u32,
 }
 
-impl Default for ProviderHealth {
+impl Default for ProviderState {
     fn default() -> Self {
         Self {
+            provider: String::new(),
             available: false,
             latency_ms: None,
             last_error: None,
-            last_check_at: std::time::Instant::now(),
+            last_checked: chrono::Utc::now(),
+            health_is_estimated: true,
+            models: vec![],
             consecutive_failures: 0,
         }
     }
 }
 
-/// Model availability status.
-#[derive(Debug, Clone)]
-pub struct ProviderAvailability {
-    pub provider: String,
-    pub available: bool,
-    pub latency_ms: Option<u64>,
-    pub models: Vec<String>,
-    pub last_checked: chrono::DateTime<chrono::Utc>,
-    pub last_error: Option<String>,
-    pub health_is_estimated: bool,
-}
-
 /// Intelligent model router with provider-agnostic, role-aware, privacy-aware routing.
 #[derive(Clone)]
 pub struct ModelRouter {
-    /// Available providers and their status
-    pub providers: HashMap<String, ProviderAvailability>,
-    /// Provider health tracking with failure counting
-    pub provider_health: HashMap<String, ProviderHealth>,
+    /// Available providers and their unified status (availability + health)
+    pub providers: HashMap<String, ProviderState>,
     /// Default provider preferences by task type
     pub task_preferences: HashMap<TaskType, Vec<String>>,
     /// Privacy policy: minimum privacy level per task type
@@ -169,7 +161,6 @@ impl Default for ModelRouter {
 
         Self {
             providers: HashMap::new(),
-            provider_health: HashMap::new(),
             task_preferences,
             privacy_policies,
             cost_budgets: HashMap::new(),
@@ -236,11 +227,11 @@ impl ModelRouter {
 
         self.providers.insert(
             "ollama".into(),
-            ProviderAvailability {
+            ProviderState {
                 provider: "ollama".into(),
                 available: ollama_available,
                 latency_ms: ollama_latency,
-                models: vec![], // Could populate with installed models
+                models: vec![],
                 last_checked: now,
                 last_error: if ollama_available {
                     None
@@ -248,6 +239,7 @@ impl ModelRouter {
                     Some("ollama_unavailable".into())
                 },
                 health_is_estimated: false,
+                consecutive_failures: if ollama_available { 0 } else { 1 },
             },
         );
 
@@ -277,7 +269,7 @@ impl ModelRouter {
         for (provider, (available, latency_ms, last_error, estimated)) in results {
             self.providers.insert(
                 provider.clone(),
-                ProviderAvailability {
+                ProviderState {
                     provider,
                     available,
                     latency_ms,
@@ -285,6 +277,7 @@ impl ModelRouter {
                     last_checked: now,
                     last_error,
                     health_is_estimated: estimated,
+                    consecutive_failures: if available { 0 } else { 1 },
                 },
             );
         }
@@ -312,7 +305,7 @@ impl ModelRouter {
 
         let results = futures::future::join_all(probes).await;
         for (provider, available, latency_ms, last_error) in results {
-            let entry = self.provider_health.entry(provider).or_default();
+            let entry = self.providers.entry(provider).or_default();
             if available {
                 entry.available = true;
                 entry.latency_ms = latency_ms;
@@ -323,12 +316,8 @@ impl ModelRouter {
                 entry.latency_ms = None;
                 entry.last_error = last_error;
                 entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-                // Mark as unavailable after 3 consecutive failures
-                if entry.consecutive_failures >= 3 {
-                    entry.available = false;
-                }
             }
-            entry.last_check_at = std::time::Instant::now();
+            entry.health_is_estimated = false;
         }
 
         self.last_health_check = Some(std::time::Instant::now());
@@ -380,11 +369,9 @@ impl ModelRouter {
         privacy_requirement: PrivacyRequirement,
         tools_needed: bool,
     ) -> Option<ModelRouteScore> {
-        // Check provider health first (if available), fallback to providers map
-        let (is_available, latency_ms) = if let Some(health) = self.provider_health.get(provider) {
-            (health.available, health.latency_ms)
-        } else if let Some(availability) = self.providers.get(provider) {
-            (availability.available, availability.latency_ms)
+        // Check provider status from unified providers map
+        let (is_available, latency_ms) = if let Some(state) = self.providers.get(provider) {
+            (state.available, state.latency_ms)
         } else {
             return None;
         };
@@ -591,7 +578,7 @@ mod tests {
         let mut router = ModelRouter::new();
         router.providers.insert(
             "ollama".into(),
-            ProviderAvailability {
+            ProviderState {
                 provider: "ollama".into(),
                 available: true,
                 latency_ms: Some(100),
@@ -599,11 +586,12 @@ mod tests {
                 last_checked: chrono::Utc::now(),
                 last_error: None,
                 health_is_estimated: false,
+                consecutive_failures: 0,
             },
         );
         router.providers.insert(
             "deepseek".into(),
-            ProviderAvailability {
+            ProviderState {
                 provider: "deepseek".into(),
                 available: true,
                 latency_ms: Some(500),
@@ -611,11 +599,12 @@ mod tests {
                 last_checked: chrono::Utc::now(),
                 last_error: None,
                 health_is_estimated: false,
+                consecutive_failures: 0,
             },
         );
         router.providers.insert(
             "openrouter".into(),
-            ProviderAvailability {
+            ProviderState {
                 provider: "openrouter".into(),
                 available: true,
                 latency_ms: Some(600),
@@ -623,6 +612,7 @@ mod tests {
                 last_checked: chrono::Utc::now(),
                 last_error: None,
                 health_is_estimated: false,
+                consecutive_failures: 0,
             },
         );
         router
@@ -674,14 +664,17 @@ mod tests {
     #[test]
     fn test_provider_unavailable_triggers_fallback() {
         let mut router = create_test_router();
-        // Mark deepseek as unavailable via provider_health
-        router.provider_health.insert(
+        // Mark deepseek as unavailable via providers map
+        router.providers.insert(
             "deepseek".into(),
-            ProviderHealth {
+            ProviderState {
+                provider: "deepseek".into(),
                 available: false,
                 latency_ms: None,
+                models: vec!["deepseek-chat".into()],
+                last_checked: chrono::Utc::now(),
                 last_error: Some("connection refused".into()),
-                last_check_at: std::time::Instant::now(),
+                health_is_estimated: false,
                 consecutive_failures: 3,
             },
         );
@@ -696,33 +689,39 @@ mod tests {
     #[test]
     fn test_provider_health_overrides_availability() {
         let mut router = create_test_router();
-        // providers says available=true, but health says false
-        router.provider_health.insert(
+        // providers says available=true for ollama, but we override
+        router.providers.insert(
             "ollama".into(),
-            ProviderHealth {
+            ProviderState {
+                provider: "ollama".into(),
                 available: false,
                 latency_ms: None,
+                models: vec!["qwen2.5:7b".into()],
+                last_checked: chrono::Utc::now(),
                 last_error: Some("ollama not running".into()),
-                last_check_at: std::time::Instant::now(),
+                health_is_estimated: false,
                 consecutive_failures: 3,
             },
         );
 
         let decision = router.route_chat(None, true).unwrap();
-        // Should not pick ollama even though providers map says available
+        // Should not pick ollama even though original insertion said available
         assert_ne!(decision.provider, "ollama");
     }
 
     #[test]
     fn test_high_privacy_requires_local_provider() {
         let mut router = create_test_router();
-        router.provider_health.insert(
+        router.providers.insert(
             "ollama".into(),
-            ProviderHealth {
+            ProviderState {
+                provider: "ollama".into(),
                 available: false,
                 latency_ms: None,
+                models: vec!["qwen2.5:7b".into()],
+                last_checked: chrono::Utc::now(),
                 last_error: Some("ollama not running".into()),
-                last_check_at: std::time::Instant::now(),
+                health_is_estimated: false,
                 consecutive_failures: 3,
             },
         );

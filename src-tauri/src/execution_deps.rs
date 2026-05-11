@@ -115,3 +115,140 @@ pub fn assemble_action_ctx<'a>(
     }
     ctx
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::config::AppConfig;
+    use openlife_core::layer_router::Layer;
+
+    #[test]
+    fn test_build_agent_task_fields() {
+        let msgs = vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: "hello".into(),
+        }];
+        let task = build_agent_task(
+            openlife_core::agent::AgentTaskKind::Conversation,
+            "sess-1".into(),
+            "hello".into(),
+            msgs.clone(),
+            Layer::L2,
+        );
+        assert_eq!(task.session_id, "sess-1");
+        assert_eq!(task.user_text, "hello");
+        assert_eq!(task.messages.len(), 1);
+        assert_eq!(task.messages[0].content, "hello");
+        assert_eq!(task.kind, openlife_core::agent::AgentTaskKind::Conversation);
+        assert_eq!(task.layer, Layer::L2);
+    }
+
+    #[test]
+    fn test_build_loop_config_reads_from_app_config() {
+        let cfg = AppConfig::default();
+        let shutdown = Arc::new(tokio::sync::Notify::new());
+        let config = build_loop_config(&cfg, shutdown);
+        assert!(config.max_steps > 0);
+        assert!(config.max_tool_calls > 0);
+        assert!(config.timeout_seconds > 0);
+        assert!(config.allow_writes);
+        assert!(config.allow_cloud);
+        assert!(config.shutdown_notify.is_some());
+    }
+
+    #[test]
+    fn test_resolve_execution_env_populates_all_fields() {
+        let cfg = AppConfig::default();
+        let env = resolve_execution_env(&cfg);
+        assert!(!env.agent_spec.id.is_empty());
+        assert!(env.prompt_registry.get("base_system").is_some());
+        assert!(
+            !env.execution_sandbox.safe_paths.is_empty()
+                || env.execution_sandbox.safe_paths.is_empty()
+        );
+        assert!(!env.network_policy.default_decision.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_action_ctx_with_all_fields() {
+        let reg = openlife_core::mcp::McpRegistry::new();
+        let ps = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_path = tempfile::tempdir().unwrap().path().join("test_audit.db");
+        let audit = openlife_core::mcp_audit::McpAuditStore::new(audit_path);
+        let pe = PrivacyEngine::new();
+        let safe_paths: Vec<String> = vec!["/tmp".into()];
+        let lm = LifeModel::default();
+        let mem = openlife_core::memory::MemoryStore::new(
+            tempfile::tempdir().unwrap().path().join("test_mem.db"),
+        )
+        .unwrap();
+        let ics_paths: Vec<String> = vec![];
+        let nw = openlife_core::config::NetworkPolicy::default();
+        let sandbox = ExecutionSandbox::default();
+        let spec = openlife_core::agent::types::AgentSpec::default_main_spec();
+
+        let ctx = assemble_action_ctx(
+            &reg,
+            &ps,
+            &audit,
+            &pe,
+            &safe_paths,
+            &lm,
+            &mem,
+            &ics_paths,
+            &nw,
+            &sandbox,
+            &spec,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(ctx.safe_paths.len(), 1);
+        assert_eq!(ctx.safe_paths[0], "/tmp");
+        assert!(ctx.life_model.is_some());
+        assert!(ctx.memory_store.is_some());
+        assert!(ctx.agent_spec.is_some());
+        assert_eq!(ctx.agent_spec.unwrap().id, spec.id);
+    }
+
+    #[test]
+    fn test_assemble_action_ctx_with_none_optionals_has_no_store() {
+        let reg = openlife_core::mcp::McpRegistry::new();
+        let ps = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit_path = tempfile::tempdir().unwrap().path().join("test_audit2.db");
+        let audit = openlife_core::mcp_audit::McpAuditStore::new(audit_path);
+        let pe = PrivacyEngine::new();
+        let safe_paths: Vec<String> = vec![];
+        let lm = LifeModel::default();
+        let mem = openlife_core::memory::MemoryStore::new(
+            tempfile::tempdir().unwrap().path().join("test_mem2.db"),
+        )
+        .unwrap();
+        let ics_paths: Vec<String> = vec![];
+        let nw = openlife_core::config::NetworkPolicy::default();
+        let sandbox = ExecutionSandbox::default();
+        let spec = openlife_core::agent::types::AgentSpec::default_main_spec();
+
+        let ctx = assemble_action_ctx(
+            &reg,
+            &ps,
+            &audit,
+            &pe,
+            &safe_paths,
+            &lm,
+            &mem,
+            &ics_paths,
+            &nw,
+            &sandbox,
+            &spec,
+            None,
+            None,
+            None,
+        );
+
+        assert!(ctx.proposal_store.is_none());
+        assert!(ctx.agent_run_store.is_none());
+        assert!(ctx.event_store.is_none());
+    }
+}

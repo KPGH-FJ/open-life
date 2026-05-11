@@ -55,6 +55,7 @@ TAURI_DIR="$REPO_ROOT/src-tauri"
 ENV_FILE="$REPO_ROOT/.env"
 A2A_PORT="${A2A_PORT:-8765}"
 VITE_PORT="${PORT:-5173}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$HOME/Library/Caches/OpenLife/cargo-target}"
 
 # =============================================================================
 # 工具函数
@@ -277,10 +278,10 @@ install_dependencies() {
     fi
 
     log_step "检查 Rust 依赖"
-    if [ ! -d "$REPO_ROOT/target" ]; then
+    if [ ! -d "$CARGO_TARGET_DIR" ]; then
         log_info "首次构建，Rust 依赖将在启动时自动编译..."
     else
-        log_success "Rust 构建缓存已存在"
+        log_success "Rust 构建缓存已存在: $CARGO_TARGET_DIR"
     fi
 }
 
@@ -333,6 +334,8 @@ start_dev() {
     echo ""
 
     cd "$REPO_ROOT"
+    mkdir -p "$CARGO_TARGET_DIR"
+    log_info "Cargo 构建缓存: $CARGO_TARGET_DIR"
 
     # 检查 pnpm
     if ! command -v corepack &>/dev/null || ! corepack pnpm --version &>/dev/null; then
@@ -371,6 +374,8 @@ start_a2a() {
     log_info "  POST http://127.0.0.1:$A2A_PORT/tasks/send"
 
     cd "$TAURI_DIR"
+    mkdir -p "$CARGO_TARGET_DIR"
+    log_info "Cargo 构建缓存: $CARGO_TARGET_DIR"
     cargo run --bin openlife-a2a-server
 }
 

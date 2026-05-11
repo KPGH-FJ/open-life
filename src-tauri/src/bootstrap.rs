@@ -32,6 +32,21 @@ pub struct BootstrapResult {
     pub state: Arc<AppState>,
 }
 
+/// Fatal bootstrap error — at least one required store could not be initialized even in memory.
+#[derive(Debug)]
+pub struct BootstrapFatal {
+    pub failed_stores: Vec<String>,
+    pub message: String,
+}
+
+impl std::fmt::Display for BootstrapFatal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for BootstrapFatal {}
+
 fn recovery_db_path(file_name: &str) -> PathBuf {
     let dir = std::env::temp_dir()
         .join("openlife-recovery")
@@ -296,8 +311,9 @@ fn init_plan_store(
 }
 
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
-/// Returns assembled AppState along with startup warnings.
-pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
+/// Returns assembled AppState along with startup warnings, or a fatal error message.
+pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
+    let mut fatal_errors: Vec<String> = Vec::new();
     let startup_warnings = std::cell::RefCell::new(Vec::new());
 
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
@@ -326,110 +342,119 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
 
+    macro_rules! store_or_fatal {
+        ($init_expr:expr, $name:expr) => {
+            match $init_expr {
+                Ok(s) => s,
+                Err(e) => {
+                    let msg = format!(
+                        "CRITICAL: {} init failed: {}. Application cannot start.",
+                        $name, e
+                    );
+                    log::error!("[startup] {}", msg);
+                    fatal_errors.push(msg);
+                    return Err(fatal_errors.join("\n"));
+                }
+            }
+        };
+    }
+
     let db_path = data_dir.join("memory.db");
-    let memory_store = init_store(
-        || init_memory_store(&db_path, &startup_warnings),
-        || MemoryStore::new_in_memory().map_err(|e| e.to_string()),
-        "MemoryStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let memory_store = store_or_fatal!(
+        init_store(
+            || init_memory_store(&db_path, &startup_warnings),
+            || MemoryStore::new_in_memory().map_err(|e| e.to_string()),
+            "MemoryStore",
+            &startup_warnings,
+        ),
+        "MemoryStore"
+    );
 
     let feedback_db_path = data_dir.join("feedback.db");
-    let feedback_store = init_store(
-        || init_feedback_store(&feedback_db_path, &startup_warnings),
-        || FeedbackStore::new_in_memory().map_err(|e| e.to_string()),
-        "FeedbackStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let feedback_store = store_or_fatal!(
+        init_store(
+            || init_feedback_store(&feedback_db_path, &startup_warnings),
+            || FeedbackStore::new_in_memory().map_err(|e| e.to_string()),
+            "FeedbackStore",
+            &startup_warnings,
+        ),
+        "FeedbackStore"
+    );
 
     let vector_db_path = data_dir.join("vectors.db");
-    let vector_store = init_store(
-        || init_vector_store(&vector_db_path, &startup_warnings),
-        || VectorStore::new_in_memory().map_err(|e| e.to_string()),
-        "VectorStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let vector_store = store_or_fatal!(
+        init_store(
+            || init_vector_store(&vector_db_path, &startup_warnings),
+            || VectorStore::new_in_memory().map_err(|e| e.to_string()),
+            "VectorStore",
+            &startup_warnings,
+        ),
+        "VectorStore"
+    );
 
     let agent_runs_db_path = data_dir.join("agent_runs.db");
-    let agent_run_store = init_store(
-        || init_agent_run_store(&agent_runs_db_path, &startup_warnings),
-        || openlife_core::agent::AgentRunStore::new_in_memory().map_err(|e| e.to_string()),
-        "AgentRunStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let agent_run_store = store_or_fatal!(
+        init_store(
+            || init_agent_run_store(&agent_runs_db_path, &startup_warnings),
+            || openlife_core::agent::AgentRunStore::new_in_memory().map_err(|e| e.to_string()),
+            "AgentRunStore",
+            &startup_warnings,
+        ),
+        "AgentRunStore"
+    );
 
     let agent_run_events_db_path = data_dir.join("agent_run_events.db");
-    let agent_run_event_store = init_store(
-        || init_agent_run_event_store(&agent_run_events_db_path, &startup_warnings),
-        || {
-            openlife_core::agent::event_store::AgentRunEventStore::new_in_memory()
-                .map_err(|e| e.to_string())
-        },
-        "AgentRunEventStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let agent_run_event_store = store_or_fatal!(
+        init_store(
+            || init_agent_run_event_store(&agent_run_events_db_path, &startup_warnings),
+            || {
+                openlife_core::agent::event_store::AgentRunEventStore::new_in_memory()
+                    .map_err(|e| e.to_string())
+            },
+            "AgentRunEventStore",
+            &startup_warnings,
+        ),
+        "AgentRunEventStore"
+    );
 
     let plans_db_path = data_dir.join("plans.db");
-    let plan_store = init_store(
-        || init_plan_store(&plans_db_path, &startup_warnings),
-        || openlife_core::agent::PlanStore::new_in_memory().map_err(|e| e.to_string()),
-        "PlanStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let plan_store = store_or_fatal!(
+        init_store(
+            || init_plan_store(&plans_db_path, &startup_warnings),
+            || openlife_core::agent::PlanStore::new_in_memory().map_err(|e| e.to_string()),
+            "PlanStore",
+            &startup_warnings,
+        ),
+        "PlanStore"
+    );
 
     let proposals_db_path = data_dir.join("proposals.db");
-    let proposal_store = init_store(
-        || init_proposal_store(&proposals_db_path, &startup_warnings),
-        || ProposalStore::new_in_memory().map_err(|e| e.to_string()),
-        "ProposalStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let proposal_store = store_or_fatal!(
+        init_store(
+            || init_proposal_store(&proposals_db_path, &startup_warnings),
+            || ProposalStore::new_in_memory().map_err(|e| e.to_string()),
+            "ProposalStore",
+            &startup_warnings,
+        ),
+        "ProposalStore"
+    );
 
     let patches_db_path = data_dir.join("patches.db");
-    let patch_store = init_store(
-        || {
-            openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || {
-            openlife_core::life_model::patch_store::PatchStore::new_in_memory()
-                .map_err(|e| e.to_string())
-        },
-        "PatchStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+    let patch_store = store_or_fatal!(
+        init_store(
+            || {
+                openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
+                    .map_err(|e| e.to_string())
+            },
+            || {
+                openlife_core::life_model::patch_store::PatchStore::new_in_memory()
+                    .map_err(|e| e.to_string())
+            },
+            "PatchStore",
+            &startup_warnings,
+        ),
+        "PatchStore"
+    );
 
     let model_dir = data_dir.join("models");
     let intent_router = IntentRouter::with_optional_onnx(Some(&model_dir));
@@ -461,24 +486,23 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
     };
 
     let mcp_registry = McpRegistry::new();
-    let tool_permission_store = init_store(
-        || {
-            openlife_core::tool_permissions::ToolPermissionStore::new(
-                data_dir.join("tool_permissions.db"),
-            )
-            .map_err(|e| e.to_string())
-        },
-        || {
-            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
+    let tool_permission_store = store_or_fatal!(
+        init_store(
+            || {
+                openlife_core::tool_permissions::ToolPermissionStore::new(
+                    data_dir.join("tool_permissions.db"),
+                )
                 .map_err(|e| e.to_string())
-        },
-        "ToolPermissionStore",
-        &startup_warnings,
-    )
-    .unwrap_or_else(|e| {
-        log::warn!("[startup] Fatal: {}", e);
-        std::process::exit(1);
-    });
+            },
+            || {
+                openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
+                    .map_err(|e| e.to_string())
+            },
+            "ToolPermissionStore",
+            &startup_warnings,
+        ),
+        "ToolPermissionStore"
+    );
 
     let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
     if let Err(e) = plugin_registry.reload() {
@@ -511,10 +535,13 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
                 match AgentSpecStore::new_in_memory() {
                     Ok(store) => Arc::new(std::sync::Mutex::new(store)),
                     Err(memory_err) => {
-                        startup_warnings
-                            .borrow_mut()
-                            .push(format!("agent_specs 内存存储也失败: {}", memory_err));
-                        std::process::exit(1);
+                        let msg = format!(
+                            "CRITICAL: AgentSpecStore init failed: file={}, in_memory={}.",
+                            e, memory_err
+                        );
+                        log::error!("[startup] {}", msg);
+                        fatal_errors.push(msg);
+                        return Err(fatal_errors.join("\n"));
                     }
                 }
             }
@@ -569,5 +596,5 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
-    BootstrapResult { state: app_state }
+    Ok(BootstrapResult { state: app_state })
 }

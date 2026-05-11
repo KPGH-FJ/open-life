@@ -1,8 +1,12 @@
 # Current Agent Runtime Audit
 
-Date: 2026-05-06
+Date: 2026-05-10 (updated: P0-P12 implementation complete)
 
-This document records the current code-level reality before the vNext Agent Framework upgrade. It is intentionally factual and conservative: architecture decisions belong in the vNext architecture documents, not in this audit.
+> **Updated note (2026-05-10)** : P0-P12 vNext primitives have all been implemented in code.
+> The "gaps" described below (AgentRunEvent, PromptStack, ToolRuntime, MemoryEvidence,
+> ExecutionSandbox, PlanMode, SubAgent) are now implemented and tested.
+> The remaining concern is **execution path convergence** — lib.rs still has 5+ entry
+> paths that need to converge to the unified `ExecutionFacade` model.
 
 ## Summary
 
@@ -117,22 +121,34 @@ Needed vNext direction:
 
 ## Prompt / System Prompt
 
-Current state:
+Current state (updated 2026-05-10):
 
-- Agent behavior is influenced by role prompt fragments and tools prompt construction.
-- There is no first-class `PromptStack` abstraction in the current code search.
-- System prompt architecture is not yet versioned, privacy-aware, or traceable as an explicit runtime asset.
+- **PromptStack** (`agent/prompt_stack.rs`, 922行) is implemented with `PromptBlock` and `PromptBlockRegistry` (4 built-in blocks: base_system, planning, tool_discipline, privacy_rule).
+- AgentLoop-governed paths (send_message, start_stream_message, scheduled, proactive) assemble PromptStack via `execute_task_with_spec()` and inject as `messages[0]`.
+- PromptStack assembly records `PromptStackAssembled` events with block IDs/versions (no raw content).
+- **Critical gap fixed (2026-05-10)**: `scheduler.rs:generate_governed()` previously caused dual system prompts — the PromptStack one at `messages[0]` and a second LifeModel YAML prompt from `build_system_prompt()`. Now detects existing system message and uses `_raw` variants to avoid double-injection.
+
+Remaining ad-hoc prompts (27 found, audited 2026-05-10):
+
+| Category | Count | Risk | Mitigation |
+|----------|-------|------|------------|
+| System prompt double-build (llm.rs/ollama.rs) | 3 | Fixed in generate_governed path | Legacy generate() still builds LifeModel prompt for non-governed callers |
+| Reasoning prompts (layered.rs) | 3 | Medium | Should become PromptBlocks, but layered.rs is not governance-critical |
+| Builder engine prompts (builder/engine.rs) | 5 | Medium | Builder has its own execution mode; converge when Builder goes through AgentRuntime |
+| Skills prompts (skills.rs) | 2 | Medium | Skill execution should contribute PromptBlocks |
+| Proactive prompts (proactive.rs) | 5 | Low | Proactive is read-only suggestion generation |
+| Runtime/dynamic prompts | 9 | Low | JSON repair, tool list, follow-up — inherently dynamic content |
 
 Current concern:
 
-- Without `PromptStack`, prompt fragments will spread across Chat, Builder, Calibration, tools, future PlanMode, and sub-agents.
-- This would make framework behavior difficult to audit or improve.
+- `PromptBlockRegistry::built_in()` has only 4 entries. Missing blocks: LifeModel, MemoryEvidence, Task, Proposal, OutputFormat, Role, SubAgent.
+- Legacy `generate()` (non-governed) path in `scheduler.rs` and `llm.rs` still builds ad-hoc LifeModel system prompts for non-AgentLoop callers.
 
-Needed vNext direction:
+Needed Post-Beta direction:
 
-- Introduce `PromptStack` and `PromptBlock`.
-- Treat the OpenLife base system prompt as framework constitution.
-- Record prompt block IDs/versions and privacy levels in AgentRun trace.
+- Expand `PromptBlockRegistry` with LifeModel/Memory/Task/OutputFormat blocks.
+- Route Builder/Calibration/Skills prompts through PromptStack.
+- Eventually remove ad-hoc system prompt construction from `llm.rs` and `ollama.rs` when all callers go through governed path.
 
 ## Memory and LifeModel Evolution
 

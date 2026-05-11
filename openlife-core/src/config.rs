@@ -192,9 +192,6 @@ pub struct SystemConfig {
     /// Safe paths for file.read tool (workspace directories allowed for file access)
     #[serde(default)]
     pub safe_paths: Vec<String>,
-    /// Enable AgentLoop for chat execution (dual-track beta)
-    #[serde(default)]
-    pub use_agent_loop: Option<bool>,
     /// Network access policy for web tools
     #[serde(default)]
     pub network_policy: NetworkPolicy,
@@ -236,7 +233,6 @@ impl Default for SystemConfig {
             ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
             memory_search_top_k: default_memory_search_top_k(),
             safe_paths: Vec::new(),
-            use_agent_loop: None,
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
             agent_loop_max_steps: default_agent_loop_max_steps(),

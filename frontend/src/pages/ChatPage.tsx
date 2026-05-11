@@ -64,6 +64,7 @@ import AgentStateIndicator from "../components/AgentStateIndicator";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
+import { formatChatRuntimeError } from "./chat/useChatStreaming";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -162,75 +163,10 @@ function getFixSuggestion(
   return null;
 }
 
-function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics | null): string {
-  if (diagnostics && !diagnostics.chat_ready && diagnostics.readiness_issues?.length) {
-    return `暂时无法发送普通对话：\n${diagnostics.readiness_issues.map(issue => `- ${issue}`).join("\n")}\n\n请去设置页查看“试用就绪检查”。`;
-  }
-  const raw = error instanceof Error ? error.message : String(error);
-  const lower = raw.toLowerCase();
-  let hint = raw;
-  const provider = diagnostics?.cloud_provider ?? "云端模型";
-  const providerLower = provider.toLowerCase();
-  const looksLikeAuthError =
-    lower.includes("api key") ||
-    lower.includes("invalid api key") ||
-    lower.includes("unauthorized") ||
-    lower.includes("401") ||
-    lower.includes("403");
-  if (lower.includes("deepseek") || providerLower.includes("deepseek")) {
-    if (looksLikeAuthError) {
-      hint =
-        "DeepSeek 鉴权失败。请去设置页确认 API Key 已保存，Provider 选择 DeepSeek，Base URL 为 https://api.deepseek.com，模型为 deepseek-chat。";
-    } else if (lower.includes("model") || lower.includes("400")) {
-      hint =
-        "DeepSeek 请求被拒绝。请去设置页确认模型名为 deepseek-chat，Base URL 为 https://api.deepseek.com，并重新测试连接。";
-    } else {
-      hint = `DeepSeek 对话请求失败：${raw}`;
-    }
-  } else if (looksLikeAuthError || lower.includes("openrouter") || lower.includes("openai")) {
-    hint = `${provider} 鉴权失败。请去设置页配置 API Key，或切回可用的本地模型。`;
-  } else if (
-    lower.includes("429") ||
-    lower.includes("rate limit") ||
-    lower.includes("too many requests")
-  ) {
-    hint = "请求过于频繁（Rate Limit）。请稍等片刻再试，或切换到另一模型后端。";
-  } else if (
-    lower.includes("ollama") ||
-    lower.includes("connection refused") ||
-    lower.includes("11434")
-  ) {
-    hint = "本地 Ollama 不可用。请启动 Ollama，或安装/切换到已下载的本地模型。";
-  } else if (lower.includes("timeout") || lower.includes("timed out")) {
-    hint = "模型响应超时。请检查网络连接，或尝试切换更快的模型后端。";
-  } else if (
-    lower.includes("500") ||
-    lower.includes("502") ||
-    lower.includes("503") ||
-    lower.includes("504")
-  ) {
-    hint = "云端模型服务暂时不可用（服务器错误）。请稍后重试，或切换到本地模型。";
-  } else if (
-    lower.includes("network") ||
-    lower.includes("fetch") ||
-    lower.includes("econnrefused")
-  ) {
-    hint = "网络连接异常。请检查网络状态，或切换到本地模型以离线使用。";
-  } else if (
-    lower.includes("no backend") ||
-    lower.includes("backend") ||
-    lower.includes("未配置")
-  ) {
-    hint =
-      "没有可用的模型后端。请在设置页配置 DeepSeek/OpenAI/OpenRouter API Key，或启动本地 Ollama。";
-  }
-  return `${hint}\n\n请去设置页查看“试用就绪检查”。`;
-}
-
 export default function ChatPage() {
   const location = useLocation();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [currentSessionId, setCurrentSessionId] = useState<string>("default");
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -263,8 +199,10 @@ export default function ChatPage() {
   const streamErrorHandledRef = useRef(false);
   const lastDoneRunIdRef = useRef<string | null>(null);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
-  const currentSessionIdRef = useRef<string>(currentSessionId);
+  const currentSessionIdRef = useRef<string | null>(currentSessionId);
   const currentRunIdRef = useRef<string | null>(currentRunId);
+  const messagesRef = useRef<ChatMessage[]>(messages);
+  messagesRef.current = messages;
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -274,14 +212,16 @@ export default function ChatPage() {
     currentRunIdRef.current = currentRunId;
   }, [currentRunId]);
 
-  const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
+  const refreshAgentRuns = async (sessionId?: string | null) => {
+    const sid = sessionId ?? currentSessionIdRef.current;
+    if (!sid) return;
     try {
-      const runs = await listAgentRunsForSession(sessionId, 10);
-      if (currentSessionIdRef.current === sessionId) {
+      const runs = await listAgentRunsForSession(sid, 10);
+      if (currentSessionIdRef.current === sid) {
         setCurrentRun(runs[0] ?? null);
       }
     } catch {
-      if (currentSessionIdRef.current === sessionId) {
+      if (currentSessionIdRef.current === sid) {
         setCurrentRun(null);
       }
     }
@@ -423,6 +363,10 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    if (!currentSessionId) {
+      setLoadingHistory(false);
+      return;
+    }
     setLoadingHistory(true);
     refreshAgentRuns(currentSessionId);
     getChatHistory(currentSessionId)
@@ -625,7 +569,7 @@ export default function ChatPage() {
       const list = await listChatSessions();
       setSessions(list);
       if (currentSessionIdRef.current === id) {
-        setCurrentSessionId(list.length > 0 ? list[0].session_id : "default");
+        setCurrentSessionId(list.length > 0 ? list[0].session_id : null);
       }
     } catch (e) {
       console.error("删除会话失败", e);
@@ -673,8 +617,10 @@ export default function ChatPage() {
               : item
           )
         );
-        loadAgentRunForSession(call.run_id, currentSessionIdRef.current);
-        refreshAgentRuns(currentSessionIdRef.current);
+        if (currentSessionIdRef.current) {
+          loadAgentRunForSession(call.run_id, currentSessionIdRef.current);
+          refreshAgentRuns(currentSessionIdRef.current);
+        }
       } catch (e) {
         const errMsg = String(e);
         // 如果是因为未授权，保持 pending 状态，不改为 error
@@ -792,16 +738,25 @@ export default function ChatPage() {
 
   const handleSend = useCallback(async () => {
     if (!input.trim() || sending) return;
-    if (!currentSessionId || typeof currentSessionId !== "string") {
-      setMessages(prev => [
-        ...prev,
-        { role: "assistant", content: "错误: 当前会话 ID 无效，请刷新页面或切换会话后重试。" },
-      ]);
-      return;
+    let sessionId = currentSessionId;
+    if (!sessionId) {
+      sessionId = generateSessionId();
+      try {
+        await createChatSession(sessionId, "新对话");
+        await loadSessions();
+        setCurrentSessionId(sessionId);
+      } catch (e) {
+        setMessages(prev => [
+          ...prev,
+          { role: "assistant", content: "错误: 创建新会话失败，请检查应用数据目录权限后重试。" },
+        ]);
+        return;
+      }
     }
     const text = input.trim();
     const userMsg: ChatMessage = { role: "user", content: text };
-    const nextMessages = [...messages, userMsg];
+    const currentMessages = messagesRef.current;
+    const nextMessages = [...currentMessages, userMsg];
     lastUserMessageRef.current = userMsg;
     setMessages(nextMessages);
     setInput("");
@@ -810,8 +765,8 @@ export default function ChatPage() {
     if (quickReply) {
       const assistantMsg: ChatMessage = { role: "assistant", content: quickReply };
       try {
-        await saveChatMessage(currentSessionId, userMsg);
-        await saveChatMessage(currentSessionId, assistantMsg);
+        await saveChatMessage(sessionId, userMsg);
+        await saveChatMessage(sessionId, assistantMsg);
         await loadSessions();
       } catch (e) {
         console.error("保存快捷指令消息失败", e);
@@ -841,7 +796,7 @@ export default function ChatPage() {
     try {
       // The streaming backend persists the user message before model execution.
       // Saving it here as well creates duplicate user rows in history and memory retrieval.
-      await startStreamMessage(currentSessionId, nextMessages);
+      await startStreamMessage(sessionId, nextMessages);
       await loadSessions();
     } catch (e) {
       flushStreaming();
@@ -854,18 +809,23 @@ export default function ChatPage() {
       setStreamingReply("");
       setSending(false);
     }
-  }, [input, sending, currentSessionId, messages, diagnostics, tryHandleQuickCommand]);
+  }, [input, sending, currentSessionId, diagnostics, tryHandleQuickCommand]);
 
   const retryLastUserMessage = useCallback(() => {
     const last =
-      lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
+      lastUserMessageRef.current ??
+      [...messagesRef.current].reverse().find(m => m.role === "user") ??
+      null;
     if (!last || sending) return;
     setInput(last.content);
-  }, [messages, sending]);
+  }, [sending]);
 
   const handleContinueStream = useCallback(async () => {
+    const currentMessages = messagesRef.current;
     const lastUser =
-      lastUserMessageRef.current ?? [...messages].reverse().find(m => m.role === "user") ?? null;
+      lastUserMessageRef.current ??
+      [...currentMessages].reverse().find(m => m.role === "user") ??
+      null;
     if (!lastUser || sending) return;
     if (diagnosticsRef.current && !diagnosticsRef.current.chat_ready) {
       setMessages(prev => [
@@ -877,8 +837,9 @@ export default function ChatPage() {
       ]);
       return;
     }
-    const lastUserIndex = messages.map(m => m.role).lastIndexOf("user");
-    const retryMessages = lastUserIndex >= 0 ? messages.slice(0, lastUserIndex + 1) : [lastUser];
+    const lastUserIndex = currentMessages.map(m => m.role).lastIndexOf("user");
+    const retryMessages =
+      lastUserIndex >= 0 ? currentMessages.slice(0, lastUserIndex + 1) : [lastUser];
     setStreamInterrupted(false);
     setSending(true);
     streamErrorHandledRef.current = false;
@@ -888,6 +849,7 @@ export default function ChatPage() {
     setToolCalls([]);
     setShowToolCalls(false);
     try {
+      if (!currentSessionId) return;
       await startStreamMessage(currentSessionId, retryMessages);
     } catch (e) {
       flushStreaming();
@@ -901,7 +863,7 @@ export default function ChatPage() {
       setStreamingReply("");
       setSending(false);
     }
-  }, [currentSessionId, messages, sending]);
+  }, [currentSessionId, sending]);
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const readinessClass =
@@ -1059,7 +1021,9 @@ export default function ChatPage() {
         return;
       }
       try {
-        await indexMemoryChunk(currentSessionId, content, "chat");
+        if (currentSessionId) {
+          await indexMemoryChunk(currentSessionId, content, "chat");
+        }
       } catch (e) {
         console.error("加入记忆失败", e);
       }
@@ -1087,6 +1051,7 @@ export default function ChatPage() {
     async (index: number, type: "up" | "down") => {
       const msg = messages[index];
       if (!msg || msg.role !== "assistant") return;
+      if (!currentSessionId) return;
       try {
         await saveFeedback(currentSessionId, index, type, msg.content.slice(0, 200));
         setFeedbackGiven(prev => ({ ...prev, [index]: type }));
@@ -1431,7 +1396,10 @@ export default function ChatPage() {
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div
+              key={m.run_id ?? `${m.role}-${i}-${m.content.slice(0, 30)}`}
+              className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
+            >
               <div
                 className={`max-w-2xl px-4 py-3 rounded-xl text-sm ${
                   m.role === "user"

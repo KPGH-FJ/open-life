@@ -45,8 +45,7 @@ pub use context_assembler::{
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
-    ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
-    ProviderHealth, TaskType,
+    ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderState, TaskType,
 };
 pub use plan_executor::{
     DefaultPlanReviewGate, PlanExecutionError, PlanExecutor, PlanReviewGate, SubAgentReviewGate,
