@@ -51,7 +51,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Enable corepack
         run: corepack enable
@@ -85,7 +85,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Enable corepack
         run: corepack enable
@@ -174,6 +174,25 @@ jobs:
           path: coverage-rust/
 
   # ============================================
+  # 依赖安全审计（仅 main 分支）
+  # ============================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    if: github.base_ref == 'main' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  # ============================================
   # 端到端验证
   # ============================================
   smoke-test:
@@ -189,7 +208,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
       - name: Enable corepack
         run: corepack enable
@@ -202,3 +221,8 @@ jobs:
         run: |
           chmod +x scripts/smoke.sh
           ./scripts/smoke.sh
+
+      # NOTE: Playwright E2E tests (frontend/e2e/smoke.spec.ts) are dev-only.
+      # They require the Vite dev server + Tauri backend on localhost:5173.
+      # See frontend/playwright.config.ts and docs/decisions/e2e-strategy.md
+      # for running them locally: `cd frontend && npx playwright test`

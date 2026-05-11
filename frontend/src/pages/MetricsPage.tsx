@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getRolloutErrors, getRolloutMetrics, getRolloutSummary } from "../tauri";
 
 interface RolloutMetric {
   id: number;
@@ -35,22 +35,13 @@ const MetricsPage: React.FC = () => {
     setLoading(true);
     try {
       const [metricsData, summaryData, errorsData] = await Promise.all([
-        invoke<RolloutMetric[]>("get_rollout_metrics", {
-          experiment: "context_assembler",
-          limit: 100,
-          offset: 0,
-        }),
-        invoke<RolloutSummary>("get_rollout_summary", {
-          experiment: "context_assembler",
-        }),
-        invoke<RolloutMetric[]>("get_rollout_errors", {
-          experiment: "context_assembler",
-          limit: 10,
-        }),
+        getRolloutMetrics({ experiment: "context_assembler", limit: 100, offset: 0 }),
+        getRolloutSummary({ experiment: "context_assembler" }),
+        getRolloutErrors({ experiment: "context_assembler", limit: 10 }),
       ]);
-      setMetrics(metricsData);
-      setSummary(summaryData);
-      setErrors(errorsData);
+      setMetrics(metricsData as RolloutMetric[]);
+      setSummary(summaryData as RolloutSummary);
+      setErrors(errorsData as RolloutMetric[]);
     } catch (e) {
       console.error("Failed to load metrics:", e);
     } finally {

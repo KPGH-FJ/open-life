@@ -10,7 +10,7 @@ pub async fn get_agent_plan(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().unwrap();
+        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.get_plan(&plan_id).map_err(AppError::from)
     } else {
         Ok(None)
@@ -23,7 +23,7 @@ pub async fn list_agent_plans_for_run(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().unwrap();
+        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.list_plans_by_run(&run_id).map_err(AppError::from)
     } else {
         Ok(vec![])
@@ -37,7 +37,7 @@ pub async fn list_agent_plans_for_session(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().unwrap();
+        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .list_plans_by_session(&session_id, limit)
             .map_err(AppError::from)
@@ -57,7 +57,7 @@ pub async fn confirm_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -89,7 +89,7 @@ pub async fn confirm_agent_plan(
     plan.confirm();
 
     {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -118,7 +118,7 @@ pub async fn reject_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -150,7 +150,7 @@ pub async fn reject_agent_plan(
     plan.reject();
 
     {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -181,7 +181,7 @@ pub async fn execute_agent_plan(
         .clone();
 
     let plan = {
-        let store = plan_store_arc.lock().unwrap();
+        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -272,6 +272,7 @@ pub async fn execute_agent_plan(
             _ => AppError::internal(e.to_string()),
         })?; // execute_agent_plan spec resolution
 
+    let plan_is_confirmed = matches!(plan.status, openlife_core::agent::PlanStatus::Confirmed);
     let result = run_plan_execution(
         &plan_id,
         &run_id,
@@ -281,6 +282,7 @@ pub async fn execute_agent_plan(
         &app_handle,
         &openlife_core::agent::DefaultPlanReviewGate,
         agent_spec,
+        plan_is_confirmed,
     )
     .await;
 
@@ -304,7 +306,7 @@ pub async fn retry_agent_plan(
         .clone();
 
     let mut plan = {
-        let store = plan_store_arc.lock().unwrap();
+        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -414,7 +416,7 @@ pub async fn retry_agent_plan(
     // Spec resolved, context built — now atomically reset plan for retry.
     plan.retry();
     {
-        let store = plan_store_arc.lock().unwrap();
+        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
     if let Some(ref es) = state.agent_run_event_store {
@@ -436,6 +438,7 @@ pub async fn retry_agent_plan(
         &app_handle,
         &openlife_core::agent::DefaultPlanReviewGate,
         agent_spec,
+        true, // plan.retry() sets status to Confirmed
     )
     .await;
     result.operation = "retry".to_string();
@@ -458,7 +461,7 @@ pub async fn cancel_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -507,7 +510,7 @@ pub async fn cancel_agent_plan(
     }
 
     {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -540,9 +543,10 @@ async fn run_plan_execution(
     app_handle: &tauri::AppHandle,
     review_gate: &impl openlife_core::agent::PlanReviewGate,
     agent_spec: openlife_core::agent::AgentSpec,
+    allow_writes: bool,
 ) -> PlanOperationResult {
     let executor_config = openlife_core::agent::ActionExecutorConfig {
-        allow_writes: false,
+        allow_writes,
         ..Default::default()
     };
     let action_executor = openlife_core::agent::ActionExecutor::new(executor_config);
@@ -695,7 +699,7 @@ pub async fn continue_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let plan = {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -948,7 +952,7 @@ pub async fn edit_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -958,7 +962,7 @@ pub async fn edit_agent_plan(
     let result = apply_safe_plan_edit(&mut plan, &edit);
 
     if result.success {
-        let store = plan_store.lock().unwrap();
+        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 

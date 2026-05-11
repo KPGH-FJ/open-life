@@ -1,0 +1,223 @@
+# OpenLife Post-Beta 完整发展计划
+
+Date: 2026-05-10
+
+Status: active
+
+> 本文档是当前阶段的最高优先级行动指南。P0-P12 全部 vNext 原语已完成代码实现，`make ci` 全绿 799 测试。当前进入 Post-Beta 架构稳固阶段。
+
+---
+
+## 零、当前状态基线
+
+### P0-P12 实现清单
+
+| 原语 | 状态 | 代码证据 |
+|------|------|----------|
+| AgentRun 追踪 | ✅ P0 | `agent/store.rs` (834行), Tauri commands |
+| AgentRunEvent (29种) | ✅ P0/P1 | `agent/event_store.rs` (804行), `agent/types.rs` (2183行) |
+| AgentLoop ReAct 循环 | ✅ P1 | `agent/agent_loop.rs` (3056行) |
+| PromptStack (10 Block) | ✅ P4/P6 | `agent/prompt_stack.rs` (922行) |
+| ToolRuntime + ActionExecutor | ✅ P3 | `agent/action_executor/` (6文件, ~3500行) |
+| ExecutionSandbox | ✅ P9 | `agent/execution_sandbox.rs` (1094行) |
+| ShellExecutor | ✅ P9 | `agent/shell_executor.rs` (1651行, 默认关闭) |
+| PlanMode + PlanExecutor | ✅ P4/P5 | `agent/plan_mode.rs` (879行), `agent/plan_executor.rs` (1726行) |
+| AgentSpec + AgentSpecStore | ✅ P6/P7 | `agent/agent_spec_store.rs` (818行) |
+| SubAgentRuntime | ✅ P7 | `agent/sub_agent.rs` (873行) |
+| Compaction | ✅ P8 | `agent/compaction.rs` (1379行) |
+| MemoryEvidence | ✅ P5 | `agent/memory_evidence.rs` (421行) |
+| Proposal 统一确认层 | ✅ P3 | 7种类型, `agent/proposal_engine.rs` (838行) |
+| ModelRouter (已毕业) | ✅ | `agent/model_router.rs` (736行) |
+| ContextAssembler | ✅ | `agent/context_assembler.rs` (603行) |
+| Proactive Engine | ✅ P6 | scheduler_runner + ProactiveEngine |
+| 前端 Agent Workspace | ✅ P10 | Workspace/Review/Runs/Proposal 面板 |
+| Beta 试用路径矩阵 | ✅ P11 | 8条烟囱路径, 诊断/SafeMode/隐私脱敏 |
+| 用户试用指南 | ✅ P12 | `BETA_TRIAL_GUIDE.md` |
+| 发布构建 | ✅ P12 | `OpenLife_0.1.0_aarch64.dmg` (25MB) |
+
+### 核心指标
+
+| 指标 | 数值 |
+|------|------|
+| CI 状态 | ✅ 全绿: 799 测试 (737 core + 62 tauri) |
+| 前端测试 | ✅ 214 passed |
+| 前端构建 | ✅ 生产构建 3.87s, 57 chunks |
+| Rust clippy | ✅ 零警告 |
+| 已知技术债标记 | 0 (agent模块内零TODO/FIXME/HACK) |
+| lib.rs 大小 | 3198 行 (需瘦身) |
+| ChatPage.tsx 大小 | 1681 行 (暂不重构) |
+
+### 已知限制
+
+| 限制 | 影响 | 优先级 |
+|------|------|--------|
+| lib.rs 执行路径未收敛 | 多条入口链 (send_message/send_message_with_agent_loop/start_stream_message等5+条) | P0 |
+| Universal binary 未打通 | 当前仅 aarch64, 缺 x86_64 | P1 |
+| 代码未签名公证 | macOS 需手动允许运行 | P2 |
+| Windows/Linux 未测试 | 仅 macOS 平台验证 | P2 |
+| ChatPage 未重构 | 1681行, ADR 0010 已accepted但受P12约束 | P3 |
+| 编译缓存偶发错误 | `make clean-tract` 可修复 (tract-onnx rlib format) | P3 |
+
+---
+
+## 一、Phase 1: P12 交付收尾 + 文档同步 (当前, 1-2周)
+
+### 1.1 RC 报告最终化
+
+- [ ] 填写 P11 烟囱测试人工结果 (S1-S8)
+- [ ] RC 报告从 `conditional-go` 升级为 `go`
+- [ ] 记录 4 个已知 P3 项的处置决定
+
+### 1.2 文档同步
+
+- [x] AGENTS.md: 标记 P12 已验收, 指向本计划
+- [x] 新增 `plans/openlife_post_beta_roadmap.md` (本文档)
+- [ ] 同步 `migration_plan.md`: Phase 0-9 与 P0-P12 实现结果对齐
+- [ ] 同步 `current_agent_runtime_audit.md`: 反映 P0-P12 实现后的新事实
+- [ ] 同步 `README.md`: 更新阶段标记和文档引用
+
+### 1.3 工程清理
+
+- [ ] 删除前端冗余文件 (`DashboardPage.tsx.bak`)
+- [ ] 验证 `make clean-tract` 跨环境有效性
+- [ ] CI 全绿重新验证
+
+### Phase 1 门控
+
+- [ ] RC 报告为 `go`
+- [ ] 文档与代码事实一致
+- [ ] `make ci` 通过
+
+---
+
+## 二、Phase 2: 执行路径收敛 (2-4周)
+
+### 2.1 Tauri 侧 ExecutionFacade 提取
+
+**问题**: `src-tauri/src/lib.rs` (3198行) 有 5+ 条执行入口:
+- `send_message` / `send_message_with_agent_loop`
+- `start_stream_message` / `start_stream_message_with_agent_loop`
+- L1 reflex 路径
+- AgentLoop fallback 路径
+- Scheduled proactive 路径
+
+**方案**: 参考 `agent/execution_facade.rs` (364行), 在 `src-tauri/` 侧建立 facade,
+
+统一入口: `run_agent_task(task, mode, stream_adapter)`
+
+| 任务 | 详情 |
+|------|------|
+| **提取 facade 模块** | `src-tauri/src/execution_facade.rs` 统一 dispatch |
+| **mode 枚举** | `chat / stream_chat / scheduled / proactive / calibration / builder / replay` |
+| **Fallback 可追踪** | fallback 到 legacy 直接生成时创建 AgentRunEvent |
+| **L1 reflex 归类** | 标记为非 AgentLoop 或转为轻量 AgentRun mode |
+| **lib.rs 瘦身** | 目标: 3198 → ~2000 行 |
+
+### 2.2 事件追踪全覆盖
+
+- [ ] Chat 双路径 (send/stream) 事件完整性测试
+- [ ] Fallback 事件保留测试
+- [ ] Scheduled/Proactive 事件创建验证
+- [ ] Builder/Calibration 事件创建验证
+
+### 2.3 PromptStack 全路径审计
+
+- [ ] 列出所有 prompt 组装点 (Chat/Builder/Calibration/Scheduled/Proactive/PlanMode)
+- [ ] 逐一核对是否通过 PromptStack
+- [ ] 接入尚未通过 PromptStack 的路径
+- [ ] PromptBlock 版本记录到 AgentRunEvent
+- [ ] 补充 PromptStack 组装测试
+
+### Phase 2 门控
+
+- [ ] lib.rs 降至 ~2000 行
+- [ ] 所有路径产生可追踪 AgentRunEvent
+- [ ] PromptStack 覆盖率 ≥ 90%
+- [ ] 无新增编译警告
+- [ ] `make ci` 通过
+
+---
+
+## 三、Phase 3: LifeModel Evolution 管线闭环 (2-4周, 可与 Phase 2 并行)
+
+### 3.1 MemoryEvidence → Evolution Pipeline
+
+**当前状态**: MemoryEvidence (`agent/memory_evidence.rs`) 已实现信号提取 (RepeatedPreference, RecurringGoal, CapabilitySignal, StateTrend, Contradiction, ValueSignal), 但 `LifeModelEvolutionEngine` 到生成 Evolution Proposal 的完整管线尚未端到端测试。
+
+| 任务 | 详情 |
+|------|------|
+| **EvolutionEngine 补全** | 聚合 accepted memory → 检测 pattern/contradiction/trend → 生成 evidence-backed Proposal |
+| **管线端到端测试** | repeated preference → proposal 生成 → 用户确认 → 应用 |
+| **Contradiction 处理** | 矛盾时不生成 confident patch, 记录冲突供用户裁决 |
+| **Rejected 反馈** | 被拒绝的 proposal 影响后续 evidence scoring |
+| **高风险字段保护** | Identity/Values/Mission/Long-term goals 永不 auto-apply |
+
+### 3.2 集成测试
+
+- [ ] Memory → Evidence → Proposal 完整链路
+- [ ] High-risk field review requirement
+- [ ] Rejected proposal negative evidence
+- [ ] No raw unaccepted transcript as evidence
+
+### Phase 3 门控
+
+- [ ] LifeModel Evolution 管线端到端可走通
+- [ ] 集成测试通过
+- [ ] 高风险字段保护不可绕过
+
+---
+
+## 四、Phase 4: 生产就绪 (6-8周)
+
+### 4.1 发布工程
+
+| 任务 | 详情 |
+|------|------|
+| Universal Binary | 安装 x86_64-apple-darwin target, 打通 aarch64+x86_64 |
+| 代码签名 | macOS Developer ID 签名 |
+| 公证 | Apple notarization |
+| Windows 构建 | x86_64 Windows 构建 + 基础冒烟 |
+| Linux 构建 | AppImage/deb + 基础冒烟 |
+
+### 4.2 ChatPage 重构 (解锁 ADR 0010)
+
+- 按组件边界拆分: ChatSurface / AgentStatusBar / RunTraceInline / ProposalBanner / MessageList
+- 渐进迁移, 不一次性推倒重写
+
+### 4.3 安全审计
+
+- Safe Paths 默认值审查
+- 云端数据足迹审核
+- 诊断导出白名单逐字段审计
+- 外部工具权限矩阵测试
+
+### Phase 4 门控
+
+- [ ] macOS universal binary + 签名 + 公证
+- [ ] Windows/Linux 构建 + 基础冒烟
+- [ ] ChatPage 重构完成
+- [ ] 安全审计通过
+
+---
+
+## 五、Phase 5: v1.0 公开发布 (2026-08+)
+
+- 官网 / 下载页 / 用户文档 / 开发者文档
+- Plugin/Skill 外部注册
+- 多语言支持
+- 社区建设
+
+---
+
+## 六、执行优先级总结
+
+```
+Phase 1 (当前)      Phase 2+3 (并行)          Phase 4                  Phase 5
+文档同步 + RC 闭环 → 执行路径收敛 + Evolution → 生产就绪 + 发布工程 → v1.0 公开
+```
+
+每个 Phase 以 `make ci` 为最低门控。
+
+---
+
+*本文档根据 2026-05-10 代码审计和 CI 结果编写。*

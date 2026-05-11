@@ -197,7 +197,8 @@ pub async fn chat_with_openrouter_raw(
     let text = res.text().await.with_context(|| "读取响应失败")?;
 
     if !status.is_success() {
-        return Err(anyhow::anyhow!("{} 错误 ({}): {}", label, status, text));
+        log::debug!("{} response body ({}): {}", label, status, text);
+        return Err(anyhow::anyhow!("{} 错误 ({})", label, status));
     }
 
     let json: serde_json::Value =
@@ -344,101 +345,15 @@ pub async fn chat_with_openrouter_raw_stream(
 }
 
 pub fn build_system_prompt(life_model: &LifeModel, tools_prompt: Option<&str>) -> String {
-    let yaml = serde_yaml::to_string(life_model).unwrap_or_default();
-    let tool_section = tools_prompt.unwrap_or("");
-    let state_hint = format_state_hint(&life_model.state);
-    let evolution_hint = if life_model.evolution_rules.is_empty() {
-        "暂无进化规则".to_string()
+    let tools_text = tools_prompt.unwrap_or("");
+    let tools_block = if tools_text.trim().is_empty() {
+        None
     } else {
-        life_model.evolution_rules.join("\n")
+        Some(crate::agent::prompt_stack::PromptBlock::available_tools(
+            tools_text.to_string(),
+        ))
     };
-    let tool_call_instruction = if tool_section.is_empty() {
-        String::new()
-    } else {
-        r#"
-【工具调用规范】
-当你需要调用工具时，请严格按以下 JSON 格式输出（不要包含其他自然语言）：
-```json
-{
-  "tool_calls": [
-    {
-      "name": "工具名称",
-      "arguments": { "参数名": "参数值" }
-    }
-  ]
-}
-```
-如果不需要工具，直接以自然语言回答用户。
-"#
-        .to_string()
-    };
-    format!(
-        r#"你是 OpenLife，用户的终身成长合伙人。你的人设和行为必须严格基于下面这份「人生模型」。
-
-请记住以下关于用户的信息，所有建议都必须经过人生模型的价值观过滤：
-
-```yaml
-{}
-```
-
-【用户当前状态摘要】
-{}
-
-【自动进化规则（基于近期反馈与行为数据）】
-{}
-
-在每次回应时：
-1. 优先考虑用户的核心价值观
-2. 结合用户当前的目标和状态给出建议
-3. 语气要符合用户定义的人格特质
-4. 如果用户的请求与人生模型冲突，请温和地提醒并引导对齐
-5. 如果用户的状态显示精力低、压力高或情绪低落，请主动表达关心并调整建议的强度和节奏
-{}{}
-"#,
-        yaml, state_hint, evolution_hint, tool_section, tool_call_instruction
-    )
-}
-
-fn format_state_hint(state: &crate::life_model::State) -> String {
-    let mut parts = Vec::new();
-    if !state.current_focus.is_empty() {
-        parts.push(format!("- 当前重心: {}", state.current_focus));
-    }
-    if !state.emotional_state.current_mood.is_empty() {
-        parts.push(format!(
-            "- 当前心情: {} (压力{}/10, 满足度{}/10)",
-            state.emotional_state.current_mood,
-            state.emotional_state.stress_level,
-            state.emotional_state.fulfillment_score
-        ));
-    }
-    if !state.health_status.physical.is_empty() || !state.health_status.mental.is_empty() {
-        parts.push(format!(
-            "- 身心健康: {}/{} (精力{}/10)",
-            state.health_status.physical,
-            state.health_status.mental,
-            state.health_status.energy_level
-        ));
-    }
-    if !state.focus_areas.is_empty() {
-        parts.push(format!("- 关注领域: {}", state.focus_areas.join(", ")));
-    }
-    if !state.recent_events.is_empty() {
-        parts.push(format!("- 近期事件: {}", state.recent_events.join(", ")));
-    }
-    if !state.habit_streaks.is_empty() {
-        let streaks: Vec<String> = state
-            .habit_streaks
-            .iter()
-            .map(|h| format!("{}({}天)", h.name, h.streak_days))
-            .collect();
-        parts.push(format!("- 习惯连续: {}", streaks.join(", ")));
-    }
-    if parts.is_empty() {
-        "暂无状态记录".to_string()
-    } else {
-        parts.join("\n")
-    }
+    crate::agent::prompt_stack::PromptStack::chat_system_stack(life_model, tools_block).assemble()
 }
 
 #[cfg(test)]

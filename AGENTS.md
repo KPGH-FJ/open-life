@@ -10,13 +10,14 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：Agent Framework Beta 已形成可运行骨架，下一大阶段进入 **vNext Agent Framework Upgrade**。P9 Shell/Sandbox 核心已收口，P10 Frontend Agent Workspace 已通过验收，P11/P11.1 Beta Trial Readiness 已通过验收，当前进入 **P12 Beta Release Candidate and User Trial Delivery**：在不重写 ChatPage、不加入终端 UI、不改变 P9 shell 默认关闭治理、不扩大 runtime 权限的前提下，把用户试用指南、桌面发布构建演练、首次启动 golden path polish、RC 验收报告和小范围真实用户测试交付准备好。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。vNext 的目标是把 OpenLife 升级为 `LifeModel-governed Personal Agent Framework`，优先建立 AgentRunEvent、PromptStack、ToolRuntime hardening、MemoryEvidence、AgentSpec/AgentPlan 与 AI coding governance。`make ci` 为发布门控。
+- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿 806 测试）**。P0-P12 全部 vNext 原语已完成代码实现：AgentRunEvent (41 种事件)、PromptStack (10 种 Block)、ActionExecutor (ToolRuntime 实现体)/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。下一阶段参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
 
 后续 Agent 进入项目时，优先阅读：
 
+0. [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)：**Post-Beta 完整发展计划**（当前阶段入口，覆盖从 P12 交付收尾到 v1.0 公开发布的全路径）。
 1. [`plans/current_agent_runtime_audit.md`](plans/current_agent_runtime_audit.md)：vNext 前的代码事实审计，先确认当前真实状态。
 2. [`plans/openlife_vnext_architecture_principles.md`](plans/openlife_vnext_architecture_principles.md)：vNext 架构原则，定义下一阶段的硬约束。
 3. [`plans/openlife_vnext_architecture_diagrams.md`](plans/openlife_vnext_architecture_diagrams.md)：vNext 总体架构、时序、Tool/Prompt/Memory/SubAgent 图。
@@ -50,7 +51,7 @@
 
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
-- vNext 第一优先级不是 SubAgent 或 Bash，而是 Runtime Trace 与执行路径收敛：按 `P0-3 -> P0-1 -> P0-2 -> P0-5 -> P0-4` 推进。
+- vNext 已全量实现（P0-P12），当前重点转为 **Post-Beta 架构稳固**：执行路径收敛、文档同步、PromptStack 审计、LifeModel Evolution 管线闭环。顺序参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。
 - 所有正式 Agent 行为必须逐步收敛到 `AgentRun + append-only AgentRunEvent`，fallback、repair、block、replay、proposal apply 都必须可追踪。
 - 所有 system prompt / planning prompt / tool prompt / privacy prompt 必须收敛到 `PromptStack`，不得继续扩散 ad hoc prompt。
 - Memory 不只是检索上下文，也要升级为 LifeModel evolution 的 evidence layer；memory-driven evolution 只能生成 Proposal，不能直接改 LifeModel。
@@ -96,7 +97,7 @@
 │       ├── index.css             # Tailwind 导入
 │       ├── test/
 │       │   ├── setup.ts          # 测试初始化 (mock ResizeObserver 等)
-│       │   └── mocks/tauri.ts    # Tauri invoke mock（约 30+ 命令）
+│       │   └── mocks/tauri.ts    # Tauri invoke mock（约 130+ 命令）
 │       ├── components/           # 通用组件
 │       │   ├── ReasoningTracePanel.tsx
 │       │   ├── ToolCallCard.tsx
@@ -147,21 +148,28 @@
 │   ├── capabilities/default.json # Tauri 权限声明
 │   └── src/
 │       ├── main.rs               # 桌面应用入口
-│       ├── lib.rs                # ⭐ 核心注册地（~1380 行，共享类型/辅助函数/send_message/start_stream_message）
+│       ├── lib.rs                # ⭐ 核心注册地（~3305 行，Tauri 命令注册/ChatOrchestrator 辅助函数/TauriStreamingCallback）
 │       ├── a2a_server.rs         # A2A 服务器模块
 │       ├── a2a_sidecar.rs        # A2A 侧车进程管理
-│       ├── commands/             # 67+ 命令按领域拆分为 13 个模块
+│       ├── commands/             # 138+ 命令按领域拆分为 21 个模块
 │       │   ├── mod.rs            # 模块声明入口
 │       │   ├── a2a.rs            # 7 个 A2A 命令
+│       │   ├── agent.rs          # 6 个 Agent 命令
+│       │   ├── agent_spec.rs     # 5 个 AgentSpec 命令
 │       │   ├── builder.rs        # 11 个 Builder 命令
 │       │   ├── calibration.rs    # 6 个 Calibration 命令
 │       │   ├── chat.rs           # 6 个 Chat 会话命令
 │       │   ├── diagnostics.rs    # 5 个诊断命令
+│       │   ├── execution.rs      # 11 个执行/工具命令
 │       │   ├── feedback.rs       # 5 个反馈命令
-│       │   ├── reasoning.rs      # 推理策略命令
 │       │   ├── life_model.rs     # 2 个 LifeModel 命令
 │       │   ├── mcp.rs            # 8 个 MCP 命令
 │       │   ├── memory.rs         # 10 个 Memory 命令
+│       │   ├── metrics.rs        # 3 个指标命令
+│       │   ├── plan.rs           # 10 个 Plan 命令
+│       │   ├── proactive.rs      # 1 个主动建议命令
+│       │   ├── proposal.rs       # 7 个 Proposal 命令
+│       │   ├── router.rs         # 1 个路由状态命令
 │       │   ├── settings.rs       # 12 个 Settings 命令
 │       │   ├── state.rs          # 8 个 State 命令
 │       │   └── version.rs        # 4 个版本命令
@@ -191,12 +199,12 @@
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
-| **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 30+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断 | 依赖 openlife-core 全部模块 |
+| **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 138+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断、Agent、Plan、Proposal | 依赖 openlife-core 全部模块 |
 | **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
 
 ### 目标架构主线
 
-当前代码还没有完整实现统一 Agent Runtime。后续开发应向下面这条主线迁移：
+✅ P0-P12 已完成统一 Agent Runtime 实现。当前架构主线如下：
 
 ```
 用户意图 / 主动触发
@@ -634,7 +642,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 ### 历史遗留问题
 
-1. **reqwest 版本不一致**：`openlife-core` 使用 `reqwest 0.11`，`src-tauri` 使用 `reqwest 0.12`。目前编译通过，但建议统一版本以避免潜在兼容性问题。
+1. ~~**reqwest 版本不一致**~~ **已修复**（Gate 0）：`openlife-core` 与 `src-tauri` 均已使用 `reqwest 0.12`。
 2. ~~Ollama 缓存固定 10 秒~~ **已修复**：`ollama_cache_ttl_seconds` 已加入 `SystemConfig`，可通过 `config.yaml` 配置，默认仍为 10 秒。
 3. ~~数据目录与 Tauri identifier 不一致~~ **已修复**：数据目录已统一为 `ai.openlife.desktop`。如果你曾使用旧版本数据目录 `com.openlife.app` 或 `ai.openlife.app`，请将其中的数据手动复制到 `ai.openlife.desktop`。
 4. **MCP 审计日志单独数据库**：`mcp_audit.db` 与 `messages.db`/`vectors.db` 分开存储，这是设计上的隔离，但备份/迁移时容易遗漏。
@@ -668,9 +676,9 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
 10. **vNext AgentRunEvent**：当前 AgentRun/status updates/actions/observations 已存在，但还缺 append-only `AgentRunEvent` 作为统一 runtime trace。
 11. **执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。
-12. **PromptStack 缺失**：system prompt、role prompt、tool prompt、privacy prompt 仍需升级为一等 PromptStack/PromptBlock 架构。
+12. ~~**PromptStack 缺失**~~ ✅ 已完成（1329 行，10 Block 类型 + 8 PromptBlock 工厂 + 2 PromptStack 工厂，llm/scheduler 已迁移到 PromptStack 内部）
 13. **MemoryEvidence 缺失**：Memory 已可写入/检索/归档，但还不是 LifeModel evolution 的正式证据层。
-14. **ToolRuntime hardening**：继续强化 tool metadata、declarative-only 过滤、permission policy、observation/event 记录和 replay re-check。
+14. **ActionExecutor hardening**：继续强化 tool metadata、declarative-only 过滤、permission policy、observation/event 记录和 replay re-check。
 
 ---
 
@@ -688,7 +696,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 ### 测试数据
 
-- **前端 Mock**：[`frontend/src/test/mocks/tauri.ts`](frontend/src/test/mocks/tauri.ts) 提供完整的 Tauri `invoke` mock，覆盖约 30+ 个命令。新增 command 时**必须同步更新此 mock**，否则组件测试会失败。
+- **前端 Mock**：[`frontend/src/test/mocks/tauri.ts`](frontend/src/test/mocks/tauri.ts) 提供完整的 Tauri `invoke` mock，覆盖约 130+ 个命令。新增 command 时**必须同步更新此 mock**，否则组件测试会失败。
 - **Rust 测试数据**：使用 `tempfile::TempDir` 创建临时 SQLite 数据库，每个测试独立隔离。
 - **LifeModel 测试数据**：YAML 序列化/反序列化测试使用内存中的字符串，无需外部文件。
 
@@ -765,7 +773,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-20 | 初始版本：完成项目结构、技术栈、启动脚本、环境配置、业务逻辑、测试策略 | AI Agent |
 | 2026-04-20 | 新增完整启动脚本集合（setup/dev/start/startup + Makefile） | AI Agent |
 | 2026-04-20 | 更新 AGENTS.md 为完整模板格式（命名约定、代码风格、业务规则、已知问题、测试策略） | AI Agent |
-| 2026-04-22 | 拆分 src-tauri/src/lib.rs：67+ 命令按领域拆分为 13 个 commands/ 模块，lib.rs 保留共享类型和核心聊天命令 | AI Agent |
+| 2026-04-22 | 拆分 src-tauri/src/lib.rs：138+ 命令按领域拆分为 21 个 commands/ 模块，lib.rs 保留共享类型和核心聊天命令 | AI Agent |
 | 2026-04-22 | 清理未使用 import，cargo check 零警告零错误；前端 86 测试 + Rust 129 测试全部通过 | AI Agent |
 | 2026-04-24 | 将项目上下文从“桌面 AI 伴侣应用”更新为“本地优先个人 Agent 框架”，新增 Agent Runtime、AgentRun、Proposal、ModelRouter 作为后续开发主线 | AI Agent |
 | 2026-04-26 | Proposal/Confirmation 统一层收敛完成：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路；AgentRun ↔ Proposal 双向关联溯源；Safe Mode 限制 Proposal 操作；Review Center 强化（分类/风险筛选/编辑/批量/空状态/失败态/Dashboard 提醒） | AI Agent |
@@ -796,6 +804,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-08 | **P10 规划准备**：P9 Shell/Sandbox 核心收口；新增 `openlife_vnext_p10_task_specs.md`，将 Frontend Agent Workspace 接入 README、AGENTS、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-08 | **P11 开发前准备**：P10 Frontend Agent Workspace 已验收；新增 `openlife_vnext_p11_task_specs.md`，将 Beta Trial Readiness 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-08 | **P12 开发前准备**：P11/P11.1 Beta Trial Readiness 已验收；新增 `openlife_vnext_p12_task_specs.md` 与 `openlife_vnext_p12_beta_rc_acceptance_report.md`，将 Beta Release Candidate and User Trial Delivery 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
+| 2026-05-10 | **P12 Beta RC 验收通过 + Post-Beta 完整计划**：`make ci` 全绿 799 测试；AGENTS.md 阶段标记更新为 P12 已验收 + Post-Beta 架构稳固；新增 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md) 完整发展计划（Phase 1-4：P12交付收尾→Post-Beta稳固→生产就绪→v1.0公开）；文档优先级列表更新 | AI Agent |
 
 ---
 

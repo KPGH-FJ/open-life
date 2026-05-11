@@ -191,3 +191,36 @@ fn map_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         source_run_id: row.get(8)?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_task_roundtrip() {
+        let store = TaskStore::new_in_memory().unwrap();
+        let task = ScheduledTask::new("测试任务", "描述内容", None, "high");
+        store.create_task(&task).unwrap();
+        let tasks = store.list_tasks(Some("pending")).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "测试任务");
+        assert_eq!(tasks[0].priority, "high");
+    }
+
+    #[test]
+    fn test_complete_task() {
+        let store = TaskStore::new_in_memory().unwrap();
+        let task = ScheduledTask::new("可完成任务", "", None, "medium");
+        let id = task.id.clone();
+        store.create_task(&task).unwrap();
+        store.complete_task(&id).unwrap();
+        let completed = store.list_tasks(Some("completed")).unwrap();
+        assert_eq!(completed.len(), 1);
+    }
+
+    #[test]
+    fn test_default_priority_is_medium() {
+        let task = ScheduledTask::new("默认优先级", "", None, "");
+        assert_eq!(task.priority, "medium");
+    }
+}

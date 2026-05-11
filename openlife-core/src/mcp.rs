@@ -1,3 +1,4 @@
+use crate::agent::prompt_stack::PromptBlock;
 use crate::privacy::PrivacyEngine;
 use crate::tool_manifest::{ToolManifest, ToolSource};
 use anyhow::{Context, Result};
@@ -949,6 +950,17 @@ impl McpRegistry {
                 .into(),
         );
         lines.join("\n")
+    }
+
+    /// Return tools prompt as an Option<PromptBlock> for PromptStack integration.
+    /// Returns None when no enabled, non-declarative tools are registered.
+    pub fn tools_prompt_block(&self) -> Option<PromptBlock> {
+        let text = self.tools_prompt();
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(PromptBlock::available_tools(text))
+        }
     }
 
     // ── Governed prompt helpers ────────────────────────────────────────

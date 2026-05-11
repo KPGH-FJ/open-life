@@ -44,6 +44,7 @@ pub struct AgentExecutionOutcome {
     pub fallback_used: bool,
     pub fallback_reason: Option<String>,
     pub warnings: Vec<String>,
+    pub reasoning_trace: crate::agent::ReasoningTrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +257,7 @@ impl AgentExecutionFacade {
             fallback_used: true,
             fallback_reason: Some(error_msg.to_string()),
             warnings: vec![format!("AgentLoop failed, used fallback: {}", error_msg)],
+            reasoning_trace: crate::agent::ReasoningTrace::default(),
         })
     }
 
@@ -284,6 +286,7 @@ impl AgentExecutionFacade {
         fallback_used: bool,
         fallback_reason: Option<String>,
     ) -> AgentExecutionOutcome {
+        let reasoning_trace = result.run.reasoning_trace.clone().unwrap_or_default();
         AgentExecutionOutcome {
             reply: result.final_response,
             run: result.run,
@@ -291,6 +294,7 @@ impl AgentExecutionFacade {
             fallback_used,
             fallback_reason,
             warnings: Vec::new(),
+            reasoning_trace,
         }
     }
 }
@@ -309,6 +313,7 @@ mod tests {
             fallback_used: false,
             fallback_reason: None,
             warnings: vec![],
+            reasoning_trace: crate::agent::ReasoningTrace::default(),
         };
         assert_eq!(outcome.mode.to_string(), "chat");
         assert!(!outcome.fallback_used);
@@ -324,6 +329,7 @@ mod tests {
             fallback_used: true,
             fallback_reason: Some("AgentLoop timeout".into()),
             warnings: vec!["fallback".into()],
+            reasoning_trace: crate::agent::ReasoningTrace::default(),
         };
         assert!(outcome.fallback_used);
         assert_eq!(
@@ -357,6 +363,7 @@ mod tests {
             fallback_used: true,
             fallback_reason: Some("test error".into()),
             warnings: vec!["fallback warning".into()],
+            reasoning_trace: crate::agent::ReasoningTrace::default(),
         };
         assert_eq!(outcome.reply, "fb reply");
         assert!(!outcome.warnings.is_empty());

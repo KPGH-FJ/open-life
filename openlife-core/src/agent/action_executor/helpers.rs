@@ -294,11 +294,11 @@ fn extract_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResul
     let block_regex = regex::Regex::new(
         r#"(?is)<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>(?P<body>.*?)(?:<a[^>]*class=["'][^"']*result__a|</body>|$)"#,
     )
-    .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    .unwrap_or_else(|_| regex::Regex::new("$^").expect("static fallback regex"));
     let snippet_regex = regex::Regex::new(
         r#"(?is)<a[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>(.*?)</a>"#,
     )
-    .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+    .unwrap_or_else(|_| regex::Regex::new("$^").expect("static fallback regex"));
 
     let mut results = Vec::new();
     for caps in block_regex.captures_iter(html) {
@@ -340,7 +340,7 @@ fn extract_fallback_results(html: &str, max_results: usize) -> Vec<SearchResult>
     // Match any <a href="...">text</a> followed by some content
     let link_regex =
         regex::Regex::new(r#"(?is)<a[^>]*href=["'](https?://[^"'\s]+)["'][^>]*>([^<]{3,200})</a>"#)
-            .unwrap_or_else(|_| regex::Regex::new("$^").unwrap());
+            .unwrap_or_else(|_| regex::Regex::new("$^").expect("static fallback regex"));
 
     let mut results = Vec::new();
     let mut seen_urls = std::collections::HashSet::new();
@@ -742,8 +742,8 @@ fn html_to_text(html: &str) -> String {
         text = text.replace(tag, replacement);
     }
 
-    let tag_regex =
-        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+    let tag_regex = regex::Regex::new(r"<[^>]+>")
+        .unwrap_or_else(|_| regex::Regex::new(r"").expect("static fallback regex"));
     text = tag_regex.replace_all(&text, "").to_string();
 
     let entities = [
@@ -900,4 +900,51 @@ pub fn summarize_content_blocking(content: &str, source_url: &str) -> Result<Str
             fallback_url, fallback_text
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_text() {
+        let result = truncate_text("hello world", 5);
+        assert!(result.contains("hello"), "should start with truncated prefix");
+        assert!(result.len() > 5, "should append truncation notice");
+        assert_eq!(truncate_text("short", 100), "short");
+        assert_eq!(truncate_text("", 10), "");
+    }
+
+    #[test]
+    fn test_extract_host_from_url() {
+        assert_eq!(
+            extract_host_from_url("https://example.com/path"),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            extract_host_from_url("http://localhost:3000"),
+            Some("localhost".to_string())
+        );
+        assert_eq!(extract_host_from_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_is_path_in_safe_paths() {
+        let tmp = std::env::temp_dir().join("test-safe-paths");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let safe = vec![tmp.to_string_lossy().to_string()];
+        let test_file = tmp.join("file.txt");
+        std::fs::write(&test_file, "test").unwrap();
+        assert!(is_path_in_safe_paths(&test_file.to_string_lossy(), &safe));
+        assert!(!is_path_in_safe_paths("/etc/passwd", &safe));
+        std::fs::remove_dir_all(&tmp).unwrap_or(());
+    }
+
+    #[test]
+    fn test_is_private_ip() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+    }
 }

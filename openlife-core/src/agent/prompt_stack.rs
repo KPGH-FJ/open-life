@@ -116,6 +116,189 @@ impl PromptBlock {
         .with_applies_to(vec!["Planner".into(), "PlanMode".into()])
     }
 
+    pub fn base_identity() -> Self {
+        Self::new(
+            "base_identity",
+            "1.0.0",
+            PromptPurpose::BaseSystem,
+            "你是 OpenLife，用户的终身成长合伙人。你的人设和行为必须严格基于下面这份「人生模型」。\n\
+             请记住以下关于用户的信息，所有建议都必须经过人生模型的价值观过滤：",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+    }
+
+    pub fn behavioral_guidelines() -> Self {
+        Self::new(
+            "behavioral_guidelines",
+            "1.0.0",
+            PromptPurpose::BaseSystem,
+            "在每次回应时：\n\
+             1. 优先考虑用户的核心价值观\n\
+             2. 结合用户当前的目标和状态给出建议\n\
+             3. 语气要符合用户定义的人格特质\n\
+             4. 如果用户的请求与人生模型冲突，请温和地提醒并引导对齐\n\
+             5. 如果用户的状态显示精力低、压力高或情绪低落，请主动表达关心并调整建议的强度和节奏",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+    }
+
+    pub fn tool_call_format() -> Self {
+        Self::new(
+            "tool_call_format",
+            "1.0.0",
+            PromptPurpose::Tool,
+            "【工具调用规范】\n\
+             当你需要调用工具时，请严格按以下 JSON 格式输出（不要包含其他自然语言）：\n\
+             ```json\n\
+             {\n  \"tool_calls\": [\n    {\n      \"name\": \"工具名称\",\n      \"arguments\": { \"参数名\": \"参数值\" }\n    }\n  ]\n}\n\
+             ```\n\
+             如果不需要工具，直接以自然语言回答用户。",
+        )
+        .with_cloud_allowed(true)
+    }
+
+    pub fn life_model_yaml(life_model: &crate::life_model::LifeModel) -> Self {
+        let yaml = serde_yaml::to_string(life_model).unwrap_or_default();
+        Self::new(
+            "life_model_yaml",
+            "1.0.0",
+            PromptPurpose::LifeModel,
+            format!("```yaml\n{}\n```", yaml),
+        )
+        .with_privacy(PromptPrivacyLevel::Sensitive)
+    }
+
+    pub fn state_hint(life_model: &crate::life_model::LifeModel) -> Self {
+        let state = &life_model.state;
+        let mut parts: Vec<String> = Vec::new();
+        if !state.current_focus.is_empty() {
+            parts.push(format!("- 当前重心: {}", state.current_focus));
+        }
+        if !state.emotional_state.current_mood.is_empty() {
+            parts.push(format!(
+                "- 当前心情: {} (压力{}/10, 满足度{}/10)",
+                state.emotional_state.current_mood,
+                state.emotional_state.stress_level,
+                state.emotional_state.fulfillment_score
+            ));
+        }
+        if !state.health_status.physical.is_empty() || !state.health_status.mental.is_empty() {
+            parts.push(format!(
+                "- 身心健康: {}/{} (精力{}/10)",
+                state.health_status.physical,
+                state.health_status.mental,
+                state.health_status.energy_level
+            ));
+        }
+        if !state.focus_areas.is_empty() {
+            parts.push(format!("- 关注领域: {}", state.focus_areas.join(", ")));
+        }
+        if !state.recent_events.is_empty() {
+            parts.push(format!("- 近期事件: {}", state.recent_events.join(", ")));
+        }
+        if !state.habit_streaks.is_empty() {
+            let streaks: Vec<String> = state
+                .habit_streaks
+                .iter()
+                .map(|h| format!("{}({}天)", h.name, h.streak_days))
+                .collect();
+            parts.push(format!("- 习惯连续: {}", streaks.join(", ")));
+        }
+        let hint = if parts.is_empty() {
+            "暂无状态记录".to_string()
+        } else {
+            parts.join("\n")
+        };
+        Self::new(
+            "state_hint",
+            "1.0.0",
+            PromptPurpose::LifeModel,
+            format!("【用户当前状态摘要】\n{}", hint),
+        )
+        .with_privacy(PromptPrivacyLevel::Sensitive)
+    }
+
+    pub fn evolution_hint(life_model: &crate::life_model::LifeModel) -> Self {
+        let rules = if life_model.evolution_rules.is_empty() {
+            "暂无进化规则".to_string()
+        } else {
+            life_model.evolution_rules.join("\n")
+        };
+        Self::new(
+            "evolution_hint",
+            "1.0.0",
+            PromptPurpose::LifeModel,
+            format!("【自动进化规则（基于近期反馈与行为数据）】\n{}", rules),
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+    }
+
+    pub fn life_model_summary(life_model: &crate::life_model::LifeModel) -> Self {
+        let state = &life_model.state;
+        let state_hint = if !state.current_focus.is_empty() {
+            format!(
+                "- 当前重心: {}\n- 当前心情: {}",
+                state.current_focus, state.emotional_state.current_mood
+            )
+        } else {
+            "暂无状态摘要".to_string()
+        };
+        let goal_summary = format!(
+            "短期目标 {} 个，中期 {} 个，长期 {} 个，人生目标 {} 个，每日 {} 个",
+            life_model.goals.short_term.len(),
+            life_model.goals.medium_term.len(),
+            life_model.goals.long_term.len(),
+            life_model.goals.life_goals.len(),
+            life_model.goals.daily.len(),
+        );
+        let value_names: Vec<&str> = life_model
+            .identity
+            .values
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        let values_hint = if value_names.is_empty() {
+            "暂无核心价值观".to_string()
+        } else {
+            format!("核心价值观: {}", value_names.join("、"))
+        };
+        let content = format!(
+            "【用户状态摘要】\n{}\n\n【目标摘要】\n{}\n\n【价值观方向】\n{}",
+            state_hint, goal_summary, values_hint,
+        );
+        Self::new(
+            "life_model_summary",
+            "1.0.0",
+            PromptPurpose::LifeModel,
+            content,
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+    }
+
+    pub fn summary_only_behavioral_guidelines() -> Self {
+        Self::new(
+            "summary_only_guidelines",
+            "1.0.0",
+            PromptPurpose::BaseSystem,
+            "在每次回应时：\n\
+             1. 基于用户的核心价值观方向给出建议\n\
+             2. 结合用户当前的状态和大致目标方向\n\
+             3. 语气要温和、支持但不透露具体个人信息\n\
+             4. 如用户要求具体信息，请说明当前处于隐私保护模式，建议切换到本地模型",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+    }
+
+    pub fn available_tools(tools_text: impl Into<String>) -> Self {
+        Self::new(
+            "available_tools",
+            "1.0.0",
+            PromptPurpose::Tool,
+            tools_text.into(),
+        )
+        .with_cloud_allowed(true)
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -339,6 +522,55 @@ impl PromptStack {
             .with_output_schema(agent_plan_output_schema())
     }
 
+    /// Full chat system prompt: base identity + behavioral guidelines +
+    /// LifeModel YAML + state hint + evolution rules + tool call format + available tools.
+    pub fn chat_system_stack(
+        life_model: &crate::life_model::LifeModel,
+        tools_block: Option<PromptBlock>,
+    ) -> Self {
+        let mut stack = Self::new()
+            .with_block(PromptBlock::base_identity())
+            .with_block(PromptBlock::behavioral_guidelines())
+            .with_block(PromptBlock::life_model_yaml(life_model))
+            .with_block(PromptBlock::state_hint(life_model))
+            .with_block(PromptBlock::evolution_hint(life_model));
+        if let Some(tb) = tools_block {
+            if !tb.content.trim().is_empty() {
+                stack.push(tb);
+                stack.push(PromptBlock::tool_call_format());
+            }
+        }
+        stack
+    }
+
+    /// SummaryOnly variant: replaces full LifeModel with a summary-only block
+    /// and uses privacy-conscious behavioral guidelines.
+    pub fn chat_system_stack_summary_only(
+        life_model: &crate::life_model::LifeModel,
+        tools_block: Option<PromptBlock>,
+    ) -> Self {
+        let mut stack = Self::new()
+            .with_block(PromptBlock::base_identity())
+            .with_block(PromptBlock::summary_only_behavioral_guidelines())
+            .with_block(PromptBlock::new(
+                "privacy_notice",
+                "1.0.0",
+                PromptPurpose::Privacy,
+                "[SummaryOnly] 云端隐私保护模式下，仅发送以下摘要信息：",
+            ))
+            .with_block(PromptBlock::life_model_summary(life_model));
+        if let Some(tb) = tools_block {
+            stack.push(PromptBlock::new(
+                "tool_info_header",
+                "1.0.0",
+                PromptPurpose::Tool,
+                "【工具信息】",
+            ));
+            stack.push(tb);
+        }
+        stack
+    }
+
     /// Push a block onto the stack.
     pub fn push(&mut self, block: PromptBlock) {
         self.blocks.push(block);
@@ -362,6 +594,12 @@ impl PromptStack {
         let assembled = parts.join("\n\n");
         self.assembled_preview = assembled.chars().take(500).collect();
         assembled
+    }
+
+    /// Read-only render — does not update assembled_preview.
+    pub fn render(&self) -> String {
+        let parts: Vec<&str> = self.blocks.iter().map(|b| b.content.as_str()).collect();
+        parts.join("\n\n")
     }
 
     /// Return only cloud-allowed blocks, assembled.
@@ -476,15 +714,10 @@ impl PromptBlockRegistry {
     pub fn built_in() -> Self {
         Self::new()
             .with_block("planning", PromptBlock::planning())
-            .with_block(
-                "base_system",
-                PromptBlock::new(
-                    "base_system",
-                    "1.0.0",
-                    PromptPurpose::BaseSystem,
-                    "You are OpenLife, a LifeModel-governed personal agent.",
-                ),
-            )
+            .with_block("base_system", PromptBlock::base_identity())
+            .with_block("base_identity", PromptBlock::base_identity())
+            .with_block("behavioral_guidelines", PromptBlock::behavioral_guidelines())
+            .with_block("tool_call_format", PromptBlock::tool_call_format())
             .with_block(
                 "tool_discipline",
                 PromptBlock::new(
@@ -918,5 +1151,179 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("unknown prompt block"));
         assert!(err.contains("nonexistent_block"));
+    }
+
+    // ── Post-Beta: PromptBlock factory tests ──────────────────────────
+
+    fn make_test_life_model() -> crate::life_model::LifeModel {
+        let mut lm = crate::life_model::LifeModel::default();
+        lm.state.current_focus = "学习 Rust".to_string();
+        lm.state.emotional_state.current_mood = "充实".to_string();
+        lm.state.emotional_state.stress_level = 3;
+        lm.state.emotional_state.fulfillment_score = 8;
+        lm.state.health_status.physical = "良好".to_string();
+        lm.state.health_status.mental = "专注".to_string();
+        lm.state.health_status.energy_level = 7;
+        lm.state.focus_areas = vec!["编程".to_string(), "健康".to_string()];
+        lm.state.recent_events = vec!["完成了 P12 验收".to_string()];
+        lm.identity.values = vec![crate::life_model::ValueItem {
+            name: "持续学习".to_string(),
+            weight: 9,
+            description: "终身成长".to_string(),
+        }];
+        lm.goals.short_term = vec![crate::life_model::GoalItem::default()];
+        lm.evolution_rules = vec!["每周复盘".to_string()];
+        lm
+    }
+
+    #[test]
+    fn test_state_hint_empty_lifemodel() {
+        let lm = crate::life_model::LifeModel::default();
+        let block = PromptBlock::state_hint(&lm);
+        assert!(block.content.contains("用户当前状态摘要"));
+        assert!(block.content.contains("暂无状态记录"));
+        assert_eq!(block.purpose, PromptPurpose::LifeModel);
+    }
+
+    #[test]
+    fn test_state_hint_populated() {
+        let lm = make_test_life_model();
+        let block = PromptBlock::state_hint(&lm);
+        assert!(block.content.contains("当前重心: 学习 Rust"));
+        assert!(block.content.contains("当前心情: 充实 (压力3/10, 满足度8/10)"));
+        assert!(block.content.contains("身心健康: 良好/专注 (精力7/10)"));
+        assert!(block.content.contains("关注领域: 编程, 健康"));
+        assert!(block.content.contains("近期事件: 完成了 P12 验收"));
+    }
+
+    #[test]
+    fn test_life_model_summary_content() {
+        let lm = make_test_life_model();
+        let block = PromptBlock::life_model_summary(&lm);
+        assert!(block.content.contains("用户状态摘要"));
+        assert!(block.content.contains("目标摘要"));
+        assert!(block.content.contains("价值观方向"));
+        assert!(block.content.contains("持续学习"));
+        assert!(block.content.contains("短期目标 1 个"));
+    }
+
+    #[test]
+    fn test_life_model_yaml_output() {
+        let lm = make_test_life_model();
+        let block = PromptBlock::life_model_yaml(&lm);
+        assert!(block.content.contains("```yaml"));
+        assert!(block.content.contains("学习 Rust"));
+        assert_eq!(block.privacy_level, PromptPrivacyLevel::Sensitive);
+    }
+
+    #[test]
+    fn test_available_tools_passthrough() {
+        let block = PromptBlock::available_tools("- web.search: search the web");
+        assert!(block.content.contains("web.search"));
+        // Must NOT add duplicate prefix
+        assert!(!block.content.starts_with("\n你可以使用以下工具:\n"));
+        assert!(block.cloud_allowed);
+    }
+
+    #[test]
+    fn test_available_tools_empty() {
+        let block = PromptBlock::available_tools("");
+        assert!(block.content.is_empty());
+    }
+
+    #[test]
+    fn test_base_identity_contains_chinese() {
+        let block = PromptBlock::base_identity();
+        assert!(block.content.contains("OpenLife"));
+        assert!(block.content.contains("终身成长合伙人"));
+        assert!(block.content.contains("人生模型"));
+    }
+
+    #[test]
+    fn test_behavioral_guidelines_content() {
+        let block = PromptBlock::behavioral_guidelines();
+        assert!(block.content.contains("核心价值观"));
+        assert!(block.content.contains("人格特质"));
+    }
+
+    #[test]
+    fn test_tool_call_format_block() {
+        let block = PromptBlock::tool_call_format();
+        assert!(block.content.contains("tool_calls"));
+        assert!(block.content.contains("JSON"));
+        assert!(block.cloud_allowed);
+    }
+
+    #[test]
+    fn test_chat_system_stack_assembles_correct_order() {
+        let lm = make_test_life_model();
+        let tools = PromptBlock::available_tools("- web.search: search");
+        let mut stack = PromptStack::chat_system_stack(&lm, Some(tools));
+        let assembled = stack.assemble();
+        // base_identity comes before behavioral_guidelines
+        let base_pos = assembled.find("终身成长合伙人").unwrap();
+        let guide_pos = assembled.find("核心价值观").unwrap();
+        assert!(base_pos < guide_pos, "base_identity should appear before behavioral_guidelines");
+        // tools_block comes before tool_call_format
+        let tools_pos = assembled.find("web.search").unwrap();
+        let format_pos = assembled.find("tool_calls").unwrap();
+        assert!(tools_pos < format_pos, "tools_block should appear before tool_call_format");
+    }
+
+    #[test]
+    fn test_chat_system_stack_no_tools() {
+        let lm = make_test_life_model();
+        let mut stack = PromptStack::chat_system_stack(&lm, None);
+        let assembled = stack.assemble();
+        assert!(!assembled.contains("tool_calls"));
+    }
+
+    #[test]
+    fn test_chat_system_stack_summary_only_content() {
+        let lm = make_test_life_model();
+        let tools = PromptBlock::available_tools("- test: a test tool");
+        let mut stack = PromptStack::chat_system_stack_summary_only(&lm, Some(tools));
+        let assembled = stack.assemble();
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(assembled.contains("云端隐私保护模式"));
+        assert!(assembled.contains("用户状态摘要"));
+        assert!(assembled.contains("目标摘要"));
+        assert!(assembled.contains("test: a test tool"));
+    }
+
+    #[test]
+    fn test_render_vs_assemble() {
+        let lm = make_test_life_model();
+        let mut stack = PromptStack::chat_system_stack(&lm, None);
+        let rendered = stack.render();
+        let assembled = stack.assemble();
+        assert_eq!(rendered, assembled, "render and assemble should produce identical output");
+    }
+
+    #[test]
+    fn test_built_in_registry_has_backward_compat_keys() {
+        let registry = PromptBlockRegistry::built_in();
+        assert!(registry.get("base_system").is_some(), "backward-compat key base_system");
+        assert!(registry.get("base_identity").is_some(), "new key base_identity");
+        assert!(registry.get("tool_discipline").is_some(), "backward-compat key tool_discipline");
+        assert!(registry.get("privacy_rule").is_some(), "privacy_rule key");
+    }
+
+    #[test]
+    fn test_evolution_hint_output() {
+        let mut lm = make_test_life_model();
+        lm.evolution_rules = vec!["规则1".to_string(), "规则2".to_string()];
+        let block = PromptBlock::evolution_hint(&lm);
+        assert!(block.content.contains("自动进化规则"));
+        assert!(block.content.contains("规则1"));
+        assert!(block.content.contains("规则2"));
+    }
+
+    #[test]
+    fn test_summary_only_guidelines() {
+        let block = PromptBlock::summary_only_behavioral_guidelines();
+        assert!(block.content.contains("核心价值观方向"));
+        assert!(block.content.contains("隐私保护模式"));
+        assert!(block.content.contains("切换"));
     }
 }

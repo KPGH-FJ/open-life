@@ -647,12 +647,430 @@ fn validate_proposal_payload(proposal_type: ProposalType, after: &Value) -> Resu
     }
 }
 
+async fn apply_life_model_patch(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let mut model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+    let _before_snapshot = {
+        let vm = state.version_manager.lock().await;
+        vm.snapshot_for_patch(&model, &proposal.id, "before")
+            .map_err(|e| e.to_string())?
+    };
+    let path_pointer =
+        openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
+    let path_display =
+        openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+    let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
+        &proposal.id,
+        &path_pointer,
+        &path_display,
+        openlife_core::life_model::patch::PatchOp::Replace,
+        proposal.before.clone(),
+        after.clone(),
+        &proposal.reason,
+        proposal.confidence,
+        proposal.risk_level,
+        openlife_core::life_model::patch::PatchSource::BuilderReview,
+    );
+    let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
+    if !result.success {
+        return Ok(result);
+    }
+    persist_life_model(state, model.clone(), true).await?;
+    let _after_snapshot = {
+        let vm = state.version_manager.lock().await;
+        vm.snapshot_for_patch(&model, &proposal.id, "after")
+            .map_err(|e| e.to_string())?
+    };
+    if let Some(ref patch_store_arc) = state.patch_store {
+        let patch_store = patch_store_arc.lock().await;
+        let mut patch_to_save = patch.clone();
+        patch_to_save.mark_applied();
+        let _ = patch_store.create_patch(&patch_to_save);
+    }
+    Ok(result)
+}
+
+async fn apply_memory_write(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let content = memory_content(after)?;
+    let session_id = memory_session_id(after);
+    let source = memory_source(after);
+    // Duplicate check
+    {
+        let store = state.memory_store.lock().await;
+        let hits = store
+            .search_text_memories(Some(&session_id), &content, 10)
+            .map_err(|e| e.to_string())?;
+        let is_duplicate = hits
+            .iter()
+            .any(|hit| hit.chunk.content.trim() == content.trim());
+        if is_duplicate {
+            return Ok(patch_result_for_proposal(
+                proposal,
+                false,
+                "memory_write",
+                Some("检测到重复内容，该记忆已存在。".to_string()),
+            ));
+        }
+    }
+    let embedding_id = {
+        let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+            let cfg = state.config.lock().await;
+            (
+                cfg.llm.provider.clone(),
+                cfg.llm.openai_base.clone(),
+                cfg.llm.openai_key.clone(),
+                cfg.llm.embedding_model.clone(),
+                cfg.llm.embedding_enabled,
+            )
+        };
+        match openlife_core::vectors::embed_text_with_config(
+            &content,
+            &provider,
+            &openai_base,
+            &openai_key,
+            &embedding_model,
+            embedding_enabled,
+        )
+        .await
+        {
+            Ok(embedding) if !embedding.is_empty() => {
+                let store = state.vector_store.lock().await;
+                store
+                    .insert(&session_id, &content, &embedding, &source)
+                    .map_err(|e| e.to_string())
+                    .ok()
+            }
+            Ok(_) | Err(_) => None,
+        }
+    };
+    {
+        let store = state.memory_store.lock().await;
+        let tags = vec![
+            "proposal".to_string(),
+            format!("proposal_id:{}", proposal.id),
+            format!("source:{}", source),
+        ];
+        store
+            .save_memory_record(
+                &session_id,
+                &content,
+                "proposal_memory",
+                &source,
+                &tags,
+                "private",
+                embedding_id,
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(patch_result_for_proposal(proposal, true, "memory_write", None))
+}
+
+async fn apply_memory_archive(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let ids = memory_archive_ids(after)?;
+    let archived = {
+        let store = state.vector_store.lock().await;
+        store.archive_chunks(&ids).map_err(|e| e.to_string())?
+    };
+    if archived == 0 {
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "memory_archive",
+            Some("没有匹配到可归档的 active memory chunk。".to_string()),
+        ));
+    }
+    Ok(patch_result_for_proposal(proposal, true, "memory_archive", None))
+}
+
+async fn apply_tool_permission(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let tool_name = after
+        .get("tool_name")
+        .or_else(|| after.get("toolName"))
+        .or_else(|| after.get("name"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
+    let policy = tool_permission_policy_from_after(after)?;
+    let source = after.get("source").and_then(Value::as_str).unwrap_or("*");
+    let risk_level = after
+        .get("risk_level")
+        .or_else(|| after.get("riskLevel"))
+        .and_then(Value::as_str)
+        .unwrap_or("*");
+    let action_type = after
+        .get("action_type")
+        .or_else(|| after.get("actionType"))
+        .and_then(Value::as_str)
+        .unwrap_or("*");
+    {
+        let permission_store = state.tool_permission_store.lock().await;
+        permission_store
+            .grant(tool_name, source, risk_level, action_type, policy, None)
+            .map_err(|e| e.to_string())?;
+    }
+    {
+        let feedback = state.feedback_store.lock().await;
+        let detail = serde_json::json!({
+            "proposal_id": proposal.id,
+            "tool_name": tool_name,
+            "permission": policy.to_string(),
+            "source_detail": proposal.source_detail,
+        });
+        let detail_text = detail.to_string();
+        feedback
+            .log_event(
+                "tool_permission_accepted",
+                proposal.run_id.as_deref(),
+                Some(&detail_text),
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    let blocked_action = after.get("blocked_action").cloned();
+    Ok(patch_result_for_proposal(
+        proposal,
+        true,
+        "tool_permission",
+        blocked_action.map(|ba| format!("__blocked_action__:{ba}")),
+    ))
+}
+
+async fn apply_external_write_action(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let path = after
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "ExternalWriteAction Proposal 缺少 after.path。".to_string())?;
+    let content = after.get("content").and_then(Value::as_str).unwrap_or("");
+    let safe_paths = {
+        let cfg = state.config.lock().await;
+        cfg.system.safe_paths.clone()
+    };
+    if !openlife_core::agent::action_executor::is_path_in_safe_paths(path, &safe_paths) {
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "external_write",
+            Some(openlife_core::agent::action_executor::filesystem_access_error(path, &safe_paths)),
+        ));
+    }
+    if std::str::from_utf8(content.as_bytes()).is_err() {
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "external_write",
+            Some("Content is not valid UTF-8.".to_string()),
+        ));
+    }
+    let max_size = EXTERNAL_WRITE_MAX_SIZE;
+    if content.len() > max_size {
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "external_write",
+            Some(format!(
+                "Content size ({} bytes) exceeds maximum allowed ({} bytes)",
+                content.len(), max_size
+            )),
+        ));
+    }
+    if let Some(expected_hash) = after.get("content_hash").and_then(Value::as_str) {
+        if !expected_hash.is_empty() {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            let actual_hash = format!("{:x}", hasher.finalize());
+            if actual_hash != expected_hash {
+                return Ok(patch_result_for_proposal(
+                    proposal,
+                    false,
+                    "external_write",
+                    Some(format!(
+                        "Content hash mismatch: expected {}, got {}",
+                        expected_hash, actual_hash
+                    )),
+                ));
+            }
+        }
+    }
+    match safe_write_utf8(path, content, &safe_paths) {
+        Ok(_) => Ok(patch_result_for_proposal(proposal, true, "external_write", None)),
+        Err(e) => Ok(patch_result_for_proposal(proposal, false, "external_write", Some(e))),
+    }
+}
+
+async fn apply_scheduled_task(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let title = after
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Untitled Task");
+    let scheduled_at = after
+        .get("scheduled_at")
+        .or_else(|| after.get("date"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let task = serde_json::json!({
+        "id": proposal.id,
+        "title": title,
+        "prompt": after.get("description").and_then(Value::as_str).unwrap_or(""),
+        "action_type": after.get("tool").and_then(Value::as_str).unwrap_or("scheduled_task"),
+        "scheduled_at": scheduled_at,
+        "status": "pending",
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "source_run_id": proposal.run_id,
+        "source_proposal_id": proposal.id,
+    });
+    let tasks_path = app_data_dir().join("scheduled_tasks.json");
+    let _guard = state.scheduled_task_mutex.lock().await;
+    let mut tasks = if tasks_path.exists() {
+        std::fs::read_to_string(&tasks_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    tasks.push(task.clone());
+    let temp_path = tasks_path.with_extension("tmp");
+    if let Err(e) = std::fs::write(
+        &temp_path,
+        serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,
+    ) {
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "scheduled_task",
+            Some(format!("Failed to write scheduled task temp file: {}", e)),
+        ));
+    }
+    if let Err(e) = std::fs::rename(&temp_path, &tasks_path) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "scheduled_task",
+            Some(format!("Failed to atomically save scheduled tasks: {}", e)),
+        ));
+    }
+    // For calendar.propose_event, also write an .ics file
+    let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
+    if tool == "calendar.propose_event" {
+        let safe_paths = {
+            let cfg = state.config.lock().await;
+            cfg.system.safe_paths.clone()
+        };
+        if !safe_paths.is_empty() {
+            let ics_content = build_ics_event(after);
+            let ics_filename = format!("{}.ics", sanitize_filename(title));
+            let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
+            if let Err(e) = safe_write_utf8(&ics_path.to_string_lossy(), &ics_content, &safe_paths)
+            {
+                log::warn!("[proposal] Failed to write ICS file '{}': {}", ics_path.display(), e);
+            }
+        }
+    }
+    Ok(patch_result_for_proposal(proposal, true, "scheduled_task", None))
+}
+
+async fn apply_data_export(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    after: &Value,
+) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
+    let content = after.get("content").and_then(Value::as_str).unwrap_or("");
+    let filename = after
+        .get("filename")
+        .and_then(Value::as_str)
+        .unwrap_or("export.txt");
+    let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
+    // email.propose_draft: open system mail client
+    if tool == "email.propose_draft" {
+        let to = after.get("to").and_then(Value::as_str).unwrap_or("");
+        let subject = after.get("subject").and_then(Value::as_str).unwrap_or("");
+        let body = after.get("body").and_then(Value::as_str).unwrap_or(content);
+        let mailto = format!(
+            "mailto:{}?subject={}&body={}",
+            to,
+            urlencoding(subject),
+            urlencoding(body)
+        );
+        match open::that(&mailto) {
+            Ok(_) => Ok(patch_result_for_proposal(proposal, true, "data_export", None)),
+            Err(e) => Ok(patch_result_for_proposal(
+                proposal,
+                false,
+                "data_export",
+                Some(format!("Failed to open mail client: {}", e)),
+            )),
+        }
+    } else {
+        if let Err(e) = validate_export_filename(filename) {
+            return Ok(patch_result_for_proposal(
+                proposal,
+                false,
+                "data_export",
+                Some(e),
+            ));
+        }
+        let safe_paths = {
+            let cfg = state.config.lock().await;
+            cfg.system.safe_paths.clone()
+        };
+        let export_dir = if !safe_paths.is_empty() {
+            std::path::PathBuf::from(&safe_paths[0])
+        } else {
+            app_data_dir().join("exports")
+        };
+        if let Err(e) = std::fs::create_dir_all(&export_dir) {
+            return Ok(patch_result_for_proposal(
+                proposal,
+                false,
+                "data_export",
+                Some(format!("Failed to create export directory: {}", e)),
+            ));
+        }
+        let export_path = export_dir.join(filename);
+        let path_lossy = export_path.to_string_lossy();
+        match safe_write_utf8(path_lossy.as_ref(), content, &safe_paths) {
+            Ok(_) => Ok(patch_result_for_proposal(proposal, true, "data_export", None)),
+            Err(e) => Ok(patch_result_for_proposal(
+                proposal,
+                false,
+                "data_export",
+                Some(format!("Failed to write export file '{}': {}", export_path.display(), e)),
+            )),
+        }
+    }
+}
+
 async fn apply_proposal_to_state(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     after: Value,
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
-    // Validate payload schema before applying
     if let Err(e) = validate_proposal_payload(proposal.proposal_type, &after) {
         return Ok(openlife_core::life_model::patch::PatchApplyResult {
             patch_id: proposal.id.clone(),
@@ -669,491 +1087,25 @@ async fn apply_proposal_to_state(
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
         | ProposalType::CapabilityUpdate => {
-            let mut model = {
-                let manager = state.life_model_manager.lock().await;
-                manager.load().map_err(|e| e.to_string())?
-            };
-
-            // 1. Create Before Snapshot
-            let _before_snapshot = {
-                let vm = state.version_manager.lock().await;
-                vm.snapshot_for_patch(&model, &proposal.id, "before")
-                    .map_err(|e| e.to_string())?
-            };
-
-            // 2. Generate Patch from Proposal
-            let path_pointer =
-                openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
-            let path_display =
-                openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
-
-            let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
-                &proposal.id,
-                &path_pointer,
-                &path_display,
-                openlife_core::life_model::patch::PatchOp::Replace,
-                proposal.before.clone(),
-                after.clone(),
-                &proposal.reason,
-                proposal.confidence,
-                proposal.risk_level,
-                openlife_core::life_model::patch::PatchSource::BuilderReview,
-            );
-
-            // 3. Apply Patch using new engine
-            let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
-
-            if !result.success {
-                return Ok(result);
-            }
-
-            // 4. Persist updated model
-            persist_life_model(state, model.clone(), true).await?;
-
-            // 5. Create After Snapshot
-            let _after_snapshot = {
-                let vm = state.version_manager.lock().await;
-                vm.snapshot_for_patch(&model, &proposal.id, "after")
-                    .map_err(|e| e.to_string())?
-            };
-
-            // 6. Save Patch to PatchStore
-            if let Some(ref patch_store_arc) = state.patch_store {
-                let patch_store = patch_store_arc.lock().await;
-                let mut patch_to_save = patch.clone();
-                patch_to_save.mark_applied();
-                let _ = patch_store.create_patch(&patch_to_save);
-            }
-
-            Ok(result)
+            apply_life_model_patch(state, proposal, &after).await
         }
-        ProposalType::MemoryWrite | ProposalType::MemoryArchive => match proposal.proposal_type {
-            ProposalType::MemoryWrite => {
-                let content = memory_content(&after)?;
-                let session_id = memory_session_id(&after);
-                let source = memory_source(&after);
-
-                // Check for duplicate content in memory store
-                {
-                    let store = state.memory_store.lock().await;
-                    let hits = store
-                        .search_text_memories(Some(&session_id), &content, 10)
-                        .map_err(|e| e.to_string())?;
-                    let is_duplicate = hits
-                        .iter()
-                        .any(|hit| hit.chunk.content.trim() == content.trim());
-                    if is_duplicate {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "memory_write",
-                            Some("检测到重复内容，该记忆已存在。".to_string()),
-                        ));
-                    }
-                }
-
-                let embedding_id = {
-                    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-                        let cfg = state.config.lock().await;
-                        (
-                            cfg.llm.provider.clone(),
-                            cfg.llm.openai_base.clone(),
-                            cfg.llm.openai_key.clone(),
-                            cfg.llm.embedding_model.clone(),
-                            cfg.llm.embedding_enabled,
-                        )
-                    };
-                    match openlife_core::vectors::embed_text_with_config(
-                        &content,
-                        &provider,
-                        &openai_base,
-                        &openai_key,
-                        &embedding_model,
-                        embedding_enabled,
-                    )
-                    .await
-                    {
-                        Ok(embedding) if !embedding.is_empty() => {
-                            let store = state.vector_store.lock().await;
-                            store
-                                .insert(&session_id, &content, &embedding, &source)
-                                .map_err(|e| e.to_string())
-                                .ok()
-                        }
-                        Ok(_) | Err(_) => None,
-                    }
-                };
-                {
-                    let store = state.memory_store.lock().await;
-                    let tags = vec![
-                        "proposal".to_string(),
-                        format!("proposal_id:{}", proposal.id),
-                        format!("source:{}", source),
-                    ];
-                    store
-                        .save_memory_record(
-                            &session_id,
-                            &content,
-                            "proposal_memory",
-                            &source,
-                            &tags,
-                            "private",
-                            embedding_id,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-                Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "memory_write",
-                    None,
-                ))
-            }
-            ProposalType::MemoryArchive => {
-                let ids = memory_archive_ids(&after)?;
-                let archived = {
-                    let store = state.vector_store.lock().await;
-                    store.archive_chunks(&ids).map_err(|e| e.to_string())?
-                };
-                if archived == 0 {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "memory_archive",
-                        Some("没有匹配到可归档的 active memory chunk。".to_string()),
-                    ));
-                }
-                Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "memory_archive",
-                    None,
-                ))
-            }
-            _ => unreachable!(),
-        },
+        ProposalType::MemoryWrite => {
+            apply_memory_write(state, proposal, &after).await
+        }
+        ProposalType::MemoryArchive => {
+            apply_memory_archive(state, proposal, &after).await
+        }
         ProposalType::ToolPermission => {
-            let tool_name = after
-                .get("tool_name")
-                .or_else(|| after.get("toolName"))
-                .or_else(|| after.get("name"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| "ToolPermission Proposal 缺少 after.tool_name。".to_string())?;
-            let policy = tool_permission_policy_from_after(&after)?;
-            let source = after.get("source").and_then(Value::as_str).unwrap_or("*");
-            let risk_level = after
-                .get("risk_level")
-                .or_else(|| after.get("riskLevel"))
-                .and_then(Value::as_str)
-                .unwrap_or("*");
-            let action_type = after
-                .get("action_type")
-                .or_else(|| after.get("actionType"))
-                .and_then(Value::as_str)
-                .unwrap_or("*");
-            {
-                let permission_store = state.tool_permission_store.lock().await;
-                permission_store
-                    .grant(tool_name, source, risk_level, action_type, policy, None)
-                    .map_err(|e| e.to_string())?;
-            }
-            {
-                let feedback = state.feedback_store.lock().await;
-                let detail = serde_json::json!({
-                    "proposal_id": proposal.id,
-                    "tool_name": tool_name,
-                    "permission": policy.to_string(),
-                    "source_detail": proposal.source_detail,
-                });
-                let detail_text = detail.to_string();
-                feedback
-                    .log_event(
-                        "tool_permission_accepted",
-                        proposal.run_id.as_deref(),
-                        Some(&detail_text),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
-            // Check for blocked_action payload from auto-generated proposals
-            // so the frontend can offer a "continue" or replay option.
-            let blocked_action = after.get("blocked_action").cloned();
-            Ok(patch_result_for_proposal(
-                proposal,
-                true,
-                "tool_permission",
-                blocked_action.map(|ba| format!("__blocked_action__:{ba}")),
-            ))
+            apply_tool_permission(state, proposal, &after).await
         }
         ProposalType::ExternalWriteAction => {
-            let path = after
-                .get("path")
-                .and_then(Value::as_str)
-                .ok_or_else(|| "ExternalWriteAction Proposal 缺少 after.path。".to_string())?;
-            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
-
-            // Load safe_paths from config
-            let safe_paths = {
-                let cfg = state.config.lock().await;
-                cfg.system.safe_paths.clone()
-            };
-
-            // Re-validate path is within safe_paths using strict canonical parent strategy.
-            // This is a defense-in-depth check: the path was already validated at proposal
-            // creation time, but the filesystem state may have changed.
-            if !openlife_core::agent::action_executor::is_path_in_safe_paths(path, &safe_paths) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(
-                        openlife_core::agent::action_executor::filesystem_access_error(
-                            path,
-                            &safe_paths,
-                        ),
-                    ),
-                ));
-            }
-
-            // Validate content is valid UTF-8 (defense-in-depth: JSON strings are UTF-8,
-            // but we enforce it explicitly for audit clarity)
-            if std::str::from_utf8(content.as_bytes()).is_err() {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some("Content is not valid UTF-8.".to_string()),
-                ));
-            }
-
-            // Check content size limit
-            let max_size = EXTERNAL_WRITE_MAX_SIZE;
-            if content.len() > max_size {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(format!(
-                        "Content size ({} bytes) exceeds maximum allowed ({} bytes)",
-                        content.len(),
-                        max_size
-                    )),
-                ));
-            }
-
-            // Validate content hash if present
-            if let Some(expected_hash) = after.get("content_hash").and_then(Value::as_str) {
-                if !expected_hash.is_empty() {
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(content.as_bytes());
-                    let actual_hash = format!("{:x}", hasher.finalize());
-                    if actual_hash != expected_hash {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "external_write",
-                            Some(format!(
-                                "Content hash mismatch: expected {}, got {}",
-                                expected_hash, actual_hash
-                            )),
-                        ));
-                    }
-                }
-            }
-
-            // Beta policy: do NOT auto-create parent directories.
-            // is_path_in_safe_paths already requires the parent to exist.
-            // If the parent was removed between proposal creation and acceptance,
-            // std::fs::write will fail with a clear error and the Proposal stays pending.
-
-            // Execute file write with symlink defense and atomic temp+rename
-            match safe_write_utf8(path, content, &safe_paths) {
-                Ok(_) => Ok(patch_result_for_proposal(
-                    proposal,
-                    true,
-                    "external_write",
-                    None,
-                )),
-                Err(e) => Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "external_write",
-                    Some(e),
-                )),
-            }
+            apply_external_write_action(state, proposal, &after).await
         }
         ProposalType::ScheduledTask => {
-            let title = after
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("Untitled Task");
-            let scheduled_at = after
-                .get("scheduled_at")
-                .or_else(|| after.get("date"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-
-            let task = serde_json::json!({
-                "id": proposal.id,
-                "title": title,
-                "prompt": after.get("description").and_then(Value::as_str).unwrap_or(""),
-                "action_type": after.get("tool").and_then(Value::as_str).unwrap_or("scheduled_task"),
-                "scheduled_at": scheduled_at,
-                "status": "pending",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "source_run_id": proposal.run_id,
-                "source_proposal_id": proposal.id,
-            });
-
-            // Atomic append to scheduled_tasks.json under mutex guard
-            let tasks_path = app_data_dir().join("scheduled_tasks.json");
-            let _guard = state.scheduled_task_mutex.lock().await;
-
-            let mut tasks = if tasks_path.exists() {
-                std::fs::read_to_string(&tasks_path)
-                    .ok()
-                    .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            };
-            tasks.push(task.clone());
-
-            let temp_path = tasks_path.with_extension("tmp");
-            if let Err(e) = std::fs::write(
-                &temp_path,
-                serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,
-            ) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "scheduled_task",
-                    Some(format!("Failed to write scheduled task temp file: {}", e)),
-                ));
-            }
-            if let Err(e) = std::fs::rename(&temp_path, &tasks_path) {
-                let _ = std::fs::remove_file(&temp_path);
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "scheduled_task",
-                    Some(format!("Failed to atomically save scheduled tasks: {}", e)),
-                ));
-            }
-
-            // For calendar.propose_event, also write an .ics file if safe_paths allow
-            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
-            if tool == "calendar.propose_event" {
-                let safe_paths = {
-                    let cfg = state.config.lock().await;
-                    cfg.system.safe_paths.clone()
-                };
-                if !safe_paths.is_empty() {
-                    let ics_content = build_ics_event(&after);
-                    let ics_filename = format!("{}.ics", sanitize_filename(title));
-                    let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
-                    if let Err(e) =
-                        safe_write_utf8(&ics_path.to_string_lossy(), &ics_content, &safe_paths)
-                    {
-                        log::warn!(
-                            "[proposal] Failed to write ICS file '{}' via safe path: {}",
-                            ics_path.display(),
-                            e
-                        );
-                    }
-                }
-            }
-
-            Ok(patch_result_for_proposal(
-                proposal,
-                true,
-                "scheduled_task",
-                None,
-            ))
+            apply_scheduled_task(state, proposal, &after).await
         }
         ProposalType::DataExport => {
-            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
-            let filename = after
-                .get("filename")
-                .and_then(Value::as_str)
-                .unwrap_or("export.txt");
-            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
-
-            // email.propose_draft: open system mail client via mailto: URI
-            if tool == "email.propose_draft" {
-                let to = after.get("to").and_then(Value::as_str).unwrap_or("");
-                let subject = after.get("subject").and_then(Value::as_str).unwrap_or("");
-                let body = after.get("body").and_then(Value::as_str).unwrap_or(content);
-                let mailto = format!(
-                    "mailto:{}?subject={}&body={}",
-                    to,
-                    urlencoding(subject),
-                    urlencoding(body)
-                );
-                match open::that(&mailto) {
-                    Ok(_) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "data_export",
-                        None,
-                    )),
-                    Err(e) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(format!("Failed to open mail client: {}", e)),
-                    )),
-                }
-            } else {
-                // Default: write to file
-                if let Err(e) = validate_export_filename(filename) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(e),
-                    ));
-                }
-                let safe_paths = {
-                    let cfg = state.config.lock().await;
-                    cfg.system.safe_paths.clone()
-                };
-                let export_dir = if !safe_paths.is_empty() {
-                    std::path::PathBuf::from(&safe_paths[0])
-                } else {
-                    app_data_dir().join("exports")
-                };
-
-                if let Err(e) = std::fs::create_dir_all(&export_dir) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(format!("Failed to create export directory: {}", e)),
-                    ));
-                }
-
-                let export_path = export_dir.join(filename);
-                let path_lossy = export_path.to_string_lossy();
-                match safe_write_utf8(path_lossy.as_ref(), content, &safe_paths) {
-                    Ok(_) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "data_export",
-                        None,
-                    )),
-                    Err(e) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(format!(
-                            "Failed to write export file '{}': {}",
-                            export_path.display(),
-                            e
-                        )),
-                    )),
-                }
-            } // end else (non-email DataExport)
+            apply_data_export(state, proposal, &after).await
         }
         ProposalType::PluginPermission
         | ProposalType::ModelPolicyChange

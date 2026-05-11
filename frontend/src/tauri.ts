@@ -389,8 +389,15 @@ export async function clearMcpAuditLogs(days: number): Promise<number> {
   return safeInvoke<number>("clear_mcp_audit_logs", { days });
 }
 
-export async function listMcpTools(): Promise<any[]> {
-  return safeInvoke<any[]>("list_mcp_tools");
+export interface McpTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  serverName: string;
+}
+
+export async function listMcpTools(): Promise<McpTool[]> {
+  return safeInvoke<McpTool[]>("list_mcp_tools");
 }
 
 export async function listToolManifests(): Promise<ToolManifest[]> {
@@ -413,11 +420,18 @@ export async function listMcpTemplates(): Promise<McpTemplate[]> {
   return safeInvoke<McpTemplate[]>("list_mcp_templates");
 }
 
+export interface ToolParameter {
+  name: string;
+  type: string;
+  description?: string;
+  required?: boolean;
+}
+
 export interface ToolManifest {
   id: string;
   name: string;
   description: string;
-  parameters: any;
+  parameters: Record<string, ToolParameter>;
   permission_level: string;
   risk_level: string;
   version: string;
@@ -660,16 +674,22 @@ export async function searchMemory(
   return raw.map(([chunk, score]) => ({ chunk, score }));
 }
 
-export async function a2aDiscoverAgent(url: string): Promise<any> {
-  return safeInvoke("a2a_discover_agent", { url });
+export interface A2AAgentCard {
+  name: string;
+  description?: string;
+  capabilities?: string[];
+}
+
+export async function a2aDiscoverAgent(url: string): Promise<A2AAgentCard> {
+  return safeInvoke<A2AAgentCard>("a2a_discover_agent", { url });
 }
 
 export async function a2aSendTask(url: string, requestJson: string): Promise<string> {
   return safeInvoke<string>("a2a_send_task", { url, requestJson, request_json: requestJson });
 }
 
-export async function a2aLocalAgentCard(): Promise<any> {
-  return safeInvoke("a2a_local_agent_card");
+export async function a2aLocalAgentCard(): Promise<A2AAgentCard> {
+  return safeInvoke<A2AAgentCard>("a2a_local_agent_card");
 }
 
 export async function a2aHandleTask(requestJson: string): Promise<string> {
@@ -681,7 +701,7 @@ export async function a2aBridgeLocal(
   text: string,
   sessionId?: string,
   skill?: string
-): Promise<any> {
+): Promise<{ success: boolean; output?: string; error?: string }> {
   return safeInvoke("a2a_bridge_local", {
     method,
     text,
@@ -1444,7 +1464,10 @@ export async function listSkills(): Promise<SkillManifest[]> {
   return safeInvoke<SkillManifest[]>("list_skills");
 }
 
-export async function runSkill(skillId: string, input: any): Promise<SkillRunResponse> {
+export async function runSkill(
+  skillId: string,
+  input: Record<string, unknown>
+): Promise<SkillRunResponse> {
   return safeInvoke<SkillRunResponse>("run_skill", { skillId, skill_id: skillId, input });
 }
 
@@ -1522,6 +1545,12 @@ export type ProposalType =
   | "schedule_checkin"
   | "unsupported"
   | "life_model_update";
+
+// Payload shapes for proposal types (documented for code navigation).
+// Consumer code dynamically accesses proposal.after.path etc. via runtime guards.
+
+// FIXME(Phase2): Replace with typed proposal payloads once consumers are updated
+export type ProposalPayload = any;
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type ProposalSource =
   | "builder_review"
@@ -1540,8 +1569,8 @@ export interface AgentProposal {
   source: ProposalSource;
   sourceDetail?: string;
   affectedPath: string;
-  before?: any;
-  after: any;
+  before?: ProposalPayload;
+  after: ProposalPayload;
   reason: string;
   confidence: number;
   riskLevel: RiskLevel;
@@ -1583,7 +1612,7 @@ export async function rejectProposal(proposalId: string): Promise<void> {
 
 export async function editProposal(
   proposalId: string,
-  newAfter: any
+  newAfter: unknown
 ): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
   return safeInvoke("edit_proposal", {
     proposalId,
@@ -1631,4 +1660,36 @@ export async function updateAgentSpec(spec: AgentSpec): Promise<void> {
 
 export async function setDefaultAgentSpec(specId: string): Promise<void> {
   return safeInvoke("set_default_agent_spec", { specId, spec_id: specId });
+}
+
+// ── Metrics ──────────────────────────────────────────────────────
+
+export async function getRolloutMetrics(args: {
+  experiment: string;
+  limit?: number;
+  offset?: number;
+}): Promise<unknown[]> {
+  return safeInvoke("get_rollout_metrics", {
+    experiment: args.experiment,
+    limit: args.limit ?? 100,
+    offset: args.offset ?? 0,
+  });
+}
+
+export async function getRolloutSummary(args: {
+  experiment: string;
+}): Promise<unknown> {
+  return safeInvoke("get_rollout_summary", {
+    experiment: args.experiment,
+  });
+}
+
+export async function getRolloutErrors(args: {
+  experiment: string;
+  limit?: number;
+}): Promise<unknown[]> {
+  return safeInvoke("get_rollout_errors", {
+    experiment: args.experiment,
+    limit: args.limit ?? 10,
+  });
 }

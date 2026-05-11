@@ -634,7 +634,8 @@ mod tests {
         let stack = AgentRuntime::prompt_stack_for_spec(&spec, &registry).unwrap();
         assert_eq!(stack.blocks.len(), 2);
         let ids: Vec<&str> = stack.blocks.iter().map(|b| b.id.as_str()).collect();
-        assert!(ids.contains(&"base_system"));
+        // "base_system" key resolves to the base_identity block
+        assert!(ids.iter().any(|id| id.starts_with("base")));
         assert!(ids.contains(&"privacy_rule"));
     }
 
@@ -822,9 +823,9 @@ mod tests {
 
         // Verify a trace entry serializes without raw prompt content
         let json = serde_json::to_string(&trace).unwrap();
-        assert!(json.contains("base_system"));
+        assert!(json.contains("base_identity"));
         assert!(json.contains("privacy_rule"));
-        assert!(!json.contains("You are OpenLife")); // raw prompt content must NOT appear
+        assert!(!json.contains("终身成长合伙人")); // raw prompt content must NOT appear in trace
     }
 
     // ── Phase 6: privacy_policy governance ────────────────────────────

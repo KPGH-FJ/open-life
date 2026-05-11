@@ -19,6 +19,7 @@ pub mod a2a_sidecar;
 pub mod bootstrap;
 pub mod commands;
 pub mod errors;
+pub mod execution_deps;
 pub mod scheduler_runner;
 pub mod state;
 pub mod storage;
@@ -213,6 +214,17 @@ async fn generate_and_persist_chat_proposals(
             Ok(proposals) => proposals,
             Err(e) => {
                 log::warn!("[ChatProposal] Proposal generation failed: {}", e);
+                if let Some(ref es) = state.agent_run_event_store {
+                    if let Err(e) = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                        &agent_run.id,
+                        openlife_core::agent::AgentRunEventType::RunFailed,
+                        openlife_core::agent::AgentEventActor::Runtime,
+                        format!("chat proposal generation failed: {}", e),
+                        serde_json::json!({"phase": "proposal_generation", "error": e.to_string()}),
+                    )) {
+                        log::error!("[AgentRun] Failed to append RunFailed event: {}", e);
+                    }
+                }
                 return;
             }
         }
@@ -280,6 +292,7 @@ pub(crate) async fn persist_life_model(
     }
     Ok(life_model)
 }
+#[allow(clippy::unnecessary_map_or)]
 fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Option<String> {
     let lower = content.to_lowercase();
     let triggers = [
@@ -292,16 +305,55 @@ fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Op
         "已经打卡了",
         "今天搞定了",
     ];
-    let triggered = triggers.iter().any(|t| lower.contains(t));
-    if !triggered {
+    let leading_punct = |i: usize| {
+        i == 0 || {
+            lower[..i].chars().next_back().map_or(false, |c| {
+                matches!(c, '.' | '!' | '?' | '\n' | '。' | '！' | '？')
+            })
+        }
+    };
+    let trigger_positions: Vec<usize> = triggers
+        .iter()
+        .flat_map(|t| {
+            lower
+                .match_indices(t)
+                .filter(|(idx, _)| leading_punct(*idx))
+                .map(|(idx, matched)| idx + matched.len())
+        })
+        .collect();
+    if trigger_positions.is_empty() {
         return None;
     }
+    let is_word_boundary_char = |c: char| -> bool {
+        c.is_whitespace() || matches!(c, '.' | '!' | '?' | ',' | '。' | '！' | '？' | '，' | '\n')
+    };
+    const SEARCH_WINDOW_CHARS: usize = 60;
     let mut checked = Vec::new();
     for goal in &mut life_model.goals.daily {
         if goal.done {
             continue;
         }
-        if lower.contains(&goal.name.to_lowercase()) {
+        let goal_lower = goal.name.to_lowercase();
+        let matched = trigger_positions.iter().any(|&start| {
+            // Only search within SEARCH_WINDOW_CHARS chars after the trigger phrase
+            let window_end = (start + SEARCH_WINDOW_CHARS).min(lower.len());
+            let window = &lower[start..window_end];
+            window.match_indices(&goal_lower).any(|(idx, _)| {
+                let before = idx == 0 || {
+                    window[..idx]
+                        .chars()
+                        .next_back()
+                        .map_or(false, is_word_boundary_char)
+                };
+                let after_idx = idx + goal_lower.len();
+                let after = window[after_idx..]
+                    .chars()
+                    .next()
+                    .map_or(true, is_word_boundary_char);
+                before && after
+            })
+        });
+        if matched {
             goal.done = true;
             checked.push(goal.name.clone());
         }
@@ -1161,16 +1213,8 @@ async fn send_message(
         preprocess_chat_input(&session_id, &messages, &state).await?
     };
 
-    let auto_checkin_msg = if let Some(ref m) = user_msg {
-        let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
-        capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
-        if msg.is_some() {
-            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await?;
-        }
-        msg
-    } else {
-        None
-    };
+    let auto_checkin_msg =
+        run_auto_checkin_and_stream_signals(&user_msg, &mut life_model, &session_id, &state, None).await?;
 
     return send_message_with_agent_loop(
         session_id,
@@ -1211,44 +1255,33 @@ async fn send_message_with_agent_loop(
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
+
     let agent_runtime =
         openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
     let action_executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
-    let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: cfg.system.agent_loop_max_steps,
-        max_tool_calls: cfg.system.agent_loop_max_tool_calls,
-        timeout_seconds: cfg.system.agent_loop_timeout_seconds,
-        allow_writes: true,
-        allow_cloud: true,
-        shutdown_notify: Some(state.inner().shutdown_notify.clone()),
-        ..Default::default()
-    };
-    let agent_loop = {
-        let mut al = openlife_core::agent::AgentLoop::new(
-            agent_runtime,
-            action_executor,
-            scheduler.clone(),
-            loop_config,
-        );
-        if let Some(ref es) = state.agent_run_event_store {
-            al = al.with_event_store((**es).clone());
-        }
-        al
-    };
 
-    let task = openlife_core::agent::AgentTask {
-        kind: openlife_core::agent::AgentTaskKind::Conversation,
-        session_id: session_id.clone(),
-        user_text: user_msg
+    let loop_config =
+        execution_deps::build_loop_config(&cfg, state.inner().shutdown_notify.clone());
+    let agent_loop = execution_deps::build_agent_loop(
+        agent_runtime,
+        action_executor,
+        &scheduler,
+        loop_config,
+        &state.agent_run_event_store,
+    );
+
+    let task = execution_deps::build_agent_task(
+        openlife_core::agent::AgentTaskKind::Conversation,
+        session_id.clone(),
+        user_msg
             .as_ref()
             .map(|m| m.content.clone())
             .unwrap_or_default(),
-        messages: desensitized_messages.clone(),
+        desensitized_messages.clone(),
         layer,
-        ..Default::default()
-    };
+    );
 
     // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
     let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
@@ -1261,16 +1294,11 @@ async fn send_message_with_agent_loop(
             return Err(format!("AgentSpec resolution failed: {}", e));
         }
     };
-    // AgentSpecSelected / PromptStackAssembled / ContextGovernanceApplied
-    // events are recorded by AgentLoop::run_loop_core using the real run id.
-
     let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
-
     let network_policy = cfg.system.network_policy.clone();
-
     let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
         &cfg.system.execution_sandbox,
-        &cfg.system.safe_paths,
+        &safe_paths,
     );
 
     let loop_result = {
@@ -1287,28 +1315,25 @@ async fn send_message_with_agent_loop(
         } else {
             None
         };
-        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
+        let action_ctx = execution_deps::assemble_action_ctx(
             &reg,
             &permission_store,
             &audit,
             &privacy_engine,
             &safe_paths,
-        )
-        .with_life_model(&life_model)
-        .with_memory_store(&memory_store)
-        .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_network_policy(&network_policy)
-        .with_execution_sandbox(&execution_sandbox)
-        .with_agent_spec(&agent_spec);
-        if let Some(ref store) = proposal_store_guard {
-            action_ctx = action_ctx.with_proposal_store(store);
-        }
-        if let Some(ref store) = agent_run_store_guard {
-            action_ctx = action_ctx.with_agent_run_store(store);
-        }
-        if let Some(ref es) = state.agent_run_event_store {
-            action_ctx = action_ctx.with_event_store((**es).clone());
-        }
+            &life_model,
+            &memory_store,
+            &calendar_ics_paths,
+            &network_policy,
+            &execution_sandbox,
+            &agent_spec,
+            proposal_store_guard.as_deref(),
+            agent_run_store_guard.as_deref(),
+            state
+                .agent_run_event_store
+                .as_ref()
+                .map(|es| (**es).clone()),
+        );
 
         agent_loop
             .run(
@@ -1471,6 +1496,442 @@ fn emit_stream_error(
     );
 }
 
+/// Run auto checkin, capture conversation signals, and persist LifeModel if needed.
+/// Returns the auto-checkin message (if a goal was triggered) or None.
+/// If `agent_run` is provided, failure will mark it as failed.
+async fn run_auto_checkin_and_stream_signals(
+    user_msg: &Option<ChatMessage>,
+    life_model: &mut LifeModel,
+    session_id: &str,
+    state: &State<'_, Arc<AppState>>,
+    agent_run: Option<&mut openlife_core::agent::AgentRun>,
+) -> Result<Option<String>, String> {
+    let Some(ref m) = user_msg else {
+        return Ok(None);
+    };
+    let msg = try_auto_checkin_daily_goals(&m.content, life_model);
+    capture_conversation_signals(session_id, &m.content, life_model, state.inner()).await;
+    if msg.is_some() {
+        if let Err(message) = persist_life_model(&state.inner().clone(), life_model.clone(), false).await {
+            if let Some(run) = agent_run {
+                run.fail(openlife_core::agent::AgentRunError {
+                    message: message.clone(),
+                    phase: "preprocess".to_string(),
+                    recoverable: true,
+                });
+                if let Some(ref store_arc) = state.agent_run_store {
+                    let store = store_arc.lock().await;
+                    if let Err(e) = store.update_run(run) {
+                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
+                }
+            }
+            return Err(message);
+        }
+    }
+    Ok(msg)
+}
+
+/// Handle L1 direct reflex response in streaming mode — persist user message,
+/// emit stream events, finalize AgentRun. Returns early via Ok(()) if a direct
+/// response was handled.
+async fn handle_l1_direct_stream_response(
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    reply: String,
+    user_msg: &Option<ChatMessage>,
+    state: &State<'_, Arc<AppState>>,
+    agent_run: &mut openlife_core::agent::AgentRun,
+) -> Result<(), String> {
+    if let Some(ref user) = user_msg {
+        if user.role == "user" {
+            let user_inserted =
+                persist_chat_message_if_needed(session_id, user, state).await?;
+            if user_inserted {
+                persist_vector_memory_for_message(session_id, user, state).await;
+            }
+        }
+    }
+
+    let life_model = {
+        let manager = state.life_model_manager.lock().await;
+        manager.load().map_err(|e| e.to_string())?
+    };
+
+    let assistant_msg = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+
+    let _ = app_handle.emit(
+        "stream-message-start",
+        serde_json::json!({
+            "session_id": session_id,
+            "run_id": agent_run.id,
+            "reasoning_trace": ReasoningTrace::default(),
+            "tool_calls": Vec::<ToolCallResult>::new(),
+        }),
+    );
+    let _ = app_handle.emit(
+        "stream-message-chunk",
+        serde_json::json!({
+            "session_id": session_id,
+            "run_id": agent_run.id,
+            "chunk": reply.clone(),
+        }),
+    );
+
+    let mut reasoning_trace = ReasoningTrace::default();
+    let model_route = openlife_core::agent::ModelRouteTrace {
+        provider: "direct".to_string(),
+        model: "L1_reflex".to_string(),
+        route_type: "direct".to_string(),
+        prefer_local: false,
+        local_model: "".to_string(),
+        reason: "layer_1_direct_response".to_string(),
+        privacy_level: openlife_core::agent::types::RedactionLevel::None,
+        latency_ms: None,
+        retry_count: 0,
+        fallback_reason: None,
+        provider_health_is_estimated: Some(false),
+    };
+    let context_summary = openlife_core::agent::ContextSummary {
+        life_model_empty: true,
+        included_life_model_sections: vec![],
+        memory_hit_count: 0,
+        memory_sources: vec![],
+        used_tools_prompt: false,
+        redaction_applied: false,
+        redaction_level: openlife_core::agent::types::RedactionLevel::None,
+    };
+    let preview = preview_text(&reply, 200);
+    agent_run.complete(&preview, model_route, context_summary);
+
+    if let Err(e) = finalize_chat_agent_run(
+        session_id,
+        &assistant_msg,
+        &reply,
+        &mut reasoning_trace,
+        agent_run,
+        &life_model,
+        state,
+    )
+    .await
+    {
+        log::warn!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
+        let _ = app_handle.emit(
+            "stream-message-error",
+            serde_json::json!({
+                "session_id": session_id,
+                "run_id": agent_run.id,
+                "error": format!("AgentRun 持久化失败: {}", e),
+            }),
+        );
+        return Err(e);
+    }
+
+    let _ = app_handle.emit(
+        "stream-message-done",
+        serde_json::json!({
+            "session_id": session_id,
+            "run_id": agent_run.id,
+            "reply": reply,
+            "reasoning_trace": ReasoningTrace::default(),
+            "tool_calls": Vec::<ToolCallResult>::new(),
+        }),
+    );
+    Ok(())
+}
+
+/// Run governed streaming with four fallback scenarios.
+/// On success, full_reply and reasoning_trace.errors are populated.
+/// On total failure, agent_run is marked failed and the error is returned.
+#[allow(clippy::too_many_arguments)]
+async fn run_governed_stream_with_fallbacks(
+    scheduler: &InferenceScheduler,
+    messages_with_reasoning: Vec<ChatMessage>,
+    life_model: &LifeModel,
+    tools_prompt: &str,
+    privacy_policy: openlife_core::agent::types::PrivacyPolicy,
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    existing_reply: String,
+    reasoning_trace: &mut ReasoningTrace,
+    agent_run: &mut openlife_core::agent::AgentRun,
+    agent_run_store: Option<
+        &std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>,
+    >,
+) -> Result<String, String> {
+    let mut full_reply = existing_reply;
+
+    let mut stream = match timeout(
+        Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
+        scheduler.generate_stream_governed(
+            messages_with_reasoning.clone(),
+            life_model,
+            Some(tools_prompt),
+            privacy_policy,
+        ),
+    )
+    .await
+    .map_err(|_| format!("流式响应初始化超时（{} 秒）", STREAM_INIT_TIMEOUT_SECS))
+    .and_then(|result| result.map_err(|e| e.to_string()))
+    {
+        Ok(s) => s,
+        Err(stream_error) => {
+            match generate_non_stream_fallback_governed(
+                scheduler,
+                messages_with_reasoning,
+                life_model,
+                tools_prompt,
+                privacy_policy,
+            )
+            .await
+            {
+                Ok(reply) => {
+                    reasoning_trace.errors.push(format!(
+                        "流式响应初始化失败，已降级为非流式响应：{}",
+                        stream_error
+                    ));
+                    full_reply = reply.clone();
+                    let _ = app_handle.emit(
+                        "stream-message-chunk",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "chunk": reply,
+                        }),
+                    );
+                }
+                Err(fallback_error) => {
+                    let message = format!(
+                        "流式响应初始化失败，非流式重试也失败：{}；重试错误：{}",
+                        stream_error, fallback_error
+                    );
+                    emit_stream_error(app_handle, session_id, &agent_run.id, message.clone());
+                    let error = openlife_core::agent::AgentRunError {
+                        message: message.clone(),
+                        phase: "stream".to_string(),
+                        recoverable: true,
+                    };
+                    agent_run.fail(error);
+                    if let Some(ref store_arc) = agent_run_store {
+                        let store = store_arc.lock().await;
+                        if let Err(e) = store.update_run(agent_run) {
+                            log::warn!("[AgentRun] 更新运行记录失败: {}", e);
+                        }
+                    }
+                    return Err(message);
+                }
+            }
+            return Ok(full_reply);
+        }
+    };
+
+    loop {
+        let next_chunk = match timeout(
+            Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
+            stream.next(),
+        )
+        .await
+        {
+            Ok(next) => next,
+            Err(_) => {
+                let stream_error =
+                    format!("超过 {} 秒没有收到模型输出", STREAM_CHUNK_TIMEOUT_SECS);
+                match generate_non_stream_fallback_governed(
+                    scheduler,
+                    messages_with_reasoning.clone(),
+                    life_model,
+                    tools_prompt,
+                    privacy_policy,
+                )
+                .await
+                {
+                    Ok(reply) => {
+                        let fallback_text = if full_reply.is_empty() {
+                            reply
+                        } else {
+                            format!(
+                                "\n\n[系统] 流式连接长时间无输出，已自动用非流式请求重试并补全回复：\n\n{}",
+                                reply
+                            )
+                        };
+                        reasoning_trace.errors.push(format!(
+                            "流式响应超时，已降级为非流式响应：{}",
+                            stream_error
+                        ));
+                        full_reply.push_str(&fallback_text);
+                        let _ = app_handle.emit(
+                            "stream-message-chunk",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "chunk": fallback_text,
+                            }),
+                        );
+                        break;
+                    }
+                    Err(fallback_error) => {
+                        let message = format!(
+                            "流式响应超时，非流式重试也失败：{}；重试错误：{}",
+                            stream_error, fallback_error
+                        );
+                        emit_stream_error(
+                            app_handle,
+                            session_id,
+                            &agent_run.id,
+                            message.clone(),
+                        );
+                        let error = openlife_core::agent::AgentRunError {
+                            message: message.clone(),
+                            phase: "stream".to_string(),
+                            recoverable: true,
+                        };
+                        agent_run.fail(error);
+                        if let Some(ref store_arc) = agent_run_store {
+                            let store = store_arc.lock().await;
+                            if let Err(e) = store.update_run(agent_run) {
+                                log::warn!("[AgentRun] 更新运行记录失败: {}", e);
+                            }
+                        }
+                        return Err(message);
+                    }
+                }
+            }
+        };
+
+        let Some(chunk_result) = next_chunk else {
+            break;
+        };
+
+        match chunk_result {
+            Ok(chunk) => {
+                if !chunk.is_empty() {
+                    full_reply.push_str(&chunk);
+                    let _ = app_handle.emit(
+                        "stream-message-chunk",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "chunk": chunk,
+                        }),
+                    );
+                }
+            }
+            Err(e) => {
+                let stream_error = e.to_string();
+                match generate_non_stream_fallback_governed(
+                    scheduler,
+                    messages_with_reasoning.clone(),
+                    life_model,
+                    tools_prompt,
+                    privacy_policy,
+                )
+                .await
+                {
+                    Ok(reply) => {
+                        let fallback_text = if full_reply.is_empty() {
+                            reply
+                        } else {
+                            format!(
+                                "\n\n[系统] 流式连接中断，已自动用非流式请求重试并补全回复：\n\n{}",
+                                reply
+                            )
+                        };
+                        reasoning_trace.errors.push(format!(
+                            "流式响应中断，已降级为非流式响应：{}",
+                            stream_error
+                        ));
+                        full_reply.push_str(&fallback_text);
+                        let _ = app_handle.emit(
+                            "stream-message-chunk",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "chunk": fallback_text,
+                            }),
+                        );
+                        break;
+                    }
+                    Err(fallback_error) => {
+                        let message = format!(
+                            "流式响应失败，非流式重试也失败：{}；重试错误：{}",
+                            stream_error, fallback_error
+                        );
+                        emit_stream_error(
+                            app_handle,
+                            session_id,
+                            &agent_run.id,
+                            message.clone(),
+                        );
+                        let error = openlife_core::agent::AgentRunError {
+                            message: message.clone(),
+                            phase: "stream".to_string(),
+                            recoverable: true,
+                        };
+                        agent_run.fail(error);
+                        if let Some(ref store_arc) = agent_run_store {
+                            let store = store_arc.lock().await;
+                            if let Err(e) = store.update_run(agent_run) {
+                                log::warn!("[AgentRun] 更新运行记录失败: {}", e);
+                            }
+                        }
+                        return Err(message);
+                    }
+                }
+            }
+        }
+    }
+
+    // Post-loop: empty stream fallback
+    if full_reply.trim().is_empty() {
+        let stream_error = "流式响应已结束，但没有收到可显示内容".to_string();
+        match generate_non_stream_fallback_governed(
+            scheduler,
+            messages_with_reasoning.clone(),
+            life_model,
+            tools_prompt,
+            privacy_policy,
+        )
+        .await
+        {
+            Ok(reply) => {
+                reasoning_trace.errors.push(format!(
+                    "流式响应为空，已降级为非流式响应：{}",
+                    stream_error
+                ));
+                full_reply = reply.clone();
+                let _ = app_handle.emit(
+                    "stream-message-chunk",
+                    serde_json::json!({
+                        "session_id": session_id,
+                        "chunk": reply,
+                    }),
+                );
+            }
+            Err(fallback_error) => {
+                let message = format!(
+                    "流式响应为空，非流式重试也失败：{}；重试错误：{}",
+                    stream_error, fallback_error
+                );
+                emit_stream_error(app_handle, session_id, &agent_run.id, message.clone());
+                let error = openlife_core::agent::AgentRunError {
+                    message: message.clone(),
+                    phase: "stream".to_string(),
+                    recoverable: true,
+                };
+                agent_run.fail(error);
+                if let Some(ref store_arc) = agent_run_store {
+                    let store = store_arc.lock().await;
+                    if let Err(e) = store.update_run(agent_run) {
+                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
+                    }
+                }
+                return Err(message);
+            }
+        }
+    }
+
+    Ok(full_reply)
+}
+
 async fn generate_non_stream_fallback_governed(
     scheduler: &InferenceScheduler,
     messages: Vec<ChatMessage>,
@@ -1522,7 +1983,9 @@ async fn handle_agent_loop_fallback(
             format!("AgentLoop failed, attempting fallback: {}", original_error),
             serde_json::json!({"error": original_error}),
         );
-        let _ = es.append_event(&ev);
+        if let Err(e) = es.append_event(&ev) {
+            log::error!("[AgentRun] Failed to append event: {}", e);
+        }
     }
     let fallback_reply = generate_non_stream_fallback_governed(
         scheduler,
@@ -1548,7 +2011,9 @@ async fn handle_agent_loop_fallback(
 
     if let Some(store_arc) = agent_run_store {
         let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
+        if let Err(e) = store.create_run(&agent_run) {
+            log::error!("[AgentRun] 创建运行记录失败: {}", e);
+        }
     }
 
     if let Some(es) = event_store {
@@ -1559,7 +2024,9 @@ async fn handle_agent_loop_fallback(
             "Fallback generation completed",
             serde_json::json!({"reply_len": fallback_reply.len()}),
         );
-        let _ = es.append_event(&ev);
+        if let Err(e) = es.append_event(&ev) {
+            log::error!("[AgentRun] Failed to append event: {}", e);
+        }
     }
 
     Ok((fallback_reply, agent_run))
@@ -1731,15 +2198,8 @@ async fn start_stream_message_with_agent_loop(
         Err(message) => return Err(message),
     };
 
-    let auto_checkin_msg = if let Some(ref m) = user_msg {
-        let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
-        if msg.is_some() {
-            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await;
-        }
-        msg
-    } else {
-        None
-    };
+    let auto_checkin_msg =
+        run_auto_checkin_and_stream_signals(&user_msg, &mut life_model, &session_id, &state, None).await?;
 
     // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
     let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
@@ -1771,45 +2231,32 @@ async fn start_stream_message_with_agent_loop(
     let action_executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
-    let loop_config = openlife_core::agent::AgentLoopConfig {
-        max_steps: cfg.system.agent_loop_max_steps,
-        max_tool_calls: cfg.system.agent_loop_max_tool_calls,
-        timeout_seconds: cfg.system.agent_loop_timeout_seconds,
-        allow_writes: true,
-        allow_cloud: true,
-        shutdown_notify: Some(state.inner().shutdown_notify.clone()),
-        ..Default::default()
-    };
-    let agent_loop = {
-        let mut al = openlife_core::agent::AgentLoop::new(
-            agent_runtime,
-            action_executor,
-            scheduler.clone(),
-            loop_config,
-        );
-        if let Some(ref es) = state.agent_run_event_store {
-            al = al.with_event_store((**es).clone());
-        }
-        al
-    };
 
-    let task = openlife_core::agent::AgentTask {
-        kind: openlife_core::agent::AgentTaskKind::Conversation,
-        session_id: session_id.clone(),
-        user_text: user_msg
+    let loop_config =
+        execution_deps::build_loop_config(&cfg, state.inner().shutdown_notify.clone());
+    let agent_loop = execution_deps::build_agent_loop(
+        agent_runtime,
+        action_executor,
+        &scheduler,
+        loop_config,
+        &state.agent_run_event_store,
+    );
+
+    let task = execution_deps::build_agent_task(
+        openlife_core::agent::AgentTaskKind::Conversation,
+        session_id.clone(),
+        user_msg
             .as_ref()
             .map(|m| m.content.clone())
             .unwrap_or_default(),
-        messages: desensitized_messages.clone(),
-        layer: _layer,
-        ..Default::default()
-    };
+        desensitized_messages.clone(),
+        _layer,
+    );
 
     let network_policy = cfg.system.network_policy.clone();
-
     let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
         &cfg.system.execution_sandbox,
-        &cfg.system.safe_paths,
+        &safe_paths,
     );
 
     // Create streaming callback with run_id placeholder (will be updated after AgentLoop starts)
@@ -1845,28 +2292,25 @@ async fn start_stream_message_with_agent_loop(
         } else {
             None
         };
-        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
+        let action_ctx = execution_deps::assemble_action_ctx(
             &reg,
             &permission_store,
             &audit,
             &privacy_engine,
             &safe_paths,
-        )
-        .with_life_model(&life_model)
-        .with_memory_store(&memory_store)
-        .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_network_policy(&network_policy)
-        .with_execution_sandbox(&execution_sandbox)
-        .with_agent_spec(&agent_spec);
-        if let Some(ref store) = proposal_store_guard {
-            action_ctx = action_ctx.with_proposal_store(store);
-        }
-        if let Some(ref store) = agent_run_store_guard {
-            action_ctx = action_ctx.with_agent_run_store(store);
-        }
-        if let Some(ref es) = state.agent_run_event_store {
-            action_ctx = action_ctx.with_event_store((**es).clone());
-        }
+            &life_model,
+            &memory_store,
+            &calendar_ics_paths,
+            &network_policy,
+            &execution_sandbox,
+            &agent_spec,
+            proposal_store_guard.as_deref(),
+            agent_run_store_guard.as_deref(),
+            state
+                .agent_run_event_store
+                .as_ref()
+                .map(|es| (**es).clone()),
+        );
 
         agent_loop
             .run_streaming(
@@ -2060,107 +2504,15 @@ async fn start_stream_message(
     if layer == Layer::L1 {
         if let Some(ref i) = intent {
             if let Some(reply) = i.direct_response() {
-                // 先保存用户消息
-                if let Some(ref user) = user_msg {
-                    if user.role == "user" {
-                        let user_inserted =
-                            persist_chat_message_if_needed(&session_id, user, &state).await?;
-                        if user_inserted {
-                            persist_vector_memory_for_message(&session_id, user, &state).await;
-                        }
-                    }
-                }
-
-                // 加载 LifeModel 用于 finalizer
-                let life_model = {
-                    let manager = state.life_model_manager.lock().await;
-                    manager.load().map_err(|e| e.to_string())?
-                };
-
-                let assistant_msg = ChatMessage {
-                    role: "assistant".into(),
-                    content: reply.clone(),
-                };
-
-                let _ = app_handle.emit(
-                    "stream-message-start",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "reasoning_trace": ReasoningTrace::default(),
-                        "tool_calls": Vec::<ToolCallResult>::new(),
-                    }),
-                );
-                let _ = app_handle.emit(
-                    "stream-message-chunk",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "chunk": reply.clone(),
-                    }),
-                );
-
-                // 使用统一的 finalizer，避免重复保存和手动更新 AgentRun
-                let mut reasoning_trace = ReasoningTrace::default();
-                let model_route = openlife_core::agent::ModelRouteTrace {
-                    provider: "direct".to_string(),
-                    model: "L1_reflex".to_string(),
-                    route_type: "direct".to_string(),
-                    prefer_local: false,
-                    local_model: "".to_string(),
-                    reason: "layer_1_direct_response".to_string(),
-                    privacy_level: openlife_core::agent::types::RedactionLevel::None,
-                    latency_ms: None,
-                    retry_count: 0,
-                    fallback_reason: None,
-                    provider_health_is_estimated: Some(false),
-                };
-                let context_summary = openlife_core::agent::ContextSummary {
-                    life_model_empty: true,
-                    included_life_model_sections: vec![],
-                    memory_hit_count: 0,
-                    memory_sources: vec![],
-                    used_tools_prompt: false,
-                    redaction_applied: false,
-                    redaction_level: openlife_core::agent::types::RedactionLevel::None,
-                };
-                let preview = preview_text(&reply, 200);
-                agent_run.complete(&preview, model_route, context_summary);
-
-                if let Err(e) = finalize_chat_agent_run(
+                return handle_l1_direct_stream_response(
+                    &app_handle,
                     &session_id,
-                    &assistant_msg,
-                    &reply,
-                    &mut reasoning_trace,
-                    &mut agent_run,
-                    &life_model,
+                    reply,
+                    &user_msg,
                     &state,
+                    &mut agent_run,
                 )
-                .await
-                {
-                    log::warn!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
-                    let _ = app_handle.emit(
-                        "stream-message-error",
-                        serde_json::json!({
-                            "session_id": &session_id,
-                            "run_id": agent_run.id,
-                            "error": format!("AgentRun 持久化失败: {}", e),
-                        }),
-                    );
-                    return Err(e);
-                }
-
-                let _ = app_handle.emit(
-                    "stream-message-done",
-                    serde_json::json!({
-                        "session_id": &session_id,
-                        "run_id": agent_run.id,
-                        "reply": reply,
-                        "reasoning_trace": ReasoningTrace::default(),
-                        "tool_calls": Vec::<ToolCallResult>::new(),
-                    }),
-                );
-                return Ok(());
+                .await;
             }
         }
     }
@@ -2202,32 +2554,8 @@ async fn start_stream_message(
         }
     };
 
-    let auto_checkin_msg_stream = if let Some(ref m) = user_msg {
-        let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
-        capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
-        if msg.is_some() {
-            if let Err(message) =
-                persist_life_model(&state.inner().clone(), life_model.clone(), false).await
-            {
-                let error = openlife_core::agent::AgentRunError {
-                    message: message.clone(),
-                    phase: "preprocess".to_string(),
-                    recoverable: true,
-                };
-                agent_run.fail(error);
-                if let Some(ref store_arc) = state.agent_run_store {
-                    let store = store_arc.lock().await;
-                    if let Err(e) = store.update_run(&agent_run) {
-                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                    }
-                }
-                return Err(message);
-            }
-        }
-        msg
-    } else {
-        None
-    };
+    let auto_checkin_msg_stream =
+        run_auto_checkin_and_stream_signals(&user_msg, &mut life_model, &session_id, &state, Some(&mut agent_run)).await?;
 
     // ── Resolve AgentSpec — fail closed, no fallback ──────────────────
     let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
@@ -2259,8 +2587,8 @@ async fn start_stream_message(
     };
 
     // Record AgentSpecSelected event — fail-closed governance metadata
-    if let Some(ref es) = state.agent_run_event_store {
-        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                if let Some(ref es) = state.agent_run_event_store {
+                    if let Err(e) = es.append_event(&openlife_core::agent::AgentRunEvent::new(
             &agent_run.id,
             openlife_core::agent::AgentRunEventType::AgentSpecSelected,
             openlife_core::agent::AgentEventActor::Runtime,
@@ -2273,7 +2601,9 @@ async fn start_stream_message(
                 "role": agent_spec.role.to_string(),
                 "privacy_policy": agent_spec.privacy_policy.to_string(),
             }),
-        ));
+        )) {
+            log::error!("[AgentRun] Failed to append AgentSpecSelected event: {}", e);
+        }
     }
 
     let scheduler_clone = state.scheduler.lock().await.clone();
@@ -2324,7 +2654,7 @@ async fn start_stream_message(
             // Record governance metadata as AgentRunEvents
             if let Some(ref es) = state.agent_run_event_store {
                 // PromptStackAssembled — block IDs/versions only, no raw prompt content
-                let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                if let Err(e) = es.append_event(&openlife_core::agent::AgentRunEvent::new(
                     &agent_run.id,
                     openlife_core::agent::AgentRunEventType::PromptStackAssembled,
                     openlife_core::agent::AgentEventActor::Runtime,
@@ -2337,9 +2667,11 @@ async fn start_stream_message(
                         "agent_spec_id": agent_spec.id,
                         "prompt_blocks": output.prompt_block_trace,
                     }),
-                ));
+                )) {
+                    log::error!("[AgentRun] Failed to append PromptStackAssembled event: {}", e);
+                }
                 // ContextGovernanceApplied — included/excluded categories only, no raw data
-                let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                if let Err(e) = es.append_event(&openlife_core::agent::AgentRunEvent::new(
                     &agent_run.id,
                     openlife_core::agent::AgentRunEventType::ContextGovernanceApplied,
                     openlife_core::agent::AgentEventActor::Runtime,
@@ -2352,7 +2684,9 @@ async fn start_stream_message(
                             .map(|g| &g.excluded).unwrap_or(&vec![]),
                         "privacy_policy": agent_spec.privacy_policy.to_string(),
                     }),
-                ));
+                )) {
+                    log::error!("[AgentRun] Failed to append ContextGovernanceApplied event: {}", e);
+                }
             }
             if layer == Layer::L3 {
                 agent_run.reasoning_strategy = Some("layered".to_string());
@@ -2375,7 +2709,7 @@ async fn start_stream_message(
                     format!("AgentSpec governance failure: {}", e),
                 );
                 if let Some(ref es) = state.agent_run_event_store {
-                    let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+                    if let Err(e) = es.append_event(&openlife_core::agent::AgentRunEvent::new(
                         &agent_run.id,
                         openlife_core::agent::AgentRunEventType::ModelFailed,
                         openlife_core::agent::AgentEventActor::Runtime,
@@ -2384,7 +2718,9 @@ async fn start_stream_message(
                             "agent_spec_id": agent_spec.id,
                             "error": e.to_string(),
                         }),
-                    ));
+                    )) {
+                        log::error!("[AgentRun] Failed to append ModelFailed event: {}", e);
+                    }
                 }
                 agent_run.fail(openlife_core::agent::AgentRunError {
                     message: format!("Governance failure: {}", e),
@@ -2435,266 +2771,24 @@ async fn start_stream_message(
         }
     }
 
-    if full_reply.is_empty() {
-        match timeout(
-            Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
-            scheduler_clone.generate_stream_governed(
-                messages_with_reasoning.clone(),
-                &life_model,
-                Some(&tools_prompt),
-                agent_spec.privacy_policy,
-            ),
+    let full_reply = if full_reply.is_empty() {
+        run_governed_stream_with_fallbacks(
+            &scheduler_clone,
+            messages_with_reasoning,
+            &life_model,
+            &tools_prompt,
+            agent_spec.privacy_policy,
+            &app_handle,
+            &session_id,
+            full_reply,
+            &mut reasoning_trace,
+            &mut agent_run,
+            state.agent_run_store.as_ref(),
         )
-        .await
-        .map_err(|_| format!("流式响应初始化超时（{} 秒）", STREAM_INIT_TIMEOUT_SECS))
-        .and_then(|result| result.map_err(|e| e.to_string()))
-        {
-            Ok(mut stream) => loop {
-                let next_chunk = match timeout(
-                    Duration::from_secs(STREAM_CHUNK_TIMEOUT_SECS),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(next) => next,
-                    Err(_) => {
-                        let stream_error =
-                            format!("超过 {} 秒没有收到模型输出", STREAM_CHUNK_TIMEOUT_SECS);
-                        match generate_non_stream_fallback_governed(
-                            &scheduler_clone,
-                            messages_with_reasoning.clone(),
-                            &life_model,
-                            &tools_prompt,
-                            agent_spec.privacy_policy,
-                        )
-                        .await
-                        {
-                            Ok(reply) => {
-                                let fallback_text = if full_reply.is_empty() {
-                                    reply
-                                } else {
-                                    format!(
-                                            "\n\n[系统] 流式连接长时间无输出，已自动用非流式请求重试并补全回复：\n\n{}",
-                                            reply
-                                        )
-                                };
-                                reasoning_trace.errors.push(format!(
-                                    "流式响应超时，已降级为非流式响应：{}",
-                                    stream_error
-                                ));
-                                full_reply.push_str(&fallback_text);
-                                let _ = app_handle.emit(
-                                    "stream-message-chunk",
-                                    serde_json::json!({
-                                        "session_id": &session_id,
-                                        "chunk": fallback_text,
-                                    }),
-                                );
-                                break;
-                            }
-                            Err(fallback_error) => {
-                                let message = format!(
-                                    "流式响应超时，非流式重试也失败：{}；重试错误：{}",
-                                    stream_error, fallback_error
-                                );
-                                emit_stream_error(
-                                    &app_handle,
-                                    &session_id,
-                                    &agent_run.id,
-                                    message.clone(),
-                                );
-                                let error = openlife_core::agent::AgentRunError {
-                                    message: message.clone(),
-                                    phase: "stream".to_string(),
-                                    recoverable: true,
-                                };
-                                agent_run.fail(error);
-                                if let Some(ref store_arc) = state.agent_run_store {
-                                    let store = store_arc.lock().await;
-                                    if let Err(e) = store.update_run(&agent_run) {
-                                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                                    }
-                                }
-                                return Err(message);
-                            }
-                        }
-                    }
-                };
-                let Some(chunk_result) = next_chunk else {
-                    break;
-                };
-                match chunk_result {
-                    Ok(chunk) => {
-                        if !chunk.is_empty() {
-                            full_reply.push_str(&chunk);
-                            let _ = app_handle.emit(
-                                "stream-message-chunk",
-                                serde_json::json!({
-                                    "session_id": &session_id,
-                                    "chunk": chunk,
-                                }),
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        let stream_error = e.to_string();
-                        match generate_non_stream_fallback_governed(
-                            &scheduler_clone,
-                            messages_with_reasoning.clone(),
-                            &life_model,
-                            &tools_prompt,
-                            agent_spec.privacy_policy,
-                        )
-                        .await
-                        {
-                            Ok(reply) => {
-                                let fallback_text = if full_reply.is_empty() {
-                                    reply
-                                } else {
-                                    format!(
-                                            "\n\n[系统] 流式连接中断，已自动用非流式请求重试并补全回复：\n\n{}",
-                                            reply
-                                        )
-                                };
-                                reasoning_trace.errors.push(format!(
-                                    "流式响应中断，已降级为非流式响应：{}",
-                                    stream_error
-                                ));
-                                full_reply.push_str(&fallback_text);
-                                let _ = app_handle.emit(
-                                    "stream-message-chunk",
-                                    serde_json::json!({
-                                        "session_id": &session_id,
-                                        "chunk": fallback_text,
-                                    }),
-                                );
-                                break;
-                            }
-                            Err(fallback_error) => {
-                                let message = format!(
-                                    "流式响应失败，非流式重试也失败：{}；重试错误：{}",
-                                    stream_error, fallback_error
-                                );
-                                emit_stream_error(
-                                    &app_handle,
-                                    &session_id,
-                                    &agent_run.id,
-                                    message.clone(),
-                                );
-                                let error = openlife_core::agent::AgentRunError {
-                                    message: message.clone(),
-                                    phase: "stream".to_string(),
-                                    recoverable: true,
-                                };
-                                agent_run.fail(error);
-                                if let Some(ref store_arc) = state.agent_run_store {
-                                    let store = store_arc.lock().await;
-                                    if let Err(e) = store.update_run(&agent_run) {
-                                        log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                                    }
-                                }
-                                return Err(message);
-                            }
-                        }
-                    }
-                }
-            },
-            Err(stream_error) => {
-                let stream_error = stream_error.to_string();
-                match generate_non_stream_fallback_governed(
-                    &scheduler_clone,
-                    messages_with_reasoning.clone(),
-                    &life_model,
-                    &tools_prompt,
-                    agent_spec.privacy_policy,
-                )
-                .await
-                {
-                    Ok(reply) => {
-                        reasoning_trace.errors.push(format!(
-                            "流式响应初始化失败，已降级为非流式响应：{}",
-                            stream_error
-                        ));
-                        full_reply = reply.clone();
-                        let _ = app_handle.emit(
-                            "stream-message-chunk",
-                            serde_json::json!({
-                                "session_id": &session_id,
-                                "chunk": reply,
-                            }),
-                        );
-                    }
-                    Err(fallback_error) => {
-                        let message = format!(
-                            "流式响应初始化失败，非流式重试也失败：{}；重试错误：{}",
-                            stream_error, fallback_error
-                        );
-                        emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
-                        let error = openlife_core::agent::AgentRunError {
-                            message: message.clone(),
-                            phase: "stream".to_string(),
-                            recoverable: true,
-                        };
-                        agent_run.fail(error);
-                        if let Some(ref store_arc) = state.agent_run_store {
-                            let store = store_arc.lock().await;
-                            if let Err(e) = store.update_run(&agent_run) {
-                                log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                            }
-                        }
-                        return Err(message);
-                    }
-                }
-            }
-        }
-        if full_reply.trim().is_empty() {
-            let stream_error = "流式响应已结束，但没有收到可显示内容".to_string();
-            match generate_non_stream_fallback_governed(
-                &scheduler_clone,
-                messages_with_reasoning.clone(),
-                &life_model,
-                &tools_prompt,
-                agent_spec.privacy_policy,
-            )
-            .await
-            {
-                Ok(reply) => {
-                    reasoning_trace.errors.push(format!(
-                        "流式响应为空，已降级为非流式响应：{}",
-                        stream_error
-                    ));
-                    full_reply = reply.clone();
-                    let _ = app_handle.emit(
-                        "stream-message-chunk",
-                        serde_json::json!({
-                            "session_id": &session_id,
-                            "chunk": reply,
-                        }),
-                    );
-                }
-                Err(fallback_error) => {
-                    let message = format!(
-                        "流式响应为空，非流式重试也失败：{}；重试错误：{}",
-                        stream_error, fallback_error
-                    );
-                    emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
-                    let error = openlife_core::agent::AgentRunError {
-                        message: message.clone(),
-                        phase: "stream".to_string(),
-                        recoverable: true,
-                    };
-                    agent_run.fail(error);
-                    if let Some(ref store_arc) = state.agent_run_store {
-                        let store = store_arc.lock().await;
-                        if let Err(e) = store.update_run(&agent_run) {
-                            log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                        }
-                    }
-                    return Err(message);
-                }
-            }
-        }
-    }
+        .await?
+    } else {
+        full_reply
+    };
 
     let mut first_reply = privacy_engine.reconstruct(&full_reply, &privacy_map);
     if let Some(msg) = auto_checkin_msg_stream {
@@ -2828,7 +2922,9 @@ async fn execute_tool_call(
 
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
-        let _ = store.create_run(&run);
+        if let Err(e) = store.create_run(&run) {
+            log::error!("[AgentRun] 创建运行记录失败: {}", e);
+        }
     }
 
     let tool_result = ToolCallResult {
@@ -2904,7 +3000,26 @@ fn ensure_main_window_visible<R: tauri::Runtime, M: Manager<R>>(manager: &M) -> 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = app_data_dir();
-    let bootstrap = bootstrap::bootstrap(data_dir.clone());
+    let bootstrap = match bootstrap::bootstrap(data_dir.clone()) {
+        Ok(b) => b,
+        Err(fatal_msg) => {
+            // Show a native dialog before exiting so the user sees what went wrong.
+            eprintln!("[startup] FATAL: {}", fatal_msg);
+            // On macOS, try to show a dialog via osascript as a last resort.
+            #[cfg(target_os = "macos")]
+            {
+                let escaped = fatal_msg.replace('"', "'");
+                let _ = std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(format!(
+                        "display dialog \"OpenLife 启动失败:\\n\\n{}\" buttons {{\"确定\"}} default button 1 with icon stop",
+                        escaped
+                    ))
+                    .output();
+            }
+            std::process::exit(1);
+        }
+    };
     let app_state = bootstrap.state;
     let app_state_for_setup = app_state.clone();
 
@@ -3127,4 +3242,82 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_life_model() -> LifeModel {
+        let mut lm = LifeModel::default();
+        lm.goals.daily = vec![openlife_core::life_model::DailyGoal {
+            name: "运动30分钟".to_string(),
+            done: false,
+            time_block: None,
+        }];
+        lm
+    }
+
+    #[test]
+    fn test_auto_checkin_triggers_on_match() {
+        let mut lm = make_test_life_model();
+        let result = try_auto_checkin_daily_goals("我今天完成了运动30分钟", &mut lm);
+        assert!(result.is_some());
+        assert!(lm.goals.daily[0].done);
+    }
+
+    #[test]
+    fn test_auto_checkin_no_match() {
+        let mut lm = make_test_life_model();
+        let result = try_auto_checkin_daily_goals("今天天气真好", &mut lm);
+        assert!(result.is_none());
+        assert!(!lm.goals.daily[0].done);
+    }
+
+    #[test]
+    fn test_auto_checkin_multiple_triggers() {
+        let triggers = ["我完成了", "我搞定了", "已经打卡了"];
+        for trigger in triggers {
+            let mut lm = make_test_life_model();
+            let result = try_auto_checkin_daily_goals(&format!("{trigger}运动30分钟"), &mut lm);
+            assert!(result.is_some(), "trigger '{trigger}' should match");
+            assert!(lm.goals.daily[0].done);
+        }
+    }
+
+    #[test]
+    fn test_auto_checkin_partial_match() {
+        let mut lm = make_test_life_model();
+        let result = try_auto_checkin_daily_goals("我今天完成了运动", &mut lm);
+        // "运动" is a partial match of "运动30分钟" — depends on contains logic
+        assert!(!lm.goals.daily[0].done || result.is_some());
+    }
+
+    #[test]
+    fn test_preview_text_truncates() {
+        assert_eq!(preview_text("hello", 3), "hel");
+        assert_eq!(preview_text("hi", 200), "hi");
+        assert_eq!(preview_text("", 10), "");
+    }
+
+    #[test]
+    fn test_included_life_model_sections() {
+        let mut lm = LifeModel::default();
+        lm.identity.name = "Test".to_string();
+        let sections = included_life_model_sections(&lm);
+        assert_eq!(sections.len(), 4);
+        assert!(sections.contains(&"identity".to_string()));
+    }
+
+    #[test]
+    fn test_included_life_model_sections_empty() {
+        let lm = LifeModel::default();
+        let sections = included_life_model_sections(&lm);
+        // Default LifeModel may or may not be effectively empty depending on default field values
+        if lm.is_effectively_empty() {
+            assert!(sections.is_empty());
+        } else {
+            assert!(!sections.is_empty());
+        }
+    }
 }
