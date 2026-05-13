@@ -151,7 +151,9 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
   // Result preview (truncated)
   const resultPreview =
     call.success && call.output
-      ? call.output.slice(0, 120) + (call.output.length > 120 ? "..." : "")
+      ? typeof call.output === "string"
+        ? call.output.slice(0, 120) + (call.output.length > 120 ? "..." : "")
+        : null
       : null;
 
   return (
@@ -281,7 +283,9 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
           {call.success && call.output && (
             <div className="text-xs text-gray-700 bg-green-50 rounded p-2">
               <div className="font-medium mb-1">完整结果:</div>
-              <pre className="whitespace-pre-wrap break-all">{call.output}</pre>
+              <pre className="whitespace-pre-wrap break-all">
+                {typeof call.output === "string" ? call.output : JSON.stringify(call.output)}
+              </pre>
             </div>
           )}
           {call.error && (

@@ -28,6 +28,26 @@ struct OllamaCache {
 
 static OLLAMA_CACHE: parking_lot::Mutex<Option<OllamaCache>> = parking_lot::Mutex::new(None);
 static OLLAMA_CACHE_TTL_SECONDS: AtomicU64 = AtomicU64::new(10);
+static OLLAMA_BASE_URL: parking_lot::Mutex<String> = parking_lot::Mutex::new(String::new());
+
+/// Set the Ollama server base URL (e.g. "http://localhost:11434").
+pub fn set_ollama_base_url(url: &str) {
+    let mut guard = OLLAMA_BASE_URL.lock();
+    *guard = url.trim_end_matches('/').to_string();
+}
+
+fn get_ollama_base_url() -> String {
+    let guard = OLLAMA_BASE_URL.lock();
+    if guard.is_empty() {
+        "http://localhost:11434".to_string()
+    } else {
+        guard.clone()
+    }
+}
+
+fn ollama_url(path: &str) -> String {
+    format!("{}{}", get_ollama_base_url(), path)
+}
 
 /// Set the Ollama cache TTL in seconds.
 pub fn set_ollama_cache_ttl_seconds(seconds: u64) {
@@ -52,7 +72,7 @@ pub async fn list_ollama_models() -> Vec<(String, u64)> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let res = client.get("http://localhost:11434/api/tags").send().await;
+    let res = client.get(ollama_url("/api/tags")).send().await;
     match res {
         Ok(r) if r.status().is_success() => {
             if let Ok(body) = r.json::<serde_json::Value>().await {
@@ -91,7 +111,7 @@ pub async fn resolve_ollama_model(model: &str) -> Option<String> {
         Ok(c) => c,
         Err(_) => return None,
     };
-    let res = client.get("http://localhost:11434/api/tags").send().await;
+    let res = client.get(ollama_url("/api/tags")).send().await;
     let resolved_model = match res {
         Ok(r) if r.status().is_success() => {
             if let Ok(body) = r.json::<serde_json::Value>().await {
@@ -190,7 +210,7 @@ pub async fn chat_with_ollama_raw(
 
     let client = reqwest::Client::new();
     let res = client
-        .post("http://localhost:11434/api/chat")
+        .post(ollama_url("/api/chat"))
         .json(&body)
         .send()
         .await
@@ -248,7 +268,7 @@ pub async fn chat_with_ollama_raw_stream(
 
     let client = reqwest::Client::new();
     let res = client
-        .post("http://localhost:11434/api/chat")
+        .post(ollama_url("/api/chat"))
         .json(&body)
         .send()
         .await
@@ -316,7 +336,7 @@ pub async fn ollama_embed(text: &str, model: &str) -> anyhow::Result<Vec<f32>> {
         "prompt": text,
     });
     let res = client
-        .post("http://localhost:11434/api/embeddings")
+        .post(ollama_url("/api/embeddings"))
         .json(&body)
         .send()
         .await

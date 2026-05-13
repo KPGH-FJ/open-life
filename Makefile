@@ -41,7 +41,7 @@ export CARGO_TARGET_DIR
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front check-pnpm check-lockfile
+.PHONY: help setup dev build check test test-front test-rust clean a2a format format-check lint ci build-front check-pnpm check-lockfile ci-security
 
 ## 显示帮助信息
 help:
@@ -58,6 +58,7 @@ help:
 	@echo "  make format-check - 检查格式但不改写文件"
 	@echo "  make lint        - 运行所有 Lint 检查"
 	@echo "  make ci          - 完整 CI 检查（format-check + lint + test + frontend build）"
+	@echo "  make ci-security - 安全检查（cargo audit + pnpm audit）"
 	@echo "  make clean       - 清理构建缓存"
 	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
@@ -219,3 +220,12 @@ clean-tract:
 	cargo clean -p selectors 2>/dev/null || true
 	cargo clean -p markup5ever 2>/dev/null || true
 	@echo "✅ tract/proc-macro 缓存已清理，重新编译即可恢复"
+
+## 安全检查（cargo audit + pnpm audit）
+ci-security:
+	@echo "🔒 运行 Rust 安全审计..."
+	cargo audit
+	@echo "🔒 运行前端安全审计（dev-only CVEs 仅作警告）..."
+	-cd frontend && $(FRONTEND_RUN) audit
+	@echo "✅ 安全检查完成"
+

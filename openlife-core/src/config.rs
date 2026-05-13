@@ -225,6 +225,9 @@ pub struct SystemConfig {
     /// P9 execution sandbox policy (default disabled, no shell)
     #[serde(default)]
     pub execution_sandbox: ExecutionSandboxConfig,
+    /// Ollama server base URL (default http://localhost:11434)
+    #[serde(default = "default_ollama_base_url")]
+    pub ollama_base_url: String,
 }
 
 impl Default for SystemConfig {
@@ -244,6 +247,7 @@ impl Default for SystemConfig {
             search_provider_key: String::new(),
             searxng_url: String::new(),
             execution_sandbox: ExecutionSandboxConfig::default(),
+            ollama_base_url: default_ollama_base_url(),
         }
     }
 }
@@ -280,6 +284,10 @@ fn default_search_provider() -> String {
     "duckduckgo".to_string()
 }
 
+fn default_ollama_base_url() -> String {
+    "http://localhost:11434".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -309,7 +317,7 @@ impl Default for AppConfig {
             prefer_local_model: true,
             local_model: default_local_model(),
             chat_proposal: ChatProposalConfig::default(),
-            experimental_context_assembler: false,
+            experimental_context_assembler: true,
             use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),

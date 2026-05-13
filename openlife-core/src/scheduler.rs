@@ -724,11 +724,8 @@ fn build_summary_only_system_prompt(life_model: &LifeModel, tools_prompt: Option
             tools_text.to_string(),
         ))
     };
-    crate::agent::prompt_stack::PromptStack::chat_system_stack_summary_only(
-        life_model,
-        tools_block,
-    )
-    .assemble()
+    crate::agent::prompt_stack::PromptStack::chat_system_stack_summary_only(life_model, tools_block)
+        .assemble()
 }
 
 /// Sanitize messages for SummaryOnly cloud raw generation.

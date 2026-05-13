@@ -10,7 +10,7 @@ pub async fn get_agent_plan(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = store_arc.lock().await;
         store.get_plan(&plan_id).map_err(AppError::from)
     } else {
         Ok(None)
@@ -23,7 +23,7 @@ pub async fn list_agent_plans_for_run(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = store_arc.lock().await;
         store.list_plans_by_run(&run_id).map_err(AppError::from)
     } else {
         Ok(vec![])
@@ -37,7 +37,7 @@ pub async fn list_agent_plans_for_session(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<AgentPlan>, AppError> {
     if let Some(ref store_arc) = state.plan_store {
-        let store = store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = store_arc.lock().await;
         store
             .list_plans_by_session(&session_id, limit)
             .map_err(AppError::from)
@@ -57,7 +57,7 @@ pub async fn confirm_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -89,7 +89,7 @@ pub async fn confirm_agent_plan(
     plan.confirm();
 
     {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -118,7 +118,7 @@ pub async fn reject_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -150,7 +150,7 @@ pub async fn reject_agent_plan(
     plan.reject();
 
     {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -181,7 +181,7 @@ pub async fn execute_agent_plan(
         .clone();
 
     let plan = {
-        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store_arc.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -260,7 +260,7 @@ pub async fn execute_agent_plan(
     let agent_spec = state
         .agent_spec_store
         .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?
+        .await
         .resolve_spec(plan.agent_spec_id.as_deref())
         .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
             openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
@@ -306,7 +306,7 @@ pub async fn retry_agent_plan(
         .clone();
 
     let mut plan = {
-        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store_arc.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -384,7 +384,7 @@ pub async fn retry_agent_plan(
     let agent_spec = state
         .agent_spec_store
         .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?
+        .await
         .resolve_spec(plan.agent_spec_id.as_deref())
         .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
             openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
@@ -416,7 +416,7 @@ pub async fn retry_agent_plan(
     // Spec resolved, context built — now atomically reset plan for retry.
     plan.retry();
     {
-        let store = plan_store_arc.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store_arc.lock().await;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
     if let Some(ref es) = state.agent_run_event_store {
@@ -461,7 +461,7 @@ pub async fn cancel_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -510,7 +510,7 @@ pub async fn cancel_agent_plan(
     }
 
     {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -537,7 +537,7 @@ pub async fn cancel_agent_plan(
 async fn run_plan_execution(
     plan_id: &str,
     run_id: &str,
-    plan_store_arc: Arc<std::sync::Mutex<openlife_core::agent::PlanStore>>,
+    plan_store_arc: Arc<tokio::sync::Mutex<openlife_core::agent::PlanStore>>,
     event_store: Option<openlife_core::agent::event_store::AgentRunEventStore>,
     ctx: openlife_core::agent::ActionExecutionContext<'_>,
     app_handle: &tauri::AppHandle,
@@ -553,62 +553,64 @@ async fn run_plan_execution(
     let plan_executor =
         PlanExecutor::new(plan_store_arc.clone(), event_store).with_agent_spec(agent_spec);
 
-    let execution_result = plan_executor.execute_with_review(
-        plan_id,
-        run_id,
-        |step, intent| {
-            let tool_name = intent
-                .map(|i| i.tool_name.clone())
-                .unwrap_or_else(|| "unknown".to_string());
+    let execution_result = plan_executor
+        .execute_with_review(
+            plan_id,
+            run_id,
+            |step, intent| {
+                let tool_name = intent
+                    .map(|i| i.tool_name.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
 
-            let request = openlife_core::agent::AgentActionRequest {
-                action_type: "builtin_tool".to_string(),
-                target: tool_name.clone(),
-                input: serde_json::json!({
-                    "plan_step": step.index,
-                    "description": step.description,
-                    "plan_id": plan_id,
-                }),
-                source_run_id: Some(run_id.to_string()),
-                step_index: step.index,
-            };
+                let request = openlife_core::agent::AgentActionRequest {
+                    action_type: "builtin_tool".to_string(),
+                    target: tool_name.clone(),
+                    input: serde_json::json!({
+                        "plan_step": step.index,
+                        "description": step.description,
+                        "plan_id": plan_id,
+                    }),
+                    source_run_id: Some(run_id.to_string()),
+                    step_index: step.index,
+                };
 
-            match action_executor.execute(request, &ctx) {
-                Ok(result) => {
-                    let success = matches!(
-                        result.status,
-                        openlife_core::agent::ActionExecutionStatus::Succeeded
-                    );
-                    let deviation = if result.action.tool_scope.as_ref().map(|s| &s.tool_name)
-                        != intent.map(|i| &i.tool_name)
-                    {
-                        Some("executed tool scope differs from plan intent".to_string())
-                    } else {
-                        None
-                    };
-                    openlife_core::agent::PlanStepExecutionResult {
+                match action_executor.execute(request, &ctx) {
+                    Ok(result) => {
+                        let success = matches!(
+                            result.status,
+                            openlife_core::agent::ActionExecutionStatus::Succeeded
+                        );
+                        let deviation = if result.action.tool_scope.as_ref().map(|s| &s.tool_name)
+                            != intent.map(|i| &i.tool_name)
+                        {
+                            Some("executed tool scope differs from plan intent".to_string())
+                        } else {
+                            None
+                        };
+                        openlife_core::agent::PlanStepExecutionResult {
+                            step_index: step.index,
+                            tool_name,
+                            success,
+                            output: Some(result.observation.content),
+                            error: if success { None } else { result.stop_reason },
+                            duration_ms: 0,
+                            deviation,
+                        }
+                    }
+                    Err(e) => openlife_core::agent::PlanStepExecutionResult {
                         step_index: step.index,
                         tool_name,
-                        success,
-                        output: Some(result.observation.content),
-                        error: if success { None } else { result.stop_reason },
+                        success: false,
+                        output: None,
+                        error: Some(e.to_string()),
                         duration_ms: 0,
-                        deviation,
-                    }
+                        deviation: None,
+                    },
                 }
-                Err(e) => openlife_core::agent::PlanStepExecutionResult {
-                    step_index: step.index,
-                    tool_name,
-                    success: false,
-                    output: None,
-                    error: Some(e.to_string()),
-                    duration_ms: 0,
-                    deviation: None,
-                },
-            }
-        },
-        review_gate,
-    );
+            },
+            review_gate,
+        )
+        .await;
 
     let mut result = match execution_result {
         Ok(outcome) => {
@@ -664,14 +666,13 @@ async fn run_plan_execution(
     };
 
     // Re-read persisted plan to capture final status (e.g. Cancelled mid-execution).
-    if let Ok(guard) = plan_store_arc.lock() {
-        if let Ok(Some(persisted)) = guard.get_plan(plan_id) {
-            result.status = persisted.status;
-            result.success =
-                result.success && persisted.status == openlife_core::agent::PlanStatus::Completed;
-            if persisted.status == openlife_core::agent::PlanStatus::Cancelled {
-                result.message = Some("plan was cancelled".to_string());
-            }
+    let guard = plan_store_arc.lock().await;
+    if let Ok(Some(persisted)) = guard.get_plan(plan_id) {
+        result.status = persisted.status;
+        result.success =
+            result.success && persisted.status == openlife_core::agent::PlanStatus::Completed;
+        if persisted.status == openlife_core::agent::PlanStatus::Cancelled {
+            result.message = Some("plan was cancelled".to_string());
         }
     }
 
@@ -699,7 +700,7 @@ pub async fn continue_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let plan = {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -952,7 +953,7 @@ pub async fn edit_agent_plan(
         .ok_or_else(|| AppError::internal("PlanStore not available"))?;
 
     let mut plan = {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store
             .get_plan(&plan_id)
             .map_err(AppError::from)?
@@ -962,7 +963,7 @@ pub async fn edit_agent_plan(
     let result = apply_safe_plan_edit(&mut plan, &edit);
 
     if result.success {
-        let store = plan_store.lock().map_err(|_| "PlanStore lock poisoned".to_string())?;
+        let store = plan_store.lock().await;
         store.update_plan(&plan).map_err(AppError::from)?;
     }
 
@@ -975,83 +976,65 @@ mod tests {
 
     #[tokio::test]
     async fn test_confirm_agent_plan_changes_status_to_confirmed() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.publish();
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
-        let plan = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
+        let plan = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
 
         // Directly verify PlanStore confirmation logic (core of the Tauri command).
         let mut p = plan.clone();
         p.confirm();
-        plan_store.lock().unwrap().update_plan(&p).unwrap();
+        plan_store.lock().await.update_plan(&p).unwrap();
 
-        let fetched = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
         assert_eq!(fetched.status, openlife_core::agent::PlanStatus::Confirmed);
         assert!(fetched.confirmed_at.is_some());
     }
 
     #[tokio::test]
     async fn test_reject_agent_plan_changes_status_to_rejected() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.publish();
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
-        let plan = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
+        let plan = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
 
         let mut p = plan.clone();
         p.reject();
-        plan_store.lock().unwrap().update_plan(&p).unwrap();
+        plan_store.lock().await.update_plan(&p).unwrap();
 
-        let fetched = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
         assert_eq!(fetched.status, openlife_core::agent::PlanStatus::Rejected);
     }
 
     #[tokio::test]
     async fn test_execute_rejects_unconfirmed_high_risk() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let mut plan = AgentPlan::new("write", openlife_core::agent::RiskLevel::High);
         plan.publish(); // Published but NOT confirmed
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(plan_store, None);
-        let result = executor.execute(&plan.id, "run-1", |_step, _intent| {
-            openlife_core::agent::PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "file.write_proposal".to_string(),
-                success: true,
-                output: None,
-                error: None,
-                duration_ms: 0,
-                deviation: None,
-            }
-        });
+        let result = executor
+            .execute(&plan.id, "run-1", |_step, _intent| {
+                openlife_core::agent::PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "file.write_proposal".to_string(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .await;
         assert!(matches!(
             result,
             Err(PlanExecutionError::PlanNotConfirmed(_))
@@ -1060,24 +1043,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_cancel_confirmed_plan_succeeds() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.publish();
         plan.confirm();
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         let mut p = plan.clone();
         p.cancel();
-        plan_store.lock().unwrap().update_plan(&p).unwrap();
+        plan_store.lock().await.update_plan(&p).unwrap();
 
-        let fetched = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
         assert_eq!(fetched.status, openlife_core::agent::PlanStatus::Cancelled);
     }
 
@@ -1088,7 +1066,7 @@ mod tests {
         use openlife_core::agent::AgentRoleKind;
         use openlife_core::agent::AgentSpecStore;
 
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let event_store =
@@ -1122,22 +1100,24 @@ mod tests {
         plan.publish();
         plan.confirm();
         plan.agent_spec_id = Some("main.deny".to_string());
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         let executor =
             PlanExecutor::new(plan_store.clone(), Some(event_store)).with_agent_spec(deny_spec);
 
-        let result = executor.execute(&plan.id, "run-1", |_step, _intent| {
-            openlife_core::agent::PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "file.read".to_string(),
-                success: true,
-                output: None,
-                error: None,
-                duration_ms: 0,
-                deviation: None,
-            }
-        });
+        let result = executor
+            .execute(&plan.id, "run-1", |_step, _intent| {
+                openlife_core::agent::PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "file.read".to_string(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .await;
 
         let outcome = result.expect("execution should complete even with blocked tool");
         assert!(
@@ -1148,12 +1128,7 @@ mod tests {
         assert_eq!(outcome.steps_failed, 1, "one step should have failed");
 
         // Re-read plan to check status
-        let fetched = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
         assert!(matches!(
             fetched.status,
             openlife_core::agent::PlanStatus::Failed
@@ -1162,7 +1137,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_plan_without_spec_uses_stored_default() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
 
@@ -1170,7 +1145,7 @@ mod tests {
         plan.publish();
         plan.confirm();
         plan.agent_spec_id = None; // no plan-bound spec
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         // When no plan-bound spec, resolve_spec(None) should return default.
         // The resolve_spec method on AgentSpecStore already has tests for this.
@@ -1182,9 +1157,9 @@ mod tests {
         assert_eq!(resolved.role, openlife_core::agent::AgentRoleKind::Main);
     }
 
-    #[test]
-    fn test_plan_execution_started_includes_agentspec_id() {
-        let plan_store = Arc::new(std::sync::Mutex::new(
+    #[tokio::test]
+    async fn test_plan_execution_started_includes_agentspec_id() {
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
         let event_store =
@@ -1193,24 +1168,26 @@ mod tests {
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.publish();
         plan.confirm();
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         let spec = openlife_core::agent::AgentSpec::default_main_spec();
 
         let executor =
             PlanExecutor::new(plan_store, Some(event_store.clone())).with_agent_spec(spec);
 
-        let _ = executor.execute(&plan.id, "run-1", |_step, _intent| {
-            openlife_core::agent::PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "life_model.read".to_string(),
-                success: true,
-                output: None,
-                error: None,
-                duration_ms: 0,
-                deviation: None,
-            }
-        });
+        let _ = executor
+            .execute(&plan.id, "run-1", |_step, _intent| {
+                openlife_core::agent::PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .await;
 
         let events = event_store.list_events_by_run("run-1").unwrap();
         let started_evt = events
@@ -1224,8 +1201,8 @@ mod tests {
         assert_eq!(agentspec_id, Some("main.default"));
     }
 
-    #[test]
-    fn test_agent_plan_with_agent_spec_builder() {
+    #[tokio::test]
+    async fn test_agent_plan_with_agent_spec_builder() {
         let plan = AgentPlan::new("plan with spec", openlife_core::agent::RiskLevel::Low)
             .with_agent_spec("main.custom");
         assert_eq!(plan.agent_spec_id, Some("main.custom".to_string()));
@@ -1233,8 +1210,8 @@ mod tests {
 
     // ── Legal-state guard tests ──────────────────────────────────────
 
-    #[test]
-    fn test_plan_can_confirm_or_reject_helper() {
+    #[tokio::test]
+    async fn test_plan_can_confirm_or_reject_helper() {
         use openlife_core::agent::PlanStatus;
         assert!(plan_can_confirm_or_reject(PlanStatus::Draft));
         assert!(plan_can_confirm_or_reject(PlanStatus::Published));
@@ -1247,8 +1224,8 @@ mod tests {
         assert!(!plan_can_confirm_or_reject(PlanStatus::FailedReview));
     }
 
-    #[test]
-    fn test_plan_can_edit_helper() {
+    #[tokio::test]
+    async fn test_plan_can_edit_helper() {
         use openlife_core::agent::PlanStatus;
         assert!(plan_can_edit(PlanStatus::Draft));
         assert!(plan_can_edit(PlanStatus::Published));
@@ -1261,8 +1238,8 @@ mod tests {
         assert!(!plan_can_edit(PlanStatus::FailedReview));
     }
 
-    #[test]
-    fn test_apply_safe_plan_edit_rejects_terminal_states() {
+    #[tokio::test]
+    async fn test_apply_safe_plan_edit_rejects_terminal_states() {
         let terminal_states = [
             openlife_core::agent::PlanStatus::Confirmed,
             openlife_core::agent::PlanStatus::Executing,
@@ -1297,8 +1274,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_apply_safe_plan_edit_updates_draft_safely() {
+    #[tokio::test]
+    async fn test_apply_safe_plan_edit_updates_draft_safely() {
         let mut plan = AgentPlan::new("old goal", openlife_core::agent::RiskLevel::Low);
         let original_id = plan.id.clone();
         let original_created = plan.created_at;
@@ -1325,8 +1302,8 @@ mod tests {
         assert!(plan.completed_at.is_none());
     }
 
-    #[test]
-    fn test_apply_safe_plan_edit_reverts_published_to_draft() {
+    #[tokio::test]
+    async fn test_apply_safe_plan_edit_reverts_published_to_draft() {
         let mut plan = AgentPlan::new("pub", openlife_core::agent::RiskLevel::Low);
         plan.publish();
         assert_eq!(plan.status, openlife_core::agent::PlanStatus::Published);
@@ -1346,8 +1323,8 @@ mod tests {
         assert_eq!(plan.goal, "updated");
     }
 
-    #[test]
-    fn test_apply_safe_plan_edit_ignores_status_confirmed_at() {
+    #[tokio::test]
+    async fn test_apply_safe_plan_edit_ignores_status_confirmed_at() {
         // Verify that edit cannot change critical execution fields
         let mut plan = AgentPlan::new("initial", openlife_core::agent::RiskLevel::Low);
         let original_id = plan.id.clone();
@@ -1370,8 +1347,8 @@ mod tests {
         assert!(plan.completed_at.is_none());
     }
 
-    #[test]
-    fn test_apply_safe_plan_edit_does_not_change_risk_level() {
+    #[tokio::test]
+    async fn test_apply_safe_plan_edit_does_not_change_risk_level() {
         let mut plan = AgentPlan::new("risky", openlife_core::agent::RiskLevel::High);
         let original_risk = plan.risk_level;
         let original_requires = plan.requires_confirmation;
@@ -1391,10 +1368,10 @@ mod tests {
 
     // ── Phase 1 / P7 legacy tests ────────────────────────────────────
 
-    #[test]
-    fn test_retry_with_missing_plan_bound_spec_preserves_failed_status() {
+    #[tokio::test]
+    async fn test_retry_with_missing_plan_bound_spec_preserves_failed_status() {
         let store = openlife_core::agent::AgentSpecStore::new_in_memory().unwrap();
-        let plan_store = Arc::new(std::sync::Mutex::new(
+        let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
 
@@ -1402,7 +1379,7 @@ mod tests {
         let mut plan = AgentPlan::new("test", openlife_core::agent::RiskLevel::Low);
         plan.status = openlife_core::agent::PlanStatus::Failed;
         plan.agent_spec_id = Some("nonexistent".to_string());
-        plan_store.lock().unwrap().create_plan(&plan).unwrap();
+        plan_store.lock().await.create_plan(&plan).unwrap();
 
         // Resolving the spec should fail without changing the plan
         let resolved = store.resolve_spec(plan.agent_spec_id.as_deref());
@@ -1413,12 +1390,7 @@ mod tests {
         ));
 
         // Plan should still be Failed
-        let fetched = plan_store
-            .lock()
-            .unwrap()
-            .get_plan(&plan.id)
-            .unwrap()
-            .unwrap();
+        let fetched = plan_store.lock().await.get_plan(&plan.id).unwrap().unwrap();
         assert_eq!(fetched.status, openlife_core::agent::PlanStatus::Failed);
         assert_eq!(fetched.agent_spec_id, Some("nonexistent".to_string()));
     }

@@ -160,12 +160,15 @@ export default function ChatInputArea({
                   ? "输入消息，按 Enter 发送..."
                   : "请先前往设置页配置模型后端..."
             }
+            aria-label="输入消息"
             className="flex-1 resize-none border rounded-lg px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           />
           <button
             onClick={onSend}
             disabled={sending || !input.trim()}
             className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            aria-label="发送消息"
+            aria-keyshortcuts="Enter"
           >
             {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
           </button>

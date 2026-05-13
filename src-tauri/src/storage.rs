@@ -5,7 +5,9 @@ use openlife_core::privacy::PrivacyPolicy;
 pub(crate) fn app_data_dir() -> std::path::PathBuf {
     dirs::data_dir()
         .map(|d| d.join("ai.openlife.desktop"))
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"))
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("ai.openlife.desktop")
 }
 
 pub(crate) fn privacy_policy_path() -> std::path::PathBuf {

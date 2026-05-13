@@ -6,6 +6,7 @@ import {
   deleteChatSession,
   type ChatSession,
 } from "../../tauri";
+import { logError } from "../../utils/logger";
 
 function generateSessionId() {
   return "sess_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -26,7 +27,7 @@ export function useChatSessions() {
         setCurrentSessionId(list.find(s => s.session_id === sid) ? sid : list[0].session_id);
       }
     } catch (e) {
-      console.error("加载会话列表失败", e);
+      logError("加载会话列表失败", e);
     }
   }, []);
 
@@ -37,7 +38,7 @@ export function useChatSessions() {
       await loadSessions();
       setCurrentSessionId(id);
     } catch (e) {
-      console.error("创建会话失败", e);
+      logError("创建会话失败", e);
     }
   }, [loadSessions]);
 
@@ -62,7 +63,7 @@ export function useChatSessions() {
           setCurrentSessionId(list[0].session_id);
         }
       } catch (e) {
-        console.error("删除会话失败", e);
+        logError("删除会话失败", e);
       }
     },
     [currentSessionId]
@@ -79,7 +80,7 @@ export function useChatSessions() {
       await renameChatSession(editingId, editingTitle.trim() || "未命名");
       await loadSessions();
     } catch (e) {
-      console.error("重命名失败", e);
+      logError("重命名失败", e);
     } finally {
       setEditingId(null);
       setEditingTitle("");

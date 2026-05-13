@@ -125,7 +125,7 @@ mod tests {
             proposal_engine: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalEngine::new(),
             )),
-            agent_spec_store: Arc::new(std::sync::Mutex::new(
+            agent_spec_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::AgentSpecStore::new_in_memory().unwrap(),
             )),
             startup_warnings: vec![],

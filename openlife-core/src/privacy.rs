@@ -182,12 +182,20 @@ impl PrivacyPolicy {
 
 fn default_regex(ptype: &PrivacyType) -> Option<Regex> {
     match ptype {
-        PrivacyType::Phone => Regex::new(r"\b1[3-9]\d{9}\b").ok(),
-        PrivacyType::IdCard => Regex::new(r"\b\d{17}[\dXx]\b").ok(),
+        PrivacyType::Phone => Regex::new(
+            r"\b(?:1[3-9]\d{9}|\+\d{1,3}[\s-]?\d{4,14}|\(\d{3}\)[\s-]?\d{3}[\s-]?\d{4}|\d{3}[\s-]\d{3}[\s-]\d{4})\b"
+        ).ok(),
+        PrivacyType::IdCard => Regex::new(
+            r"\b(?:\d{17}[\dXx]|\d{3}-\d{2}-\d{4})\b"
+        ).ok(),
         PrivacyType::Email => Regex::new(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}").ok(),
         PrivacyType::BankCard => Regex::new(r"\b(?:\d{4}[\s-]?){3}\d{4}\b").ok(),
-        PrivacyType::Address => Regex::new(r"([\u4e00-\u9fa5]{2,}(省|市|区|县|镇|乡|村|街|路|号|栋|楼|室|单元)){2,}").ok(),
-        PrivacyType::Name => Regex::new(r"[李王张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段雷钱汤尹黎易常武乔贺赖龚文][\u4e00-\u9fa5]{1,2}").ok(),
+        PrivacyType::Address => Regex::new(
+            r"(?:[\u4e00-\u9fa5]{2,}(?:省|市|区|县|镇|乡|村|街|路|号|栋|楼|室|单元)){2,}|\b\d{1,5}\s[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Court|Ct|Way|Place|Pl)\b"
+        ).ok(),
+        PrivacyType::Name => Regex::new(
+            r"(?:[李王张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段雷钱汤尹黎易常武乔贺赖龚文][\u4e00-\u9fa5]{1,2}|[A-Z][a-z]+\s[A-Z][a-z]+)"
+        ).ok(),
         PrivacyType::Generic => None,
     }
 }

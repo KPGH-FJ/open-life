@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { getRolloutErrors, getRolloutMetrics, getRolloutSummary } from "../tauri";
+import { logError } from "../utils/logger";
 
 interface RolloutMetric {
   id: number;
@@ -43,7 +44,7 @@ const MetricsPage: React.FC = () => {
       setSummary(summaryData as RolloutSummary);
       setErrors(errorsData as RolloutMetric[]);
     } catch (e) {
-      console.error("Failed to load metrics:", e);
+      logError("Failed to load metrics:", e);
     } finally {
       setLoading(false);
     }

@@ -13,6 +13,7 @@ interface PerformanceMetrics {
 }
 
 let metrics: PerformanceMetrics = {};
+let observers: PerformanceObserver[] = [];
 
 /**
  * Initialize performance monitoring
@@ -20,6 +21,10 @@ let metrics: PerformanceMetrics = {};
  */
 export function initPerformanceMonitoring(): void {
   if (typeof window === "undefined" || !("PerformanceObserver" in window)) {
+    return;
+  }
+
+  if (observers.length > 0) {
     return;
   }
 
@@ -33,6 +38,7 @@ export function initPerformanceMonitoring(): void {
       metrics.lcp = lastEntry.startTime;
     });
     lcpObserver.observe({ entryTypes: ["largest-contentful-paint"] });
+    observers.push(lcpObserver);
   } catch {
     // LCP not supported
   }
@@ -48,6 +54,7 @@ export function initPerformanceMonitoring(): void {
       metrics.fid = firstEntry.processingStart - firstEntry.startTime;
     });
     fidObserver.observe({ entryTypes: ["first-input"] });
+    observers.push(fidObserver);
   } catch {
     // FID not supported
   }
@@ -68,6 +75,7 @@ export function initPerformanceMonitoring(): void {
       metrics.cls = clsValue;
     });
     clsObserver.observe({ entryTypes: ["layout-shift"] });
+    observers.push(clsObserver);
   } catch {
     // CLS not supported
   }
@@ -82,6 +90,7 @@ export function initPerformanceMonitoring(): void {
       }
     });
     paintObserver.observe({ entryTypes: ["paint"] });
+    observers.push(paintObserver);
   } catch {
     // Paint API not supported
   }
@@ -102,6 +111,15 @@ export function initPerformanceMonitoring(): void {
       }
     }, 0);
   });
+}
+
+/**
+ * Clean up all performance observers
+ * Call on app teardown or hot-reload
+ */
+export function cleanupPerformanceMonitoring(): void {
+  observers.forEach(o => o.disconnect());
+  observers = [];
 }
 
 /**

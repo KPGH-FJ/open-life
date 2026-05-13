@@ -205,7 +205,7 @@ function App() {
             </NavLink>
           )}
         </div>
-        <nav className="flex flex-wrap justify-end gap-2">
+        <nav className="flex flex-wrap justify-end gap-2" role="navigation" aria-label="主导航">
           <NavLink to="/" end className={navClass}>
             <LayoutDashboard size={16} /> Workspace
           </NavLink>

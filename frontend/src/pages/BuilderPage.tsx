@@ -37,6 +37,7 @@ import {
 import BuilderPatchReview from "../components/BuilderPatchReview";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import { logError } from "../utils/logger";
 
 function CompletionBar({
   label,
@@ -325,7 +326,7 @@ export default function BuilderPage() {
       const c = await getModel4DCompletion();
       setCompletion(c);
     } catch (e) {
-      console.error("加载四维完成度失败", e);
+      logError("加载四维完成度失败", e);
       setBuilderError("加载四维完成度失败：" + String(e));
     }
   };
@@ -335,7 +336,7 @@ export default function BuilderPage() {
       const list = await builderListUnfinished();
       setUnfinished(sortResumeSessions(list));
     } catch (e) {
-      console.error("加载未完成会话失败", e);
+      logError("加载未完成会话失败", e);
       setBuilderError(buildRuntimeActionError("加载未完成会话", e, "data"));
     }
   };

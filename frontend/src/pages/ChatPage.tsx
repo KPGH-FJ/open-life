@@ -55,8 +55,10 @@ import type {
   StreamMessageStartPayload,
   SystemDiagnostics,
   ToolCallResult,
+  ToolCallStatus,
 } from "../tauri";
 import { getModelEmptyState } from "../utils/modelEmpty";
+import { logError, logWarn } from "../utils/logger";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
@@ -354,7 +356,7 @@ export default function ChatPage() {
         setCurrentSessionId(list[0].session_id);
       }
     } catch (e) {
-      console.error("加载会话列表失败", e);
+      logError("加载会话列表失败", e);
     }
   };
 
@@ -384,7 +386,7 @@ export default function ChatPage() {
         }
       })
       .catch(e => {
-        console.error("加载历史消息失败", e);
+        logError("加载历史消息失败", e);
         setMessages([
           {
             role: "assistant",
@@ -548,7 +550,7 @@ export default function ChatPage() {
         .then(setDiagnostics)
         .catch(() => {});
     } catch (e) {
-      console.error(e);
+      logError(e);
     }
   };
 
@@ -559,7 +561,7 @@ export default function ChatPage() {
       await loadSessions();
       setCurrentSessionId(id);
     } catch (e) {
-      console.error("创建会话失败", e);
+      logError("创建会话失败", e);
     }
   }, []);
 
@@ -572,7 +574,7 @@ export default function ChatPage() {
         setCurrentSessionId(list.length > 0 ? list[0].session_id : null);
       }
     } catch (e) {
-      console.error("删除会话失败", e);
+      logError("删除会话失败", e);
     }
   }, []);
 
@@ -587,7 +589,7 @@ export default function ChatPage() {
       await renameChatSession(editingId, editingTitle.trim() || "未命名");
       await loadSessions();
     } catch (e) {
-      console.error("重命名失败", e);
+      logError("重命名失败", e);
     } finally {
       setEditingId(null);
       setEditingTitle("");
@@ -599,7 +601,7 @@ export default function ChatPage() {
       const call = toolCalls[index];
       if (!call?.requires_confirmation) return;
       if (!call.run_id || !call.action_id) {
-        console.error("Tool call missing run_id or action_id");
+        logError("Tool call missing run_id or action_id");
         return;
       }
       try {
@@ -610,9 +612,12 @@ export default function ChatPage() {
               ? {
                   ...item,
                   success: result.status === "succeeded",
-                  status: result.status as any,
+                  status: result.status as ToolCallStatus,
                   requires_confirmation: false,
-                  output: result.output?.text,
+                  output:
+                    result.output != null && typeof result.output === "object"
+                      ? ((result.output as Record<string, unknown>).text as string)
+                      : String(result.output ?? ""),
                 }
               : item
           )
@@ -626,7 +631,7 @@ export default function ChatPage() {
         // 如果是因为未授权，保持 pending 状态，不改为 error
         if (errMsg.includes("not authorized") || errMsg.includes("Review Center")) {
           // 保持 requires_confirmation: true，让用户去 Review Center 授权
-          console.warn("Tool call still needs authorization:", errMsg);
+          logWarn("Tool call still needs authorization:", errMsg);
           return;
         }
         // 其他错误才标记为失败
@@ -769,7 +774,7 @@ export default function ChatPage() {
         await saveChatMessage(sessionId, assistantMsg);
         await loadSessions();
       } catch (e) {
-        console.error("保存快捷指令消息失败", e);
+        logError("保存快捷指令消息失败", e);
       }
       setMessages([...nextMessages, assistantMsg]);
       return;
@@ -1004,7 +1009,7 @@ export default function ChatPage() {
     try {
       await addDailyGoal(name);
     } catch (e) {
-      console.error("保存今日目标失败", e);
+      logError("保存今日目标失败", e);
     }
   }, []);
 
@@ -1025,7 +1030,7 @@ export default function ChatPage() {
           await indexMemoryChunk(currentSessionId, content, "chat");
         }
       } catch (e) {
-        console.error("加入记忆失败", e);
+        logError("加入记忆失败", e);
       }
     },
     [diagnostics, currentSessionId]
@@ -1056,7 +1061,7 @@ export default function ChatPage() {
         await saveFeedback(currentSessionId, index, type, msg.content.slice(0, 200));
         setFeedbackGiven(prev => ({ ...prev, [index]: type }));
       } catch (e) {
-        console.error("反馈保存失败", e);
+        logError("反馈保存失败", e);
       }
     },
     [messages, currentSessionId]
@@ -1198,7 +1203,12 @@ export default function ChatPage() {
             ))}
           </div>
         </div>
-        <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
+        <div
+          className="flex-1 overflow-auto px-6 py-4 space-y-4"
+          role="log"
+          aria-live="polite"
+          aria-label="聊天消息"
+        >
           {!loadingHistory && (
             <div className="rounded-3xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">

@@ -27,13 +27,13 @@ tauri-plugin-store = "2.2"
 tauri-plugin-http = { version = "2.4", features = ["unsafe-headers"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.44", features = ["full"] }
 async-trait = "0.1"
 anyhow = "1.0"
 dirs = "5.0"
 chrono = "0.4"
 serde_yaml = "0.9"
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.6", features = ["v4"] }
 sha2 = "0.10"
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"

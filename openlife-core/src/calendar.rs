@@ -44,42 +44,7 @@ pub fn parse_ics(
                         if let Some(end) = range_end {
                             if event.dtstart.as_str() >= start && event.dtstart.as_str() <= end {
                                 events.push(event);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse_ics_basic_event() {
-        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:test-1\nSUMMARY:Meeting\nDTSTART:20260101T100000Z\nDTEND:20260101T110000Z\nEND:VEVENT\nEND:VCALENDAR";
-        let events = parse_ics(ics, None, None);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].summary, "Meeting");
-        assert_eq!(events[0].dtstart, "20260101T100000Z");
-        assert_eq!(events[0].uid, "test-1");
-    }
-
-    #[test]
-    fn test_parse_ics_empty() {
-        let events = parse_ics("", None, None);
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_parse_ics_date_range() {
-        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:early\nSUMMARY:Early\nDTSTART:20250101T000000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:late\nSUMMARY:Late\nDTSTART:20270101T000000Z\nEND:VEVENT\nEND:VCALENDAR";
-        let events = parse_ics(ics, Some("20260101T000000Z"), Some("20261231T235959Z"));
-        // Neither early nor late are in 2026 range — both filtered out
-        assert_eq!(events.len(), 0);
-    }
-
-    #[test]
-    fn test_unescape_ics_text() {
-        assert_eq!(unescape_ics_text("hello\\nworld"), "hello\nworld");
-        assert_eq!(unescape_ics_text("a\\;b\\,c\\\\d"), "a;b,c\\d");
-    }
-}
+                            }
                         } else if event.dtstart.as_str() >= start {
                             events.push(event);
                         }
@@ -166,5 +131,40 @@ impl CalendarEventBuilder {
             description: self.description,
             location: self.location,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ics_basic_event() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:test-1\nSUMMARY:Meeting\nDTSTART:20260101T100000Z\nDTEND:20260101T110000Z\nEND:VEVENT\nEND:VCALENDAR";
+        let events = parse_ics(ics, None, None);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].summary, "Meeting");
+        assert_eq!(events[0].dtstart, "20260101T100000Z");
+        assert_eq!(events[0].uid, "test-1");
+    }
+
+    #[test]
+    fn test_parse_ics_empty() {
+        let events = parse_ics("", None, None);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_parse_ics_date_range() {
+        let ics = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:early\nSUMMARY:Early\nDTSTART:20250101T000000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:late\nSUMMARY:Late\nDTSTART:20270101T000000Z\nEND:VEVENT\nEND:VCALENDAR";
+        let events = parse_ics(ics, Some("20260101T000000Z"), Some("20261231T235959Z"));
+        // Neither early nor late are in 2026 range — both filtered out
+        assert_eq!(events.len(), 0);
+    }
+
+    #[test]
+    fn test_unescape_ics_text() {
+        assert_eq!(unescape_ics_text("hello\\nworld"), "hello\nworld");
+        assert_eq!(unescape_ics_text("a\\;b\\,c\\\\d"), "a;b,c\\d");
     }
 }

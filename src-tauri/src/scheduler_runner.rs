@@ -193,7 +193,9 @@ async fn execute_scheduled_task(
     let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
         &state.agent_spec_store,
         None,
-    ) {
+    )
+    .await
+    {
         Ok(spec) => spec,
         Err(e) => {
             log::error!(

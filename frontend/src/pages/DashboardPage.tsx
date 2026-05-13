@@ -1160,6 +1160,7 @@ export default function DashboardPage() {
                         key={action.title}
                         to={action.to}
                         className="flex items-center justify-between gap-2 rounded-lg bg-white border border-stone-100 px-3 py-2 hover:shadow-sm transition group text-xs"
+                        aria-label={action.title}
                       >
                         <span className="text-stone-700 truncate">{action.title}</span>
                         <ArrowRight
@@ -1214,6 +1215,7 @@ export default function DashboardPage() {
                         ? "bg-stone-900 text-amber-50 hover:bg-stone-800"
                         : "bg-white/80 text-stone-700 border border-stone-200 hover:bg-white"
                     }`}
+                    aria-label={action.title}
                   >
                     {action.title}
                     <ArrowRight size={14} />
@@ -1280,6 +1282,7 @@ export default function DashboardPage() {
                   key={action.title}
                   to={action.to}
                   className="group rounded-xl border border-white/80 bg-white/80 p-4 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md"
+                  aria-label={action.title}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-medium text-gray-900">{action.title}</div>
@@ -1314,6 +1317,7 @@ export default function DashboardPage() {
                   key={`${index}-${item.title}`}
                   to={item.to}
                   className="flex items-start gap-3 rounded-xl border border-stone-100 bg-stone-50/70 px-4 py-3 transition hover:bg-white"
+                  aria-label={item.title}
                 >
                   <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-stone-900 text-xs font-semibold text-amber-50">
                     {index + 1}

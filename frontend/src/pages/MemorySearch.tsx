@@ -26,6 +26,7 @@ import {
 import EmptyState from "../components/EmptyState";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import { buildRuntimeActionError, buildSafeModeBlockedMessage } from "../utils/runtimeMessages";
+import { logError } from "../utils/logger";
 
 interface MemoryResult {
   chunk: {
@@ -78,7 +79,7 @@ export default function MemorySearch() {
       const res = await searchMemory(query.trim(), 5);
       setResults(res);
     } catch (e) {
-      console.error("记忆搜索失败", e);
+      logError("记忆搜索失败", e);
     } finally {
       setLoading(false);
     }

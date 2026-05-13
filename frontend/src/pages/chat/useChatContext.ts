@@ -9,6 +9,7 @@ import {
   type AgentProposal,
 } from "../../tauri";
 import type { LifeModel } from "../../types";
+import { logError } from "../../utils/logger";
 
 export function useChatContext() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
@@ -73,7 +74,7 @@ export function useChatContext() {
         .then(setDiagnostics)
         .catch(() => {});
     } catch (e) {
-      console.error(e);
+      logError(e);
     }
   };
 

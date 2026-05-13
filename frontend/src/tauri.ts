@@ -134,7 +134,7 @@ export interface ToolCallResult {
   arguments: Record<string, any>;
   sanitized_arguments?: Record<string, any>;
   success: boolean;
-  output?: string;
+  output?: string | Record<string, unknown>;
   error?: string;
   permission_level?: string;
   status?: ToolCallStatus;
@@ -1245,8 +1245,8 @@ export interface AgentAction {
   id: string;
   actionType: string;
   target?: string;
-  input: any;
-  output?: any;
+  input: Record<string, unknown>;
+  output?: string | Record<string, unknown>;
   status: string;
   permissionDecision?: string;
   startedAt?: string;
@@ -1261,7 +1261,7 @@ export interface AgentObservation {
   actionId?: string;
   content: string;
   source: string;
-  structuredResult?: any;
+  structuredResult?: string | Record<string, unknown>;
   timestamp: string;
 }
 
@@ -1549,8 +1549,24 @@ export type ProposalType =
 // Payload shapes for proposal types (documented for code navigation).
 // Consumer code dynamically accesses proposal.after.path etc. via runtime guards.
 
-// FIXME(Phase2): Replace with typed proposal payloads once consumers are updated
-export type ProposalPayload = any;
+// FIXME(Phase2): Convert to proper discriminated union:
+// ToolPermissionPayload | ExternalWriteActionPayload | LifeModelPatchPayload | ...
+export interface ProposalPayload {
+  tool_name?: string;
+  toolName?: string;
+  name?: string;
+  permission?: string;
+  level?: string;
+  risk_level?: string;
+  source?: string;
+  path?: string;
+  operation?: string;
+  size_bytes?: number;
+  encoding?: string;
+  content_hash?: string;
+  content_preview?: string;
+  [key: string]: unknown;
+}
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 export type ProposalSource =
   | "builder_review"
@@ -1676,9 +1692,7 @@ export async function getRolloutMetrics(args: {
   });
 }
 
-export async function getRolloutSummary(args: {
-  experiment: string;
-}): Promise<unknown> {
+export async function getRolloutSummary(args: { experiment: string }): Promise<unknown> {
   return safeInvoke("get_rollout_summary", {
     experiment: args.experiment,
   });

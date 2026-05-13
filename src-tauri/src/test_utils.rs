@@ -66,7 +66,7 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         agent_run_event_store: Some(Arc::new(
             openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap(),
         )),
-        plan_store: Some(Arc::new(std::sync::Mutex::new(
+        plan_store: Some(Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ))),
         proposal_store: Some(Arc::new(Mutex::new(
@@ -89,7 +89,7 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         proposal_engine: Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::ProposalEngine::new(),
         )),
-        agent_spec_store: Arc::new(std::sync::Mutex::new(
+        agent_spec_store: Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::AgentSpecStore::new_in_memory().unwrap(),
         )),
         startup_warnings: vec![],
@@ -129,10 +129,10 @@ async fn test_event_store_accessible_through_app_state() {
 }
 
 #[cfg(test)]
-#[test]
-fn test_default_agent_spec_available_after_bootstrap() {
+#[tokio::test]
+async fn test_default_agent_spec_available_after_bootstrap() {
     let state = test_app_state();
-    let store = state.agent_spec_store.lock().unwrap();
+    let store = state.agent_spec_store.lock().await;
     let spec = store.get_default_spec().unwrap();
     assert!(
         spec.is_some(),
@@ -145,10 +145,10 @@ fn test_default_agent_spec_available_after_bootstrap() {
 }
 
 #[cfg(test)]
-#[test]
-fn test_list_returns_default_main_spec() {
+#[tokio::test]
+async fn test_list_returns_default_main_spec() {
     let state = test_app_state();
-    let store = state.agent_spec_store.lock().unwrap();
+    let store = state.agent_spec_store.lock().await;
     let specs = store.list_specs().unwrap();
     assert!(
         !specs.is_empty(),

@@ -716,7 +716,10 @@ impl PromptBlockRegistry {
             .with_block("planning", PromptBlock::planning())
             .with_block("base_system", PromptBlock::base_identity())
             .with_block("base_identity", PromptBlock::base_identity())
-            .with_block("behavioral_guidelines", PromptBlock::behavioral_guidelines())
+            .with_block(
+                "behavioral_guidelines",
+                PromptBlock::behavioral_guidelines(),
+            )
             .with_block("tool_call_format", PromptBlock::tool_call_format())
             .with_block(
                 "tool_discipline",
@@ -1190,7 +1193,9 @@ mod tests {
         let lm = make_test_life_model();
         let block = PromptBlock::state_hint(&lm);
         assert!(block.content.contains("当前重心: 学习 Rust"));
-        assert!(block.content.contains("当前心情: 充实 (压力3/10, 满足度8/10)"));
+        assert!(block
+            .content
+            .contains("当前心情: 充实 (压力3/10, 满足度8/10)"));
         assert!(block.content.contains("身心健康: 良好/专注 (精力7/10)"));
         assert!(block.content.contains("关注领域: 编程, 健康"));
         assert!(block.content.contains("近期事件: 完成了 P12 验收"));
@@ -1263,11 +1268,17 @@ mod tests {
         // base_identity comes before behavioral_guidelines
         let base_pos = assembled.find("终身成长合伙人").unwrap();
         let guide_pos = assembled.find("核心价值观").unwrap();
-        assert!(base_pos < guide_pos, "base_identity should appear before behavioral_guidelines");
+        assert!(
+            base_pos < guide_pos,
+            "base_identity should appear before behavioral_guidelines"
+        );
         // tools_block comes before tool_call_format
         let tools_pos = assembled.find("web.search").unwrap();
         let format_pos = assembled.find("tool_calls").unwrap();
-        assert!(tools_pos < format_pos, "tools_block should appear before tool_call_format");
+        assert!(
+            tools_pos < format_pos,
+            "tools_block should appear before tool_call_format"
+        );
     }
 
     #[test]
@@ -1297,15 +1308,27 @@ mod tests {
         let mut stack = PromptStack::chat_system_stack(&lm, None);
         let rendered = stack.render();
         let assembled = stack.assemble();
-        assert_eq!(rendered, assembled, "render and assemble should produce identical output");
+        assert_eq!(
+            rendered, assembled,
+            "render and assemble should produce identical output"
+        );
     }
 
     #[test]
     fn test_built_in_registry_has_backward_compat_keys() {
         let registry = PromptBlockRegistry::built_in();
-        assert!(registry.get("base_system").is_some(), "backward-compat key base_system");
-        assert!(registry.get("base_identity").is_some(), "new key base_identity");
-        assert!(registry.get("tool_discipline").is_some(), "backward-compat key tool_discipline");
+        assert!(
+            registry.get("base_system").is_some(),
+            "backward-compat key base_system"
+        );
+        assert!(
+            registry.get("base_identity").is_some(),
+            "new key base_identity"
+        );
+        assert!(
+            registry.get("tool_discipline").is_some(),
+            "backward-compat key tool_discipline"
+        );
         assert!(registry.get("privacy_rule").is_some(), "privacy_rule key");
     }
 

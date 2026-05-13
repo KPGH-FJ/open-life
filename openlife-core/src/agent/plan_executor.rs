@@ -3,7 +3,7 @@ use crate::agent::plan_store::PlanStore;
 use crate::agent::sub_agent::{ReviewAgentOutput, ReviewIssue};
 use crate::agent::types::*;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub enum PlanExecutionError {
     PlanNotFound(String),
@@ -117,13 +117,16 @@ impl PlanReviewGate for SubAgentReviewGate {
 }
 
 pub struct PlanExecutor {
-    plan_store: Arc<Mutex<PlanStore>>,
+    plan_store: Arc<tokio::sync::Mutex<PlanStore>>,
     event_store: Option<AgentRunEventStore>,
     agent_spec: Option<AgentSpec>,
 }
 
 impl PlanExecutor {
-    pub fn new(plan_store: Arc<Mutex<PlanStore>>, event_store: Option<AgentRunEventStore>) -> Self {
+    pub fn new(
+        plan_store: Arc<tokio::sync::Mutex<PlanStore>>,
+        event_store: Option<AgentRunEventStore>,
+    ) -> Self {
         Self {
             plan_store,
             event_store,
@@ -137,15 +140,15 @@ impl PlanExecutor {
         self
     }
 
-    fn lock_store(&self) -> Result<std::sync::MutexGuard<'_, PlanStore>, PlanExecutionError> {
-        self.plan_store
-            .lock()
-            .map_err(|e| PlanExecutionError::StoreError(format!("plan store lock poisoned: {}", e)))
+    async fn lock_store(
+        &self,
+    ) -> Result<tokio::sync::MutexGuard<'_, PlanStore>, PlanExecutionError> {
+        Ok(self.plan_store.lock().await)
     }
 
     /// Check whether the plan has been cancelled since execution started.
-    fn is_plan_cancelled(&self, plan_id: &str) -> Result<bool, PlanExecutionError> {
-        let guard = self.lock_store()?;
+    async fn is_plan_cancelled(&self, plan_id: &str) -> Result<bool, PlanExecutionError> {
+        let guard = self.lock_store().await?;
         match guard.get_plan(plan_id) {
             Ok(Some(plan)) => Ok(plan.status == PlanStatus::Cancelled),
             _ => Ok(false),
@@ -159,7 +162,7 @@ impl PlanExecutor {
     /// `plan.execution_failed`.  On success returns the plan and outcome
     /// **without** persisting `Completed` or recording `plan.execution_completed`.
     /// The caller is responsible for the final status transition.
-    fn execute_steps_without_completion<F>(
+    async fn execute_steps_without_completion<F>(
         &self,
         plan_id: &str,
         run_id: &str,
@@ -169,7 +172,8 @@ impl PlanExecutor {
         F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
     {
         let mut plan = self
-            .lock_store()?
+            .lock_store()
+            .await?
             .get_plan(plan_id)
             .map_err(|e| PlanExecutionError::StoreError(e.to_string()))?
             .ok_or_else(|| PlanExecutionError::PlanNotFound(plan_id.to_string()))?;
@@ -214,10 +218,11 @@ impl PlanExecutor {
         );
 
         plan.start_execution();
-        let _ = self.lock_store().and_then(|s| {
-            s.update_plan(&plan)
-                .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-        });
+        if let Ok(s) = self.lock_store().await {
+            let _ = s
+                .update_plan(&plan)
+                .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+        }
 
         let total_steps = plan.steps.len() as u32;
         let mut outcome = PlanExecutionOutcome {
@@ -235,7 +240,7 @@ impl PlanExecutor {
 
         for step in &steps {
             // Bail out if the plan was cancelled mid-execution.
-            if self.is_plan_cancelled(plan_id)? {
+            if self.is_plan_cancelled(plan_id).await? {
                 outcome.success = false;
                 self.record_event(
                     run_id,
@@ -349,10 +354,11 @@ impl PlanExecutor {
                 // Persist terminal failed status.
                 plan.status = PlanStatus::Failed;
                 plan.updated_at = chrono::Utc::now();
-                let _ = self.lock_store().and_then(|s| {
-                    s.update_plan(&plan)
-                        .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-                });
+                if let Ok(s) = self.lock_store().await {
+                    let _ = s
+                        .update_plan(&plan)
+                        .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+                }
 
                 return Ok((plan, outcome));
             }
@@ -365,7 +371,7 @@ impl PlanExecutor {
     ///
     /// This is the simple path used when **no review gate** is needed.
     /// After all steps succeed the plan is immediately completed.
-    pub fn execute<F>(
+    pub async fn execute<F>(
         &self,
         plan_id: &str,
         run_id: &str,
@@ -374,12 +380,13 @@ impl PlanExecutor {
     where
         F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
     {
-        let (mut plan, outcome) =
-            self.execute_steps_without_completion(plan_id, run_id, execute_step)?;
+        let (mut plan, outcome) = self
+            .execute_steps_without_completion(plan_id, run_id, execute_step)
+            .await?;
 
         if outcome.success {
             // Guard: re-read persisted plan — if cancelled, don't complete.
-            if self.is_plan_cancelled(plan_id)? {
+            if self.is_plan_cancelled(plan_id).await? {
                 return Ok(outcome);
             }
             self.record_event(
@@ -393,10 +400,11 @@ impl PlanExecutor {
             );
 
             plan.complete();
-            let _ = self.lock_store().and_then(|s| {
-                s.update_plan(&plan)
-                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-            });
+            if let Ok(s) = self.lock_store().await {
+                let _ = s
+                    .update_plan(&plan)
+                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+            }
         }
 
         Ok(outcome)
@@ -415,7 +423,7 @@ impl PlanExecutor {
     ///
     /// The review observation event is always recorded **before** the final
     /// completion/failure event.
-    pub fn execute_with_review<F, R>(
+    pub async fn execute_with_review<F, R>(
         &self,
         plan_id: &str,
         run_id: &str,
@@ -426,8 +434,9 @@ impl PlanExecutor {
         F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
         R: PlanReviewGate,
     {
-        let (mut plan, outcome) =
-            self.execute_steps_without_completion(plan_id, run_id, execute_step)?;
+        let (mut plan, outcome) = self
+            .execute_steps_without_completion(plan_id, run_id, execute_step)
+            .await?;
 
         if !outcome.success {
             return Ok(outcome);
@@ -435,7 +444,7 @@ impl PlanExecutor {
 
         if !outcome.review_required {
             // Low-risk: complete directly.
-            if self.is_plan_cancelled(plan_id)? {
+            if self.is_plan_cancelled(plan_id).await? {
                 return Ok(outcome);
             }
             self.record_event(
@@ -448,10 +457,11 @@ impl PlanExecutor {
                 json!({"steps_completed": outcome.steps_completed, "steps_failed": outcome.steps_failed}),
             );
             plan.complete();
-            let _ = self.lock_store().and_then(|s| {
-                s.update_plan(&plan)
-                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-            });
+            if let Ok(s) = self.lock_store().await {
+                let _ = s
+                    .update_plan(&plan)
+                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+            }
             return Ok(outcome);
         }
 
@@ -465,10 +475,10 @@ impl PlanExecutor {
         })?;
         let review = review_gate.review(&plan, &outcome, review_spec)?;
 
-        match self.review_execution(plan_id, run_id, &review) {
+        match self.review_execution(plan_id, run_id, &review).await {
             Ok(()) => {
                 // Guard: re-read persisted plan — cancelled mid-review.
-                if self.is_plan_cancelled(plan_id)? {
+                if self.is_plan_cancelled(plan_id).await? {
                     return Ok(outcome);
                 }
                 // Approved: complete plan.
@@ -483,10 +493,11 @@ impl PlanExecutor {
                     }),
                 );
                 plan.complete();
-                let _ = self.lock_store().and_then(|s| {
-                    s.update_plan(&plan)
-                        .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-                });
+                if let Ok(s) = self.lock_store().await {
+                    let _ = s
+                        .update_plan(&plan)
+                        .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+                }
                 Ok(outcome)
             }
             Err(PlanExecutionError::ReviewFailed(msg)) => {
@@ -518,14 +529,15 @@ impl PlanExecutor {
     /// - `NeedsChanges` or `Rejected` (critical) → plan set to `FailedReview`; records event.
     ///
     /// This method does NOT mutate LifeModel, Memory, files, or external state.
-    pub fn review_execution(
+    pub async fn review_execution(
         &self,
         plan_id: &str,
         run_id: &str,
         review_result: &crate::agent::ReviewAgentOutput,
     ) -> Result<(), PlanExecutionError> {
         let mut plan = self
-            .lock_store()?
+            .lock_store()
+            .await?
             .get_plan(plan_id)
             .map_err(|e| PlanExecutionError::StoreError(e.to_string()))?
             .ok_or_else(|| PlanExecutionError::PlanNotFound(plan_id.to_string()))?;
@@ -556,10 +568,11 @@ impl PlanExecutor {
         if review_result.has_critical_issues() {
             plan.status = PlanStatus::FailedReview;
             plan.updated_at = chrono::Utc::now();
-            let _ = self.lock_store().and_then(|s| {
-                s.update_plan(&plan)
-                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()))
-            });
+            if let Ok(s) = self.lock_store().await {
+                let _ = s
+                    .update_plan(&plan)
+                    .map_err(|e| PlanExecutionError::StoreError(e.to_string()));
+            }
             return Err(PlanExecutionError::ReviewFailed(format!(
                 "plan {} failed review: {}",
                 plan_id, review_result.summary
@@ -594,8 +607,12 @@ impl PlanExecutor {
 mod tests {
     use super::*;
 
-    fn setup() -> (Arc<Mutex<PlanStore>>, AgentRunEventStore, String) {
-        let ps = Arc::new(Mutex::new(PlanStore::new_in_memory().unwrap()));
+    fn setup() -> (
+        Arc<tokio::sync::Mutex<PlanStore>>,
+        AgentRunEventStore,
+        String,
+    ) {
+        let ps = Arc::new(tokio::sync::Mutex::new(PlanStore::new_in_memory().unwrap()));
         let es = AgentRunEventStore::new_in_memory().unwrap();
         let run_id = "test-run-1".to_string();
         (ps, es, run_id)
@@ -647,12 +664,12 @@ mod tests {
         plan
     }
 
-    #[test]
-    fn test_confirmed_plan_executes_read_only_step() {
+    #[tokio::test]
+    async fn test_confirmed_plan_executes_read_only_step() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -668,6 +685,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -687,26 +705,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_unconfirmed_high_risk_plan_is_rejected() {
+    #[tokio::test]
+    async fn test_unconfirmed_high_risk_plan_is_rejected() {
         let (ps, es, run_id) = setup();
         let plan = create_high_risk_plan(false); // Published but NOT confirmed
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es));
 
-        let result = executor.execute(&plan_id, &run_id, |_step, _intent| {
-            PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "file.write_proposal".to_string(),
-                success: true,
-                output: None,
-                error: None,
-                duration_ms: 0,
-                deviation: None,
-            }
-        });
+        let result = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "file.write_proposal".to_string(),
+                    success: true,
+                    output: None,
+                    error: None,
+                    duration_ms: 0,
+                    deviation: None,
+                }
+            })
+            .await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -717,8 +737,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_step_events_are_recorded_in_order() {
+    #[tokio::test]
+    async fn test_step_events_are_recorded_in_order() {
         let (ps, es, run_id) = setup();
         let mut plan = create_read_only_plan(true);
         plan.steps = vec![
@@ -754,7 +774,7 @@ mod tests {
             },
         ];
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -777,6 +797,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -798,12 +819,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_deviation_event_recorded_when_action_differs_from_plan() {
+    #[tokio::test]
+    async fn test_deviation_event_recorded_when_action_differs_from_plan() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -819,6 +840,7 @@ mod tests {
                     deviation: Some("executed different tool for broader context".to_string()),
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -833,12 +855,12 @@ mod tests {
         assert_eq!(deviation_events.len(), 1);
     }
 
-    #[test]
-    fn test_low_risk_read_only_plan_executes_without_confirmation() {
+    #[tokio::test]
+    async fn test_low_risk_read_only_plan_executes_without_confirmation() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(false); // Published but not explicitly confirmed
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -854,6 +876,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -868,24 +891,26 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_plan_not_found_error() {
+    #[tokio::test]
+    async fn test_plan_not_found_error() {
         let (ps, es, run_id) = setup();
         let executor = PlanExecutor::new(ps, Some(es));
-        let result = executor.execute("nonexistent", &run_id, |_, _| PlanStepExecutionResult {
-            step_index: 0,
-            tool_name: "none".to_string(),
-            success: true,
-            output: None,
-            error: None,
-            duration_ms: 0,
-            deviation: None,
-        });
+        let result = executor
+            .execute("nonexistent", &run_id, |_, _| PlanStepExecutionResult {
+                step_index: 0,
+                tool_name: "none".to_string(),
+                success: true,
+                output: None,
+                error: None,
+                duration_ms: 0,
+                deviation: None,
+            })
+            .await;
         assert!(matches!(result, Err(PlanExecutionError::PlanNotFound(_))));
     }
 
-    #[test]
-    fn test_step_failure_stops_execution_and_records_failed_event() {
+    #[tokio::test]
+    async fn test_step_failure_stops_execution_and_records_failed_event() {
         let (ps, es, run_id) = setup();
         let mut plan = create_read_only_plan(true);
         plan.steps = vec![
@@ -935,7 +960,7 @@ mod tests {
             },
         ];
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -965,6 +990,7 @@ mod tests {
                     }
                 }
             })
+            .await
             .unwrap();
 
         assert!(!outcome.success);
@@ -987,12 +1013,12 @@ mod tests {
             .any(|e| e.event_type == AgentRunEventType::PlanExecutionCompleted));
     }
 
-    #[test]
-    fn test_write_tool_returns_blocked_when_policy_disallows() {
+    #[tokio::test]
+    async fn test_write_tool_returns_blocked_when_policy_disallows() {
         let (ps, es, run_id) = setup();
         let plan = create_high_risk_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1008,6 +1034,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(!outcome.success);
@@ -1020,12 +1047,12 @@ mod tests {
 
     // ── P4-S2: Terminal Failed State tests ────────────────────────────
 
-    #[test]
-    fn test_failed_step_persists_failed_status() {
+    #[tokio::test]
+    async fn test_failed_step_persists_failed_status() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es));
 
@@ -1041,18 +1068,19 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
-        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        let fetched = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
         assert_eq!(fetched.status, PlanStatus::Failed);
     }
 
-    #[test]
-    fn test_failed_plan_not_left_executing() {
+    #[tokio::test]
+    async fn test_failed_plan_not_left_executing() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es));
 
@@ -1068,19 +1096,20 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
-        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        let fetched = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
         assert!(!matches!(fetched.status, PlanStatus::Executing));
         assert_eq!(fetched.status, PlanStatus::Failed);
     }
 
-    #[test]
-    fn test_failed_plan_records_no_execution_completed() {
+    #[tokio::test]
+    async fn test_failed_plan_records_no_execution_completed() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1096,6 +1125,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1109,8 +1139,8 @@ mod tests {
 
     // ── P4-S3: Real Review Gate tests ──────────────────────────────────
 
-    #[test]
-    fn test_execute_with_review_approved_keeps_completed() {
+    #[tokio::test]
+    async fn test_execute_with_review_approved_keeps_completed() {
         let (ps, es, run_id) = setup();
         // Medium-risk: review_required = true
         let mut plan = AgentPlan::new("medium-risk task", RiskLevel::Medium);
@@ -1131,7 +1161,7 @@ mod tests {
         plan.publish();
         plan.confirm();
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es.clone()))
             .with_agent_spec(AgentSpec::default_main_spec());
@@ -1153,10 +1183,11 @@ mod tests {
                 },
                 &gate,
             )
+            .await
             .unwrap();
 
         assert!(outcome.success);
-        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        let fetched = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
         assert_eq!(fetched.status, PlanStatus::Completed);
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1165,8 +1196,8 @@ mod tests {
             .any(|e| e.summary.contains("review agent verdict")));
     }
 
-    #[test]
-    fn test_execute_with_review_critical_causes_failed_review() {
+    #[tokio::test]
+    async fn test_execute_with_review_critical_causes_failed_review() {
         use crate::agent::{ReviewAgentOutput, ReviewIssue};
 
         let (ps, es, run_id) = setup();
@@ -1188,7 +1219,7 @@ mod tests {
         plan.publish();
         plan.confirm();
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es.clone()))
             .with_agent_spec(AgentSpec::default_main_spec());
@@ -1216,23 +1247,25 @@ mod tests {
         }
         let gate = CriticalGate;
 
-        let result = executor.execute_with_review(
-            &plan_id,
-            &run_id,
-            |_step, _intent| PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "file.write_proposal".to_string(),
-                success: true,
-                output: Some("wrote".to_string()),
-                error: None,
-                duration_ms: 1,
-                deviation: None,
-            },
-            &gate,
-        );
+        let result = executor
+            .execute_with_review(
+                &plan_id,
+                &run_id,
+                |_step, _intent| PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "file.write_proposal".to_string(),
+                    success: true,
+                    output: Some("wrote".to_string()),
+                    error: None,
+                    duration_ms: 1,
+                    deviation: None,
+                },
+                &gate,
+            )
+            .await;
         assert!(result.is_err());
 
-        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        let fetched = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
         assert_eq!(fetched.status, PlanStatus::FailedReview);
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1255,12 +1288,12 @@ mod tests {
             .any(|e| matches!(e.event_type, AgentRunEventType::PlanExecutionCompleted)));
     }
 
-    #[test]
-    fn test_execute_with_review_low_risk_skips_gate() {
+    #[tokio::test]
+    async fn test_execute_with_review_low_risk_skips_gate() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es.clone()));
         let gate = DefaultPlanReviewGate;
@@ -1281,6 +1314,7 @@ mod tests {
                 },
                 &gate,
             )
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -1291,14 +1325,14 @@ mod tests {
 
     // ── P4-5: Review Gate tests ────────────────────────────────────────
 
-    #[test]
-    fn test_approved_review_allows_completed_status() {
+    #[tokio::test]
+    async fn test_approved_review_allows_completed_status() {
         use crate::agent::ReviewAgentOutput;
 
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1315,11 +1349,12 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         // Review: approved — should stay completed.
         let review = ReviewAgentOutput::approved("all good".to_string());
-        let result = executor.review_execution(&plan_id, &run_id, &review);
+        let result = executor.review_execution(&plan_id, &run_id, &review).await;
         assert!(result.is_ok());
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1332,14 +1367,14 @@ mod tests {
         assert!(review_events[0].summary.contains("approved"));
     }
 
-    #[test]
-    fn test_critical_issue_leaves_plan_failed_review() {
+    #[tokio::test]
+    async fn test_critical_issue_leaves_plan_failed_review() {
         use crate::agent::{ReviewAgentOutput, ReviewIssue};
 
         let (ps, es, run_id) = setup();
         let plan = create_high_risk_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1356,6 +1391,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         // Review: critical issue — should fail review.
@@ -1371,7 +1407,7 @@ mod tests {
         );
         assert!(review.has_critical_issues());
 
-        let result = executor.review_execution(&plan_id, &run_id, &review);
+        let result = executor.review_execution(&plan_id, &run_id, &review).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("failed review"));
@@ -1386,14 +1422,14 @@ mod tests {
         assert!(review_events[0].summary.contains("needs_changes"));
     }
 
-    #[test]
-    fn test_review_gate_records_parent_trace_event() {
+    #[tokio::test]
+    async fn test_review_gate_records_parent_trace_event() {
         use crate::agent::ReviewAgentOutput;
 
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1409,11 +1445,13 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         let review = ReviewAgentOutput::approved("verified".to_string());
         executor
             .review_execution(&plan_id, &run_id, &review)
+            .await
             .unwrap();
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1433,8 +1471,8 @@ mod tests {
 
     // ── P5-S1: Cancellation safety tests ──────────────────────────────
 
-    #[test]
-    fn test_cancelled_during_execution_prevents_completion() {
+    #[tokio::test]
+    async fn test_cancelled_during_execution_prevents_completion() {
         let (ps, es, run_id) = setup();
         let mut plan = create_read_only_plan(true);
         plan.steps = vec![PlanStep {
@@ -1445,21 +1483,21 @@ mod tests {
             depends_on: vec![],
         }];
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps.clone(), Some(es.clone()));
 
         // Cancel the plan after execution starts (simulate external cancellation).
         {
-            let mut p = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+            let mut p = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
             p.start_execution();
             p.cancel();
-            ps.lock().unwrap().update_plan(&p).unwrap();
+            ps.lock().await.update_plan(&p).unwrap();
         }
 
         // execute_steps_without_completion should detect cancellation and stop.
-        let result =
-            executor.execute_steps_without_completion(&plan_id, &run_id, |_step, _intent| {
+        let result = executor
+            .execute_steps_without_completion(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1469,22 +1507,25 @@ mod tests {
                     duration_ms: 1,
                     deviation: None,
                 }
-            });
+            })
+            .await;
         let (_plan, outcome) = result.unwrap();
         assert!(!outcome.success);
 
         // execute() should NOT complete a cancelled plan.
-        let result2 = executor.execute(&plan_id, &run_id, |_step, _intent| {
-            PlanStepExecutionResult {
-                step_index: 0,
-                tool_name: "life_model.read".to_string(),
-                success: true,
-                output: Some("ok".to_string()),
-                error: None,
-                duration_ms: 1,
-                deviation: None,
-            }
-        });
+        let result2 = executor
+            .execute(&plan_id, &run_id, |_step, _intent| {
+                PlanStepExecutionResult {
+                    step_index: 0,
+                    tool_name: "life_model.read".to_string(),
+                    success: true,
+                    output: Some("ok".to_string()),
+                    error: None,
+                    duration_ms: 1,
+                    deviation: None,
+                }
+            })
+            .await;
         let outcome2 = result2.unwrap();
         assert!(
             !outcome2.success,
@@ -1492,22 +1533,22 @@ mod tests {
         );
 
         // Plan store must still show Cancelled, not Completed.
-        let fetched = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+        let fetched = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
         assert_eq!(fetched.status, PlanStatus::Cancelled);
     }
 
-    #[test]
-    fn test_cancelled_execution_does_not_record_completed() {
+    #[tokio::test]
+    async fn test_cancelled_execution_does_not_record_completed() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         // Cancel before execution.
         {
-            let mut p = ps.lock().unwrap().get_plan(&plan_id).unwrap().unwrap();
+            let mut p = ps.lock().await.get_plan(&plan_id).unwrap().unwrap();
             p.cancel();
-            ps.lock().unwrap().update_plan(&p).unwrap();
+            ps.lock().await.update_plan(&p).unwrap();
         }
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
@@ -1524,6 +1565,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1534,12 +1576,12 @@ mod tests {
 
     // ── P6-6: AgentSpec tool policy enforcement ────────────────────────
 
-    #[test]
-    fn test_agentspec_allowed_tool_executes() {
+    #[tokio::test]
+    async fn test_agentspec_allowed_tool_executes() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         // AgentSpec allows life_model.read
         let spec = AgentSpec::default().with_allowed_tools(vec!["life_model.read".to_string()]);
@@ -1557,17 +1599,18 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
     }
 
-    #[test]
-    fn test_agentspec_denied_tool_blocked_before_execution() {
+    #[tokio::test]
+    async fn test_agentspec_denied_tool_blocked_before_execution() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let spec = AgentSpec::default().with_denied_tools(vec!["life_model.read".to_string()]);
         let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
@@ -1586,6 +1629,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         // AgentSpec blocked BEFORE execute_step should be called.
@@ -1600,12 +1644,12 @@ mod tests {
 
     // ── P7-4: Plan execution uses stored AgentSpec ─────────────────────
 
-    #[test]
-    fn test_execute_plan_uses_stored_agentspec() {
+    #[tokio::test]
+    async fn test_execute_plan_uses_stored_agentspec() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         // Use the default main spec explicitly on the executor
         let spec = AgentSpec::default_main_spec();
@@ -1623,6 +1667,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);
@@ -1644,12 +1689,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_trace_includes_agentspec_id_on_blocked_tool() {
+    #[tokio::test]
+    async fn test_trace_includes_agentspec_id_on_blocked_tool() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let spec = AgentSpec::default().with_denied_tools(vec!["life_model.read".to_string()]);
         let spec_id = spec.id.clone();
@@ -1667,6 +1712,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         let events = es.list_events_by_run(&run_id).unwrap();
@@ -1685,13 +1731,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_plan_without_agentspec_executes_with_default() {
+    #[tokio::test]
+    async fn test_plan_without_agentspec_executes_with_default() {
         // When no AgentSpec is attached, execution should still work (legacy mode)
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
-        ps.lock().unwrap().create_plan(&plan).unwrap();
+        ps.lock().await.create_plan(&plan).unwrap();
 
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
@@ -1707,6 +1753,7 @@ mod tests {
                     deviation: None,
                 }
             })
+            .await
             .unwrap();
 
         assert!(outcome.success);

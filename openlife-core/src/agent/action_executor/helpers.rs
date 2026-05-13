@@ -909,7 +909,10 @@ mod tests {
     #[test]
     fn test_truncate_text() {
         let result = truncate_text("hello world", 5);
-        assert!(result.contains("hello"), "should start with truncated prefix");
+        assert!(
+            result.contains("hello"),
+            "should start with truncated prefix"
+        );
         assert!(result.len() > 5, "should append truncation notice");
         assert_eq!(truncate_text("short", 100), "short");
         assert_eq!(truncate_text("", 10), "");

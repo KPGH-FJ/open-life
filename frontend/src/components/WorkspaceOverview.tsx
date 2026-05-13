@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, memo } from "react";
 import { Link } from "react-router-dom";
 import {
   Activity,
@@ -21,6 +21,7 @@ import {
   countMemoryChunks,
 } from "../tauri";
 import { isSafeMode } from "../utils/safeMode";
+import { logError } from "../utils/logger";
 
 interface WorkspaceStats {
   pendingProposals: number;
@@ -34,7 +35,7 @@ interface WorkspaceStats {
   chatSessions: number;
 }
 
-export default function WorkspaceOverview() {
+const WorkspaceOverview = memo(function WorkspaceOverview() {
   const [stats, setStats] = useState<WorkspaceStats>({
     pendingProposals: 0,
     totalRuns: 0,
@@ -101,7 +102,7 @@ export default function WorkspaceOverview() {
         chatSessions: diag?.chat_session_count || 0,
       });
     } catch (e) {
-      console.error("Failed to load workspace data:", e);
+      logError("Failed to load workspace data:", e);
     } finally {
       setLoading(false);
     }
@@ -299,4 +300,6 @@ export default function WorkspaceOverview() {
       </div>
     </div>
   );
-}
+});
+
+export default WorkspaceOverview;

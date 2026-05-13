@@ -661,10 +661,8 @@ async fn apply_life_model_patch(
         vm.snapshot_for_patch(&model, &proposal.id, "before")
             .map_err(|e| e.to_string())?
     };
-    let path_pointer =
-        openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
-    let path_display =
-        openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+    let path_pointer = openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
+    let path_display = openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
     let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
         &proposal.id,
         &path_pointer,
@@ -772,7 +770,12 @@ async fn apply_memory_write(
             )
             .map_err(|e| e.to_string())?;
     }
-    Ok(patch_result_for_proposal(proposal, true, "memory_write", None))
+    Ok(patch_result_for_proposal(
+        proposal,
+        true,
+        "memory_write",
+        None,
+    ))
 }
 
 async fn apply_memory_archive(
@@ -793,7 +796,12 @@ async fn apply_memory_archive(
             Some("没有匹配到可归档的 active memory chunk。".to_string()),
         ));
     }
-    Ok(patch_result_for_proposal(proposal, true, "memory_archive", None))
+    Ok(patch_result_for_proposal(
+        proposal,
+        true,
+        "memory_archive",
+        None,
+    ))
 }
 
 async fn apply_tool_permission(
@@ -889,7 +897,8 @@ async fn apply_external_write_action(
             "external_write",
             Some(format!(
                 "Content size ({} bytes) exceeds maximum allowed ({} bytes)",
-                content.len(), max_size
+                content.len(),
+                max_size
             )),
         ));
     }
@@ -913,8 +922,18 @@ async fn apply_external_write_action(
         }
     }
     match safe_write_utf8(path, content, &safe_paths) {
-        Ok(_) => Ok(patch_result_for_proposal(proposal, true, "external_write", None)),
-        Err(e) => Ok(patch_result_for_proposal(proposal, false, "external_write", Some(e))),
+        Ok(_) => Ok(patch_result_for_proposal(
+            proposal,
+            true,
+            "external_write",
+            None,
+        )),
+        Err(e) => Ok(patch_result_for_proposal(
+            proposal,
+            false,
+            "external_write",
+            Some(e),
+        )),
     }
 }
 
@@ -988,11 +1007,20 @@ async fn apply_scheduled_task(
             let ics_path = std::path::PathBuf::from(&safe_paths[0]).join(&ics_filename);
             if let Err(e) = safe_write_utf8(&ics_path.to_string_lossy(), &ics_content, &safe_paths)
             {
-                log::warn!("[proposal] Failed to write ICS file '{}': {}", ics_path.display(), e);
+                log::warn!(
+                    "[proposal] Failed to write ICS file '{}': {}",
+                    ics_path.display(),
+                    e
+                );
             }
         }
     }
-    Ok(patch_result_for_proposal(proposal, true, "scheduled_task", None))
+    Ok(patch_result_for_proposal(
+        proposal,
+        true,
+        "scheduled_task",
+        None,
+    ))
 }
 
 async fn apply_data_export(
@@ -1018,7 +1046,12 @@ async fn apply_data_export(
             urlencoding(body)
         );
         match open::that(&mailto) {
-            Ok(_) => Ok(patch_result_for_proposal(proposal, true, "data_export", None)),
+            Ok(_) => Ok(patch_result_for_proposal(
+                proposal,
+                true,
+                "data_export",
+                None,
+            )),
             Err(e) => Ok(patch_result_for_proposal(
                 proposal,
                 false,
@@ -1055,12 +1088,21 @@ async fn apply_data_export(
         let export_path = export_dir.join(filename);
         let path_lossy = export_path.to_string_lossy();
         match safe_write_utf8(path_lossy.as_ref(), content, &safe_paths) {
-            Ok(_) => Ok(patch_result_for_proposal(proposal, true, "data_export", None)),
+            Ok(_) => Ok(patch_result_for_proposal(
+                proposal,
+                true,
+                "data_export",
+                None,
+            )),
             Err(e) => Ok(patch_result_for_proposal(
                 proposal,
                 false,
                 "data_export",
-                Some(format!("Failed to write export file '{}': {}", export_path.display(), e)),
+                Some(format!(
+                    "Failed to write export file '{}': {}",
+                    export_path.display(),
+                    e
+                )),
             )),
         }
     }
@@ -1086,27 +1128,15 @@ async fn apply_proposal_to_state(
         | ProposalType::GoalUpdate
         | ProposalType::StateUpdate
         | ProposalType::PreferenceUpdate
-        | ProposalType::CapabilityUpdate => {
-            apply_life_model_patch(state, proposal, &after).await
-        }
-        ProposalType::MemoryWrite => {
-            apply_memory_write(state, proposal, &after).await
-        }
-        ProposalType::MemoryArchive => {
-            apply_memory_archive(state, proposal, &after).await
-        }
-        ProposalType::ToolPermission => {
-            apply_tool_permission(state, proposal, &after).await
-        }
+        | ProposalType::CapabilityUpdate => apply_life_model_patch(state, proposal, &after).await,
+        ProposalType::MemoryWrite => apply_memory_write(state, proposal, &after).await,
+        ProposalType::MemoryArchive => apply_memory_archive(state, proposal, &after).await,
+        ProposalType::ToolPermission => apply_tool_permission(state, proposal, &after).await,
         ProposalType::ExternalWriteAction => {
             apply_external_write_action(state, proposal, &after).await
         }
-        ProposalType::ScheduledTask => {
-            apply_scheduled_task(state, proposal, &after).await
-        }
-        ProposalType::DataExport => {
-            apply_data_export(state, proposal, &after).await
-        }
+        ProposalType::ScheduledTask => apply_scheduled_task(state, proposal, &after).await,
+        ProposalType::DataExport => apply_data_export(state, proposal, &after).await,
         ProposalType::PluginPermission
         | ProposalType::ModelPolicyChange
         | ProposalType::ScheduleCheckin
@@ -1474,7 +1504,7 @@ mod tests {
             ))),
             hot_cache,
             proposal_engine: Arc::new(tokio::sync::Mutex::new(ProposalEngine::new())),
-            agent_spec_store: Arc::new(std::sync::Mutex::new(
+            agent_spec_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::AgentSpecStore::new_in_memory().unwrap(),
             )),
             startup_warnings: vec![],

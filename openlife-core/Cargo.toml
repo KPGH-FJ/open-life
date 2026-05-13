@@ -7,13 +7,13 @@ edition = "2021"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-tokio = { version = "1.35", features = ["full"] }
+tokio = { version = "1.44", features = ["full"] }
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
 dirs = "5.0"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 regex = "1.10"
 similar = "2.4"
 async-trait = "0.1"
@@ -28,6 +28,8 @@ base64 = "0.22"
 ring = "0.17"
 log = "0.4"
 parking_lot = "0.12"
+keyring = "4.0"
+keyring-core = "1.0"
 
 [dev-dependencies]
 criterion = "0.8.2"

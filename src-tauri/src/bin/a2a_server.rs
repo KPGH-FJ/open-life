@@ -22,7 +22,9 @@ async fn main() {
 
     let data_dir = dirs::data_dir()
         .map(|d| d.join("ai.openlife.desktop"))
-        .unwrap_or_else(|| std::env::current_dir().unwrap().join(".openlife"));
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("ai.openlife.desktop");
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
     let privacy_engine = PrivacyEngine::new();

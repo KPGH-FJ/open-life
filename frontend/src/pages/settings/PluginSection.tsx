@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { reloadPlugins, enablePlugin, disablePlugin } from "../../tauri";
 import type { PluginRecord } from "../../tauri";
+import { logError } from "../../utils/logger";
 
 interface PluginSectionProps {
   plugins: PluginRecord[];
@@ -34,7 +35,7 @@ export default function PluginSection({
       }
       await onRefreshDiagnostics();
     } catch (e) {
-      console.error("Plugin toggle failed:", e);
+      logError("Plugin toggle failed:", e);
     }
   };
 

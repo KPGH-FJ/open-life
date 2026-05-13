@@ -1,20 +1,18 @@
 use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::agent::{AgentSpec, AgentSpecStore, AgentSpecStoreError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tauri::State;
 
 /// Resolve the required AgentSpec for governed execution.
 ///
 /// Follows ADR 0012 resolution order: explicit spec → stored default main.
 /// Returns a hard error on failure — never falls back to `AgentSpec::default()`.
-pub fn resolve_required_agent_spec(
-    store: &Mutex<AgentSpecStore>,
+pub async fn resolve_required_agent_spec(
+    store: &tokio::sync::Mutex<AgentSpecStore>,
     explicit_id: Option<&str>,
 ) -> Result<AgentSpec, AppError> {
-    let store = store
-        .lock()
-        .map_err(|e| AppError::internal(format!("AgentSpecStore lock: {}", e)))?;
+    let store = store.lock().await;
     store.resolve_spec(explicit_id).map_err(|e| match &e {
         AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
         AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
@@ -27,10 +25,7 @@ pub async fn get_agent_spec(
     spec_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentSpec>, AppError> {
-    let store = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state.agent_spec_store.lock().await;
     match store.get_spec_optional(&spec_id) {
         Ok(spec) => Ok(spec),
         Err(e) => {
@@ -45,10 +40,7 @@ pub async fn get_agent_spec(
 
 #[tauri::command]
 pub async fn list_agent_specs(state: State<'_, Arc<AppState>>) -> Result<Vec<AgentSpec>, AppError> {
-    let store = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state.agent_spec_store.lock().await;
     store
         .list_specs()
         .map_err(|e| AppError::internal(e.to_string()))
@@ -58,10 +50,7 @@ pub async fn list_agent_specs(state: State<'_, Arc<AppState>>) -> Result<Vec<Age
 pub async fn get_default_agent_spec(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Option<AgentSpec>, AppError> {
-    let store = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state.agent_spec_store.lock().await;
     store
         .get_default_spec()
         .map_err(|e| AppError::internal(e.to_string()))
@@ -72,10 +61,7 @@ pub async fn update_agent_spec(
     spec: AgentSpec,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state.agent_spec_store.lock().await;
     store
         .update_spec(&spec)
         .map_err(|e| AppError::internal(e.to_string()))
@@ -86,10 +72,7 @@ pub async fn set_default_agent_spec(
     spec_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    let store = state
-        .agent_spec_store
-        .lock()
-        .map_err(|e| AppError::internal(format!("{}", e)))?;
+    let store = state.agent_spec_store.lock().await;
     store.set_default_main_spec(&spec_id).map_err(|e| match &e {
         AgentSpecStoreError::NotFound(_) => AppError::not_found(e.to_string()),
         AgentSpecStoreError::InvalidRole { .. } => AppError::permission(e.to_string()),
@@ -106,9 +89,9 @@ mod tests {
     /// When the store has no `main.default` (e.g., corrupt bootstrap),
     /// resolve_required_agent_spec MUST return an error — not fall back
     /// to AgentSpec::default().
-    #[test]
-    fn test_chat_agentspec_resolution_failure_fails_run_without_model_call() {
-        use std::sync::Mutex;
+    #[tokio::test]
+    async fn test_chat_agentspec_resolution_failure_fails_run_without_model_call() {
+        use tokio::sync::Mutex;
         // Create an in-memory store and deactivate the bootstrapped main.default.
         let store = AgentSpecStore::new_in_memory().unwrap();
         // Deactivate main.default to simulate a missing default spec.
@@ -121,7 +104,7 @@ mod tests {
         );
 
         let locked = Mutex::new(store);
-        let result = super::resolve_required_agent_spec(&locked, None);
+        let result = super::resolve_required_agent_spec(&locked, None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

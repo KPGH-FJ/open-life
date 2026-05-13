@@ -27,6 +27,7 @@ import {
 import type { LifeModel, DailyGoal, StateAlert } from "../types";
 import type { Model4DCompletion, CapabilityGap, AlignmentIssue } from "../tauri";
 import EmptyState from "../components/EmptyState";
+import { logError } from "../utils/logger";
 
 interface DimensionCardProps {
   title: string;
@@ -123,7 +124,7 @@ export default function LifeMapPage() {
       setGaps(g);
       setAlignments(a);
     } catch (e) {
-      console.error("LifeMap load failed:", e);
+      logError("LifeMap load failed:", e);
     } finally {
       setLoading(false);
     }

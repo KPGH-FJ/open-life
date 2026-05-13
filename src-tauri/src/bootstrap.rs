@@ -332,6 +332,16 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
 
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
+    openlife_core::ollama::set_ollama_base_url(&config.system.ollama_base_url);
+
+    // Migrate API key to OS keyring for secure storage
+    openlife_core::keyring_store::init_native_store();
+    if !config.llm.openai_key.is_empty() {
+        openlife_core::keyring_store::migrate_to_keyring(
+            &config.llm.provider,
+            &config.llm.openai_key,
+        );
+    }
 
     // Initialize web search provider configuration
     openlife_core::agent::action_executor::helpers::set_search_config(
@@ -527,13 +537,13 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
     let agent_spec_store = {
         let store_path = data_dir.join("agent_specs.db");
         match AgentSpecStore::new(&store_path) {
-            Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+            Ok(store) => Arc::new(tokio::sync::Mutex::new(store)),
             Err(e) => {
                 startup_warnings
                     .borrow_mut()
                     .push(format!("agent_specs.db 初始化失败，降级为内存存储: {}", e));
                 match AgentSpecStore::new_in_memory() {
-                    Ok(store) => Arc::new(std::sync::Mutex::new(store)),
+                    Ok(store) => Arc::new(tokio::sync::Mutex::new(store)),
                     Err(memory_err) => {
                         let msg = format!(
                             "CRITICAL: AgentSpecStore init failed: file={}, in_memory={}.",
@@ -569,7 +579,7 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         agent_run_event_store: Some(Arc::new(agent_run_event_store)),
-        plan_store: Some(Arc::new(std::sync::Mutex::new(plan_store))),
+        plan_store: Some(Arc::new(tokio::sync::Mutex::new(plan_store))),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,

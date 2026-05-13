@@ -148,7 +148,8 @@ pub async fn run_skill(
     // Resolve stored default AgentSpec for governed execution — fail closed, no fallback.
     let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
     let agent_spec =
-        crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)?;
+        crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)
+            .await?;
 
     // Create AgentRun before governed execution so events can reference the run_id.
     let mut run = AgentRun::new_chat_run(

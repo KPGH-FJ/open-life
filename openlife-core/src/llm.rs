@@ -34,9 +34,17 @@ pub fn provider_label(provider: &str) -> String {
 }
 
 pub fn effective_api_key(provider: &str, configured_key: &str) -> String {
+    // 1. Check OS keyring first (most secure)
+    if let Some(key) = crate::keyring_store::get_api_key(provider) {
+        if !key.trim().is_empty() {
+            return key;
+        }
+    }
+    // 2. Fall back to configured key in config.yaml
     if !configured_key.trim().is_empty() {
         return configured_key.to_string();
     }
+    // 3. Fall back to environment variable
     match provider {
         "deepseek" => std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),

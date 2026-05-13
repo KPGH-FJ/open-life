@@ -97,8 +97,19 @@
 │       ├── index.css             # Tailwind 导入
 │       ├── test/
 │       │   ├── setup.ts          # 测试初始化 (mock ResizeObserver 等)
-│       │   └── mocks/tauri.ts    # Tauri invoke mock（约 130+ 命令）
+│       │   └── mocks/tauri.ts    # Tauri invoke mock（约 134 命令）
 │       ├── components/           # 通用组件
+│       │   ├── ErrorBanner.tsx
+│       │   ├── AgentStateIndicator.tsx
+│       │   ├── RunTracePanel.tsx
+│       │   ├── ToolObservationPanel.tsx
+│       │   ├── PlanPanel.tsx
+│       │   ├── PlanStatusBanner.tsx
+│       │   ├── WorkspaceOverview.tsx
+│       │   ├── SuggestionContextPanel.tsx
+│       │   ├── OnboardingWizard.tsx
+│       │   ├── EmptyState.tsx
+│       │   ├── BuilderPatchReview.tsx
 │       │   ├── ReasoningTracePanel.tsx
 │       │   ├── ToolCallCard.tsx
 │       │   └── LoadingSpinner.tsx
@@ -112,35 +123,74 @@
 │           ├── MemorySearch.tsx
 │           ├── VersionControl.tsx
 │           ├── SettingsPage.tsx
-│           └── CalibrationPage.tsx
+│           ├── CalibrationPage.tsx
+│           ├── ProposalReviewPage.tsx
+│           ├── RunsPage.tsx
+│           ├── AgentRunDetail.tsx
+│           ├── LifeMapPage.tsx
+│           └── MetricsPage.tsx
 │
-├── openlife-core/                # Rust 核心业务库
+├── openlife-core/                # Rust 核心业务库（73 文件）
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                # 模块暴露入口
-│       ├── config.rs             # AppConfig (YAML + env 覆盖)
+│       ├── config.rs             # AppConfig + SystemConfig (YAML + env 覆盖)
 │       ├── life_model.rs         # 四维人生模型（Identity/Goals/Capabilities/State）
-│       ├── llm.rs                # DeepSeek / OpenAI-compatible 云端模型调用
+│       ├── llm.rs                # 7 家 Provider 云端模型调用
 │       ├── ollama.rs             # Ollama 本地模型调用
-│       ├── scheduler.rs          # 推理调度器（本地优先策略）
-│       ├── reasoning/            # 推理策略模块
-│       │   ├── mod.rs            # ReasoningStrategy trait
-│       │   ├── layered.rs        # 三层推理策略 (Meaning→Strategy→Generation)
-│       │   └── direct.rs         # 直接推理策略
+│       ├── scheduler.rs          # InferenceScheduler（ModelRouter / 隐私治理路由）
 │       ├── memory.rs             # SQLite 消息/会话/状态存储
+│       ├── memory_cache.rs       # HotMemoryCache（LifeModel 关键信息缓存）
 │       ├── vectors.rs            # 向量记忆 Tier 3（SQLite + 本地 embedding）
 │       ├── router.rs             # 意图路由
-│       ├── layer_router.rs       # 层路由
+│       ├── layer_router.rs       # 层路由（L1/L2/L3）
 │       ├── mcp.rs                # MCP 客户端（JSON-RPC stdio）
-│       ├── mcp_audit.rs          # MCP 调用审计
+│       ├── mcp_audit.rs          # MCP 调用审计（AES-256-GCM 加密）
 │       ├── a2a.rs                # A2A 协议实现
 │       ├── privacy.rs            # PII 检测与脱敏
 │       ├── versioning.rs         # Git-like 快照与回滚
 │       ├── feedback.rs           # 用户反馈与进化信号
-│       ├── builder.rs            # 构建模式（引导式人生模型创建）
+│       ├── builder.rs            # Builder 模式（引导式人生模型创建）
 │       ├── reflex_engine.rs      # 反射引擎
 │       ├── evolution.rs          # 微进化系统
-│       └── tool_manifest.rs      # 工具清单定义
+│       ├── proactive.rs          # ProactiveEngine 主动建议
+│       ├── tool_manifest.rs      # 工具清单定义
+│       ├── tool_permissions.rs   # 工具权限策略
+│       ├── plugins.rs            # 插件清单管理
+│       ├── skills.rs             # 技能清单管理
+│       ├── tasks.rs              # 任务系统
+│       ├── calendar.rs           # ICS 日历解析
+│       ├── json_utils.rs         # JSON 工具函数
+│       ├── agent/                # ⭐ Agent 核心模块（27 文件 ~32k 行）
+│       │   ├── mod.rs            # Agent 模块入口
+│       │   ├── runtime.rs        # AgentRuntime 主执行体
+│       │   ├── types/
+│       │   │   └── mod.rs        # 2183行：AgentRunEvent (41 种)、AgentRun/Action 等类型
+│       │   ├── agent_loop/       # ReAct 循环（AgentLoop 双轨）
+│       │   ├── action_executor/  # ActionExecutor + ToolRuntime（6 文件 ~3500 行）
+│       │   ├── reasoning/        # 推理策略（LayeredReasoner/DirectReasoner）
+│       │   ├── prompt_stack.rs   # PromptStack (10 Block 类型)
+│       │   ├── context_assembler.rs # ContextAssembler 组装策略
+│       │   ├── model_router.rs   # ModelRouter（已毕业）
+│       │   ├── proposal_engine.rs   # ProposalEngine 生成层
+│       │   ├── proposal_store.rs    # Proposal 统一持久化
+│       │   ├── proposal_generators/ # 分类 Proposal 生成器
+│       │   ├── plan_mode.rs     # PlanMode 定义
+│       │   ├── plan_executor.rs # PlanExecutor 执行引擎
+│       │   ├── plan_store.rs    # Plan 持久化
+│       │   ├── agent_spec_store.rs  # AgentSpec 存储
+│       │   ├── event_store.rs   # AgentRunEvent append-only 事件存储
+│       │   ├── compaction.rs    # 上下文压缩
+│       │   ├── memory_evidence.rs   # MemoryEvidence 信号提取
+│       │   ├── memory_service.rs    # MemoryService 检索服务
+│       │   ├── execution_facade.rs  # 执行路径收敛 facade
+│       │   ├── execution_sandbox.rs # ExecutionSandbox 治理
+│       │   ├── shell_executor.rs    # ShellExecutor（默认关闭）
+│       │   ├── sub_agent.rs     # SubAgentRuntime
+│       │   ├── store.rs         # AgentRun 持久化存储
+│       │   ├── metrics.rs       # Rollout metrics
+│       │   └── tests/           # Agent 模块测试
+│       └── builder/             # Builder 模式子模块
 │
 ├── src-tauri/                    # Tauri 应用壳
 │   ├── Cargo.toml                # Tauri 依赖 + bin 定义
@@ -148,35 +198,46 @@
 │   ├── capabilities/default.json # Tauri 权限声明
 │   └── src/
 │       ├── main.rs               # 桌面应用入口
-│       ├── lib.rs                # ⭐ 核心注册地（~3305 行，Tauri 命令注册/ChatOrchestrator 辅助函数/TauriStreamingCallback）
+│       ├── lib.rs                # ⭐ 核心注册地（3323 行，Tauri 命令注册/ChatOrchestrator 辅助函数/TauriStreamingCallback）
 │       ├── a2a_server.rs         # A2A 服务器模块
 │       ├── a2a_sidecar.rs        # A2A 侧车进程管理
-│       ├── commands/             # 138+ 命令按领域拆分为 21 个模块
+│       ├── bootstrap.rs          # 应用启动初始化
+│       ├── state.rs              # AppState 定义
+│       ├── storage.rs            # 存储路径管理
+│       ├── execution_deps.rs     # AgentLoop 依赖组装
+│       ├── errors.rs             # 错误类型定义
+│       ├── scheduler_runner.rs   # 定时任务调度器（60s 轮询）
+│       ├── test_utils.rs         # 测试工具（#[cfg(test)]）
+│       ├── commands/             # 134 命令按领域拆分为 21 个模块
 │       │   ├── mod.rs            # 模块声明入口
 │       │   ├── a2a.rs            # 7 个 A2A 命令
-│       │   ├── agent.rs          # 6 个 Agent 命令
+│       │   ├── agent.rs          # 7 个 Agent 命令（含 restore_agent_run）
 │       │   ├── agent_spec.rs     # 5 个 AgentSpec 命令
-│       │   ├── builder.rs        # 11 个 Builder 命令
-│       │   ├── calibration.rs    # 6 个 Calibration 命令
+│       │   ├── builder.rs        # 12 个 Builder 命令
+│       │   ├── calibration.rs    # 7 个 Calibration 命令
 │       │   ├── chat.rs           # 6 个 Chat 会话命令
 │       │   ├── diagnostics.rs    # 5 个诊断命令
-│       │   ├── execution.rs      # 11 个执行/工具命令
+│       │   ├── execution.rs      # 11 个执行/工具/插件/技能命令
 │       │   ├── feedback.rs       # 5 个反馈命令
 │       │   ├── life_model.rs     # 2 个 LifeModel 命令
-│       │   ├── mcp.rs            # 8 个 MCP 命令
+│       │   ├── mcp.rs            # 9 个 MCP 命令
 │       │   ├── memory.rs         # 10 个 Memory 命令
 │       │   ├── metrics.rs        # 3 个指标命令
 │       │   ├── plan.rs           # 10 个 Plan 命令
 │       │   ├── proactive.rs      # 1 个主动建议命令
 │       │   ├── proposal.rs       # 7 个 Proposal 命令
 │       │   ├── router.rs         # 1 个路由状态命令
-│       │   ├── settings.rs       # 12 个 Settings 命令
+│       │   ├── settings.rs       # 14 个 Settings 命令
 │       │   ├── state.rs          # 8 个 State 命令
 │       │   └── version.rs        # 4 个版本命令
 │       └── bin/
 │           └── a2a_server.rs     # 独立 A2A HTTP 服务器（Axum，port 8765）
 │
 ├── scripts/
+│   ├── dev.sh / dev.ps1          # 开发启动脚本
+│   ├── setup.sh / setup.ps1      # 环境初始化脚本
+│   ├── start.sh / start.ps1      # 生产构建脚本
+│   ├── startup.sh / startup.ps1  # 一体化工具
 │   └── quantize_int8.py          # ONNX INT8 量化工具
 │
 └── plans/                        # 项目规划文档
@@ -199,8 +260,8 @@
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
-| **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 138+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断、Agent、Plan、Proposal | 依赖 openlife-core 全部模块 |
-| **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
+| **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) + [`src-tauri/src/commands/`](src-tauri/src/commands/) | 134 个 `#[tauri::command]`（4 个在 lib.rs + 130 个在 21 个 commands/ 模块）：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断、Agent、Plan、Proposal、Settings、Plugins、Skills | 依赖 openlife-core 全部模块 |
+| **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，~80 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
 
 ### 目标架构主线
 
@@ -260,11 +321,11 @@ LifeModel / Memory / Audit / Snapshot 持久化
 ```
 
 关键处理节点：
-1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:391)）：用户消息 → 向量检索相关记忆 → LayeredReasoner 请求构建
-2. **三层推理**（[`LayeredReasoner::reason`](openlife-core/src/agent/reasoning/layered.rs)）：MeaningPhase（语义理解）→ StrategyPhase（JSON 策略）→ GenerationPhase（回复生成）
-3. **模型调度**（[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:71)）：根据 tool prompt 和 Ollama 可用性决定使用本地或云端模型
-4. **工具调用**（[`execute_tool_call_internal`](src-tauri/src/lib.rs:264)）：MCP 工具执行 + 隐私参数脱敏 + 审计日志
-5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:822)）：SSE 风格流式传输到前端
+1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:522), v2 在 721）：用户消息 → 向量检索/MemoryService → PrivacyEngine 脱敏 → ContextAssembler
+2. **模型调度**（[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:127)）：根据 ModelRouter / 隐私策略 / tool prompt 决定本地/云端路径
+3. **AgentLoop 执行**（[`send_message_with_agent_loop`](src-tauri/src/lib.rs:1239)）：AgentTask → AgentLoop.run() → AgentRunEvent 事件流
+4. **工具调用**（通过 [`action_executor/`](openlife-core/src/agent/action_executor/) 模块，受 ToolPermission + ExecutionSandbox 治理）
+5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:2446)）：AgentLoop 流式 → stream-message-chunk Tauri 事件
 
 > 注意：上面的数据流描述的是当前实现。目标架构会把这条链路收敛到 `AgentRun`，并让每次模型调用、上下文选择、工具调用和 LifeModel 更新都具备可查询 trace。
 
@@ -444,7 +505,7 @@ VectorStore.search(query_embedding, top_k=5)
 
 #### 5. 每日目标自动打卡流程
 
-[`try_auto_checkin_daily_goals`](src-tauri/src/lib.rs:357) 会在每次 assistant 回复后检查内容中是否提到完成了某个 daily goal 的名称，自动将 `done` 标记为 `true`。
+[`try_auto_checkin_daily_goals`](src-tauri/src/lib.rs:296) 会在每次 assistant 回复后检查内容中是否提到完成了某个 daily goal 的名称，自动将 `done` 标记为 `true`。
 
 ### 业务规则约束
 
@@ -478,11 +539,12 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 | `proposal.create` | 创建提案 | low | ✅ P1 |
 | `proposal.list` | 列出提案 | low | ✅ P1 |
 | `agent_run.lookup` | 查询运行记录 | low | ✅ P1 |
-| `snapshot.create` | 创建快照 | low | ⚠️ declarative-only（Beta 不进入 tools prompt） |
 | `tool.list_available` | 列出可用工具 | low | ✅ P1 |
 | `permission.check` | 检查权限策略 | low | ✅ P1 |
 | `permission.request` | 请求权限 | medium | ✅ P1（生成 ToolPermission Proposal） |
 | `permission.replay_action` | 重放已授权动作 | medium | ✅ P1 |
+
+> **`snapshot.create`** 在工具清单中声明为 declarative-only，不进入模型的 tools prompt。实际快照操作通过 `create_snapshot` Tauri 命令直接调用，不经过 AgentLoop 工具执行路径。
 
 #### Execution Tools（混合 P1/P2）
 
@@ -510,15 +572,19 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 
 | 变量名 | 用途 | 示例值 | 是否必须 |
 |--------|------|--------|----------|
-| `DEEPSEEK_API_KEY` | DeepSeek API Key（当前推荐试用） | `sk-xxxxxxxx` | 否（三选一） |
-| `OPENROUTER_API_KEY` | OpenRouter API Key | `sk-or-v1-xxxxxxxx` | 否（三选一） |
-| `OPENAI_API_KEY` | OpenAI API Key | `sk-xxxxxxxx` | 否（三选一） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key（当前推荐试用） | `sk-xxxxxxxx` | 否（七选一） |
+| `OPENROUTER_API_KEY` | OpenRouter API Key | `sk-or-v1-xxxxxxxx` | 否（七选一） |
+| `OPENAI_API_KEY` | OpenAI API Key | `sk-xxxxxxxx` | 否（七选一） |
+| `SILICONFLOW_API_KEY` | SiliconFlow（硅基流动）API Key | `sk-xxxxxxxx` | 否（七选一） |
+| `MOONSHOT_API_KEY` | Moonshot/Kimi API Key | `sk-xxxxxxxx` | 否（七选一） |
+| `DASHSCOPE_API_KEY` | DashScope（通义千问）API Key | `sk-xxxxxxxx` | 否（七选一） |
+| `ZHIPU_API_KEY` | 智谱 GLM API Key | `sk-xxxxxxxx` | 否（七选一） |
 | `OPENAI_API_BASE` | 自定义 API Base URL | `https://api.openai.com/v1` | 否（有默认值） |
 | `A2A_PORT` | A2A 独立服务器端口 | `8765` | 否（默认 8765） |
 | `PORT` | Vite 开发服务器端口 | `5173` | 否（默认 5173） |
 | `TAURI_DEBUG` | Tauri 调试日志开关 | `1` | 否 |
 
-> 至少配置 `DEEPSEEK_API_KEY`、`OPENROUTER_API_KEY` 或 `OPENAI_API_KEY` 之一才能使用云端模型对话。如果不配置，必须本地运行 Ollama。
+> 至少配置上述 7 个 Provider 之一的 API Key 才能使用云端模型对话。如果不配置，必须本地运行 Ollama。
 
 ### 外部服务依赖
 
@@ -528,6 +594,10 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 | **DeepSeek API** | 当前推荐云端试用 Provider | `.env` / `config.yaml` | OpenAI-compatible Provider |
 | **OpenRouter API** | 云端 LLM（多模型聚合） | `.env` / `config.yaml` | DeepSeek / OpenAI API |
 | **OpenAI API** | 云端 LLM（官方） | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
+| **SiliconFlow API** | 硅基流动云端 LLM | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
+| **Moonshot API** | Kimi 云端 LLM | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
+| **DashScope API** | 通义千问云端 LLM | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
+| **ZhiPu API** | 智谱 GLM 云端 LLM | `.env` / `config.yaml` | DeepSeek / OpenRouter API |
 | **SQLite** | 本地数据持久化 | 自动 bundled | 无需替代，零配置 |
 
 配置优先级：**环境变量 > `config.yaml` > 代码默认值**
@@ -540,8 +610,24 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `system.ollama_cache_ttl_seconds` | u64 | 10 | Ollama 模型可用性缓存 TTL |
+| `system.ollama_cache_ttl_seconds` | u64 | 10 | Ollama 模型可用性缓存 TTL（秒） |
 | `system.memory_search_top_k` | usize | 3 | Chat 流程中记忆检索数量 |
+| `system.safe_paths` | Vec\<String\> | [] | 允许 file.read 工具访问的安全目录 |
+| `system.network_policy` | NetworkPolicy | {enabled:true, default_decision:"ask"} | 网络访问策略：domain allowlist/denylist |
+| `system.calendar_ics_paths` | Vec\<String\> | [] | ICS 日历文件路径列表 |
+| `system.agent_loop_max_steps` | u32 | 4 | ReAct AgentLoop 单次最大步数 |
+| `system.agent_loop_max_tool_calls` | u32 | 6 | ReAct AgentLoop 跨步最大工具调用数 |
+| `system.agent_loop_timeout_seconds` | u64 | 90 | AgentLoop 单次执行超时（秒） |
+| `system.stale_goal_days` | i64 | 7 | Proactive Engine：目标未更新天数阈值 |
+| `system.proposal_reminder_days` | i64 | 3 | Proactive Engine：待处理提案提醒天数 |
+| `system.search_provider` | String | "duckduckgo" | Web 搜索 Provider："duckduckgo" / "brave" / "searxng" |
+| `system.search_provider_key` | String | "" | Web 搜索 Provider API Key（Brave 等） |
+| `system.searxng_url` | String | "" | SearXNG 实例 URL（使用 searxng Provider 时） |
+| `system.execution_sandbox` | ExecutionSandboxConfig | {bash_enabled:false, ...} | P9 执行沙箱策略配置 |
+| `system.execution_sandbox.bash_enabled` | bool | false | 是否启用 Shell 执行（默认关闭，需多方授权） |
+| `system.execution_sandbox.command_allowlist` | Vec\<String\> | [] | 允许执行的命令白名单 |
+| `system.execution_sandbox.timeout_ms` | u64 | 30000 | Shell 命令超时（毫秒） |
+| `system.execution_sandbox.max_output_bytes` | usize | 1048576 | Shell 命令输出最大字节数（1MB） |
 
 ### 启动和测试命令
 
@@ -671,13 +757,13 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 4. ~~**Proposal 统一**：Builder、Calibration、Evolution、Memory 更新应统一走 Proposal/Confirmation，而不是各自实现审批流。~~ ✅ 已完成（Builder/Calibration/Chat/Memory/Tool Permission MVP 已接入 Proposal 流）
 5. ~~**LayeredReasoner / ReAct 边界重构**：三层推理总线应纳入 AgentRuntime 或成为其中一种策略。~~ ✅ 已完成（LayeredReasoner 已作为 AgentRuntime 的默认推理策略，通过 ReasoningStrategy trait 注册）
 6. ~~**前端信息架构重构**：从多页面工具箱收敛为 Workspace / Agent / LifeModel / Memory / Runs / Settings。~~ ✅ 已完成（Gate 7：导航收敛为 Chat/Review/Runs/Settings）
-7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
+7. ~~**前端 ErrorBoundary 过于简单**~~ ✅ 已完成（Sprint 15：更名为 ErrorBanner，支持重试按钮 + 错误详情，`components/ErrorBanner.tsx`）
 8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试 + 10 个集成测试）
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
-10. **vNext AgentRunEvent**：当前 AgentRun/status updates/actions/observations 已存在，但还缺 append-only `AgentRunEvent` 作为统一 runtime trace。
+10. ~~**vNext AgentRunEvent**~~ ✅ 已完成（AgentRunEvent (41 种事件) + append-only event_store.rs，`agent/types/mod.rs` 2183 行）
 11. **执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。
 12. ~~**PromptStack 缺失**~~ ✅ 已完成（1329 行，10 Block 类型 + 8 PromptBlock 工厂 + 2 PromptStack 工厂，llm/scheduler 已迁移到 PromptStack 内部）
-13. **MemoryEvidence 缺失**：Memory 已可写入/检索/归档，但还不是 LifeModel evolution 的正式证据层。
+13. ~~**MemoryEvidence 缺失**~~ ✅ 已完成（`agent/memory_evidence.rs` 实现 RepeatedPreference/RecurringGoal/CapabilitySignal/StateTrend/Contradiction/ValueSignal 六种信号提取）
 14. **ActionExecutor hardening**：继续强化 tool metadata、declarative-only 过滤、permission policy、observation/event 记录和 replay re-check。
 
 ---
@@ -696,7 +782,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 ### 测试数据
 
-- **前端 Mock**：[`frontend/src/test/mocks/tauri.ts`](frontend/src/test/mocks/tauri.ts) 提供完整的 Tauri `invoke` mock，覆盖约 130+ 个命令。新增 command 时**必须同步更新此 mock**，否则组件测试会失败。
+- **前端 Mock**：[`frontend/src/test/mocks/tauri.ts`](frontend/src/test/mocks/tauri.ts) 提供完整的 Tauri `invoke` mock，覆盖约 134 个命令。新增 command 时**必须同步更新此 mock**，否则组件测试会失败。
 - **Rust 测试数据**：使用 `tempfile::TempDir` 创建临时 SQLite 数据库，每个测试独立隔离。
 - **LifeModel 测试数据**：YAML 序列化/反序列化测试使用内存中的字符串，无需外部文件。
 
@@ -773,7 +859,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-04-20 | 初始版本：完成项目结构、技术栈、启动脚本、环境配置、业务逻辑、测试策略 | AI Agent |
 | 2026-04-20 | 新增完整启动脚本集合（setup/dev/start/startup + Makefile） | AI Agent |
 | 2026-04-20 | 更新 AGENTS.md 为完整模板格式（命名约定、代码风格、业务规则、已知问题、测试策略） | AI Agent |
-| 2026-04-22 | 拆分 src-tauri/src/lib.rs：138+ 命令按领域拆分为 21 个 commands/ 模块，lib.rs 保留共享类型和核心聊天命令 | AI Agent |
+| 2026-04-22 | 拆分 src-tauri/src/lib.rs：命令按领域拆分为 21 个 commands/ 模块，lib.rs 保留共享类型和核心聊天命令 | AI Agent |
 | 2026-04-22 | 清理未使用 import，cargo check 零警告零错误；前端 86 测试 + Rust 129 测试全部通过 | AI Agent |
 | 2026-04-24 | 将项目上下文从“桌面 AI 伴侣应用”更新为“本地优先个人 Agent 框架”，新增 Agent Runtime、AgentRun、Proposal、ModelRouter 作为后续开发主线 | AI Agent |
 | 2026-04-26 | Proposal/Confirmation 统一层收敛完成：Builder 和 Calibration 的 LifeModel 更新默认走 Proposal → Review Center → 用户确认 → Snapshot → Apply 链路；AgentRun ↔ Proposal 双向关联溯源；Safe Mode 限制 Proposal 操作；Review Center 强化（分类/风险筛选/编辑/批量/空状态/失败态/Dashboard 提醒） | AI Agent |
@@ -805,6 +891,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-08 | **P11 开发前准备**：P10 Frontend Agent Workspace 已验收；新增 `openlife_vnext_p11_task_specs.md`，将 Beta Trial Readiness 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-08 | **P12 开发前准备**：P11/P11.1 Beta Trial Readiness 已验收；新增 `openlife_vnext_p12_task_specs.md` 与 `openlife_vnext_p12_beta_rc_acceptance_report.md`，将 Beta Release Candidate and User Trial Delivery 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-10 | **P12 Beta RC 验收通过 + Post-Beta 完整计划**：`make ci` 全绿 799 测试；AGENTS.md 阶段标记更新为 P12 已验收 + Post-Beta 架构稳固；新增 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md) 完整发展计划（Phase 1-4：P12交付收尾→Post-Beta稳固→生产就绪→v1.0公开）；文档优先级列表更新 | AI Agent |
+| 2026-05-11 | **P0 快速止血**：修复 `current_dir().unwrap()` 崩溃（三级回退链）；PerformanceObserver 泄漏修复 + `cleanupPerformanceMonitoring`；uuid 1.0→1.6 统一；AGENTS.md 全面事实审计修复（目录树补全 agent/ 27 文件、命令计数 138+→134、数据流行号修正、SystemConfig 表 2→18 字段、Tool Taxonomy 移除 snapshot.create P1、已知问题 7/10/13 标记已修复、环境变量表 7 Provider 全列） | AI Agent |
 
 ---
 
