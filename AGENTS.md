@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿 806 测试）**。P0-P12 全部 vNext 原语已完成代码实现：AgentRunEvent (41 种事件)、PromptStack (10 种 Block)、ActionExecutor (ToolRuntime 实现体)/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。下一阶段参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。`make ci` 为发布门控。
+- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿）**。P0-P12 全部 vNext 原语已完成代码实现：AgentRunEvent (41 种事件)、PromptStack (10 种 Block)、ActionExecutor (ToolRuntime 实现体)/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。下一阶段参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级

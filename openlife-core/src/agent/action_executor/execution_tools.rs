@@ -10,8 +10,8 @@ use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
 
-use super::ActionExecutionContext;
 use super::AgentActionRequest;
+use super::BorrowedActionContext;
 
 impl super::ActionExecutor {
     /// Execute an Execution tool (file.read, web.fetch, etc.).
@@ -19,7 +19,7 @@ impl super::ActionExecutor {
         &self,
         tool_name: &str,
         args: &Value,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
         request: &AgentActionRequest,
     ) -> Result<ToolCallInternalResult> {
         // Check network policy for web tools

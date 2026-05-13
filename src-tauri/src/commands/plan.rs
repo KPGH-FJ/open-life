@@ -213,48 +213,36 @@ pub async fn execute_agent_plan(
         .as_ref()
         .map(|es| (**es).clone());
 
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let privacy_engine = state.privacy_engine.lock().await;
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     let network_policy = cfg.system.network_policy.clone();
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &safe_paths,
+    );
     drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    let memory_store = state.memory_store.lock().await;
-    let proposal_store_opt = state.proposal_store.clone();
-    let proposal_store_guard = if let Some(ref store) = proposal_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
-    };
-    let agent_run_store_opt = state.agent_run_store.clone();
-    let agent_run_store_guard = if let Some(ref store) = agent_run_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
-    };
 
-    let ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        calendar_ics_paths: &calendar_ics_paths,
-        life_model: Some(&life_model),
-        memory_store: Some(&memory_store),
-        proposal_store: proposal_store_guard.as_deref(),
-        agent_run_store: agent_run_store_guard.as_deref(),
-        network_policy: Some(&network_policy),
-        event_store: event_store.clone(),
-        execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let ctx = crate::execution_deps::assemble_action_context(
+        state.mcp_registry.clone(),
+        state.tool_permission_store.clone(),
+        state.mcp_audit_store.clone(),
+        state.privacy_engine.clone(),
+        safe_paths.clone(),
+        Some(life_model.clone()),
+        Some(state.memory_store.clone()),
+        calendar_ics_paths.clone(),
+        network_policy.clone(),
+        execution_sandbox,
+        openlife_core::agent::types::AgentSpec::default_main_spec(),
+        state.proposal_store.clone(),
+        state.agent_run_store.clone(),
+        event_store.clone(),
+    );
 
     // Resolve stored AgentSpec: plan-bound spec first, then stored default.
     let agent_spec = state
@@ -270,7 +258,7 @@ pub async fn execute_agent_plan(
                 AppError::permission(e.to_string())
             }
             _ => AppError::internal(e.to_string()),
-        })?; // execute_agent_plan spec resolution
+        })?;
 
     let plan_is_confirmed = matches!(plan.status, openlife_core::agent::PlanStatus::Confirmed);
     let result = run_plan_execution(
@@ -285,10 +273,6 @@ pub async fn execute_agent_plan(
         plan_is_confirmed,
     )
     .await;
-
-    drop(proposal_store_guard);
-    drop(agent_run_store_guard);
-    drop(memory_store);
 
     Ok(result)
 }
@@ -353,34 +337,38 @@ pub async fn retry_agent_plan(
         .as_ref()
         .map(|es| (**es).clone());
 
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let privacy_engine = state.privacy_engine.lock().await;
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     let network_policy = cfg.system.network_policy.clone();
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &safe_paths,
+    );
     drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    let memory_store = state.memory_store.lock().await;
-    let proposal_store_opt = state.proposal_store.clone();
-    let proposal_store_guard = if let Some(ref store) = proposal_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
-    };
-    let agent_run_store_opt = state.agent_run_store.clone();
-    let agent_run_store_guard = if let Some(ref store) = agent_run_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
-    };
+
+    let ctx = crate::execution_deps::assemble_action_context(
+        state.mcp_registry.clone(),
+        state.tool_permission_store.clone(),
+        state.mcp_audit_store.clone(),
+        state.privacy_engine.clone(),
+        safe_paths.clone(),
+        Some(life_model.clone()),
+        Some(state.memory_store.clone()),
+        calendar_ics_paths.clone(),
+        network_policy.clone(),
+        execution_sandbox,
+        openlife_core::agent::types::AgentSpec::default_main_spec(),
+        state.proposal_store.clone(),
+        state.agent_run_store.clone(),
+        event_store.clone(),
+    );
 
     // Resolve AgentSpec BEFORE mutating plan state.
-    // If spec is missing or invalid, return error and leave plan unchanged.
     let agent_spec = state
         .agent_spec_store
         .lock()
@@ -395,23 +383,6 @@ pub async fn retry_agent_plan(
             }
             _ => AppError::internal(e.to_string()),
         })?;
-
-    let ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        calendar_ics_paths: &calendar_ics_paths,
-        life_model: Some(&life_model),
-        memory_store: Some(&memory_store),
-        proposal_store: proposal_store_guard.as_deref(),
-        agent_run_store: agent_run_store_guard.as_deref(),
-        network_policy: Some(&network_policy),
-        event_store: event_store.clone(),
-        execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
 
     // Spec resolved, context built — now atomically reset plan for retry.
     plan.retry();
@@ -442,10 +413,6 @@ pub async fn retry_agent_plan(
     )
     .await;
     result.operation = "retry".to_string();
-
-    drop(proposal_store_guard);
-    drop(agent_run_store_guard);
-    drop(memory_store);
 
     Ok(result)
 }
@@ -539,7 +506,7 @@ async fn run_plan_execution(
     run_id: &str,
     plan_store_arc: Arc<tokio::sync::Mutex<openlife_core::agent::PlanStore>>,
     event_store: Option<openlife_core::agent::event_store::AgentRunEventStore>,
-    ctx: openlife_core::agent::ActionExecutionContext<'_>,
+    ctx: openlife_core::agent::ActionContext,
     app_handle: &tauri::AppHandle,
     review_gate: &impl openlife_core::agent::PlanReviewGate,
     agent_spec: openlife_core::agent::AgentSpec,
@@ -574,7 +541,8 @@ async fn run_plan_execution(
                     step_index: step.index,
                 };
 
-                match action_executor.execute(request, &ctx) {
+                let handle = tokio::runtime::Handle::current();
+                match handle.block_on(action_executor.execute(request, &ctx)) {
                     Ok(result) => {
                         let success = matches!(
                             result.status,

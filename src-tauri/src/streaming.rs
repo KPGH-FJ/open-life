@@ -675,33 +675,20 @@ async fn start_stream_message_with_agent_loop(
     );
 
     let loop_result = {
-        let (reg, audit) = state.get_mcp_state().await;
-        let permission_store = state.tool_permission_store.lock().await;
-        let memory_store = state.memory_store.lock().await;
-        let proposal_store_guard = if let Some(ref store) = state.proposal_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let action_ctx = execution_deps::assemble_action_ctx(
-            &reg,
-            &permission_store,
-            &audit,
-            &privacy_engine,
-            &safe_paths,
-            &life_model,
-            &memory_store,
-            &calendar_ics_paths,
-            &network_policy,
-            &execution_sandbox,
-            &agent_spec,
-            proposal_store_guard.as_deref(),
-            agent_run_store_guard.as_deref(),
+        let action_ctx = execution_deps::assemble_action_context(
+            state.mcp_registry.clone(),
+            state.tool_permission_store.clone(),
+            state.mcp_audit_store.clone(),
+            state.privacy_engine.clone(),
+            safe_paths.clone(),
+            Some(life_model.clone()),
+            Some(state.memory_store.clone()),
+            calendar_ics_paths.clone(),
+            network_policy.clone(),
+            execution_sandbox.clone(),
+            agent_spec.clone(),
+            state.proposal_store.clone(),
+            state.agent_run_store.clone(),
             state
                 .agent_run_event_store
                 .as_ref()

@@ -1,4 +1,4 @@
-use openlife_core::agent::action_executor::ActionExecutionContext;
+use openlife_core::agent::action_executor::ActionContext;
 use openlife_core::agent::execution_sandbox::ExecutionSandbox;
 use openlife_core::config::AppConfig;
 use openlife_core::life_model::LifeModel;
@@ -76,44 +76,42 @@ pub fn build_agent_task(
     }
 }
 
-/// Assemble ActionExecutionContext from pre-acquired locks.
-/// Caller must hold all necessary lock guards alive.
+/// Assemble an owned `ActionContext` from `Arc` clones of global stores.
+/// No locks are held across this call — all handles are cloned, and the
+/// resulting context is safe to pass across `.await` points.
 #[allow(clippy::too_many_arguments)]
-pub fn assemble_action_ctx<'a>(
-    reg: &'a openlife_core::mcp::McpRegistry,
-    permission_store: &'a openlife_core::tool_permissions::ToolPermissionStore,
-    audit: &'a openlife_core::mcp_audit::McpAuditStore,
-    privacy_engine: &'a PrivacyEngine,
-    safe_paths: &'a [String],
-    life_model: &'a LifeModel,
-    memory_store: &'a openlife_core::memory::MemoryStore,
-    calendar_ics_paths: &'a [String],
-    network_policy: &'a openlife_core::config::NetworkPolicy,
-    execution_sandbox: &'a ExecutionSandbox,
-    agent_spec: &'a openlife_core::agent::types::AgentSpec,
-    proposal_store: Option<&'a openlife_core::agent::ProposalStore>,
-    agent_run_store: Option<&'a openlife_core::agent::AgentRunStore>,
+pub fn assemble_action_context(
+    mcp_registry: Arc<tokio::sync::Mutex<openlife_core::mcp::McpRegistry>>,
+    permission_store: Arc<tokio::sync::Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
+    audit_store: Arc<tokio::sync::Mutex<openlife_core::mcp_audit::McpAuditStore>>,
+    privacy_engine: Arc<tokio::sync::Mutex<PrivacyEngine>>,
+    safe_paths: Vec<String>,
+    life_model: Option<LifeModel>,
+    memory_store: Option<Arc<tokio::sync::Mutex<openlife_core::memory::MemoryStore>>>,
+    calendar_ics_paths: Vec<String>,
+    network_policy: openlife_core::config::NetworkPolicy,
+    execution_sandbox: ExecutionSandbox,
+    agent_spec: openlife_core::agent::types::AgentSpec,
+    proposal_store: Option<Arc<tokio::sync::Mutex<openlife_core::agent::ProposalStore>>>,
+    agent_run_store: Option<Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>>,
     event_store: Option<openlife_core::agent::event_store::AgentRunEventStore>,
-) -> ActionExecutionContext<'a> {
-    let mut ctx =
-        ActionExecutionContext::new(reg, permission_store, audit, privacy_engine, safe_paths)
-            .with_life_model(life_model)
-            .with_memory_store(memory_store)
-            .with_calendar_ics_paths(calendar_ics_paths)
-            .with_network_policy(network_policy)
-            .with_execution_sandbox(execution_sandbox)
-            .with_agent_spec(agent_spec);
-
-    if let Some(store) = proposal_store {
-        ctx = ctx.with_proposal_store(store);
+) -> ActionContext {
+    ActionContext {
+        registry: mcp_registry,
+        permission_store,
+        audit_store,
+        privacy_engine,
+        safe_paths,
+        life_model,
+        memory_store,
+        proposal_store,
+        agent_run_store,
+        event_store,
+        network_policy: Some(network_policy),
+        calendar_ics_paths,
+        execution_sandbox,
+        agent_spec: Some(agent_spec),
     }
-    if let Some(store) = agent_run_store {
-        ctx = ctx.with_agent_run_store(store);
-    }
-    if let Some(es) = event_store {
-        ctx = ctx.with_event_store(es);
-    }
-    ctx
 }
 
 #[cfg(test)]
@@ -162,93 +160,5 @@ mod tests {
         let env = resolve_execution_env(&cfg);
         assert!(!env.agent_spec.id.is_empty());
         assert!(env.prompt_registry.get("base_system").is_some());
-        assert!(
-            !env.execution_sandbox.safe_paths.is_empty()
-                || env.execution_sandbox.safe_paths.is_empty()
-        );
-        assert!(!env.network_policy.default_decision.is_empty());
-    }
-
-    #[test]
-    fn test_assemble_action_ctx_with_all_fields() {
-        let reg = openlife_core::mcp::McpRegistry::new();
-        let ps = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        let audit_path = tempfile::tempdir().unwrap().path().join("test_audit.db");
-        let audit = openlife_core::mcp_audit::McpAuditStore::new(audit_path);
-        let pe = PrivacyEngine::new();
-        let safe_paths: Vec<String> = vec!["/tmp".into()];
-        let lm = LifeModel::default();
-        let mem = openlife_core::memory::MemoryStore::new(
-            tempfile::tempdir().unwrap().path().join("test_mem.db"),
-        )
-        .unwrap();
-        let ics_paths: Vec<String> = vec![];
-        let nw = openlife_core::config::NetworkPolicy::default();
-        let sandbox = ExecutionSandbox::default();
-        let spec = openlife_core::agent::types::AgentSpec::default_main_spec();
-
-        let ctx = assemble_action_ctx(
-            &reg,
-            &ps,
-            &audit,
-            &pe,
-            &safe_paths,
-            &lm,
-            &mem,
-            &ics_paths,
-            &nw,
-            &sandbox,
-            &spec,
-            None,
-            None,
-            None,
-        );
-
-        assert_eq!(ctx.safe_paths.len(), 1);
-        assert_eq!(ctx.safe_paths[0], "/tmp");
-        assert!(ctx.life_model.is_some());
-        assert!(ctx.memory_store.is_some());
-        assert!(ctx.agent_spec.is_some());
-        assert_eq!(ctx.agent_spec.unwrap().id, spec.id);
-    }
-
-    #[test]
-    fn test_assemble_action_ctx_with_none_optionals_has_no_store() {
-        let reg = openlife_core::mcp::McpRegistry::new();
-        let ps = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        let audit_path = tempfile::tempdir().unwrap().path().join("test_audit2.db");
-        let audit = openlife_core::mcp_audit::McpAuditStore::new(audit_path);
-        let pe = PrivacyEngine::new();
-        let safe_paths: Vec<String> = vec![];
-        let lm = LifeModel::default();
-        let mem = openlife_core::memory::MemoryStore::new(
-            tempfile::tempdir().unwrap().path().join("test_mem2.db"),
-        )
-        .unwrap();
-        let ics_paths: Vec<String> = vec![];
-        let nw = openlife_core::config::NetworkPolicy::default();
-        let sandbox = ExecutionSandbox::default();
-        let spec = openlife_core::agent::types::AgentSpec::default_main_spec();
-
-        let ctx = assemble_action_ctx(
-            &reg,
-            &ps,
-            &audit,
-            &pe,
-            &safe_paths,
-            &lm,
-            &mem,
-            &ics_paths,
-            &nw,
-            &sandbox,
-            &spec,
-            None,
-            None,
-            None,
-        );
-
-        assert!(ctx.proposal_store.is_none());
-        assert!(ctx.agent_run_store.is_none());
-        assert!(ctx.event_store.is_none());
     }
 }

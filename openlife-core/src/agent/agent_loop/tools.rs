@@ -5,9 +5,7 @@ use super::streaming::StreamingCallback;
 use super::types::AgentLoopResult;
 use super::types::StepResult;
 use super::AgentLoop;
-use crate::agent::action_executor::{
-    ActionExecutionContext, ActionExecutionStatus, AgentActionRequest,
-};
+use crate::agent::action_executor::{ActionContext, ActionExecutionStatus, AgentActionRequest};
 use crate::agent::types::AgentAction;
 use crate::agent::types::{
     AgentEventActor, AgentLoopPhase, AgentLoopStatusUpdate, AgentObservation, AgentRun,
@@ -40,7 +38,7 @@ impl AgentLoop {
     pub(crate) async fn execute_tool_batch(
         &self,
         tool_actions: &[AgentActionRequest],
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
         callback: &Option<Arc<dyn StreamingCallback>>,
@@ -102,6 +100,7 @@ impl AgentLoop {
             let exec_result = match self
                 .action_executor
                 .execute(action_request.clone(), action_ctx)
+                .await
             {
                 Ok(r) => {
                     let is_success = r.status == ActionExecutionStatus::Succeeded

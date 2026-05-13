@@ -325,7 +325,7 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
     }
 
     let config_path = data_dir.join("config.yaml");
-    let (config, config_warning) = AppConfig::load_or_default_with_warning(&config_path);
+    let (mut config, config_warning) = AppConfig::load_or_default_with_warning(&config_path);
     if let Some(warning) = config_warning {
         startup_warnings.borrow_mut().push(warning);
     }
@@ -337,10 +337,20 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
     // Migrate API key to OS keyring for secure storage
     openlife_core::keyring_store::init_native_store();
     if !config.llm.openai_key.is_empty() {
-        openlife_core::keyring_store::migrate_to_keyring(
+        let migrated = openlife_core::keyring_store::migrate_to_keyring(
             &config.llm.provider,
             &config.llm.openai_key,
         );
+        if migrated {
+            // Clear the key from config so it's not persisted to disk
+            config.llm.openai_key.clear();
+            if let Err(e) = config.save(&config_path) {
+                startup_warnings.borrow_mut().push(format!(
+                    "API key migrated to keyring, but failed to clear from config.yaml: {}",
+                    e
+                ));
+            }
+        }
     }
 
     // Initialize web search provider configuration

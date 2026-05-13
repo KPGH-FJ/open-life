@@ -1,16 +1,20 @@
 use axum::{
     extract::State,
+    http::HeaderMap,
     routing::{get, post},
     Json, Router,
 };
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::privacy::PrivacyEngine;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 struct AppState {
     life_model_manager: LifeModelManager,
     privacy_engine: PrivacyEngine,
+    bearer_token: String,
+    instance_id: String,
 }
 
 #[tokio::main]
@@ -19,6 +23,10 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8765);
+
+    let bearer_token = std::env::var("A2A_BEARER_TOKEN").unwrap_or_default();
+    let instance_id =
+        std::env::var("A2A_INSTANCE_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
 
     let data_dir = dirs::data_dir()
         .map(|d| d.join("ai.openlife.desktop"))
@@ -36,15 +44,26 @@ async fn main() {
     let state = Arc::new(AppState {
         life_model_manager,
         privacy_engine,
+        bearer_token,
+        instance_id,
     });
 
     let card = A2AServerHandler::default_agent_card(port, &life_model);
+    let card = {
+        let mut c = card;
+        c.authentication = Some(openlife_core::a2a::AgentAuthentication {
+            schemes: vec!["bearer".to_string()],
+            credentials: None,
+        });
+        c
+    };
     let app = Router::new()
         .route(
             "/agent.json",
             get(move || async move { Json(card.clone()) }),
         )
         .route("/tasks/send", post(send_task))
+        .route("/health", get(health_handler))
         .with_state(state);
 
     let bind_addr = format!("127.0.0.1:{}", port);
@@ -84,8 +103,23 @@ async fn main() {
 
 async fn send_task(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<SendTaskRequest>,
 ) -> Result<Json<SendTaskResponse>, axum::http::StatusCode> {
+    // Validate bearer token
+    if !state.bearer_token.is_empty() {
+        let auth_header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !auth_header
+            .strip_prefix("Bearer ")
+            .is_some_and(|t| t == state.bearer_token)
+        {
+            return Err(axum::http::StatusCode::UNAUTHORIZED);
+        }
+    }
+
     let life_model = state
         .life_model_manager
         .load()
@@ -96,4 +130,20 @@ async fn send_task(
     };
     let resp = handler.handle_task(req);
     Ok(Json(resp))
+}
+
+async fn health_handler(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let challenge = params.get("challenge").cloned().unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(state.bearer_token.as_bytes());
+    hasher.update(challenge.as_bytes());
+    let proof = format!("{:x}", hasher.finalize());
+    Ok(Json(serde_json::json!({
+        "instance_id": state.instance_id,
+        "proof": proof,
+        "status": "ok"
+    })))
 }

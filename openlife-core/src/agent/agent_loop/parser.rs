@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::types::ParsedAgentReply;
 use super::AgentLoop;
-use crate::agent::action_executor::{ActionExecutionContext, AgentActionRequest};
+use crate::agent::action_executor::{ActionContext, AgentActionRequest};
 use crate::agent::types::AgentRun;
 
 /// Extract JSON object from text.
@@ -19,7 +19,7 @@ impl AgentLoop {
     pub fn parse_tool_calls(
         &self,
         reply: &str,
-        _action_ctx: &ActionExecutionContext<'_>,
+        _action_ctx: &ActionContext,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<Vec<AgentActionRequest>> {
@@ -31,7 +31,7 @@ impl AgentLoop {
     pub(crate) fn parse_agent_reply(
         &self,
         reply: &str,
-        _action_ctx: &ActionExecutionContext<'_>,
+        _action_ctx: &ActionContext,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<ParsedAgentReply> {

@@ -16,13 +16,15 @@ use ring::digest::{Context as DigestContext, SHA256};
 /// Key management mode for MCP audit encryption.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum KeyMode {
-    /// Derive key from a fixed app secret (default, backward-compatible)
-    #[default]
+    /// Derive key from a fixed app secret (legacy, backward-compatible)
     Derived,
     /// User-provided passphrase (more secure, user-controlled)
     Passphrase,
     /// Environment variable sourced key
     Env,
+    /// Per-installation random key stored in app data (default for new installs)
+    #[default]
+    PerInstall,
 }
 
 /// Key management configuration for MCP audit logs.
@@ -41,9 +43,12 @@ pub struct AuditKeyConfig {
 
 impl Default for AuditKeyConfig {
     fn default() -> Self {
+        use rand::RngCore;
+        let mut random_key = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut random_key);
         Self {
-            mode: KeyMode::Derived,
-            salt_b64: None,
+            mode: KeyMode::PerInstall,
+            salt_b64: Some(general_purpose::STANDARD.encode(random_key)),
             env_var: None,
             epoch: 0,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -137,6 +142,36 @@ impl McpAuditStore {
                 let digest = context.finish();
                 let mut key_arr = [0u8; 32];
                 key_arr.copy_from_slice(digest.as_ref());
+                key_arr
+            }
+            KeyMode::PerInstall => {
+                // Read per-install key from salt_b64; generate random if missing
+                let key_bytes = config
+                    .salt_b64
+                    .as_ref()
+                    .and_then(|s| {
+                        let decoded = general_purpose::STANDARD.decode(s).ok()?;
+                        (decoded.len() == 32).then_some(decoded)
+                    })
+                    .unwrap_or_else(|| {
+                        // Generate a random 32-byte key as fallback (caller should
+                        // have persisted a proper per-install key via keyring).
+                        use rand::RngCore;
+                        let mut random_key = [0u8; 32];
+                        rand::thread_rng().fill_bytes(&mut random_key);
+                        random_key.to_vec()
+                    });
+                let mut key_arr = [0u8; 32];
+                if key_bytes.len() == 32 {
+                    key_arr.copy_from_slice(&key_bytes);
+                } else {
+                    // Fallback: hash the salt
+                    let mut context = DigestContext::new(&SHA256);
+                    context.update(&key_bytes);
+                    context.update(b"openlife_mcp_per_install_v1");
+                    let digest = context.finish();
+                    key_arr.copy_from_slice(digest.as_ref());
+                }
                 key_arr
             }
             KeyMode::Passphrase => {

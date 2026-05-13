@@ -5,10 +5,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex;
 
 /// MCP Tool definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,22 +50,68 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-/// MCP Client using Stdio transport
+/// MCP Client using async tokio::process for timeout-safe transport.
 pub struct McpClient {
     child: Arc<Mutex<Child>>,
     request_id: Arc<AtomicU64>,
     pub command: String,
     pub args: Vec<String>,
+    pub timeout: Duration,
 }
 
 impl McpClient {
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Send an MCP request (write + flush) with timeout.
+    async fn send_request(
+        stdin: &mut tokio::process::ChildStdin,
+        req: &JsonRpcRequest,
+    ) -> Result<()> {
+        let json = serde_json::to_string(req)?;
+        stdin
+            .write_all(format!("{}\n", json).as_bytes())
+            .await
+            .context("mcp write failed")?;
+        stdin.flush().await.context("mcp flush failed")?;
+        Ok(())
+    }
+
+    /// Read a line from the child's stdout with timeout.
+    async fn read_response_line(child: &Arc<Mutex<Child>>, timeout: Duration) -> Result<String> {
+        let line_fut = async {
+            let mut guard = child.lock().await;
+            let stdout = guard.stdout.as_mut().context("stdout unavailable")?;
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .await
+                .context("mcp read_line failed")?;
+            Ok(line)
+        };
+
+        match tokio::time::timeout(timeout, line_fut).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // Kill the child on timeout
+                if let Ok(mut guard) = child.try_lock() {
+                    let _ = guard.kill().await;
+                }
+                Err(anyhow::anyhow!(
+                    "MCP operation timed out after {} seconds",
+                    timeout.as_secs()
+                ))
+            }
+        }
+    }
+
     /// Start an MCP server subprocess and create a client
-    pub fn new(command: &str, args: &[&str], env: &HashMap<String, String>) -> Result<Self> {
+    pub async fn new(command: &str, args: &[&str], env: &HashMap<String, String>) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit());
         for (k, v) in env {
             cmd.env(k, v);
         }
@@ -71,7 +119,7 @@ impl McpClient {
             .spawn()
             .with_context(|| format!("failed to spawn MCP server: {}", command))?;
 
-        // Initialize the server
+        // Initialize with timeout
         {
             let stdin = child.stdin.as_mut().context("failed to get stdin")?;
             let init_req = JsonRpcRequest {
@@ -84,33 +132,21 @@ impl McpClient {
                     "clientInfo": { "name": "openlife", "version": "0.1.0" }
                 })),
             };
-            Self::send_request_raw(stdin, &init_req)?;
+            Self::send_request(stdin, &init_req).await?;
         }
 
-        // Read initialization response (consume it)
-        {
-            let stdout = child.stdout.as_mut().context("failed to get stdout")?;
-            let mut reader = BufReader::new(stdout);
-            let mut line = String::new();
-            reader
-                .read_line(&mut line)
-                .context("failed to read init response")?;
-            // We could parse and validate, but for now we just consume
-        }
-
-        Ok(Self {
+        let client = Self {
             child: Arc::new(Mutex::new(child)),
             request_id: Arc::new(AtomicU64::new(1)),
             command: command.to_string(),
             args: args.iter().map(|s| s.to_string()).collect(),
-        })
-    }
+            timeout: Self::DEFAULT_TIMEOUT,
+        };
 
-    fn send_request_raw(stdin: &mut std::process::ChildStdin, req: &JsonRpcRequest) -> Result<()> {
-        let json = serde_json::to_string(req)?;
-        writeln!(stdin, "{}", json)?;
-        stdin.flush()?;
-        Ok(())
+        // Read init response with timeout
+        Self::read_response_line(&client.child, Self::DEFAULT_TIMEOUT).await?;
+
+        Ok(client)
     }
 
     fn next_id(&self) -> u64 {
@@ -118,29 +154,23 @@ impl McpClient {
     }
 
     /// List available tools from the MCP server
-    pub fn list_tools(&self) -> Result<Vec<Tool>> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
-        let id = self.next_id();
+    pub async fn list_tools(&self) -> Result<Vec<Tool>> {
+        let req_id = self.next_id();
+        {
+            let mut guard = self.child.lock().await;
+            let stdin = guard.stdin.as_mut().context("stdin unavailable")?;
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: req_id,
+                method: "tools/list".into(),
+                params: None,
+            };
+            Self::send_request(stdin, &req).await?;
+        }
 
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id,
-            method: "tools/list".into(),
-            params: None,
-        };
-
-        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
-        Self::send_request_raw(stdin, &req)?;
-
-        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .context("failed to read response")?;
+        let line = Self::read_response_line(&self.child, self.timeout)
+            .await
+            .context("MCP list_tools timed out")?;
 
         let resp: JsonRpcResponse = serde_json::from_str(&line)
             .with_context(|| format!("invalid JSON response: {}", line))?;
@@ -159,32 +189,26 @@ impl McpClient {
     }
 
     /// Call a tool with the given arguments
-    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mcp child mutex poison: {}", e))?;
-        let id = self.next_id();
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
+        let req_id = self.next_id();
+        {
+            let mut guard = self.child.lock().await;
+            let stdin = guard.stdin.as_mut().context("stdin unavailable")?;
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".into(),
+                id: req_id,
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({
+                    "name": name,
+                    "arguments": arguments
+                })),
+            };
+            Self::send_request(stdin, &req).await?;
+        }
 
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".into(),
-            id,
-            method: "tools/call".into(),
-            params: Some(serde_json::json!({
-                "name": name,
-                "arguments": arguments
-            })),
-        };
-
-        let stdin = child.stdin.as_mut().context("stdin unavailable")?;
-        Self::send_request_raw(stdin, &req)?;
-
-        let stdout = child.stdout.as_mut().context("stdout unavailable")?;
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .context("failed to read response")?;
+        let line = Self::read_response_line(&self.child, self.timeout)
+            .await
+            .context("MCP call_tool timed out")?;
 
         let resp: JsonRpcResponse = serde_json::from_str(&line)
             .with_context(|| format!("invalid JSON response: {}", line))?;
@@ -193,7 +217,6 @@ impl McpClient {
             return Err(anyhow::anyhow!("MCP error {}: {}", err.code, err.message));
         }
 
-        // Extract content from result
         let content = resp
             .result
             .and_then(|r| r.get("content").cloned())
@@ -212,9 +235,12 @@ impl McpClient {
 
 impl Drop for McpClient {
     fn drop(&mut self) {
-        if let Ok(mut child) = self.child.lock() {
-            let _ = child.kill();
-        }
+        let child = self.child.clone();
+        tokio::task::spawn(async move {
+            if let Ok(mut guard) = child.try_lock() {
+                let _ = guard.kill().await;
+            }
+        });
     }
 }
 
@@ -737,27 +763,28 @@ impl McpRegistry {
     }
 
     /// Register and start an MCP server
-    pub fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
+    pub async fn register(&mut self, name: &str, command: &str, args: &[&str]) -> Result<()> {
         self.register_with_env(name, command, args, &HashMap::new())
+            .await
     }
 
     /// Register and start an MCP server with environment variables.
-    pub fn register_with_env(
+    pub async fn register_with_env(
         &mut self,
         name: &str,
         command: &str,
         args: &[&str],
         env: &HashMap<String, String>,
     ) -> Result<()> {
-        let client = McpClient::new(command, args, env)?;
-        let tools = client.list_tools().unwrap_or_default();
+        let client = McpClient::new(command, args, env).await?;
+        let tools = client.list_tools().await.unwrap_or_default();
         self.tools_cache.extend(tools);
         self.clients.insert(name.to_string(), client);
         Ok(())
     }
 
     /// Unregister an MCP server
-    pub fn unregister(&mut self, name: &str) -> Result<()> {
+    pub async fn unregister(&mut self, name: &str) -> Result<()> {
         let removed = self.clients.remove(name);
         if removed.is_none() {
             return Err(anyhow::anyhow!("server '{}' not found", name));
@@ -765,23 +792,24 @@ impl McpRegistry {
         // rebuild tools cache
         self.tools_cache.clear();
         for client in self.clients.values() {
-            let tools = client.list_tools().unwrap_or_default();
+            let tools = client.list_tools().await.unwrap_or_default();
             self.tools_cache.extend(tools);
         }
         Ok(())
     }
 
     /// List registered servers with metadata
-    pub fn list_servers(&self) -> Vec<McpServerInfo> {
-        self.clients
-            .iter()
-            .map(|(name, client)| McpServerInfo {
+    pub async fn list_servers(&self) -> Vec<McpServerInfo> {
+        let mut servers = Vec::new();
+        for (name, client) in &self.clients {
+            servers.push(McpServerInfo {
                 name: name.clone(),
                 command: client.command.clone(),
                 args: client.args.clone(),
-                tool_count: client.list_tools().unwrap_or_default().len(),
-            })
-            .collect()
+                tool_count: client.list_tools().await.unwrap_or_default().len(),
+            });
+        }
+        servers
     }
 
     /// Get all available tools from all registered servers
@@ -789,7 +817,8 @@ impl McpRegistry {
         &self.tools_cache
     }
 
-    /// Return unified manifests for both MCP tools and built-in tools.
+    /// Return unified manifests for built-in tools and cached MCP tools.
+    /// (call refresh_tools() to update MCP tool cache from servers)
     pub fn list_manifests(&self) -> Vec<ToolManifest> {
         let mut out: Vec<ToolManifest> = self
             .builtin_manifests
@@ -797,39 +826,41 @@ impl McpRegistry {
             .into_iter()
             .map(ToolManifest::normalized)
             .collect();
-        for (server_name, client) in &self.clients {
-            if let Ok(tools) = client.list_tools() {
-                for tool in tools {
-                    out.push(
-                        ToolManifest {
-                            id: format!("mcp:{}:{}", server_name, tool.name),
-                            name: tool.name.clone(),
-                            description: tool.description.clone(),
-                            parameters: tool.parameters.clone(),
-                            permission_level: ToolManifest::infer_permission_level(&tool.name),
-                            risk_level: ToolManifest::infer_permission_level(&tool.name),
-                            version: "1.0.0".into(),
-                            source: ToolSource::Mcp {
-                                server_name: server_name.clone(),
-                            },
-                            capabilities: ToolManifest::infer_capabilities(&tool.name),
-                            requires_confirmation: ToolManifest::infer_permission_level(&tool.name)
-                                == "high",
-                            enabled: true,
-                            declarative_only: false,
-                            action_type: ToolManifest::infer_action_type(&tool.name),
-                            tags: Vec::new(),
-                        }
-                        .normalized(),
-                    );
+        for tool in &self.tools_cache {
+            // Use empty server_name for cached tools (source is from aggregated cache)
+            let server_name = "mcp-server";
+            out.push(
+                ToolManifest {
+                    id: format!("mcp:{}:{}", server_name, tool.name),
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    parameters: tool.parameters.clone(),
+                    permission_level: ToolManifest::infer_permission_level(&tool.name),
+                    risk_level: ToolManifest::infer_permission_level(&tool.name),
+                    version: "1.0.0".into(),
+                    source: ToolSource::Mcp {
+                        server_name: server_name.to_string(),
+                    },
+                    capabilities: ToolManifest::infer_capabilities(&tool.name),
+                    requires_confirmation: ToolManifest::infer_permission_level(&tool.name)
+                        == "high",
+                    enabled: true,
+                    declarative_only: false,
+                    action_type: ToolManifest::infer_action_type(&tool.name),
+                    tags: Vec::new(),
                 }
-            }
+                .normalized(),
+            );
         }
         out
     }
 
     /// Execute a manifest by its source.
-    pub fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
+    pub async fn execute_manifest(
+        &self,
+        manifest: &ToolManifest,
+        arguments: Value,
+    ) -> Result<String> {
         match &manifest.source {
             ToolSource::BuiltIn => {
                 if let Some(func) = self.builtins.get(&manifest.name) {
@@ -843,6 +874,7 @@ impl McpRegistry {
             }
             ToolSource::Mcp { server_name } => {
                 self.call_tool_on_server(server_name, &manifest.name, arguments)
+                    .await
             }
             ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
@@ -855,7 +887,7 @@ impl McpRegistry {
 
     /// Call a tool by name (searches all registered servers).
     /// Arguments are desensitized before sending and reconstructed after receiving the result.
-    pub fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<String> {
         // 1. Detect and desensitize arguments
         let args_str = arguments.to_string();
         let pii = self.privacy_engine.detect(&args_str);
@@ -869,7 +901,7 @@ impl McpRegistry {
 
         let mut last_error: Option<anyhow::Error> = None;
         for client in self.clients.values() {
-            match client.call_tool(name, desensitized_args.clone()) {
+            match client.call_tool(name, desensitized_args.clone()).await {
                 Ok(result) => {
                     // 2. Reconstruct any placeholders in the result
                     let final_result = if map.is_empty() {
@@ -894,7 +926,7 @@ impl McpRegistry {
 
     /// Call a tool on a specific MCP server by name.
     /// Requires the server to be registered. Returns error if server or tool is not found.
-    pub fn call_tool_on_server(
+    pub async fn call_tool_on_server(
         &self,
         server_name: &str,
         name: &str,
@@ -917,7 +949,7 @@ impl McpRegistry {
             serde_json::from_str(&desensitized_str).unwrap_or_else(|_| arguments.clone());
 
         // 2. Execute on the specific server
-        let result = client.call_tool(name, desensitized_args)?;
+        let result = client.call_tool(name, desensitized_args).await?;
 
         // 3. Reconstruct any placeholders in the result
         let final_result = if map.is_empty() {
@@ -1208,8 +1240,8 @@ mod tests {
 
     // ── P9-2: shell.run manifest tests ─────────────────────────────────
 
-    #[test]
-    fn test_shell_run_is_high_risk() {
+    #[tokio::test]
+    async fn test_shell_run_is_high_risk() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
@@ -1221,8 +1253,8 @@ mod tests {
         assert!(manifest.requires_confirmation);
     }
 
-    #[test]
-    fn test_shell_run_default_not_model_callable() {
+    #[tokio::test]
+    async fn test_shell_run_default_not_model_callable() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
@@ -1244,8 +1276,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_shell_run_disabled_out_of_model_prompt() {
+    #[tokio::test]
+    async fn test_shell_run_disabled_out_of_model_prompt() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
@@ -1261,8 +1293,8 @@ mod tests {
         assert!(!prompt.contains("shell.run"));
     }
 
-    #[test]
-    fn test_shell_run_not_executable_yet() {
+    #[tokio::test]
+    async fn test_shell_run_not_executable_yet() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
@@ -1275,10 +1307,12 @@ mod tests {
         // But by default it is disabled (not model-callable).
         assert!(!manifest.declarative_only);
         // Builtin closure blocks direct registry calls:
-        let result = registry.execute_manifest(
-            &manifest,
-            serde_json::json!({"command": "echo", "args": ["hi"]}),
-        );
+        let result = registry
+            .execute_manifest(
+                &manifest,
+                serde_json::json!({"command": "echo", "args": ["hi"]}),
+            )
+            .await;
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("ActionExecutor"),
@@ -1286,8 +1320,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_shell_run_remains_disabled_by_default() {
+    #[tokio::test]
+    async fn test_shell_run_remains_disabled_by_default() {
         let registry = McpRegistry::new();
         let manifest = registry
             .list_manifests()
@@ -1297,8 +1331,8 @@ mod tests {
         assert!(!manifest.enabled);
     }
 
-    #[test]
-    fn test_runtime_enable_makes_manifest_enabled() {
+    #[tokio::test]
+    async fn test_runtime_enable_makes_manifest_enabled() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let manifest = registry
@@ -1310,8 +1344,8 @@ mod tests {
         assert!(!manifest.declarative_only);
     }
 
-    #[test]
-    fn test_builtin_closure_still_blocks_direct_execution_after_runtime_enable() {
+    #[tokio::test]
+    async fn test_builtin_closure_still_blocks_direct_execution_after_runtime_enable() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let manifest = registry
@@ -1320,18 +1354,20 @@ mod tests {
             .find(|m| m.name == "shell.run")
             .unwrap();
         // Direct registry execution must still be blocked even when enabled
-        let result = registry.execute_manifest(
-            &manifest,
-            serde_json::json!({"command": "echo", "args": ["hi"]}),
-        );
+        let result = registry
+            .execute_manifest(
+                &manifest,
+                serde_json::json!({"command": "echo", "args": ["hi"]}),
+            )
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("ActionExecutor"));
     }
 
     // ── P9 prompt governance tests ───────────────────────────────────────
 
-    #[test]
-    fn test_default_tools_prompt_excludes_shell_run() {
+    #[tokio::test]
+    async fn test_default_tools_prompt_excludes_shell_run() {
         let registry = McpRegistry::new();
         let prompt = registry.tools_prompt();
         assert!(
@@ -1344,8 +1380,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_generic_tools_prompt_excludes_shell_even_when_runtime_enabled() {
+    #[tokio::test]
+    async fn test_generic_tools_prompt_excludes_shell_even_when_runtime_enabled() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let prompt = registry.tools_prompt();
@@ -1374,8 +1410,8 @@ mod tests {
         spec
     }
 
-    #[test]
-    fn test_governed_tools_prompt_excludes_shell_when_sandbox_disabled() {
+    #[tokio::test]
+    async fn test_governed_tools_prompt_excludes_shell_when_sandbox_disabled() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
@@ -1388,8 +1424,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_governed_tools_prompt_excludes_shell_when_agentspec_denies() {
+    #[tokio::test]
+    async fn test_governed_tools_prompt_excludes_shell_when_agentspec_denies() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = make_enabled_sandbox_for_prompt();
@@ -1403,8 +1439,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_governed_tools_prompt_excludes_shell_when_permission_not_granted() {
+    #[tokio::test]
+    async fn test_governed_tools_prompt_excludes_shell_when_permission_not_granted() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = make_enabled_sandbox_for_prompt();
@@ -1418,8 +1454,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_governed_tools_prompt_includes_shell_when_all_gates_pass() {
+    #[tokio::test]
+    async fn test_governed_tools_prompt_includes_shell_when_all_gates_pass() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = make_enabled_sandbox_for_prompt();
@@ -1446,8 +1482,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_governed_prompt_does_not_consume_allow_once() {
+    #[tokio::test]
+    async fn test_governed_prompt_does_not_consume_allow_once() {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = make_enabled_sandbox_for_prompt();

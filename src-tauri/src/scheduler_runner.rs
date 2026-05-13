@@ -211,38 +211,25 @@ async fn execute_scheduled_task(
     let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
 
     let loop_result = {
-        let (reg, audit) = state.get_mcp_state().await;
-        let permission_store = state.tool_permission_store.lock().await;
-        let memory_store = state.memory_store.lock().await;
-        let proposal_store_guard = if let Some(ref store) = state.proposal_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let action_ctx = openlife_core::agent::ActionExecutionContext {
-            registry: &reg,
-            permission_store: &permission_store,
-            audit_store: &audit,
-            privacy_engine: &privacy_engine,
-            safe_paths: &safe_paths,
-            calendar_ics_paths: &calendar_ics_paths,
-            life_model: Some(&life_model),
-            memory_store: Some(&memory_store),
-            proposal_store: proposal_store_guard.as_deref(),
-            agent_run_store: agent_run_store_guard.as_deref(),
-            network_policy: Some(&network_policy),
-            event_store: state
+        let action_ctx = crate::execution_deps::assemble_action_context(
+            state.mcp_registry.clone(),
+            state.tool_permission_store.clone(),
+            state.mcp_audit_store.clone(),
+            state.privacy_engine.clone(),
+            safe_paths.clone(),
+            Some(life_model.clone()),
+            Some(state.memory_store.clone()),
+            calendar_ics_paths.clone(),
+            network_policy.clone(),
+            openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
+            agent_spec.clone(),
+            state.proposal_store.clone(),
+            state.agent_run_store.clone(),
+            state
                 .agent_run_event_store
                 .as_ref()
                 .map(|es| (**es).clone()),
-            execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
-            agent_spec: None,
-        };
+        );
 
         agent_loop
             .run(

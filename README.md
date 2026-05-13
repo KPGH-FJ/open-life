@@ -16,7 +16,7 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **P0-P12 vNext 原语全部实现（2026-05-10 验收）**：AgentRunEvent (29种)、PromptStack (10 Block)、ToolRuntime/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。`make ci` 全绿 806 测试。
+- **P0-P12 vNext 原语全部实现（2026-05-10 验收）**：AgentRunEvent (41种)、PromptStack (10 Block)、ToolRuntime/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。`make ci` 全绿（140+ Rust 测试 + 214 前端测试）。
 - **当前进入 Post-Beta 架构稳固阶段**：执行路径收敛、文档同步、真实用户试用反馈闭环、LifeModel Evolution 管线闭环。完整计划参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。
 
 下一大阶段是 **vNext Agent Framework Upgrade**。目标不是继续堆页面或工具，而是把 OpenLife 升级为：

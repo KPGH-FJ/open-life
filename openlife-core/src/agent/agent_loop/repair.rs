@@ -3,7 +3,7 @@ use anyhow::Result;
 use super::context::AgentLoopContext;
 use super::types::ParsedAgentReply;
 use super::AgentLoop;
-use crate::agent::action_executor::ActionExecutionContext;
+use crate::agent::action_executor::ActionContext;
 use crate::agent::types::AgentRun;
 use crate::llm::ChatMessage;
 
@@ -28,7 +28,7 @@ impl AgentLoop {
     pub(crate) async fn try_json_self_repair(
         &self,
         actx: &AgentLoopContext<'_>,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<ParsedAgentReply> {

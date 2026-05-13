@@ -1,4 +1,4 @@
-use crate::agent::action_executor::{ActionExecutionContext, ActionExecutor, ActionExecutorConfig};
+use crate::agent::action_executor::{ActionContext, ActionExecutor, ActionExecutorConfig};
 use crate::agent::agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::runtime::AgentRuntime;
@@ -83,7 +83,7 @@ impl AgentExecutionFacade {
         task: AgentTask,
         mode: AgentExecutionMode,
         deps: AgentExecutionDeps,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
     ) -> Result<AgentExecutionOutcome> {
         match mode {
             AgentExecutionMode::Chat => Self::run_chat(task, deps, action_ctx).await,
@@ -98,7 +98,7 @@ impl AgentExecutionFacade {
     async fn run_chat(
         task: AgentTask,
         deps: AgentExecutionDeps,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
     ) -> Result<AgentExecutionOutcome> {
         let agent_loop = Self::build_agent_loop(&deps);
 
@@ -129,7 +129,7 @@ impl AgentExecutionFacade {
     async fn run_stream_chat(
         task: AgentTask,
         deps: AgentExecutionDeps,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentExecutionOutcome> {
         let agent_loop = Self::build_agent_loop(&deps);
@@ -162,7 +162,7 @@ impl AgentExecutionFacade {
     async fn run_scheduled(
         task: AgentTask,
         deps: AgentExecutionDeps,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
     ) -> Result<AgentExecutionOutcome> {
         let agent_loop = Self::build_agent_loop(&deps);
 
@@ -192,7 +192,7 @@ impl AgentExecutionFacade {
     async fn run_proactive(
         task: AgentTask,
         deps: AgentExecutionDeps,
-        action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionContext,
     ) -> Result<AgentExecutionOutcome> {
         let agent_loop = Self::build_agent_loop(&deps);
 

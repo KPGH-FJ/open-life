@@ -19,6 +19,9 @@ pub struct AgentCard {
     pub default_input_modes: Vec<String>,
     pub default_output_modes: Vec<String>,
     pub skills: Vec<AgentSkill>,
+    /// Extensible metadata (instance_id, etc.)
+    #[serde(default)]
+    pub metadata: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +317,7 @@ impl A2AServerHandler {
                     output_modes: None,
                 },
             ],
+            metadata: None,
         }
     }
 

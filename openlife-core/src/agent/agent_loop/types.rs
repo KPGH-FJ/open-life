@@ -1,4 +1,4 @@
-use crate::agent::action_executor::{ActionExecutionContext, AgentActionRequest};
+use crate::agent::action_executor::{ActionContext, AgentActionRequest};
 use crate::agent::prompt_stack::PromptBlockRegistry;
 use crate::agent::runtime::AgentRuntimeOutput;
 use crate::agent::types::{AgentLoopStatusUpdate, AgentObservation, AgentRun};
@@ -38,7 +38,7 @@ pub struct StepContext<'a> {
     pub privacy_policy: PrivacyPolicy,
     pub agent_spec: &'a AgentSpec,
     pub prompt_registry: &'a PromptBlockRegistry,
-    pub action_ctx: &'a ActionExecutionContext<'a>,
+    pub action_ctx: &'a ActionContext,
     pub run: &'a mut AgentRun,
     pub tool_call_count: u32,
 }

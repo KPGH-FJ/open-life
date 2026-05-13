@@ -24,7 +24,7 @@ pub async fn get_system_diagnostics(
     let (mcp_server_count, mcp_tool_count) = {
         let registry = state.mcp_registry.lock().await;
         (
-            registry.list_servers().len(),
+            registry.list_servers().await.len(),
             registry.list_all_tools().len(),
         )
     };

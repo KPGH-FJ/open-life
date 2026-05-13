@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use base64::Engine;
 use openlife_core::config::AppConfig;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::{
@@ -7,6 +8,7 @@ use openlife_core::llm::{
 use openlife_core::mcp_audit::{AuditExport, AuditKeyConfig, KeyMode};
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
+use rand::RngCore;
 use std::sync::Arc;
 use tauri::State;
 
@@ -77,25 +79,50 @@ pub async fn save_config(
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
 
-    // Preserve existing API key if the submitted config has a mask or empty key
-    let current_key = {
-        let cfg = state.config.lock().await;
-        cfg.llm.openai_key.clone()
+    // Resolve API key with keyring priority:
+    //   1) non-empty, non-mask → new key: migrate to keyring, clear from config
+    //   2) mask or empty → preserve existing key (from keyring or current config)
+    let provider = &config.llm.provider;
+    let submitted_key = std::mem::take(&mut config.llm.openai_key);
+
+    let resolved_key = if submitted_key.is_empty() || submitted_key == KEY_MASK {
+        // Keep existing key — read from keyring first, then old config value
+        let existing = openlife_core::keyring_store::get_api_key(provider);
+        match existing {
+            Some(k) => k,
+            None => {
+                let cfg = state.config.lock().await;
+                cfg.llm.openai_key.clone()
+            }
+        }
+    } else {
+        // New key provided — persist to OS keyring
+        let new_key = submitted_key;
+        if !openlife_core::keyring_store::set_api_key(provider, &new_key) {
+            return Err(AppError::internal(
+                "OS keyring unavailable. Your API key could not be saved securely. \
+                 Please check your system keychain/credential manager is accessible.",
+            ));
+        }
+        // Keyring succeeded — do NOT put key in config.yaml
+        new_key
     };
-    if config.llm.openai_key.is_empty() || config.llm.openai_key == KEY_MASK {
-        config.llm.openai_key = current_key;
-    }
+
+    // Ensure key is NOT persisted to config.yaml (keyring is source of truth)
+    config.llm.openai_key.clear();
 
     config.save(&config_path).map_err(AppError::from)?;
     let mut cfg = state.config.lock().await;
     *cfg = config.clone();
+    // Note: in-memory InferenceScheduler still needs the key to operate.
+    // effective_api_key() will pull it from keyring at runtime.
     let mut scheduler = state.scheduler.lock().await;
     let mut new_scheduler = InferenceScheduler::new(
         config.local_model,
         config.prefer_local_model,
         config.llm.provider,
         config.llm.openai_base,
-        config.llm.openai_key,
+        resolved_key,
         config.llm.chat_model,
         config.llm.embedding_model,
         config.llm.embedding_enabled,
@@ -240,7 +267,11 @@ pub async fn test_api_key(state: State<'_, Arc<AppState>>) -> Result<bool, AppEr
     } else {
         format!("{}/models", base.trim_end_matches('/'))
     };
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| AppError::external(format!("Failed to build test API client: {}", e)))?;
     let res = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -301,7 +332,11 @@ pub async fn test_llm_connection(
         "temperature": 0.0
     });
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| AppError::external(format!("Failed to build test LLM client: {}", e)))?;
     let res = client
         .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
@@ -357,9 +392,11 @@ pub async fn cleanup_mcp_audit_logs(
 #[tauri::command]
 pub async fn rotate_mcp_audit_key(state: State<'_, Arc<AppState>>) -> Result<(), AppError> {
     let mut store = state.mcp_audit_store.lock().await;
+    let mut random_key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut random_key);
     let new_config = AuditKeyConfig {
-        mode: KeyMode::Derived,
-        salt_b64: None,
+        mode: KeyMode::PerInstall,
+        salt_b64: Some(base64::engine::general_purpose::STANDARD.encode(random_key)),
         env_var: None,
         epoch: chrono::Utc::now().timestamp() as u64,
         created_at: chrono::Utc::now().to_rfc3339(),

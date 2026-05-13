@@ -31,8 +31,12 @@ impl A2ASidecar {
             bin_path
         );
 
+        let token = resolve_a2a_token();
+        let instance_id = resolve_a2a_instance_id();
         let child = Command::new(&bin_path)
             .env("A2A_PORT", self.port.to_string())
+            .env("A2A_BEARER_TOKEN", &token)
+            .env("A2A_INSTANCE_ID", &instance_id)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -58,6 +62,37 @@ impl Drop for A2ASidecar {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+fn resolve_a2a_token() -> String {
+    let path = crate::storage::app_data_dir().join("a2a_token");
+    if path.exists() {
+        if let Ok(token) = std::fs::read_to_string(&path) {
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return token;
+            }
+        }
+    }
+    // Generate if missing
+    let token = uuid::Uuid::new_v4().to_string();
+    let _ = std::fs::write(&path, &token);
+    token
+}
+
+fn resolve_a2a_instance_id() -> String {
+    let path = crate::storage::app_data_dir().join("a2a_instance_id");
+    if path.exists() {
+        if let Ok(id) = std::fs::read_to_string(&path) {
+            let id = id.trim().to_string();
+            if !id.is_empty() {
+                return id;
+            }
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let _ = std::fs::write(&path, &id);
+    id
 }
 
 fn resolve_a2a_server_binary() -> Result<std::path::PathBuf, AppError> {

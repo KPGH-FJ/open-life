@@ -9,14 +9,13 @@ pub struct AgentLoopConfig {
     pub max_tool_calls: u32,
     pub timeout_seconds: u64,
     /// If `true`, write-proposal tools (e.g. file.write_proposal, memory.propose_write)
-    /// may appear in the tool prompt and be executable. If `false`, the caller should
-    /// exclude write tools from the tool prompt. Currently hardcoded to `true` in the
-    /// Tauri Chat command; there is no runtime enforcement inside the AgentLoop.
+    /// may appear in the tool prompt and be executable. If `false`, write tools are
+    /// excluded from the tool prompt AND blocked at execution level (hard enforcement).
     pub allow_writes: bool,
-    /// If `true`, model calls may be routed to cloud providers. If `false`, the caller
-    /// should restrict routing to local-only (Ollama). Currently hardcoded to `true`
-    /// in the Tauri Chat command; the actual routing is governed by the privacy_policy
-    /// and ModelRouter, not directly checked inside the AgentLoop.
+    /// If `true`, model calls may be routed to cloud providers. If `false`, routing
+    /// is restricted to local-only (Ollama). Enforcement: AgentLoop forces
+    /// PrivacyPolicy::LocalOnly when allow_cloud is false, causing fail-closed
+    /// behavior when no local model is available.
     pub allow_cloud: bool,
     pub shutdown_notify: Option<Arc<tokio::sync::Notify>>,
     /// Specialized role for tool selection and system prompt tuning

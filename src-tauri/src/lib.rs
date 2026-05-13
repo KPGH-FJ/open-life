@@ -344,33 +344,20 @@ async fn send_message_with_agent_loop(
     );
 
     let loop_result = {
-        let (reg, audit) = state.get_mcp_state().await;
-        let permission_store = state.tool_permission_store.lock().await;
-        let memory_store = state.memory_store.lock().await;
-        let proposal_store_guard = if let Some(ref store) = state.proposal_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
-            Some(store.lock().await)
-        } else {
-            None
-        };
-        let action_ctx = execution_deps::assemble_action_ctx(
-            &reg,
-            &permission_store,
-            &audit,
-            &privacy_engine,
-            &safe_paths,
-            &life_model,
-            &memory_store,
-            &calendar_ics_paths,
-            &network_policy,
-            &execution_sandbox,
-            &agent_spec,
-            proposal_store_guard.as_deref(),
-            agent_run_store_guard.as_deref(),
+        let action_ctx = execution_deps::assemble_action_context(
+            state.mcp_registry.clone(),
+            state.tool_permission_store.clone(),
+            state.mcp_audit_store.clone(),
+            state.privacy_engine.clone(),
+            safe_paths.clone(),
+            Some(life_model.clone()),
+            Some(state.memory_store.clone()),
+            calendar_ics_paths.clone(),
+            network_policy.clone(),
+            execution_sandbox.clone(),
+            agent_spec.clone(),
+            state.proposal_store.clone(),
+            state.agent_run_store.clone(),
             state
                 .agent_run_event_store
                 .as_ref()
@@ -570,41 +557,35 @@ async fn execute_tool_call(
     arguments: serde_json::Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ToolCallResult, String> {
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let privacy_engine = state.privacy_engine.lock().await;
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
+    drop(cfg);
 
     // Create an AgentRun for direct tool execution audit trail
     let mut run = openlife_core::agent::AgentRun::new_tool_execution_run(&name);
     let run_id = run.id.clone();
 
-    let agent_run_store_guard = if let Some(ref store) = state.agent_run_store {
-        Some(store.lock().await)
-    } else {
-        None
-    };
-
     let executor = openlife_core::agent::ActionExecutor::new(
         openlife_core::agent::ActionExecutorConfig::default(),
     );
-    let ctx = openlife_core::agent::ActionExecutionContext::new(
-        &reg,
-        &permission_store,
-        &audit,
-        &privacy_engine,
-        &safe_paths,
-    );
-    let ctx = if let Some(ref store) = agent_run_store_guard {
-        ctx.with_agent_run_store(store)
-    } else {
-        ctx
-    };
-    let ctx = if let Some(ref es) = state.agent_run_event_store {
-        ctx.with_event_store((**es).clone())
-    } else {
-        ctx
+    let ctx = openlife_core::agent::ActionContext {
+        registry: state.mcp_registry.clone(),
+        permission_store: state.tool_permission_store.clone(),
+        audit_store: state.mcp_audit_store.clone(),
+        privacy_engine: state.privacy_engine.clone(),
+        safe_paths,
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: state.agent_run_store.clone(),
+        event_store: state
+            .agent_run_event_store
+            .as_ref()
+            .map(|es| (**es).clone()),
+        network_policy: None,
+        calendar_ics_paths: Vec::new(),
+        execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
+        agent_spec: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -615,7 +596,10 @@ async fn execute_tool_call(
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).map_err(|e| e.to_string())?;
+    let result = executor
+        .execute(request, &ctx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     // Persist the AgentRun
     run.actions.push(result.action.clone());
@@ -731,13 +715,25 @@ pub fn run() {
             });
             if std::env::var("OPENLIFE_AUTOSTART_FILESYSTEM_MCP").as_deref() == Ok("1") {
                 let mcp_registry = app_state_for_setup.mcp_registry.clone();
+                let sandbox_path = app_data_dir().join("mcp-filesystem-sandbox");
                 tauri::async_runtime::spawn(async move {
                     let mut registry = mcp_registry.lock().await;
+                    let sandbox_str = sandbox_path.to_string_lossy().to_string();
+                    log::info!("[setup] autostart filesystem MCP with sandbox path: {}", sandbox_str);
+                    if let Err(e) = std::fs::create_dir_all(&sandbox_path) {
+                        log::warn!(
+                            "[setup] failed to create MCP filesystem sandbox dir: {} - {}",
+                            sandbox_str,
+                            e
+                        );
+                    }
                     if let Err(e) = registry.register(
                         "filesystem",
                         "npx",
-                        &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-                    ) {
+                        &["-y", "@modelcontextprotocol/server-filesystem", &sandbox_str],
+                    )
+                    .await
+                    {
                         eprintln!(
                             "[setup] autoregister filesystem mcp failed: {} - lib.rs:2246",
                             e

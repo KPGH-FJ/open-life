@@ -1,9 +1,9 @@
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use serde_json::Value;
 
-use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::AgentActionRequest;
+use super::BorrowedActionContext;
 
 impl super::ActionExecutor {
     /// For declarative-only stub tools (calendar, email), create a Proposal instead of blocking.
@@ -11,7 +11,7 @@ impl super::ActionExecutor {
     pub fn create_declarative_stub_proposal(
         &self,
         request: &AgentActionRequest,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
         tool_name: &str,
         args: &Value,
         proposal_type: ProposalType,

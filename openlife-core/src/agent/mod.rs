@@ -28,7 +28,7 @@ pub mod types;
 mod tests;
 
 pub use action_executor::{
-    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
+    ActionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,
 };
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};

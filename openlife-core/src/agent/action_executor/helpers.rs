@@ -232,53 +232,119 @@ pub fn extract_host_from_url(url: &str) -> Option<String> {
 }
 
 fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+    const MAX_REDIRECTS: u32 = 5;
+    let mut current_url = url.to_string();
+    let mut redirects_remaining = MAX_REDIRECTS;
 
-    match client.get(url).send() {
-        Ok(response) => {
-            let status = response.status();
-            if status.is_success() {
-                match response.text() {
-                    Ok(text) => {
-                        let text = if text.trim_start().starts_with('<') {
-                            html_to_text(&text)
-                        } else {
-                            text
-                        };
-                        let max_length = 50_000;
-                        let truncated = truncate_text(&text, max_length);
-                        Ok(ToolCallInternalResult {
-                            success: true,
-                            output: Some(truncated),
-                            error: None,
-                        })
+    loop {
+        // Check private URL before each request (redirect 防护)
+        if is_private_url(&current_url) {
+            return Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "URL '{}' points to a private/internal address, blocked by security policy",
+                    current_url
+                )),
+            });
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build HTTP client: {}", e))?;
+
+        match client.get(&current_url).send() {
+            Ok(response) => {
+                let status = response.status();
+                if status.is_redirection() {
+                    if redirects_remaining == 0 {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(
+                                "Redirect limit exceeded, blocked by security policy".to_string(),
+                            ),
+                        });
                     }
-                    Err(e) => Ok(ToolCallInternalResult {
+                    redirects_remaining -= 1;
+                    // Extract redirect location
+                    if let Some(location) = response.headers().get("location") {
+                        match location.to_str() {
+                            Ok(new_url) => {
+                                // Resolve relative URLs
+                                if let Ok(parsed_base) = reqwest::Url::parse(&current_url) {
+                                    if let Ok(resolved) = parsed_base.join(new_url) {
+                                        current_url = resolved.to_string();
+                                        continue;
+                                    }
+                                }
+                                current_url = new_url.to_string();
+                                continue;
+                            }
+                            Err(_) => {
+                                return Ok(ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some("Invalid redirect Location header".to_string()),
+                                });
+                            }
+                        }
+                    }
+                    return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
-                        error: Some(format!("Failed to read response body: {}", e)),
-                    }),
+                        error: Some(format!(
+                            "HTTP {} redirect without Location header",
+                            status.as_u16()
+                        )),
+                    });
                 }
-            } else {
-                Ok(ToolCallInternalResult {
+                if status.is_success() {
+                    match response.text() {
+                        Ok(text) => {
+                            let text = if text.trim_start().starts_with('<') {
+                                html_to_text(&text)
+                            } else {
+                                text
+                            };
+                            let max_length = 50_000;
+                            let truncated = truncate_text(&text, max_length);
+                            return Ok(ToolCallInternalResult {
+                                success: true,
+                                output: Some(truncated),
+                                error: None,
+                            });
+                        }
+                        Err(e) => {
+                            return Ok(ToolCallInternalResult {
+                                success: false,
+                                output: None,
+                                error: Some(format!("Failed to read response body: {}", e)),
+                            });
+                        }
+                    }
+                } else {
+                    return Ok(ToolCallInternalResult {
+                        success: false,
+                        output: None,
+                        error: Some(format!(
+                            "HTTP {}: {}",
+                            status.as_u16(),
+                            status.canonical_reason().unwrap_or("Unknown error")
+                        )),
+                    });
+                }
+            }
+            Err(e) => {
+                return Ok(ToolCallInternalResult {
                     success: false,
                     output: None,
-                    error: Some(format!(
-                        "HTTP {}: {}",
-                        status.as_u16(),
-                        status.canonical_reason().unwrap_or("Unknown error")
-                    )),
-                })
+                    error: Some(format!("HTTP request failed: {}", e)),
+                });
             }
         }
-        Err(e) => Ok(ToolCallInternalResult {
-            success: false,
-            output: None,
-            error: Some(format!("HTTP request failed: {}", e)),
-        }),
     }
 }
 

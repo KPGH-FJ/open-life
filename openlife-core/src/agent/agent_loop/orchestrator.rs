@@ -139,7 +139,7 @@ impl AgentLoop {
     pub(crate) async fn run_loop_core(
         &self,
         actx: &AgentLoopContext<'_>,
-        action_ctx: &crate::agent::action_executor::ActionExecutionContext<'_>,
+        action_ctx: &crate::agent::action_executor::ActionContext,
         callback: Option<Arc<dyn StreamingCallback>>,
     ) -> Result<AgentLoopResult> {
         use crate::agent::types::AgentRunEventType;
@@ -248,9 +248,10 @@ impl AgentLoop {
             }
 
             // Search memory for relevant context
-            let memory_context = if let Some(memory_store) = action_ctx.memory_store {
+            let memory_context = if let Some(ref memory_store) = action_ctx.memory_store {
+                let guard = memory_store.lock().await;
                 super::memory::search_memory_for_context(
-                    memory_store,
+                    &guard,
                     &current_task.user_text,
                     &actx.task.session_id,
                 )
@@ -410,9 +411,14 @@ impl AgentLoop {
         _privacy_policy: PrivacyPolicy,
         agent_spec: &crate::agent::types::AgentSpec,
         prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
-        action_ctx: &crate::agent::action_executor::ActionExecutionContext<'_>,
+        action_ctx: &crate::agent::action_executor::ActionContext,
     ) -> Result<AgentLoopResult> {
         let effective_policy = crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
+        let effective_policy = if !self.config.allow_cloud {
+            PrivacyPolicy::LocalOnly
+        } else {
+            effective_policy
+        };
         let actx = AgentLoopContext {
             task,
             life_model,
@@ -439,10 +445,15 @@ impl AgentLoop {
         _privacy_policy: PrivacyPolicy,
         agent_spec: &crate::agent::types::AgentSpec,
         prompt_registry: &crate::agent::prompt_stack::PromptBlockRegistry,
-        action_ctx: &crate::agent::action_executor::ActionExecutionContext<'_>,
+        action_ctx: &crate::agent::action_executor::ActionContext,
         callback: Arc<dyn StreamingCallback>,
     ) -> Result<AgentLoopResult> {
         let effective_policy = crate::agent::runtime::resolve_privacy_policy(task, agent_spec);
+        let effective_policy = if !self.config.allow_cloud {
+            PrivacyPolicy::LocalOnly
+        } else {
+            effective_policy
+        };
         let actx = AgentLoopContext {
             task,
             life_model,

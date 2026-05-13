@@ -9,9 +9,9 @@
 
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentEventActor,
-    AgentExecutionBudget, AgentLoop, AgentLoopConfig, AgentObservation, AgentRun,
-    AgentRunEventType, AgentRunStatus, AgentTask, AgentTaskKind,
+    ActionContext, ActionExecutor, ActionExecutorConfig, AgentEventActor, AgentExecutionBudget,
+    AgentLoop, AgentLoopConfig, AgentObservation, AgentRun, AgentRunEventType, AgentRunStatus,
+    AgentTask, AgentTaskKind,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -19,6 +19,7 @@ use crate::llm::ChatMessage;
 use crate::mcp::McpRegistry;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
+use std::sync::Arc;
 
 /// Helper to create a minimal AgentLoop for testing
 fn create_test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
@@ -34,18 +35,13 @@ fn create_test_agent_loop(config: AgentLoopConfig) -> AgentLoop {
 }
 
 /// Helper to create an ActionExecutionContext for testing
-fn create_test_action_ctx() -> (
-    crate::mcp::McpRegistry,
-    crate::tool_permissions::ToolPermissionStore,
-    crate::mcp_audit::McpAuditStore,
-    PrivacyEngine,
-) {
-    let registry = crate::mcp::McpRegistry::new();
-    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-    let audit_file = tempfile::NamedTempFile::new().unwrap();
-    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
-    let privacy_engine = PrivacyEngine::new();
-    (registry, permission_store, audit_store, privacy_engine)
+fn create_test_action_ctx() -> ActionContext {
+    let reg = crate::mcp::McpRegistry::new();
+    let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let af = tempfile::NamedTempFile::new().unwrap();
+    let as_ = crate::mcp_audit::McpAuditStore::new(af.path());
+    let pe = PrivacyEngine::new();
+    ActionContext::new_for_test(reg, ps, as_, pe, vec![])
 }
 
 /// Helper to create a test task
@@ -64,8 +60,8 @@ fn create_test_task(messages: Vec<ChatMessage>) -> AgentTask {
 }
 
 /// Test 1: AgentLoopConfig defaults are reasonable
-#[test]
-fn test_agent_loop_config_defaults() {
+#[tokio::test]
+async fn test_agent_loop_config_defaults() {
     let config = AgentLoopConfig::default();
     assert_eq!(config.max_steps, 4);
     assert_eq!(config.max_tool_calls, 6);
@@ -75,8 +71,8 @@ fn test_agent_loop_config_defaults() {
 }
 
 /// Test 2: AgentExecutionBudget defaults match config
-#[test]
-fn test_agent_execution_budget_defaults() {
+#[tokio::test]
+async fn test_agent_execution_budget_defaults() {
     let budget = AgentExecutionBudget::default();
     assert_eq!(budget.max_steps, 5);
     assert_eq!(budget.max_tool_calls, 3);
@@ -86,8 +82,8 @@ fn test_agent_execution_budget_defaults() {
 }
 
 /// Test 3: Budget can be customized
-#[test]
-fn test_agent_execution_budget_customization() {
+#[tokio::test]
+async fn test_agent_execution_budget_customization() {
     let mut budget = AgentExecutionBudget::default();
     budget.max_steps = 2;
     budget.max_tool_calls = 1;
@@ -96,8 +92,8 @@ fn test_agent_execution_budget_customization() {
 }
 
 /// Test 4: AgentRun is created with correct initial state
-#[test]
-fn test_agent_run_initial_state() {
+#[tokio::test]
+async fn test_agent_run_initial_state() {
     let run = AgentRun::new_chat_run("session-1", "Hello");
     assert_eq!(run.session_id, Some("session-1".to_string()));
     assert_eq!(run.user_input, Some("Hello".to_string()));
@@ -109,8 +105,8 @@ fn test_agent_run_initial_state() {
 }
 
 /// Test 5: AgentRun can record warnings
-#[test]
-fn test_agent_run_warnings() {
+#[tokio::test]
+async fn test_agent_run_warnings() {
     let mut run = AgentRun::new_chat_run("session-1", "Hello");
     run.warnings.push("Parse warning: test".to_string());
     assert_eq!(run.warnings.len(), 1);
@@ -118,29 +114,13 @@ fn test_agent_run_warnings() {
 }
 
 /// Test 6: Action Parser - valid JSON envelope with final returns no actions
-#[test]
-fn test_action_parser_final_envelope() {
+#[tokio::test]
+async fn test_action_parser_final_envelope() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
     let actions = loop_instance
@@ -152,29 +132,13 @@ fn test_action_parser_final_envelope() {
 }
 
 /// Test 7: Action Parser - valid JSON envelope with actions
-#[test]
-fn test_action_parser_actions_envelope() {
+#[tokio::test]
+async fn test_action_parser_actions_envelope() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
     let actions = loop_instance
@@ -188,29 +152,13 @@ fn test_action_parser_actions_envelope() {
 }
 
 /// Test 8: Action Parser - legacy tool_calls format still works
-#[test]
-fn test_action_parser_legacy_tool_calls() {
+#[tokio::test]
+async fn test_action_parser_legacy_tool_calls() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
     let actions = loop_instance
@@ -222,29 +170,13 @@ fn test_action_parser_legacy_tool_calls() {
 }
 
 /// Test 9: Action Parser - malformed JSON fail-soft
-#[test]
-fn test_action_parser_malformed_json_fail_soft() {
+#[tokio::test]
+async fn test_action_parser_malformed_json_fail_soft() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let reply = "{broken json";
     let actions = loop_instance
@@ -257,29 +189,13 @@ fn test_action_parser_malformed_json_fail_soft() {
 }
 
 /// Test 10: Action Parser - no JSON returns empty actions
-#[test]
-fn test_action_parser_no_json() {
+#[tokio::test]
+async fn test_action_parser_no_json() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let reply = "This is just a plain text response without any JSON.";
     let actions = loop_instance
@@ -291,29 +207,13 @@ fn test_action_parser_no_json() {
 }
 
 /// Test 11: Action Parser - final + actions coexist: actions should be returned
-#[test]
-fn test_action_parser_final_with_actions() {
+#[tokio::test]
+async fn test_action_parser_final_with_actions() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     // Model returns both final text and tool calls
     let reply = r#"{"final": "Let me search for that", "actions": [{"name": "web.search", "arguments": {"query": "test"}}]}"#;
@@ -329,8 +229,8 @@ fn test_action_parser_final_with_actions() {
 }
 
 /// Test 12: Follow-up messages retain tools prompt
-#[test]
-fn test_follow_up_messages_retain_tools() {
+#[tokio::test]
+async fn test_follow_up_messages_retain_tools() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let task = create_test_task(vec![ChatMessage {
         role: "user".into(),
@@ -366,8 +266,8 @@ fn test_follow_up_messages_retain_tools() {
 }
 
 /// Test 13: max_tool_calls reached returns correct stop_reason
-#[test]
-fn test_max_tool_calls_stop_reason() {
+#[tokio::test]
+async fn test_max_tool_calls_stop_reason() {
     let config = AgentLoopConfig {
         max_steps: 4,
         max_tool_calls: 1,
@@ -377,23 +277,7 @@ fn test_max_tool_calls_stop_reason() {
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 1u32; // Already at limit
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     // Simulate model returning actions when budget is already exceeded
     let reply = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}]}"#;
@@ -407,29 +291,13 @@ fn test_max_tool_calls_stop_reason() {
 }
 
 /// Test 14: JSON self-repair flag is set when model produces malformed JSON
-#[test]
-fn test_json_self_repair_flag_on_malformed_json() {
+#[tokio::test]
+async fn test_json_self_repair_flag_on_malformed_json() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     // Malformed JSON: missing closing brace
     let malformed = r#"{"final": "hello"#;
@@ -446,29 +314,13 @@ fn test_json_self_repair_flag_on_malformed_json() {
 }
 
 /// Test 15: Valid JSON with actions does NOT trigger json_parse_failed
-#[test]
-fn test_json_self_repair_flag_not_set_on_valid_json() {
+#[tokio::test]
+async fn test_json_self_repair_flag_not_set_on_valid_json() {
     let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
     let mut run = AgentRun::new_chat_run("test", "Hi");
     let mut tool_call_count = 0u32;
 
-    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
-    let action_ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let action_ctx = create_test_action_ctx();
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
     let parsed = loop_instance
@@ -480,8 +332,8 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
 }
 
 /// Test 16: Proposal-generation tools bypass permission-confirmation blocking.
-#[test]
-fn test_proposal_tool_bypass_permission_blocking() {
+#[tokio::test]
+async fn test_proposal_tool_bypass_permission_blocking() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_default_builtins();
 
@@ -495,22 +347,15 @@ fn test_proposal_tool_bypass_permission_blocking() {
     let safe_dir = tempfile::TempDir::new().unwrap();
     let safe_path = safe_dir.path().to_str().unwrap().to_string();
 
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[safe_path.clone()],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: Some(&prop_store),
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    let mut ctx = ActionContext::new_for_test(
+        registry,
+        permission_store,
+        audit_store,
+        privacy_engine,
+        vec![safe_path.clone()],
+    );
+    let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
+    ctx.proposal_store = Some(Arc::new(tokio::sync::Mutex::new(prop_store)));
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
 
@@ -530,7 +375,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
 
     // A1 fix: proposal tool bypasses permission blocking → Proposal is created.
     // The action status is Succeeded because the handler creates the Proposal.
@@ -544,8 +389,8 @@ fn test_proposal_tool_bypass_permission_blocking() {
 }
 
 /// Test 17: permission.check tool returns a valid permission decision.
-#[test]
-fn test_permission_check_tool() {
+#[tokio::test]
+async fn test_permission_check_tool() {
     let mut registry = crate::mcp::McpRegistry::new();
     registry.register_default_builtins();
 
@@ -566,77 +411,15 @@ fn test_permission_check_tool() {
         )
         .unwrap();
 
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
-
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
-
-    // Check a tool that has an explicit allow policy
-    let request = crate::agent::AgentActionRequest {
-        action_type: "mcp_tool".into(),
-        target: "permission.check".into(),
-        input: serde_json::json!({
-            "arguments": {
-                "tool_name": "web.fetch",
-                "source": "builtin"
-            }
-        }),
-        source_run_id: None,
-        step_index: 0,
-    };
-
-    let result = executor.execute(request, &ctx).unwrap();
-    assert_eq!(
-        result.status,
-        crate::agent::ActionExecutionStatus::Succeeded
+    let mut ctx = ActionContext::new_for_test(
+        registry,
+        permission_store,
+        audit_store,
+        privacy_engine,
+        vec![],
     );
-    let output = result.action.output.unwrap();
-    // The output should contain a JSON decision
-    assert!(output.to_string().contains("allowed"));
-}
-
-/// Test 18: memory.propose_write generates a MemoryWrite Proposal instead of being blocked.
-#[test]
-fn test_memory_propose_write_creates_proposal() {
-    let mut registry = crate::mcp::McpRegistry::new();
-    registry.register_default_builtins();
-
-    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-    let audit_file = tempfile::NamedTempFile::new().unwrap();
-    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
-    let privacy_engine = PrivacyEngine::new();
     let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
-
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: Some(&prop_store),
-        agent_run_store: None,
-        network_policy: None,
-        event_store: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    ctx.proposal_store = Some(Arc::new(tokio::sync::Mutex::new(prop_store)));
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
 
@@ -653,7 +436,7 @@ fn test_memory_propose_write_creates_proposal() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
 
     // Should succeed because memory.propose_write is a proposal-generation tool
     // that was exempted from permission blocking in Sprint A1
@@ -669,16 +452,16 @@ fn test_memory_propose_write_creates_proposal() {
     );
 }
 
-#[test]
-fn test_agent_loop_config_role_generalist_default() {
+#[tokio::test]
+async fn test_agent_loop_config_role_generalist_default() {
     let config = AgentLoopConfig::default();
     assert_eq!(config.role, crate::agent::agent_loop::AgentRole::Generalist);
     assert!(config.toolset_allowlist.is_empty());
     assert!(config.role_system_instruction().is_none());
 }
 
-#[test]
-fn test_agent_loop_config_role_planner_instruction() {
+#[tokio::test]
+async fn test_agent_loop_config_role_planner_instruction() {
     let config = AgentLoopConfig {
         role: crate::agent::agent_loop::AgentRole::Planner,
         ..Default::default()
@@ -689,8 +472,8 @@ fn test_agent_loop_config_role_planner_instruction() {
 }
 
 /// P1-3: Role prompt is available as a versioned PromptBlock.
-#[test]
-fn test_agent_role_prompt_block_traceable() {
+#[tokio::test]
+async fn test_agent_role_prompt_block_traceable() {
     let config = AgentLoopConfig {
         role: crate::agent::agent_loop::AgentRole::Planner,
         ..Default::default()
@@ -705,14 +488,14 @@ fn test_agent_role_prompt_block_traceable() {
 }
 
 /// P1-3: Generalist role produces no prompt block.
-#[test]
-fn test_agent_role_generalist_no_block() {
+#[tokio::test]
+async fn test_agent_role_generalist_no_block() {
     let config = AgentLoopConfig::default();
     assert!(config.role_prompt_block().is_none());
 }
 
-#[test]
-fn test_agent_loop_config_toolset_allowlist() {
+#[tokio::test]
+async fn test_agent_loop_config_toolset_allowlist() {
     let config = AgentLoopConfig {
         role: crate::agent::agent_loop::AgentRole::Planner,
         toolset_allowlist: vec!["goal.read".into(), "life_model.read".into()],
@@ -725,8 +508,8 @@ fn test_agent_loop_config_toolset_allowlist() {
 // ── P1-1: Declarative-Only Enforcement tests ──────────────────────────
 
 /// Test that declarative-only tools are filtered from the tools prompt.
-#[test]
-fn test_declarative_only_tools_filtered_from_prompt() {
+#[tokio::test]
+async fn test_declarative_only_tools_filtered_from_prompt() {
     let mut registry = McpRegistry::new();
     registry.register_default_builtins();
 
@@ -754,8 +537,8 @@ fn test_declarative_only_tools_filtered_from_prompt() {
 }
 
 /// Test that declarative-only tools are blocked at runtime by ActionExecutor.
-#[test]
-fn test_declarative_only_tool_blocked_at_runtime() {
+#[tokio::test]
+async fn test_declarative_only_tool_blocked_at_runtime() {
     let mut registry = McpRegistry::new();
     registry.register_default_builtins();
     // Verify email.read is declarative_only
@@ -770,125 +553,18 @@ fn test_declarative_only_tool_blocked_at_runtime() {
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        event_store: None,
-        network_policy: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
-
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
-    let request = crate::agent::AgentActionRequest {
-        action_type: "mcp_tool".into(),
-        target: "email.read".into(),
-        input: serde_json::json!({"arguments": {}}),
-        source_run_id: None,
-        step_index: 0,
-    };
-
-    let result = executor.execute(request, &ctx).unwrap();
-    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
-    assert_eq!(result.action.status, "blocked");
-    assert!(result.observation.content.contains("declarative-only"));
-}
-
-/// Test that blocked tool execution records an AgentRunEvent.
-#[test]
-fn test_blocked_tool_records_event() {
-    let mut registry = McpRegistry::new();
-    registry.register_default_builtins();
-
-    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-    let audit_file = tempfile::NamedTempFile::new().unwrap();
-    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
-    let privacy_engine = PrivacyEngine::new();
-    let event_store = AgentRunEventStore::new_in_memory().unwrap();
-    let run_id = "test-blocked-event-001";
-
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: None,
-        event_store: Some(event_store.clone()),
-        network_policy: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
-
-    let executor = ActionExecutor::new(ActionExecutorConfig::default());
-    let request = crate::agent::AgentActionRequest {
-        action_type: "mcp_tool".into(),
-        target: "email.read".into(),
-        input: serde_json::json!({"arguments": {}}),
-        source_run_id: Some(run_id.to_string()),
-        step_index: 0,
-    };
-
-    let result = executor.execute(request, &ctx).unwrap();
-    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
-
-    // Verify event was recorded
-    let events = event_store.list_events_by_run(run_id).unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, AgentRunEventType::ToolCallBlocked);
-    assert_eq!(
-        events[0].actor,
-        AgentEventActor::Tool("email.read".to_string())
+    let mut ctx = ActionContext::new_for_test(
+        registry,
+        permission_store,
+        audit_store,
+        privacy_engine,
+        vec![],
     );
-    assert!(events[0].summary.contains("blocked"));
-}
-
-/// Test that proposal-generating tools remain callable (not blocked).
-#[test]
-fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
-    let mut registry = McpRegistry::new();
-    registry.register_default_builtins();
-
-    let safe_dir = tempfile::TempDir::new().unwrap();
-    let safe_path = safe_dir.path().to_str().unwrap().to_string();
-    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-    let audit_file = tempfile::NamedTempFile::new().unwrap();
-    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
-    let privacy_engine = PrivacyEngine::new();
     let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
-
-    let ctx = ActionExecutionContext {
-        registry: &registry,
-        permission_store: &permission_store,
-        audit_store: &audit_store,
-        privacy_engine: &privacy_engine,
-        safe_paths: &[safe_path.clone()],
-        calendar_ics_paths: &[],
-        life_model: None,
-        memory_store: None,
-        proposal_store: Some(&prop_store),
-        agent_run_store: None,
-        event_store: None,
-        network_policy: None,
-        execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-        agent_spec: None,
-    };
+    ctx.proposal_store = Some(Arc::new(tokio::sync::Mutex::new(prop_store)));
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
 
-    // memory.propose_write is a proposal-generating tool
     let request = crate::agent::AgentActionRequest {
         action_type: "mcp_tool".into(),
         target: "memory.propose_write".into(),
@@ -897,7 +573,7 @@ fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
         step_index: 0,
     };
 
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     // Should succeed or need confirmation, not be blocked
     assert!(result.status != crate::agent::ActionExecutionStatus::Blocked);
     assert!(result.action.status == "succeeded" || result.action.status == "needs_confirmation");
@@ -905,8 +581,8 @@ fn test_proposal_tools_not_blocked_by_declarative_enforcement() {
 
 // ── P9-3: Sandbox wiring tests ──────────────────────────────────────
 
-#[test]
-fn test_missing_config_yields_disabled_sandbox() {
+#[tokio::test]
+async fn test_missing_config_yields_disabled_sandbox() {
     use crate::agent::action_executor::DISABLED_SANDBOX;
     assert!(!DISABLED_SANDBOX.bash_enabled);
     assert_eq!(
@@ -920,20 +596,20 @@ fn test_missing_config_yields_disabled_sandbox() {
         .any(|c| c == "rm"));
 }
 
-#[test]
-fn test_action_context_default_is_disabled_sandbox() {
+#[tokio::test]
+async fn test_action_context_default_is_disabled_sandbox() {
     let reg = McpRegistry::new();
     let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
     let audit =
         crate::mcp_audit::McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit.db"));
     let pe = PrivacyEngine::new();
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[]);
+    let ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![]);
     assert!(!ctx.execution_sandbox.bash_enabled);
     assert!(!ctx.execution_sandbox.command_allowlist.is_empty());
 }
 
-#[test]
-fn test_configured_safe_paths_feed_sandbox_safe_paths() {
+#[tokio::test]
+async fn test_configured_safe_paths_feed_sandbox_safe_paths() {
     let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
         safe_paths: vec!["/custom/path".into()],
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
@@ -943,8 +619,8 @@ fn test_configured_safe_paths_feed_sandbox_safe_paths() {
     assert!(sandbox.is_path_in_safe_paths("/custom/path"));
 }
 
-#[test]
-fn test_plan_execution_receives_sandbox_without_enabling_shell() {
+#[tokio::test]
+async fn test_plan_execution_receives_sandbox_without_enabling_shell() {
     let reg = McpRegistry::new();
     let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
     let audit =
@@ -954,16 +630,16 @@ fn test_plan_execution_receives_sandbox_without_enabling_shell() {
         safe_paths: vec!["/tmp".into()],
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
     };
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox);
+    let ctx =
+        ActionContext::new_for_test(reg, ps, audit, pe, vec![]).with_execution_sandbox(sandbox);
     assert!(!ctx.execution_sandbox.bash_enabled);
     assert!(!ctx.execution_sandbox.command_allowlist.is_empty());
 }
 
 // ── P9-5: ActionExecutor shell.run governed tests ─────────────────────
 
-#[test]
-fn test_shell_run_default_not_model_callable() {
+#[tokio::test]
+async fn test_shell_run_default_not_model_callable() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     let manifests = reg.list_manifests();
@@ -979,8 +655,8 @@ fn test_shell_run_default_not_model_callable() {
     assert_eq!(shell.permission_level, "high");
 }
 
-#[test]
-fn test_shell_run_manifest_disabled_blocks() {
+#[tokio::test]
+async fn test_shell_run_manifest_disabled_blocks() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
@@ -994,8 +670,8 @@ fn test_shell_run_manifest_disabled_blocks() {
         command_allowlist: vec!["echo".into()],
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
     };
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox);
+    let ctx =
+        ActionContext::new_for_test(reg, ps, audit, pe, vec![]).with_execution_sandbox(sandbox);
 
     // shell.run manifest is enabled=false by default → blocked before spawn
     let executor = crate::agent::ActionExecutor::new(Default::default());
@@ -1006,7 +682,7 @@ fn test_shell_run_manifest_disabled_blocks() {
         source_run_id: None,
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx);
+    let result = executor.execute(request, &ctx).await;
     assert!(result.is_ok(), "execute should not return Err");
     let result = result.unwrap();
     assert_eq!(
@@ -1016,8 +692,8 @@ fn test_shell_run_manifest_disabled_blocks() {
     assert!(result.action.error.unwrap_or_default().contains("disabled"));
 }
 
-#[test]
-fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
+#[tokio::test]
+async fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     // This test exercises the ActionExecutor → execute_shell_run path
@@ -1031,8 +707,8 @@ fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
     let pe = PrivacyEngine::new();
     // Make sandbox bash_enabled=false → blocked event
     let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::default();
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox);
+    let ctx =
+        ActionContext::new_for_test(reg, ps, audit, pe, vec![]).with_execution_sandbox(sandbox);
 
     let executor = crate::agent::ActionExecutor::new(Default::default());
     let request = crate::agent::AgentActionRequest {
@@ -1042,7 +718,7 @@ fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
         source_run_id: None,
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx);
+    let result = executor.execute(request, &ctx).await;
     assert!(result.is_ok());
     let result = result.unwrap();
     assert_eq!(
@@ -1051,8 +727,8 @@ fn test_shell_run_disabled_sandbox_blocks_at_action_executor() {
     );
 }
 
-#[test]
-fn test_shell_run_sandbox_disabled_records_blocked() {
+#[tokio::test]
+async fn test_shell_run_sandbox_disabled_records_blocked() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
@@ -1063,9 +739,9 @@ fn test_shell_run_sandbox_disabled_records_blocked() {
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory()
         .expect("in-memory event store");
 
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_event_store(event_store.clone());
+    let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![]);
+    ctx.execution_sandbox = sandbox;
+    ctx.event_store = Some(event_store.clone());
 
     let run_id = "test-run-shell-blocked";
     let executor = crate::agent::ActionExecutor::new(Default::default());
@@ -1076,7 +752,7 @@ fn test_shell_run_sandbox_disabled_records_blocked() {
         source_run_id: Some(run_id.to_string()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::action_executor::ActionExecutionStatus::Blocked
@@ -1092,8 +768,8 @@ fn test_shell_run_sandbox_disabled_records_blocked() {
     assert!(has_blocked, "blocked event must be recorded");
 }
 
-#[test]
-fn test_shell_run_allowed_command_succeeds() {
+#[tokio::test]
+async fn test_shell_run_allowed_command_succeeds() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
 
@@ -1142,8 +818,8 @@ fn test_shell_run_allowed_command_succeeds() {
 
 // ── P9-6: Governed runtime entry policy tests ──────────────────────────
 
-#[test]
-fn test_default_agent_spec_denies_shell() {
+#[tokio::test]
+async fn test_default_agent_spec_denies_shell() {
     let spec = crate::agent::types::AgentSpec::default();
     // Default AgentSpec has empty allowed_tools (= use role defaults).
     // An AgentSpec with explicit allowlist without shell.run denies it.
@@ -1162,16 +838,16 @@ fn test_default_agent_spec_denies_shell() {
     );
 }
 
-#[test]
-fn test_scheduled_proactive_uses_disabled_sandbox() {
+#[tokio::test]
+async fn test_scheduled_proactive_uses_disabled_sandbox() {
     // The DISABLED_SANDBOX static is used by scheduler_runner for
     // scheduled/proactive tasks. Verify it never enables bash.
     let sandbox = &crate::agent::action_executor::DISABLED_SANDBOX;
     assert!(!sandbox.bash_enabled);
 }
 
-#[test]
-fn test_sub_agent_shell_attempt_blocked_by_default() {
+#[tokio::test]
+async fn test_sub_agent_shell_attempt_blocked_by_default() {
     // SubAgentRuntime does not expose shell by design.
     // The default AgentSpec used in SubAgentSpec does not include shell.run.
     let agent_spec = crate::agent::types::AgentSpec::default();
@@ -1187,8 +863,8 @@ fn test_sub_agent_shell_attempt_blocked_by_default() {
     assert!(!has_shell, "default sub-agent must deny shell.run");
 }
 
-#[test]
-fn test_plan_bound_agent_spec_denies_shell_execution() {
+#[tokio::test]
+async fn test_plan_bound_agent_spec_denies_shell_execution() {
     // A plan-bound AgentSpec without shell.run in allowed_tools must deny shell.
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
@@ -1202,8 +878,8 @@ fn test_plan_bound_agent_spec_denies_shell_execution() {
     );
 }
 
-#[test]
-fn test_agent_spec_with_explicit_shell_allows_it() {
+#[tokio::test]
+async fn test_agent_spec_with_explicit_shell_allows_it() {
     // If an AgentSpec explicitly allows shell.run, the spec permits it.
     // (Runtime sandbox/manifest still must also allow.)
     let mut spec = crate::agent::types::AgentSpec::default();
@@ -1217,8 +893,8 @@ fn test_agent_spec_with_explicit_shell_allows_it() {
 
 // ── P9 AgentSpec gate tests ────────────────────────────────────────────
 
-#[test]
-fn test_shell_run_missing_agentspec_blocks() {
+#[tokio::test]
+async fn test_shell_run_missing_agentspec_blocks() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     reg.set_builtin_manifest_enabled("shell.run", true);
@@ -1236,8 +912,8 @@ fn test_shell_run_missing_agentspec_blocks() {
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
     };
     // No agent_spec set → must fail-closed
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox);
+    let ctx =
+        ActionContext::new_for_test(reg, ps, audit, pe, vec![]).with_execution_sandbox(sandbox);
 
     let executor = crate::agent::ActionExecutor::new(Default::default());
     let request = crate::agent::AgentActionRequest {
@@ -1247,7 +923,7 @@ fn test_shell_run_missing_agentspec_blocks() {
         source_run_id: None,
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::action_executor::ActionExecutionStatus::Blocked
@@ -1259,8 +935,8 @@ fn test_shell_run_missing_agentspec_blocks() {
         .contains("AgentSpec missing"));
 }
 
-#[test]
-fn test_shell_run_agentspec_denies_blocks_before_permission() {
+#[tokio::test]
+async fn test_shell_run_agentspec_denies_blocks_before_permission() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     reg.set_builtin_manifest_enabled("shell.run", true);
@@ -1280,9 +956,9 @@ fn test_shell_run_agentspec_denies_blocks_before_permission() {
     // AgentSpec explicitly denies shell by not listing it
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_agent_spec(&spec);
+    let ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+        .with_execution_sandbox(sandbox)
+        .with_agent_spec(spec);
 
     let executor = crate::agent::ActionExecutor::new(Default::default());
     let request = crate::agent::AgentActionRequest {
@@ -1292,7 +968,7 @@ fn test_shell_run_agentspec_denies_blocks_before_permission() {
         source_run_id: Some("run-as-deny".into()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::action_executor::ActionExecutionStatus::Blocked
@@ -1304,8 +980,8 @@ fn test_shell_run_agentspec_denies_blocks_before_permission() {
         .contains("AgentSpec denied"));
 }
 
-#[test]
-fn test_shell_run_agentspec_allows_continues_to_permission() {
+#[tokio::test]
+async fn test_shell_run_agentspec_allows_continues_to_permission() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     reg.set_builtin_manifest_enabled("shell.run", true);
@@ -1325,9 +1001,9 @@ fn test_shell_run_agentspec_allows_continues_to_permission() {
     // AgentSpec allows shell, but permission store denies by default
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["goal.read".into(), "shell.run".into()];
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_agent_spec(&spec);
+    let ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+        .with_execution_sandbox(sandbox)
+        .with_agent_spec(spec);
 
     let executor = crate::agent::ActionExecutor::new(Default::default());
     let request = crate::agent::AgentActionRequest {
@@ -1337,7 +1013,7 @@ fn test_shell_run_agentspec_allows_continues_to_permission() {
         source_run_id: Some("run-as-allow".into()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     // AgentSpec allows, but permission store blocks → NeedsConfirmation or Blocked
     assert!(
         matches!(
@@ -1352,8 +1028,8 @@ fn test_shell_run_agentspec_allows_continues_to_permission() {
 
 // ── P9 event deduplication tests ────────────────────────────────────────
 
-#[test]
-fn test_shell_run_blocked_records_only_blocked_no_started() {
+#[tokio::test]
+async fn test_shell_run_blocked_records_only_blocked_no_started() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
@@ -1363,9 +1039,9 @@ fn test_shell_run_blocked_records_only_blocked_no_started() {
     let pe = PrivacyEngine::new();
     let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_event_store(event_store.clone());
+    let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![]);
+    ctx.execution_sandbox = sandbox;
+    ctx.event_store = Some(event_store.clone());
 
     let run_id = "run-evt-blocked";
     let executor = crate::agent::ActionExecutor::new(Default::default());
@@ -1376,7 +1052,7 @@ fn test_shell_run_blocked_records_only_blocked_no_started() {
         source_run_id: Some(run_id.to_string()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::action_executor::ActionExecutionStatus::Blocked
@@ -1411,8 +1087,8 @@ fn test_shell_run_blocked_records_only_blocked_no_started() {
     );
 }
 
-#[test]
-fn test_shell_run_success_records_started_and_completed() {
+#[tokio::test]
+async fn test_shell_run_success_records_started_and_completed() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     reg.set_builtin_manifest_enabled("shell.run", true);
@@ -1442,10 +1118,10 @@ fn test_shell_run_success_records_started_and_completed() {
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["shell.run".into()];
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_agent_spec(&spec)
-        .with_event_store(event_store.clone());
+    let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+        .with_execution_sandbox(sandbox)
+        .with_agent_spec(spec);
+    ctx.event_store = Some(event_store.clone());
 
     let run_id = "run-evt-success";
     let executor = crate::agent::ActionExecutor::new(Default::default());
@@ -1456,7 +1132,7 @@ fn test_shell_run_success_records_started_and_completed() {
         source_run_id: Some(run_id.to_string()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
     assert_eq!(
         result.status,
         crate::agent::action_executor::ActionExecutionStatus::Succeeded
@@ -1516,8 +1192,8 @@ fn test_shell_run_success_records_started_and_completed() {
 
 // ── P9 full governed success path test ──────────────────────────────────
 
-#[test]
-fn test_shell_run_full_governed_success_path() {
+#[tokio::test]
+async fn test_shell_run_full_governed_success_path() {
     let mut reg = McpRegistry::new();
     reg.register_default_builtins();
     reg.set_builtin_manifest_enabled("shell.run", true);
@@ -1549,10 +1225,10 @@ fn test_shell_run_full_governed_success_path() {
     let mut spec = crate::agent::types::AgentSpec::default();
     spec.allowed_tools = vec!["shell.run".into()];
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
-    let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-        .with_execution_sandbox(&sandbox)
-        .with_agent_spec(&spec)
-        .with_event_store(event_store.clone());
+    let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+        .with_execution_sandbox(sandbox)
+        .with_agent_spec(spec);
+    ctx.event_store = Some(event_store.clone());
 
     let run_id = "run-full-success";
     let executor = crate::agent::ActionExecutor::new(Default::default());
@@ -1566,7 +1242,7 @@ fn test_shell_run_full_governed_success_path() {
         source_run_id: Some(run_id.to_string()),
         step_index: 0,
     };
-    let result = executor.execute(request, &ctx).unwrap();
+    let result = executor.execute(request, &ctx).await.unwrap();
 
     // Must succeed
     assert_eq!(
@@ -1632,8 +1308,8 @@ fn test_shell_run_full_governed_success_path() {
 }
 
 // ── MemoryEvidence → LifeModel Proposal pipeline test ────────────────
-#[test]
-fn test_memory_evidence_to_proposal_pipeline() {
+#[tokio::test]
+async fn test_memory_evidence_to_proposal_pipeline() {
     use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
     use crate::agent::types::{ProposalSource, ProposalType, RiskLevel};
 
@@ -1670,8 +1346,8 @@ fn test_memory_evidence_to_proposal_pipeline() {
     assert!(weak.is_none(), "low confidence evidence should yield None");
 }
 
-#[test]
-fn test_memory_evidence_high_risk_requires_explicit_review_in_proposal() {
+#[tokio::test]
+async fn test_memory_evidence_high_risk_requires_explicit_review_in_proposal() {
     use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
     use crate::agent::types::RiskLevel;
 
@@ -1695,8 +1371,8 @@ fn test_memory_evidence_high_risk_requires_explicit_review_in_proposal() {
     );
 }
 
-#[test]
-fn test_memory_evidence_contradiction_halves_confidence() {
+#[tokio::test]
+async fn test_memory_evidence_contradiction_halves_confidence() {
     use crate::agent::memory_evidence::{EvidenceType, MemoryEvidence};
 
     let e1 = MemoryEvidence::new(

@@ -15,7 +15,7 @@ Status: active
 | 原语 | 状态 | 代码证据 |
 |------|------|----------|
 | AgentRun 追踪 | ✅ P0 | `agent/store.rs` (834行), Tauri commands |
-| AgentRunEvent (29种) | ✅ P0/P1 | `agent/event_store.rs` (804行), `agent/types.rs` (2183行) |
+| AgentRunEvent (41种) | ✅ P0/P1 | `agent/event_store.rs` (804行), `agent/types/mod.rs` (2183行) |
 | AgentLoop ReAct 循环 | ✅ P1 | `agent/agent_loop.rs` (3056行) |
 | PromptStack (10 Block) | ✅ P4/P6 | `agent/prompt_stack.rs` (922行) |
 | ToolRuntime + ActionExecutor | ✅ P3 | `agent/action_executor/` (6文件, ~3500行) |
@@ -39,7 +39,7 @@ Status: active
 
 | 指标 | 数值 |
 |------|------|
-| CI 状态 | ✅ 全绿: 799 测试 (737 core + 62 tauri) |
+| CI 状态 | ✅ 全绿: 140+ Rust 测试 (core + tauri) |
 | 前端测试 | ✅ 214 passed |
 | 前端构建 | ✅ 生产构建 3.87s, 57 chunks |
 | Rust clippy | ✅ 零警告 |

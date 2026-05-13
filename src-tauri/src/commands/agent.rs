@@ -144,9 +144,6 @@ pub(crate) async fn replay_action_internal(
         )));
     }
 
-    let (reg, audit) = state.get_mcp_state().await;
-    let permission_store = state.tool_permission_store.lock().await;
-    let privacy_engine = state.privacy_engine.lock().await;
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
@@ -155,19 +152,6 @@ pub(crate) async fn replay_action_internal(
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
-    };
-    let memory_store = state.memory_store.lock().await;
-    let proposal_store_opt = state.proposal_store.clone();
-    let proposal_store_guard = if let Some(ref store) = proposal_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
-    };
-    let agent_run_store_opt = state.agent_run_store.clone();
-    let agent_run_store_guard = if let Some(ref store) = agent_run_store_opt {
-        Some(store.lock().await)
-    } else {
-        None
     };
     let args = action
         .input
@@ -180,23 +164,23 @@ pub(crate) async fn replay_action_internal(
             consume_allow_once: false,
             ..Default::default()
         });
-    let ctx = openlife_core::agent::ActionExecutionContext {
-        registry: &reg,
-        permission_store: &permission_store,
-        audit_store: &audit,
-        privacy_engine: &privacy_engine,
-        safe_paths: &safe_paths,
-        calendar_ics_paths: &calendar_ics_paths,
-        life_model: Some(&life_model),
-        memory_store: Some(&memory_store),
-        proposal_store: proposal_store_guard.as_deref(),
-        agent_run_store: agent_run_store_guard.as_deref(),
-        network_policy: Some(&network_policy),
+    let ctx = openlife_core::agent::ActionContext {
+        registry: state.mcp_registry.clone(),
+        permission_store: state.tool_permission_store.clone(),
+        audit_store: state.mcp_audit_store.clone(),
+        privacy_engine: state.privacy_engine.clone(),
+        safe_paths,
+        life_model: Some(life_model.clone()),
+        memory_store: Some(state.memory_store.clone()),
+        proposal_store: state.proposal_store.clone(),
+        agent_run_store: state.agent_run_store.clone(),
         event_store: state
             .agent_run_event_store
             .as_ref()
             .map(|es| (**es).clone()),
-        execution_sandbox: &openlife_core::agent::action_executor::DISABLED_SANDBOX,
+        network_policy: Some(network_policy),
+        calendar_ics_paths,
+        execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
         agent_spec: None,
     };
 
@@ -208,9 +192,10 @@ pub(crate) async fn replay_action_internal(
         step_index: action_idx as u32,
     };
 
-    let exec_result = executor.execute(request, &ctx).map_err(AppError::from)?;
-    drop(proposal_store_guard);
-    drop(agent_run_store_guard);
+    let exec_result = executor
+        .execute(request, &ctx)
+        .await
+        .map_err(AppError::from)?;
 
     let mut new_action = exec_result.action;
     let mut new_observation = exec_result.observation;

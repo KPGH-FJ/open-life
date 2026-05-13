@@ -4,7 +4,7 @@ use serde_json::Value;
 use super::helpers::ToolCallInternalResult;
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
-use super::ActionExecutionContext;
+use super::BorrowedActionContext;
 
 impl super::ActionExecutor {
     /// Execute a Core OS tool with real data from LifeModel.
@@ -12,7 +12,7 @@ impl super::ActionExecutor {
         &self,
         tool_name: &str,
         args: &Value,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
     ) -> Result<ToolCallInternalResult> {
         let output = match tool_name {
             "life_model.read" => {
@@ -292,10 +292,6 @@ impl super::ActionExecutor {
             }
             "permission.replay_action" => {
                 let target = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
-                let action_input = args
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| args.clone());
                 if target.is_empty() {
                     serde_json::json!({
                         "status": "error",
@@ -309,28 +305,12 @@ impl super::ActionExecutor {
                     })
                     .to_string()
                 } else {
-                    // Replay the action through ActionExecutor
-                    let action_request = super::AgentActionRequest {
-                        action_type: "mcp_tool".into(),
-                        target: target.to_string(),
-                        input: serde_json::json!({ "arguments": action_input }),
-                        source_run_id: None,
-                        step_index: 0,
-                    };
-                    match self.execute(action_request, ctx) {
-                        Ok(result) => serde_json::json!({
-                            "status": if result.status == super::ActionExecutionStatus::Succeeded { "success" } else { "failed" },
-                            "action_status": format!("{:?}", result.status),
-                            "observation": result.observation.content,
-                            "requires_confirmation": result.status == super::ActionExecutionStatus::NeedsConfirmation,
-                        })
-                        .to_string(),
-                        Err(e) => serde_json::json!({
-                            "status": "error",
-                            "reason": format!("重放操作失败: {}", e)
-                        })
-                        .to_string(),
-                    }
+                    // Replay: return needs-confirmation (async replay path handled by Tauri command)
+                    serde_json::json!({
+                        "status": "needs_replay",
+                        "reason": "permission.replay_action requires async Tauri command dispatch"
+                    })
+                    .to_string()
                 }
             }
             _ => {
@@ -351,7 +331,7 @@ impl super::ActionExecutor {
 
     pub fn create_core_os_proposal(
         &self,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
         proposal_type: ProposalType,
         affected_path: &str,
         after: Value,

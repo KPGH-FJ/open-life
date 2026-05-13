@@ -8,7 +8,7 @@ pub async fn list_mcp_servers(
     state: State<'_, Arc<AppState>>,
 ) -> Result<Vec<openlife_core::mcp::McpServerInfo>, AppError> {
     let reg = state.mcp_registry.lock().await;
-    Ok(reg.list_servers())
+    Ok(reg.list_servers().await)
 }
 
 /// Default allowlist for MCP server commands.
@@ -84,6 +84,7 @@ pub async fn register_mcp_server(
     let env_map = env.unwrap_or_default();
     registry
         .register_with_env(&name, &command, &args_ref, &env_map)
+        .await
         .map_err(AppError::from)
 }
 
@@ -93,7 +94,7 @@ pub async fn unregister_mcp_server(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
     let mut registry = state.mcp_registry.lock().await;
-    registry.unregister(&name).map_err(AppError::from)
+    registry.unregister(&name).await.map_err(AppError::from)
 }
 
 #[tauri::command]

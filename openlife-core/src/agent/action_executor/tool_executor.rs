@@ -1,3 +1,17 @@
+use super::helpers::{
+    canonical_tool_source, filesystem_access_error, is_path_in_safe_paths, normalize_tool_name,
+    should_mark_needs_confirmation, ToolCallInternalResult,
+};
+use super::ActionContext;
+use super::ActionExecutionResult;
+use super::ActionExecutionStatus;
+use super::AgentActionRequest;
+use super::BorrowedActionContext;
+use crate::agent::shell_executor::{ShellCommandRequest, ShellExecutor};
+use crate::agent::types::{
+    AgentAction, AgentEventActor, AgentObservation, AgentProposal, AgentRunEvent,
+    AgentRunEventType, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
+};
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
 use crate::mcp_audit::McpAuditStore;
@@ -6,20 +20,6 @@ use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
-
-use super::helpers::{
-    canonical_tool_source, filesystem_access_error, is_path_in_safe_paths, normalize_tool_name,
-    should_mark_needs_confirmation, ToolCallInternalResult,
-};
-use super::ActionExecutionContext;
-use super::ActionExecutionResult;
-use super::ActionExecutionStatus;
-use super::AgentActionRequest;
-use crate::agent::shell_executor::{ShellCommandRequest, ShellExecutor};
-use crate::agent::types::{
-    AgentAction, AgentEventActor, AgentObservation, AgentProposal, AgentRunEvent,
-    AgentRunEventType, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
-};
 
 /// Returns true if the tool name indicates a proposal-generation tool that
 /// only creates a user-confirmable Proposal (no direct side effect).
@@ -37,11 +37,50 @@ fn is_proposal_generation_tool(name: &str) -> bool {
 }
 
 impl super::ActionExecutor {
-    /// Execute a tool action (MCP, builtin, or plugin).
-    pub fn execute_tool(
+    pub async fn execute_tool(
         &self,
         request: AgentActionRequest,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &ActionContext,
+    ) -> Result<ActionExecutionResult> {
+        let reg = ctx.registry.lock().await;
+        let perm = ctx.permission_store.lock().await;
+        let audit = ctx.audit_store.lock().await;
+        let pe = ctx.privacy_engine.lock().await;
+        let ms_guard = match &ctx.memory_store {
+            Some(s) => Some(s.lock().await),
+            None => None,
+        };
+        let ps_guard = match &ctx.proposal_store {
+            Some(s) => Some(s.lock().await),
+            None => None,
+        };
+        let as_guard = match &ctx.agent_run_store {
+            Some(s) => Some(s.lock().await),
+            None => None,
+        };
+        let inner = BorrowedActionContext {
+            registry: &reg,
+            permission_store: &perm,
+            audit_store: &audit,
+            privacy_engine: &pe,
+            safe_paths: &ctx.safe_paths,
+            life_model: ctx.life_model.as_ref(),
+            memory_store: ms_guard.as_deref(),
+            proposal_store: ps_guard.as_deref(),
+            agent_run_store: as_guard.as_deref(),
+            event_store: ctx.event_store.clone(),
+            network_policy: ctx.network_policy.as_ref(),
+            calendar_ics_paths: &ctx.calendar_ics_paths,
+            execution_sandbox: &ctx.execution_sandbox,
+            agent_spec: ctx.agent_spec.as_ref(),
+        };
+        self.execute_tool_sync(request, &inner)
+    }
+
+    pub fn execute_tool_sync(
+        &self,
+        request: AgentActionRequest,
+        ctx: &BorrowedActionContext<'_>,
     ) -> Result<ActionExecutionResult> {
         let normalized_target = normalize_tool_name(&request.target, ctx.registry);
         let tool_name = &normalized_target;
@@ -372,7 +411,9 @@ impl super::ActionExecutor {
         audit: &McpAuditStore,
         pii_found: bool,
     ) -> ToolCallInternalResult {
-        match registry.execute_manifest(manifest, args.clone()) {
+        let handle = tokio::runtime::Handle::current();
+        let result = handle.block_on(registry.execute_manifest(manifest, args.clone()));
+        match result {
             Ok(r) => {
                 if let Err(e) = audit.insert_log(&manifest.name, &args, &r, true, pii_found) {
                     eprintln!("[warn] audit log write failed: {}", e);
@@ -621,7 +662,7 @@ impl super::ActionExecutor {
     fn create_tool_permission_proposal(
         &self,
         request: &AgentActionRequest,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
         tool_name: &str,
         args: &Value,
         manifest: Option<&ToolManifest>,
@@ -712,7 +753,7 @@ impl super::ActionExecutor {
     fn execute_shell_run(
         &self,
         args: &Value,
-        ctx: &ActionExecutionContext<'_>,
+        ctx: &BorrowedActionContext<'_>,
         request: &AgentActionRequest,
         manifest: Option<&ToolManifest>,
         inspection: &McpArgumentInspection,
@@ -1227,8 +1268,8 @@ mod tests {
 
     // ── P9-5: ActionExecutor shell.run governed path tests ───────────
 
-    #[test]
-    fn test_shell_run_disabled_sandbox_records_blocked() {
+    #[tokio::test]
+    async fn test_shell_run_disabled_sandbox_records_blocked() {
         let mut reg = McpRegistry::new();
         reg.register_default_builtins();
         let ps = ToolPermissionStore::new_in_memory().unwrap();
@@ -1236,9 +1277,9 @@ mod tests {
         let pe = PrivacyEngine::new();
         let sandbox = crate::agent::execution_sandbox::ExecutionSandbox::always_disabled();
         let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
-        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-            .with_execution_sandbox(&sandbox)
-            .with_event_store(event_store.clone());
+        let mut ctx = crate::agent::ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+            .with_execution_sandbox(sandbox);
+        ctx.event_store = Some(event_store.clone());
 
         let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
         let request = crate::agent::AgentActionRequest {
@@ -1248,7 +1289,7 @@ mod tests {
             source_run_id: Some("test-run-1".into()),
             step_index: 0,
         };
-        let result = executor.execute(request, &ctx).unwrap();
+        let result = executor.execute(request, &ctx).await.unwrap();
         assert_eq!(result.status, ActionExecutionStatus::Blocked);
         assert!(result.action.error.unwrap_or_default().contains("disabled"));
 
@@ -1265,8 +1306,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_shell_run_manifest_disabled_blocks_in_action_executor() {
+    #[tokio::test]
+    async fn test_shell_run_manifest_disabled_blocks_in_action_executor() {
         let mut reg = McpRegistry::new();
         reg.register_default_builtins();
         let ps = ToolPermissionStore::new_in_memory().unwrap();
@@ -1281,8 +1322,7 @@ mod tests {
             command_allowlist: vec!["echo".into()],
             ..crate::agent::execution_sandbox::ExecutionSandbox::default()
         };
-        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-            .with_execution_sandbox(&sandbox);
+        let ctx = crate::agent::ActionContext::new_for_test(reg, ps, audit, pe, vec![]);
 
         let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
         let request = crate::agent::AgentActionRequest {
@@ -1292,14 +1332,14 @@ mod tests {
             source_run_id: None,
             step_index: 0,
         };
-        let result = executor.execute(request, &ctx).unwrap();
+        let result = executor.execute(request, &ctx).await.unwrap();
         // Manifest is disabled → blocked at the manifest check
         assert_eq!(result.status, ActionExecutionStatus::Blocked);
         assert!(result.action.error.unwrap_or_default().contains("disabled"));
     }
 
-    #[test]
-    fn test_tool_permission_proposal_action_keeps_tool_scope_for_replay() {
+    #[tokio::test]
+    async fn test_tool_permission_proposal_action_keeps_tool_scope_for_replay() {
         let mut reg = McpRegistry::new();
         reg.register_default_builtins();
         let ps = ToolPermissionStore::new_in_memory().unwrap();
@@ -1315,8 +1355,8 @@ mod tests {
         let audit = McpAuditStore::new(tempfile::tempdir().unwrap().path().join("audit_tool3.db"));
         let pe = PrivacyEngine::new();
         let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
-        let ctx = crate::agent::ActionExecutionContext::new(&reg, &ps, &audit, &pe, &[])
-            .with_proposal_store(&proposal_store);
+        let ctx = crate::agent::ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+            .with_proposal_store(std::sync::Arc::new(tokio::sync::Mutex::new(proposal_store)));
 
         let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
         let request = crate::agent::AgentActionRequest {
@@ -1326,7 +1366,7 @@ mod tests {
             source_run_id: Some("test-run-2".into()),
             step_index: 0,
         };
-        let result = executor.execute(request, &ctx).unwrap();
+        let result = executor.execute(request, &ctx).await.unwrap();
 
         assert_eq!(result.status, ActionExecutionStatus::NeedsConfirmation);
         let scope = result

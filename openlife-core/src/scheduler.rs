@@ -565,9 +565,11 @@ impl InferenceScheduler {
                     .await
                 } else if has_remote {
                     if has_prompt_stack {
+                        let (safe_messages, summary_prompt) =
+                            prepare_summary_only_cloud_payload(&messages, life_model, tools_prompt);
                         chat_with_openrouter_raw(
-                            messages,
-                            None,
+                            safe_messages,
+                            Some(&summary_prompt),
                             &self.provider,
                             &self.openai_base,
                             &self.openai_key,
@@ -1460,5 +1462,192 @@ mod tests {
 
         // Logic verification: the function should branch to legacy variant
         assert!(!has_prompt_stack, "flag should be false for legacy path");
+    }
+
+    // ── Fix 1: SummaryOnly + PromptStack cloud bypass regression ───────────
+
+    #[test]
+    fn test_summary_only_with_prompt_stack_sanitizes_user_text() {
+        use crate::life_model::{Identity, LifeModel};
+        use crate::llm::ChatMessage;
+
+        let mut lm = LifeModel::default();
+        lm.identity = Identity {
+            name: "Alice Secret".to_string(),
+            ..Default::default()
+        };
+
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "[PromptStack] BaseSystemPrompt v1.0.0\n\nLifeModel identity.name: Alice Secret\n\nGoal: secret-goal-description\n\nMemory: user prefers dark mode\n\n".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "我的名字是Alice，帮我查看我的目标 secret-goal".to_string(),
+            },
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: "Alice，根据你的LifeModel，目标secret-goal的进度是50%".to_string(),
+            },
+        ];
+
+        // Simulate the fix: even with PromptStack present, SummaryOnly cloud
+        // must sanitize through prepare_summary_only_cloud_payload.
+        let (safe_msgs, prompt) =
+            super::prepare_summary_only_cloud_payload(&messages, &lm, Some("tool prompt"));
+
+        // All messages must be sanitized
+        assert_eq!(safe_msgs.len(), 3, "all messages should be preserved");
+
+        // User message must NOT contain raw user text
+        assert!(
+            !safe_msgs[1].content.contains("Alice"),
+            "user message must not contain name: {}",
+            safe_msgs[1].content
+        );
+        assert!(
+            !safe_msgs[1].content.contains("secret-goal"),
+            "user message must not contain goal: {}",
+            safe_msgs[1].content
+        );
+        assert!(
+            safe_msgs[1].content.contains("SummaryOnly"),
+            "user message must be SummaryOnly-marked"
+        );
+
+        // Assistant message must NOT contain raw LifeModel info
+        assert!(
+            !safe_msgs[2].content.contains("Alice"),
+            "assistant must not contain name"
+        );
+        assert!(
+            !safe_msgs[2].content.contains("LifeModel"),
+            "assistant must not contain LifeModel refs"
+        );
+        assert!(
+            safe_msgs[2].content.contains("SummaryOnly"),
+            "assistant must be SummaryOnly-marked"
+        );
+
+        // System message (PromptStack) must be replaced
+        let sys_content = &safe_msgs[0].content;
+        assert!(
+            !sys_content.contains("Alice Secret"),
+            "system must not contain identity.name"
+        );
+        assert!(
+            !sys_content.contains("secret-goal-description"),
+            "system must not contain goal description"
+        );
+        assert!(
+            !sys_content.contains("dark mode"),
+            "system must not contain memory content"
+        );
+        assert!(
+            sys_content.contains("SummaryOnly") || sys_content.contains("内部指令已被隐私策略过滤"),
+            "system must be sanitized, got: {}",
+            sys_content
+        );
+
+        // Cloud system prompt must NOT contain sensitive fields
+        assert!(
+            !prompt.contains("Alice Secret"),
+            "cloud prompt must not contain name"
+        );
+        assert!(
+            !prompt.contains("secret-goal"),
+            "cloud prompt must not contain goal names"
+        );
+        assert!(
+            prompt.contains("SummaryOnly"),
+            "cloud prompt must be SummaryOnly-marked"
+        );
+    }
+
+    #[test]
+    fn test_summary_only_without_prompt_stack_sanitizes_correctly() {
+        use crate::life_model::{GoalItem, Goals, Identity, LifeModel};
+        use crate::llm::ChatMessage;
+
+        let mut lm = LifeModel::default();
+        lm.identity = Identity {
+            name: "Bob".to_string(),
+            ..Default::default()
+        };
+        lm.goals = Goals {
+            short_term: vec![GoalItem {
+                name: "goal-x".to_string(),
+                description: "secret desc".to_string(),
+                priority: 5,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        // No PromptStack system message
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: "Bob需要完成goal-x".to_string(),
+        }];
+
+        let (safe_msgs, prompt) = super::prepare_summary_only_cloud_payload(&messages, &lm, None);
+
+        assert!(
+            !safe_msgs[0].content.contains("Bob"),
+            "user message must be sanitized"
+        );
+        assert!(
+            !safe_msgs[0].content.contains("goal-x"),
+            "user message must not contain goal names"
+        );
+        assert!(!prompt.contains("Bob"), "prompt must not contain name");
+        assert!(
+            !prompt.contains("goal-x"),
+            "prompt must not contain goal names"
+        );
+        assert!(
+            !prompt.contains("secret desc"),
+            "prompt must not contain goal descriptions"
+        );
+        assert!(
+            prompt.contains("SummaryOnly"),
+            "prompt must be SummaryOnly-marked"
+        );
+    }
+
+    #[test]
+    fn test_prompt_stack_detection_with_summary_only_system_message() {
+        use crate::llm::ChatMessage;
+
+        // Simulate the actual has_prompt_stack detection used in generate_governed
+        let messages = vec![
+            ChatMessage {
+                role: "system".to_string(),
+                content: "PromptStack assembled system prompt".to_string(),
+            },
+            ChatMessage {
+                role: "user".to_string(),
+                content: "user text".to_string(),
+            },
+        ];
+
+        let has_prompt_stack = messages
+            .first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false);
+
+        assert!(has_prompt_stack);
+
+        // Key assertion: even with has_prompt_stack=true, the SummaryOnly cloud
+        // path must still produce sanitized output (verified in test above)
+        let lm = crate::life_model::LifeModel::default();
+        let (safe_msgs, prompt) = super::prepare_summary_only_cloud_payload(&messages, &lm, None);
+
+        assert!(
+            !safe_msgs[1].content.contains("user text"),
+            "PromptStack path must still sanitize user messages"
+        );
+        assert!(prompt.contains("SummaryOnly"));
     }
 }

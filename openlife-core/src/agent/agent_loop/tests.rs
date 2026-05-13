@@ -37,44 +37,26 @@ fn make_test_agent_loop() -> AgentLoop {
     AgentLoop::new(runtime, executor, scheduler, config)
 }
 
-/// Create a minimal ActionExecutionContext backed by tempfile-based stores.
+/// Create a minimal ActionContext backed by tempfile-based stores.
 struct TestCtx {
-    registry: McpRegistry,
-    permission_store: ToolPermissionStore,
-    audit_store: McpAuditStore,
-    privacy_engine: PrivacyEngine,
-    safe_paths: Vec<String>,
+    ctx: crate::agent::action_executor::ActionContext,
 }
 
 impl TestCtx {
     fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        Self {
-            registry: McpRegistry::new(),
-            permission_store: ToolPermissionStore::new_in_memory().unwrap(),
-            audit_store: McpAuditStore::new(tmp.path().join("audit.db")),
-            privacy_engine: PrivacyEngine::new(),
-            safe_paths: vec!["/tmp/openlife-test".into()],
-        }
+        let ctx = crate::agent::action_executor::ActionContext::new_for_test(
+            McpRegistry::new(),
+            ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit.db")),
+            PrivacyEngine::new(),
+            vec!["/tmp/openlife-test".into()],
+        );
+        Self { ctx }
     }
 
-    fn as_ctx(&self) -> crate::agent::action_executor::ActionExecutionContext<'_> {
-        crate::agent::action_executor::ActionExecutionContext {
-            registry: &self.registry,
-            permission_store: &self.permission_store,
-            audit_store: &self.audit_store,
-            privacy_engine: &self.privacy_engine,
-            safe_paths: &self.safe_paths,
-            life_model: None,
-            memory_store: None,
-            proposal_store: None,
-            agent_run_store: None,
-            network_policy: None,
-            calendar_ics_paths: &[],
-            event_store: None,
-            execution_sandbox: &crate::agent::action_executor::DISABLED_SANDBOX,
-            agent_spec: None,
-        }
+    fn as_ctx(&self) -> &crate::agent::action_executor::ActionContext {
+        &self.ctx
     }
 }
 
