@@ -4,9 +4,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use constant_time_eq::constant_time_eq;
+use hmac::{Hmac, Mac};
 use openlife_core::a2a::AgentCard;
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::sync::Arc;
 
 use crate::AppState;
@@ -52,16 +54,20 @@ pub async fn has_reachable_local_server(port: u16) -> bool {
                     body.get("instance_id").and_then(|v| v.as_str()),
                     body.get("proof").and_then(|v| v.as_str()),
                 ) {
-                    // Check instance_id matches expected
+                    // Verify instance_id and proof using HMAC-SHA256(token, challenge)
                     if iid != expected_iid {
                         return false;
                     }
-                    // Verify: proof = SHA256(local_token + challenge)
-                    let mut hasher = Sha256::new();
-                    hasher.update(local_token.as_bytes());
-                    hasher.update(challenge.as_bytes());
-                    let expected = format!("{:x}", hasher.finalize());
-                    return proof == expected;
+                    let mut mac =
+                        Hmac::<Sha256>::new_from_slice(local_token.as_bytes()).expect("HMAC key");
+                    mac.update(challenge.as_bytes());
+                    let expected_tag = mac.finalize().into_bytes();
+                    // constant-time compare
+                    let proof_bytes = hex::decode(proof).unwrap_or_default();
+                    if proof_bytes.len() != expected_tag.len() {
+                        return false;
+                    }
+                    return constant_time_eq(&proof_bytes, expected_tag.as_slice());
                 }
             }
         }
@@ -71,8 +77,9 @@ pub async fn has_reachable_local_server(port: u16) -> bool {
 }
 
 fn verify_bearer_token(headers: &HeaderMap, expected_token: &str) -> bool {
+    // Empty token means no auth configured → always deny (fail closed)
     if expected_token.is_empty() {
-        return true; // no token configured — allow (backward-compatible for dev)
+        return false;
     }
     let auth_header = headers
         .get(axum::http::header::AUTHORIZATION)
@@ -186,10 +193,9 @@ async fn health_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let challenge = params.get("challenge").cloned().unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(state.bearer_token.as_bytes());
-    hasher.update(challenge.as_bytes());
-    let proof = format!("{:x}", hasher.finalize());
+    let mut mac = Hmac::<Sha256>::new_from_slice(state.bearer_token.as_bytes()).expect("HMAC key");
+    mac.update(challenge.as_bytes());
+    let proof = hex::encode(mac.finalize().into_bytes());
     Ok(Json(serde_json::json!({
         "instance_id": state.instance_id,
         "proof": proof,
@@ -225,4 +231,46 @@ fn load_or_generate_instance_id() -> String {
     let id = uuid::Uuid::new_v4().to_string();
     let _ = std::fs::write(&path, &id);
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_verify_bearer_empty_expected_token_returns_false() {
+        let headers = HeaderMap::new();
+        assert!(!verify_bearer_token(&headers, ""));
+    }
+
+    #[test]
+    fn test_verify_bearer_valid_token_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer my-secret-token".parse().unwrap(),
+        );
+        assert!(verify_bearer_token(&headers, "my-secret-token"));
+    }
+
+    #[test]
+    fn test_verify_bearer_invalid_token_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer wrong-token".parse().unwrap(),
+        );
+        assert!(!verify_bearer_token(&headers, "my-secret-token"));
+    }
+
+    #[test]
+    fn test_verify_bearer_empty_header_token_with_nonempty_expected_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer ".parse().unwrap(),
+        );
+        assert!(!verify_bearer_token(&headers, "my-secret-token"));
+    }
 }

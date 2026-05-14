@@ -244,11 +244,11 @@ impl Drop for McpClient {
     }
 }
 
-pub type BuiltinFn = Box<dyn Fn(Value) -> Result<String> + Send + Sync>;
+pub type BuiltinFn = Arc<dyn Fn(Value) -> Result<String> + Send + Sync>;
 
 /// Registry for multiple MCP clients and built-in tools
 pub struct McpRegistry {
-    clients: HashMap<String, McpClient>,
+    clients: HashMap<String, Arc<McpClient>>,
     tools_cache: Vec<Tool>,
     privacy_engine: PrivacyEngine,
     builtins: HashMap<String, BuiltinFn>,
@@ -318,7 +318,7 @@ impl McpRegistry {
         };
         self.register_builtin(
             echo_manifest,
-            Box::new(|args| {
+            Arc::new(|args| {
                 let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 Ok(text.to_string())
             }),
@@ -486,7 +486,7 @@ impl McpRegistry {
                 action_type: "read".into(),
                 tags: vec!["execution".into(), "web".into()],
             },
-            Box::new(|_args| Ok("web.search executed".to_string())),
+            Arc::new(|_args| Ok("web.search executed".to_string())),
         );
 
         self.register_builtin(
@@ -514,7 +514,7 @@ impl McpRegistry {
                 action_type: "external_side_effect".into(),
                 tags: vec!["execution".into(), "mcp_wrapper".into()],
             },
-            Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
+            Arc::new(|_args| Ok("mcp.call_tool executed".to_string())),
         );
 
         // Execution Tools: P1 calendar.read (reads ICS files).
@@ -611,7 +611,7 @@ impl McpRegistry {
                 action_type: "external_side_effect".into(),
                 tags: vec!["shell".into(), "execution".into(), "p9".into()],
             },
-            Box::new(|_args| {
+            Arc::new(|_args| {
                 Err(anyhow::anyhow!(
                     "shell.run must be executed through ActionExecutor"
                 ))
@@ -650,7 +650,7 @@ impl McpRegistry {
         let id_owned = id.to_string();
         self.register_builtin(
             manifest,
-            Box::new(move |_args| {
+            Arc::new(move |_args| {
                 Ok(format!(
                     "Core OS tool '{}' executed (Beta MVP stub)",
                     id_owned
@@ -692,7 +692,7 @@ impl McpRegistry {
         let id_owned = id.to_string();
         self.register_builtin(
             manifest,
-            Box::new(move |_args| {
+            Arc::new(move |_args| {
                 Ok(format!(
                     "Execution tool '{}' executed (Beta MVP stub)",
                     id_owned
@@ -721,7 +721,7 @@ impl McpRegistry {
         };
         self.register_builtin(
             manifest,
-            Box::new(move |_args| {
+            Arc::new(move |_args| {
                 Ok("This tool is a declarative-only stub for Beta. Configure the appropriate provider to enable it.".to_string())
             }),
         );
@@ -779,7 +779,7 @@ impl McpRegistry {
         let client = McpClient::new(command, args, env).await?;
         let tools = client.list_tools().await.unwrap_or_default();
         self.tools_cache.extend(tools);
-        self.clients.insert(name.to_string(), client);
+        self.clients.insert(name.to_string(), Arc::new(client));
         Ok(())
     }
 
@@ -853,6 +853,18 @@ impl McpRegistry {
             );
         }
         out
+    }
+
+    /// Clone the `Arc<McpClient>` for a registered MCP server.
+    /// Returns `None` if the server is not registered.
+    pub fn get_mcp_client(&self, server_name: &str) -> Option<Arc<McpClient>> {
+        self.clients.get(server_name).cloned()
+    }
+
+    /// Clone the `Arc<dyn Fn>` for a registered built-in tool.
+    /// Returns `None` if the tool is not registered.
+    pub fn get_builtin_fn(&self, name: &str) -> Option<BuiltinFn> {
+        self.builtins.get(name).cloned()
     }
 
     /// Execute a manifest by its source.
@@ -935,6 +947,7 @@ impl McpRegistry {
         let client = self
             .clients
             .get(server_name)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?;
 
         // 1. Detect and desensitize arguments

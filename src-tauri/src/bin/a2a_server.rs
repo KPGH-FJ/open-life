@@ -4,10 +4,11 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use hmac::{Hmac, Mac};
 use openlife_core::a2a::{A2AServerHandler, SendTaskRequest, SendTaskResponse};
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::privacy::PrivacyEngine;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use std::sync::Arc;
 
 struct AppState {
@@ -25,6 +26,14 @@ async fn main() {
         .unwrap_or(8765);
 
     let bearer_token = std::env::var("A2A_BEARER_TOKEN").unwrap_or_default();
+    if bearer_token.trim().is_empty() {
+        eprintln!(
+            "FATAL: A2A_BEARER_TOKEN is not set or is empty. \
+             Standalone A2A server requires a bearer token for authentication. \
+             Set the environment variable and restart."
+        );
+        std::process::exit(1);
+    }
     let instance_id =
         std::env::var("A2A_INSTANCE_ID").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
 
@@ -101,23 +110,28 @@ async fn main() {
     }
 }
 
+fn verify_bearer_token_standalone(headers: &HeaderMap, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if let Some(token) = auth_header.strip_prefix("Bearer ") {
+        token == expected
+    } else {
+        false
+    }
+}
+
 async fn send_task(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<SendTaskRequest>,
 ) -> Result<Json<SendTaskResponse>, axum::http::StatusCode> {
-    // Validate bearer token
-    if !state.bearer_token.is_empty() {
-        let auth_header = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !auth_header
-            .strip_prefix("Bearer ")
-            .is_some_and(|t| t == state.bearer_token)
-        {
-            return Err(axum::http::StatusCode::UNAUTHORIZED);
-        }
+    if !verify_bearer_token_standalone(&headers, &state.bearer_token) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
 
     let life_model = state
@@ -137,13 +151,61 @@ async fn health_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let challenge = params.get("challenge").cloned().unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(state.bearer_token.as_bytes());
-    hasher.update(challenge.as_bytes());
-    let proof = format!("{:x}", hasher.finalize());
+    let mut mac = Hmac::<Sha256>::new_from_slice(state.bearer_token.as_bytes()).expect("HMAC key");
+    mac.update(challenge.as_bytes());
+    let proof = hex::encode(mac.finalize().into_bytes());
     Ok(Json(serde_json::json!({
         "instance_id": state.instance_id,
         "proof": proof,
         "status": "ok"
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_empty_expected_token_returns_false() {
+        let headers = HeaderMap::new();
+        assert!(!verify_bearer_token_standalone(&headers, ""));
+    }
+
+    #[test]
+    fn test_valid_token_passes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer my-secret-token".parse().unwrap(),
+        );
+        assert!(verify_bearer_token_standalone(&headers, "my-secret-token"));
+    }
+
+    #[test]
+    fn test_invalid_token_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer wrong-token".parse().unwrap(),
+        );
+        assert!(!verify_bearer_token_standalone(&headers, "my-secret-token"));
+    }
+
+    #[test]
+    fn test_missing_auth_header_rejected() {
+        let headers = HeaderMap::new();
+        assert!(!verify_bearer_token_standalone(&headers, "my-secret-token"));
+    }
+
+    #[test]
+    fn test_empty_bearer_token_in_header_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer ".parse().unwrap(),
+        );
+        // Empty token in header with non-empty expected token → rejected
+        assert!(!verify_bearer_token_standalone(&headers, "my-secret-token"));
+    }
 }

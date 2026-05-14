@@ -4,7 +4,7 @@
 use crate::a2a_sidecar;
 use crate::state::AppState;
 use crate::storage::{
-    load_mcp_audit_keyring_from_path, load_privacy_policy_from_path, mcp_audit_keyring_path,
+    load_or_create_mcp_audit_keyring, load_privacy_policy_from_path, mcp_audit_keyring_path,
     privacy_policy_path,
 };
 use openlife_core::agent::{AgentSpecStore, ProposalEngine, ProposalStore};
@@ -494,7 +494,12 @@ pub fn bootstrap(data_dir: PathBuf) -> Result<BootstrapResult, String> {
     let version_manager = VersionManager::new(data_dir.join("life-model").join("versions"));
     let mcp_audit_store = McpAuditStore::with_keyring(
         data_dir.join("mcp_audit.db"),
-        load_mcp_audit_keyring_from_path(&mcp_audit_keyring_path()),
+        load_or_create_mcp_audit_keyring(&mcp_audit_keyring_path()).unwrap_or_else(|e| {
+            startup_warnings
+                .borrow_mut()
+                .push(format!("mcp audit keyring init failed: {}", e));
+            vec![openlife_core::mcp_audit::AuditKeyConfig::default()]
+        }),
     );
 
     let hot_cache: SharedHotCache = {

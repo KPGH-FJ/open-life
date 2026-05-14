@@ -166,17 +166,15 @@ impl ActionExecutor {
 pub struct BorrowedActionContext<'a> {
     registry: &'a McpRegistry,
     permission_store: &'a ToolPermissionStore,
+    #[allow(dead_code)]
     audit_store: &'a McpAuditStore,
     #[allow(dead_code)]
     privacy_engine: &'a PrivacyEngine,
-    safe_paths: &'a [String],
     life_model: Option<&'a crate::life_model::LifeModel>,
     memory_store: Option<&'a crate::memory::MemoryStore>,
     proposal_store: Option<&'a crate::agent::ProposalStore>,
     agent_run_store: Option<&'a crate::agent::AgentRunStore>,
     event_store: Option<crate::agent::event_store::AgentRunEventStore>,
-    network_policy: Option<&'a crate::config::NetworkPolicy>,
-    calendar_ics_paths: &'a [String],
     execution_sandbox: &'a crate::agent::execution_sandbox::ExecutionSandbox,
     agent_spec: Option<&'a crate::agent::types::AgentSpec>,
 }
@@ -212,6 +210,14 @@ fn is_write_action(request: &AgentActionRequest) -> bool {
 /// audit logging, and building the action/observation pair.
 pub struct ActionExecutor {
     config: ActionExecutorConfig,
+}
+
+impl Clone for ActionExecutor {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+        }
+    }
 }
 
 impl ActionExecutor {

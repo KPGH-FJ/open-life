@@ -524,56 +524,72 @@ async fn run_plan_execution(
         .execute_with_review(
             plan_id,
             run_id,
-            |step, intent| {
-                let tool_name = intent
-                    .map(|i| i.tool_name.clone())
-                    .unwrap_or_else(|| "unknown".to_string());
+            {
+                let action_executor = action_executor.clone();
+                let ctx = ctx.clone();
+                let plan_id_owned = plan_id.to_string();
+                let run_id_owned = run_id.to_string();
+                move |step, intent| {
+                    let tool_name = intent
+                        .map(|i| i.tool_name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let step_index = step.index;
+                    let step_description = step.description.clone();
+                    let tool_intent_name = intent.map(|i| i.tool_name.clone());
 
-                let request = openlife_core::agent::AgentActionRequest {
-                    action_type: "builtin_tool".to_string(),
-                    target: tool_name.clone(),
-                    input: serde_json::json!({
-                        "plan_step": step.index,
-                        "description": step.description,
-                        "plan_id": plan_id,
-                    }),
-                    source_run_id: Some(run_id.to_string()),
-                    step_index: step.index,
-                };
+                    let request = openlife_core::agent::AgentActionRequest {
+                        action_type: "builtin_tool".to_string(),
+                        target: tool_name.clone(),
+                        input: serde_json::json!({
+                            "plan_step": step_index,
+                            "description": step_description,
+                            "plan_id": plan_id_owned,
+                        }),
+                        source_run_id: Some(run_id_owned.clone()),
+                        step_index,
+                    };
 
-                let handle = tokio::runtime::Handle::current();
-                match handle.block_on(action_executor.execute(request, &ctx)) {
-                    Ok(result) => {
-                        let success = matches!(
-                            result.status,
-                            openlife_core::agent::ActionExecutionStatus::Succeeded
-                        );
-                        let deviation = if result.action.tool_scope.as_ref().map(|s| &s.tool_name)
-                            != intent.map(|i| &i.tool_name)
-                        {
-                            Some("executed tool scope differs from plan intent".to_string())
-                        } else {
-                            None
-                        };
-                        openlife_core::agent::PlanStepExecutionResult {
-                            step_index: step.index,
-                            tool_name,
-                            success,
-                            output: Some(result.observation.content),
-                            error: if success { None } else { result.stop_reason },
-                            duration_ms: 0,
-                            deviation,
+                    let executor = action_executor.clone();
+                    let ctx = ctx.clone();
+                    async move {
+                        match executor.execute(request, &ctx).await {
+                            Ok(result) => {
+                                let success = matches!(
+                                    result.status,
+                                    openlife_core::agent::ActionExecutionStatus::Succeeded
+                                );
+                                let deviation = if result
+                                    .action
+                                    .tool_scope
+                                    .as_ref()
+                                    .map(|s| &s.tool_name)
+                                    != tool_intent_name.as_ref()
+                                {
+                                    Some("executed tool scope differs from plan intent".to_string())
+                                } else {
+                                    None
+                                };
+                                openlife_core::agent::PlanStepExecutionResult {
+                                    step_index,
+                                    tool_name,
+                                    success,
+                                    output: Some(result.observation.content),
+                                    error: if success { None } else { result.stop_reason },
+                                    duration_ms: 0,
+                                    deviation,
+                                }
+                            }
+                            Err(e) => openlife_core::agent::PlanStepExecutionResult {
+                                step_index,
+                                tool_name,
+                                success: false,
+                                output: None,
+                                error: Some(e.to_string()),
+                                duration_ms: 0,
+                                deviation: None,
+                            },
                         }
                     }
-                    Err(e) => openlife_core::agent::PlanStepExecutionResult {
-                        step_index: step.index,
-                        tool_name,
-                        success: false,
-                        output: None,
-                        error: Some(e.to_string()),
-                        duration_ms: 0,
-                        deviation: None,
-                    },
                 }
             },
             review_gate,
@@ -991,7 +1007,7 @@ mod tests {
 
         let executor = PlanExecutor::new(plan_store, None);
         let result = executor
-            .execute(&plan.id, "run-1", |_step, _intent| {
+            .execute_sync(&plan.id, "run-1", |_step, _intent| {
                 openlife_core::agent::PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "file.write_proposal".to_string(),
@@ -1074,7 +1090,7 @@ mod tests {
             PlanExecutor::new(plan_store.clone(), Some(event_store)).with_agent_spec(deny_spec);
 
         let result = executor
-            .execute(&plan.id, "run-1", |_step, _intent| {
+            .execute_sync(&plan.id, "run-1", |_step, _intent| {
                 openlife_core::agent::PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "file.read".to_string(),
@@ -1144,7 +1160,7 @@ mod tests {
             PlanExecutor::new(plan_store, Some(event_store.clone())).with_agent_spec(spec);
 
         let _ = executor
-            .execute(&plan.id, "run-1", |_step, _intent| {
+            .execute_sync(&plan.id, "run-1", |_step, _intent| {
                 openlife_core::agent::PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),

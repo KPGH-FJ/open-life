@@ -5,26 +5,28 @@ use crate::agent::action_executor::helpers::{
     search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-use crate::tool_manifest::ToolSource;
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
 
+use super::ActionContext;
 use super::AgentActionRequest;
-use super::BorrowedActionContext;
 
 impl super::ActionExecutor {
     /// Execute an Execution tool (file.read, web.fetch, etc.).
-    pub fn execute_execution_tool(
+    /// Each tool variant uses only short-lived locks on the stores it
+    /// actually needs — no `MutexGuard` is held across external I/O
+    /// (file, web, A2A, MCP).
+    pub async fn execute_execution_tool(
         &self,
         tool_name: &str,
         args: &Value,
-        ctx: &BorrowedActionContext<'_>,
+        ac: &ActionContext,
         request: &AgentActionRequest,
     ) -> Result<ToolCallInternalResult> {
         // Check network policy for web tools
         if matches!(tool_name, "web.fetch" | "web.search") {
-            if let Some(policy) = ctx.network_policy {
+            if let Some(ref policy) = ac.network_policy {
                 if !policy.enabled {
                     return Ok(ToolCallInternalResult {
                         success: false,
@@ -91,11 +93,11 @@ impl super::ActionExecutor {
                     .ok_or_else(|| anyhow::anyhow!("Missing 'path' argument for file.read"))?;
 
                 // Validate path is within safe_paths
-                if !is_path_in_safe_paths(path, ctx.safe_paths) {
+                if !is_path_in_safe_paths(path, &ac.safe_paths) {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
-                        error: Some(filesystem_access_error(path, ctx.safe_paths)),
+                        error: Some(filesystem_access_error(path, &ac.safe_paths)),
                     });
                 }
 
@@ -137,8 +139,8 @@ impl super::ActionExecutor {
 
                 let events = if let Some(path) = ics_path {
                     // Validate source path is within calendar_ics_paths or safe_paths
-                    let mut all_calendar_paths: Vec<String> = ctx.calendar_ics_paths.to_vec();
-                    all_calendar_paths.extend(ctx.safe_paths.iter().cloned());
+                    let mut all_calendar_paths: Vec<String> = ac.calendar_ics_paths.to_vec();
+                    all_calendar_paths.extend(ac.safe_paths.iter().cloned());
                     if !is_path_in_safe_paths(path, &all_calendar_paths) {
                         return Ok(ToolCallInternalResult {
                             success: false,
@@ -180,10 +182,10 @@ impl super::ActionExecutor {
                     }
                 } else {
                     // Try calendar_ics_paths first, then safe_paths for .ics files
-                    let ics_search_paths: Vec<&String> = if ctx.calendar_ics_paths.is_empty() {
-                        ctx.safe_paths.iter().collect()
+                    let ics_search_paths: Vec<&String> = if ac.calendar_ics_paths.is_empty() {
+                        ac.safe_paths.iter().collect()
                     } else {
-                        ctx.calendar_ics_paths.iter().collect()
+                        ac.calendar_ics_paths.iter().collect()
                     };
                     let mut all_events = Vec::new();
                     for search_path in &ics_search_paths {
@@ -320,59 +322,67 @@ impl super::ActionExecutor {
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
 
-                // 1. Find target manifest
-                let manifests = ctx.registry.list_manifests();
-                let mut target_manifests: Vec<_> = manifests
-                    .into_iter()
-                    .filter(|m| m.name == target_tool_name || m.id == target_tool_name)
-                    .collect();
-
-                let target_manifest = if let Some(server_name) = server {
-                    target_manifests
+                // 1. Short-lock registry: find target manifest + inspect PII
+                let (target_manifest, inspection) = {
+                    let reg = ac.registry.lock().await;
+                    let manifests = reg.list_manifests();
+                    let mut target_manifests: Vec<_> = manifests
                         .into_iter()
-                        .find(|m| matches!(&m.source, ToolSource::Mcp { server_name: s } if s == server_name))
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "MCP tool '{}' not found on server '{}'",
-                            target_tool_name,
-                            server_name
-                        ))?
-                } else if target_manifests.len() == 1 {
-                    target_manifests.remove(0)
-                } else if target_manifests.is_empty() {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("MCP tool '{}' not found", target_tool_name)),
-                    });
-                } else {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
-                            "Multiple MCP tools named '{}'. Please specify 'server' parameter.",
-                            target_tool_name
-                        )),
-                    });
-                };
+                        .filter(|m| m.name == target_tool_name || m.id == target_tool_name)
+                        .collect();
 
-                // 2. Check permission using target tool's canonical scope
-                let target_source = canonical_tool_source(&target_manifest);
-                let target_decision = ctx
-                    .permission_store
-                    .check(
+                    let target_manifest = if let Some(server_name) = server {
+                        target_manifests
+                            .into_iter()
+                            .find(|m| matches!(&m.source, crate::tool_manifest::ToolSource::Mcp { server_name: s } if s == server_name))
+                            .ok_or_else(|| anyhow::anyhow!(
+                                "MCP tool '{}' not found on server '{}'",
+                                target_tool_name,
+                                server_name
+                            ))?
+                    } else if target_manifests.len() == 1 {
+                        target_manifests.remove(0)
+                    } else if target_manifests.is_empty() {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!("MCP tool '{}' not found", target_tool_name)),
+                        });
+                    } else {
+                        return Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(format!(
+                                "Multiple MCP tools named '{}'. Please specify 'server' parameter.",
+                                target_tool_name
+                            )),
+                        });
+                    };
+                    let inspection = reg.inspect_call_arguments(&target_manifest.name, &tool_args);
+                    (target_manifest, inspection)
+                }; // registry lock released
+
+                // 2. Short-lock permission_store: check target permission
+                let target_decision = {
+                    let perm = ac.permission_store.lock().await;
+                    let target_source = canonical_tool_source(&target_manifest);
+                    perm.check(
                         &target_manifest.name,
                         &target_source,
                         &target_manifest.risk_level,
                         &target_manifest.action_type,
                         &target_manifest.capabilities,
                     )
-                    .unwrap_or(crate::tool_permissions::ToolPermissionDecision {
-                        allowed: false,
-                        requires_confirmation: true,
-                        decision: "ask_every_time".into(),
-                        reason: "permission check failed".into(),
-                        policy_id: None,
-                    });
+                    .unwrap_or(
+                        crate::tool_permissions::ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: true,
+                            decision: "ask_every_time".into(),
+                            reason: "permission check failed".into(),
+                            policy_id: None,
+                        },
+                    )
+                }; // permission_store lock released
 
                 if !target_decision.allowed || target_decision.requires_confirmation {
                     return Ok(ToolCallInternalResult {
@@ -385,10 +395,6 @@ impl super::ActionExecutor {
                     });
                 }
 
-                // 3. Inspect PII using target tool
-                let inspection = ctx
-                    .registry
-                    .inspect_call_arguments(&target_manifest.name, &tool_args);
                 if inspection.requires_confirmation && inspection.pii_found {
                     return Ok(ToolCallInternalResult {
                         success: false,
@@ -400,25 +406,27 @@ impl super::ActionExecutor {
                     });
                 }
 
-                // 4. Execute target tool
-                Ok(self.call_tool_internal(
-                    &target_manifest,
-                    tool_args,
-                    ctx.registry,
-                    ctx.audit_store,
-                    inspection.pii_found,
-                ))
+                // 3. Execute target tool — NO store locks held
+                Ok(self
+                    .call_tool_internal_async(
+                        &target_manifest,
+                        tool_args,
+                        &ac.registry,
+                        &ac.audit_store,
+                        inspection.pii_found,
+                    )
+                    .await)
             }
             "file.write_proposal" => {
                 let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
                 let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
                 // Validate path is within safe_paths
-                if !path.is_empty() && !is_path_in_safe_paths(path, ctx.safe_paths) {
+                if !path.is_empty() && !is_path_in_safe_paths(path, &ac.safe_paths) {
                     return Ok(ToolCallInternalResult {
                         success: false,
                         output: None,
-                        error: Some(filesystem_access_error(path, ctx.safe_paths)),
+                        error: Some(filesystem_access_error(path, &ac.safe_paths)),
                     });
                 }
 
@@ -443,10 +451,11 @@ impl super::ActionExecutor {
                     content.to_string()
                 };
 
-                // Auto-create ExternalWriteAction Proposal if path is non-empty
+                // Auto-create ExternalWriteAction Proposal — lock proposal_store briefly
                 let mut proposal_id: Option<String> = None;
                 if !path.is_empty() {
-                    if let Some(proposal_store) = ctx.proposal_store {
+                    if let Some(ref ps_arc) = ac.proposal_store {
+                        let ps = ps_arc.lock().await;
                         let mut proposal = AgentProposal::new(
                             ProposalType::ExternalWriteAction,
                             &format!("filesystem.{}", path),
@@ -469,7 +478,7 @@ impl super::ActionExecutor {
                             proposal.run_id = Some(run_id.clone());
                         }
                         let id = proposal.id.clone();
-                        if let Err(e) = proposal_store.create_proposal(&proposal) {
+                        if let Err(e) = ps.create_proposal(&proposal) {
                             eprintln!(
                                 "[warn] Failed to create ExternalWriteAction Proposal: {}",
                                 e
@@ -531,7 +540,7 @@ impl super::ActionExecutor {
                     .and_then(|v: &Value| v.as_str())
                     .unwrap_or("medium");
 
-                // Check if we have a proposal store (create proposal first for user confirmation)
+                // Create proposal for user confirmation — lock proposal_store briefly
                 let task_args = serde_json::json!({
                     "title": title,
                     "description": description,
@@ -541,7 +550,8 @@ impl super::ActionExecutor {
                     "tool": "task.create_proposal",
                 });
 
-                if let Some(proposal_store) = ctx.proposal_store {
+                if let Some(ref ps_arc) = ac.proposal_store {
+                    let ps = ps_arc.lock().await;
                     let mut proposal = AgentProposal::new(
                         ProposalType::ScheduledTask,
                         "tasks",
@@ -555,7 +565,7 @@ impl super::ActionExecutor {
                         proposal.run_id = Some(run_id.clone());
                     }
                     let proposal_id = proposal.id.clone();
-                    match proposal_store.create_proposal(&proposal) {
+                    match ps.create_proposal(&proposal) {
                         Ok(_) => {
                             let output = serde_json::json!({
                                 "status": "proposal_created",

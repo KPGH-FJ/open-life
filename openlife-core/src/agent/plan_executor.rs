@@ -162,14 +162,15 @@ impl PlanExecutor {
     /// `plan.execution_failed`.  On success returns the plan and outcome
     /// **without** persisting `Completed` or recording `plan.execution_completed`.
     /// The caller is responsible for the final status transition.
-    async fn execute_steps_without_completion<F>(
+    async fn execute_steps_without_completion<F, Fut>(
         &self,
         plan_id: &str,
         run_id: &str,
         mut execute_step: F,
     ) -> Result<(AgentPlan, PlanExecutionOutcome), PlanExecutionError>
     where
-        F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
+        F: FnMut(&PlanStep, Option<&ToolIntent>) -> Fut,
+        Fut: std::future::Future<Output = PlanStepExecutionResult>,
     {
         let mut plan = self
             .lock_store()
@@ -288,10 +289,10 @@ impl PlanExecutor {
                     );
                     blocked
                 } else {
-                    execute_step(step, tool_intent)
+                    execute_step(step, tool_intent).await
                 }
             } else {
-                execute_step(step, tool_intent)
+                execute_step(step, tool_intent).await
             };
 
             // Detect deviation.
@@ -371,14 +372,15 @@ impl PlanExecutor {
     ///
     /// This is the simple path used when **no review gate** is needed.
     /// After all steps succeed the plan is immediately completed.
-    pub async fn execute<F>(
+    pub async fn execute<F, Fut>(
         &self,
         plan_id: &str,
         run_id: &str,
         execute_step: F,
     ) -> Result<PlanExecutionOutcome, PlanExecutionError>
     where
-        F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
+        F: FnMut(&PlanStep, Option<&ToolIntent>) -> Fut,
+        Fut: std::future::Future<Output = PlanStepExecutionResult>,
     {
         let (mut plan, outcome) = self
             .execute_steps_without_completion(plan_id, run_id, execute_step)
@@ -423,7 +425,7 @@ impl PlanExecutor {
     ///
     /// The review observation event is always recorded **before** the final
     /// completion/failure event.
-    pub async fn execute_with_review<F, R>(
+    pub async fn execute_with_review<F, Fut, R>(
         &self,
         plan_id: &str,
         run_id: &str,
@@ -431,7 +433,8 @@ impl PlanExecutor {
         review_gate: &R,
     ) -> Result<PlanExecutionOutcome, PlanExecutionError>
     where
-        F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
+        F: FnMut(&PlanStep, Option<&ToolIntent>) -> Fut,
+        Fut: std::future::Future<Output = PlanStepExecutionResult>,
         R: PlanReviewGate,
     {
         let (mut plan, outcome) = self
@@ -520,6 +523,45 @@ impl PlanExecutor {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Sync-compat wrapper: execute with a synchronous callback.
+    /// This is kept for test convenience and for any sync-only callers.
+    /// Production code should prefer the async `execute` / `execute_with_review`.
+    pub async fn execute_sync<F>(
+        &self,
+        plan_id: &str,
+        run_id: &str,
+        mut execute_step: F,
+    ) -> Result<PlanExecutionOutcome, PlanExecutionError>
+    where
+        F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
+    {
+        self.execute(plan_id, run_id, move |step, intent| {
+            std::future::ready(execute_step(step, intent))
+        })
+        .await
+    }
+
+    /// Sync-compat wrapper for execute_with_review.
+    pub async fn execute_with_review_sync<F, R>(
+        &self,
+        plan_id: &str,
+        run_id: &str,
+        mut execute_step: F,
+        review_gate: &R,
+    ) -> Result<PlanExecutionOutcome, PlanExecutionError>
+    where
+        F: FnMut(&PlanStep, Option<&ToolIntent>) -> PlanStepExecutionResult,
+        R: PlanReviewGate,
+    {
+        self.execute_with_review(
+            plan_id,
+            run_id,
+            move |step, intent| std::future::ready(execute_step(step, intent)),
+            review_gate,
+        )
+        .await
     }
 
     /// Review the execution result of a completed plan.
@@ -674,7 +716,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -715,7 +757,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es));
 
         let result = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "file.write_proposal".to_string(),
@@ -780,7 +822,7 @@ mod tests {
 
         let mut step_count = 0;
         let outcome = executor
-            .execute(&plan_id, &run_id, |step, _intent| {
+            .execute_sync(&plan_id, &run_id, |step, _intent| {
                 step_count += 1;
                 PlanStepExecutionResult {
                     step_index: step.index,
@@ -829,7 +871,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "web.search".to_string(), // different from planned life_model.read
@@ -865,7 +907,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -896,7 +938,7 @@ mod tests {
         let (ps, es, run_id) = setup();
         let executor = PlanExecutor::new(ps, Some(es));
         let result = executor
-            .execute("nonexistent", &run_id, |_, _| PlanStepExecutionResult {
+            .execute_sync("nonexistent", &run_id, |_, _| PlanStepExecutionResult {
                 step_index: 0,
                 tool_name: "none".to_string(),
                 success: true,
@@ -966,7 +1008,7 @@ mod tests {
 
         let mut call_count = 0;
         let outcome = executor
-            .execute(&plan_id, &run_id, |step, _intent| {
+            .execute_sync(&plan_id, &run_id, |step, _intent| {
                 call_count += 1;
                 if step.index == 1 {
                     PlanStepExecutionResult {
@@ -1023,7 +1065,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "file.write_proposal".to_string(),
@@ -1057,7 +1099,7 @@ mod tests {
         let executor = PlanExecutor::new(ps.clone(), Some(es));
 
         let _outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1085,7 +1127,7 @@ mod tests {
         let executor = PlanExecutor::new(ps.clone(), Some(es));
 
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1114,7 +1156,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1169,7 +1211,7 @@ mod tests {
 
         // execute_with_review on medium-risk plan: review gate runs, approves.
         let outcome = executor
-            .execute_with_review(
+            .execute_with_review_sync(
                 &plan_id,
                 &run_id,
                 |_step, _intent| PlanStepExecutionResult {
@@ -1248,7 +1290,7 @@ mod tests {
         let gate = CriticalGate;
 
         let result = executor
-            .execute_with_review(
+            .execute_with_review_sync(
                 &plan_id,
                 &run_id,
                 |_step, _intent| PlanStepExecutionResult {
@@ -1300,7 +1342,7 @@ mod tests {
 
         // Low-risk: review_required = false → gate is skipped entirely.
         let outcome = executor
-            .execute_with_review(
+            .execute_with_review_sync(
                 &plan_id,
                 &run_id,
                 |_step, _intent| PlanStepExecutionResult {
@@ -1338,7 +1380,7 @@ mod tests {
 
         // Execute successfully first.
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1380,7 +1422,7 @@ mod tests {
 
         // Execute successfully first.
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "file.write_proposal".to_string(),
@@ -1434,7 +1476,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1498,7 +1540,7 @@ mod tests {
         // execute_steps_without_completion should detect cancellation and stop.
         let result = executor
             .execute_steps_without_completion(&plan_id, &run_id, |_step, _intent| {
-                PlanStepExecutionResult {
+                std::future::ready(PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
                     success: true,
@@ -1506,7 +1548,7 @@ mod tests {
                     error: None,
                     duration_ms: 1,
                     deviation: None,
-                }
+                })
             })
             .await;
         let (_plan, outcome) = result.unwrap();
@@ -1514,7 +1556,7 @@ mod tests {
 
         // execute() should NOT complete a cancelled plan.
         let result2 = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1554,7 +1596,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1588,7 +1630,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1617,7 +1659,7 @@ mod tests {
 
         let mut called = false;
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 called = true;
                 PlanStepExecutionResult {
                     step_index: 0,
@@ -1656,7 +1698,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec.clone());
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1701,7 +1743,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone())).with_agent_spec(spec);
 
         let _ = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
@@ -1742,7 +1784,7 @@ mod tests {
         let executor = PlanExecutor::new(ps, Some(es.clone()));
 
         let outcome = executor
-            .execute(&plan_id, &run_id, |_step, _intent| {
+            .execute_sync(&plan_id, &run_id, |_step, _intent| {
                 PlanStepExecutionResult {
                     step_index: 0,
                     tool_name: "life_model.read".to_string(),
