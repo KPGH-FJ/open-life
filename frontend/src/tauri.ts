@@ -15,6 +15,48 @@ function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
 }
 
+const SENSITIVE_KEY_PATTERNS = [
+  /key/i,
+  /api_key/i,
+  /openai_key/i,
+  /token/i,
+  /secret/i,
+  /password/i,
+  /credential/i,
+  /auth/i,
+  /signature/i,
+];
+const SUMMARIZE_KEY_PATTERNS = [
+  /messages/i,
+  /lifeModel/i,
+  /life_model/i,
+  /content/i,
+  /payload/i,
+  /config/i,
+  /body/i,
+  /data/i,
+];
+
+export function redactSensitiveArgs(args?: Record<string, any>): Record<string, any> | undefined {
+  if (!args) return args;
+  const redacted: Record<string, any> = {};
+  for (const [key, value] of Object.entries(args)) {
+    if (value == null) {
+      redacted[key] = value;
+    } else if (SENSITIVE_KEY_PATTERNS.some(p => p.test(key))) {
+      redacted[key] = "***";
+    } else if (SUMMARIZE_KEY_PATTERNS.some(p => p.test(key))) {
+      const s = JSON.stringify(value);
+      redacted[key] = s.length > 80 ? `[obj len=${s.length}]` : `[obj]`;
+    } else if (typeof value === "object") {
+      redacted[key] = redactSensitiveArgs(value);
+    } else {
+      redacted[key] = value;
+    }
+  }
+  return redacted;
+}
+
 function safeInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   if (!isTauriEnv()) {
     return Promise.reject(
@@ -23,7 +65,7 @@ function safeInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
   }
   const normalizedArgs = withTauriArgAliases(args);
   if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
-    console.log("[safeInvoke]", cmd, JSON.stringify(normalizedArgs));
+    console.log("[safeInvoke]", cmd, JSON.stringify(redactSensitiveArgs(normalizedArgs)));
   }
   return invoke<T>(cmd, normalizedArgs);
 }

@@ -15,11 +15,73 @@ import {
   getDefaultAgentSpec,
   updateAgentSpec,
   setDefaultAgentSpec,
+  redactSensitiveArgs,
 } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
+
+describe("safeInvoke sensitive argument redaction", () => {
+  it("redacts API key fields", () => {
+    const args = { openai_key: "sk-super-secret-key-12345", provider: "deepseek" };
+    const redacted = redactSensitiveArgs(args);
+    expect(redacted).toBeTruthy();
+    expect(redacted!.openai_key).toBe("***");
+    expect(redacted!.provider).toBe("deepseek");
+  });
+
+  it("redacts password and credential fields", () => {
+    const args = { password: "my-password", credential: "my-credential", name: "test" };
+    const redacted = redactSensitiveArgs(args);
+    expect(redacted).toBeTruthy();
+    expect(redacted!.password).toBe("***");
+    expect(redacted!.credential).toBe("***");
+    expect(redacted!.name).toBe("test");
+  });
+
+  it("summarizes large message arrays", () => {
+    const args = {
+      messages: [
+        { role: "user", content: "hello world, this is a long message with lots of content" },
+        { role: "assistant", content: "hi there, here is a detailed response" },
+      ],
+      sessionId: "test-session",
+    };
+    const redacted = redactSensitiveArgs(args);
+    expect(redacted).toBeTruthy();
+    const messagesStr = JSON.stringify(redacted!.messages);
+    expect(messagesStr).not.toContain("hello world");
+    expect(messagesStr).not.toContain("hi there");
+    expect(redacted!.sessionId).toBe("test-session");
+  });
+
+  it("summarizes config and lifemodel objects", () => {
+    const args = {
+      config: { llm: { provider: "deepseek", openai_key: "sk-secret" } },
+      lifeModel: { identity: { name: "User", values: ["privacy"] } },
+    };
+    const redacted = redactSensitiveArgs(args);
+    expect(redacted).toBeTruthy();
+    const configStr = JSON.stringify(redacted!.config);
+    const lmStr = JSON.stringify(redacted!.lifeModel);
+    expect(configStr).not.toContain("deepseek");
+    expect(configStr).not.toContain("sk-secret");
+    expect(lmStr).not.toContain("User");
+  });
+
+  it("handles nested sensitive objects recursively", () => {
+    const args = {
+      nested: {
+        api_key: "sk-nested-secret",
+        sub: { token: "bearer-token-xyz" },
+      },
+    };
+    const redacted = redactSensitiveArgs(args);
+    expect(redacted!.nested.api_key).toBe("***");
+    expect(redacted!.nested.sub.token).toBe("***");
+  });
+});
 
 describe("tauri command argument aliases", () => {
   beforeEach(() => {

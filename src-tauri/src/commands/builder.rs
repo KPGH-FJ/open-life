@@ -538,7 +538,33 @@ pub async fn builder_apply_signals(
     decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    builder_apply_signals_with_state(session_id, decisions, state.inner()).await
+    builder_apply_signals_command_with_state(session_id, decisions, state.inner()).await
+}
+
+/// Production guard: rejects legacy builder_apply_signals unless
+/// system.allow_legacy_builder_direct_apply is explicitly set to true.
+async fn ensure_legacy_builder_direct_apply_allowed(state: &Arc<AppState>) -> Result<(), AppError> {
+    let allowed = {
+        let cfg = state.config.lock().await;
+        cfg.system.allow_legacy_builder_direct_apply
+    };
+    if !allowed {
+        return Err(AppError::permission(
+            "legacy builder_apply_signals is disabled in production. \
+             Use builder_create_proposals which goes through Review Center for governable, traceable LifeModel changes. \
+             Set system.allow_legacy_builder_direct_apply=true in config.yaml for dev/test only.",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn builder_apply_signals_command_with_state(
+    session_id: String,
+    decisions: Vec<openlife_core::builder::BuilderSignalDecision>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    ensure_legacy_builder_direct_apply_allowed(state).await?;
+    builder_apply_signals_with_state(session_id, decisions, state).await
 }
 
 async fn builder_create_proposals_with_state(
@@ -1097,5 +1123,132 @@ mod tests {
             .get_session("proposal-session")
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn builder_apply_signals_tests_use_internal_state_fn_to_bypass_command_gate() {
+        // The Tauri command `builder_apply_signals` is gated by
+        // `allow_legacy_builder_direct_apply` (default false).
+        // Tests use `builder_apply_signals_with_state` to verify the internal
+        // apply logic without going through the Tauri command gate.
+        // This test ensures the internal function remains callable.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("gate-test", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals = vec![BuilderSignal {
+            id: "sig_gate".into(),
+            source_step: 1,
+            source_question_id: "name".into(),
+            dimension: BuilderDimension::Identity,
+            affected_path: "identity.name".into(),
+            proposed_value: serde_json::Value::String("test".into()),
+            confidence: 0.8,
+            reason: "test".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        }];
+        {
+            let store = state.builder_session_store.lock().await;
+            store.save_session(&session).unwrap();
+        }
+        let decisions = vec![BuilderSignalDecision {
+            id: "sig_gate".into(),
+            status: "accepted".into(),
+            proposed_value: None,
+        }];
+        // Internal function should work regardless of config flag
+        let res = builder_apply_signals_with_state("gate-test".into(), decisions, &state)
+            .await
+            .unwrap();
+        assert_eq!(res.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(res.get("legacy").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn builder_apply_signals_command_gate_rejects_by_default() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        // Default config: allow_legacy_builder_direct_apply = false
+        let mut session = BuilderSession::new("gate-deny-test", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals = vec![BuilderSignal {
+            id: "sig_deny".into(),
+            source_step: 1,
+            source_question_id: "name".into(),
+            dimension: BuilderDimension::Identity,
+            affected_path: "identity.name".into(),
+            proposed_value: serde_json::Value::String("test".into()),
+            confidence: 0.8,
+            reason: "test".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        }];
+        {
+            let store = state.builder_session_store.lock().await;
+            store.save_session(&session).unwrap();
+        }
+        let decisions = vec![BuilderSignalDecision {
+            id: "sig_deny".into(),
+            status: "accepted".into(),
+            proposed_value: None,
+        }];
+
+        let res =
+            builder_apply_signals_command_with_state("gate-deny-test".into(), decisions, &state)
+                .await;
+
+        assert!(res.is_err(), "command should be rejected by default gate");
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("disabled in production") || err.contains("builder_create_proposals"),
+            "error should mention builder_create_proposals, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn builder_apply_signals_command_gate_allows_when_config_set() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        // Set allow_legacy_builder_direct_apply = true
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.allow_legacy_builder_direct_apply = true;
+        }
+
+        let mut session = BuilderSession::new("gate-allow-test", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals = vec![BuilderSignal {
+            id: "sig_allow".into(),
+            source_step: 1,
+            source_question_id: "name".into(),
+            dimension: BuilderDimension::Identity,
+            affected_path: "identity.name".into(),
+            proposed_value: serde_json::Value::String("test".into()),
+            confidence: 0.8,
+            reason: "test".into(),
+            risk_level: RiskLevel::Low,
+            user_status: SignalUserStatus::Pending,
+        }];
+        {
+            let store = state.builder_session_store.lock().await;
+            store.save_session(&session).unwrap();
+        }
+        let decisions = vec![BuilderSignalDecision {
+            id: "sig_allow".into(),
+            status: "accepted".into(),
+            proposed_value: None,
+        }];
+
+        let res =
+            builder_apply_signals_command_with_state("gate-allow-test".into(), decisions, &state)
+                .await;
+
+        assert!(res.is_ok(), "command should succeed when gate is open");
+        let val = res.unwrap();
+        assert_eq!(val.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(val.get("legacy").and_then(|v| v.as_bool()), Some(true));
     }
 }

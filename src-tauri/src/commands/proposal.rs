@@ -1350,40 +1350,55 @@ pub async fn batch_accept_low_risk_proposals(
     proposal_ids: Option<Vec<String>>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<i64, String> {
-    check_safe_mode(state.inner())?;
-    let store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(proposal_store_missing)?;
-    let store = store.lock().await;
+    batch_accept_low_risk_proposals_with_state(proposal_ids, state.inner()).await
+}
 
-    // If specific IDs provided, use those; otherwise fall back to all low-risk pending
-    let proposals = if let Some(ids) = proposal_ids {
-        let mut proposals = Vec::new();
-        for id in ids {
-            if let Ok(Some(p)) = store.get_proposal(&id) {
-                if p.status == ProposalStatus::Pending && p.risk_level == RiskLevel::Low {
-                    proposals.push(p);
+pub(crate) async fn batch_accept_low_risk_proposals_with_state(
+    proposal_ids: Option<Vec<String>>,
+    state: &Arc<AppState>,
+) -> Result<i64, String> {
+    check_safe_mode(state)?;
+
+    // Collect qualifying proposal IDs while holding the lock,
+    // then release the lock before accepting to avoid deadlock.
+    let qualifying_ids = {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?;
+        let store = store.lock().await;
+
+        if let Some(ids) = proposal_ids {
+            let mut qualifying = Vec::new();
+            for id in ids {
+                if let Ok(Some(p)) = store.get_proposal(&id) {
+                    if p.status == ProposalStatus::Pending && p.risk_level == RiskLevel::Low {
+                        qualifying.push(p.id.clone());
+                    }
                 }
             }
+            qualifying
+        } else {
+            store
+                .list_proposals_filtered(
+                    Some(ProposalStatus::Pending),
+                    None,
+                    Some(RiskLevel::Low),
+                    200,
+                )
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|p| p.id.clone())
+                .collect()
         }
-        proposals
-    } else {
-        store
-            .list_proposals_filtered(
-                Some(ProposalStatus::Pending),
-                None,
-                Some(RiskLevel::Low),
-                200,
-            )
-            .map_err(|e| e.to_string())?
     };
 
     let mut accepted_count = 0i64;
-    for proposal in proposals {
-        match accept_proposal_with_state(proposal.id.clone(), state.inner()).await {
+    for id in qualifying_ids {
+        let proposal_id = id.clone();
+        match accept_proposal_with_state(id, state).await {
             Ok(_) => accepted_count += 1,
-            Err(e) => eprintln!("Batch accept failed for proposal {}: {}", proposal.id, e),
+            Err(e) => eprintln!("Batch accept failed for proposal {}: {}", proposal_id, e),
         }
     }
 
@@ -2178,5 +2193,675 @@ mod tests {
         assert_eq!(value.get("proposalType").unwrap(), "goal_update");
         assert_eq!(value.get("riskLevel").unwrap(), "low");
         assert_eq!(value.get("status").unwrap(), "pending");
+    }
+
+    #[tokio::test]
+    async fn batch_accept_real_helper_with_timeout_and_only_accepts_pending_low() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let mut p1 = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("test1"),
+            "low pending",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let p1_id = p1.id.clone();
+
+        let mut p2 = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("test2"),
+            "low but already accepted",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        p2.accept();
+        let p2_id = p2.id.clone();
+
+        let mut p3 = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("test3"),
+            "high pending",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let p3_id = p3.id.clone();
+
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&p1).unwrap();
+            store.create_proposal(&p2).unwrap();
+            store.create_proposal(&p3).unwrap();
+        }
+
+        // Call the real helper with specific IDs
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            batch_accept_low_risk_proposals_with_state(
+                Some(vec![p1_id.clone(), p2_id.clone(), p3_id.clone()]),
+                &state,
+            ),
+        )
+        .await
+        .expect("batch accept should complete within 5s (no deadlock)");
+
+        assert!(result.is_ok(), "batch accept should not error");
+        assert_eq!(
+            result.unwrap(),
+            1,
+            "only the low+pending proposal should be accepted"
+        );
+
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.get_proposal(&p1_id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+        assert_eq!(
+            store.get_proposal(&p2_id).unwrap().unwrap().status,
+            ProposalStatus::Accepted // unchanged — it was already accepted
+        );
+        assert_eq!(
+            store.get_proposal(&p3_id).unwrap().unwrap().status,
+            ProposalStatus::Pending // not accepted — high risk
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_accept_real_helper_scan_all_pending_low_when_no_ids_provided() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let mut p_high = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("high"),
+            "high risk pending",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+
+        let mut p_low1 = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("low1"),
+            "low pending 1",
+            0.5,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+
+        let mut p_low2 = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("low2"),
+            "low pending 2",
+            0.5,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&p_high).unwrap();
+            store.create_proposal(&p_low1).unwrap();
+            store.create_proposal(&p_low2).unwrap();
+        }
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            batch_accept_low_risk_proposals_with_state(None, &state),
+        )
+        .await
+        .expect("batch accept should complete within 5s");
+
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap(),
+            2,
+            "both low-risk pending should be accepted"
+        );
+
+        let store = state.proposal_store.as_ref().unwrap().lock().await;
+        assert_eq!(
+            store.get_proposal(&p_high.id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+        assert_eq!(
+            store.get_proposal(&p_low1.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+        assert_eq!(
+            store.get_proposal(&p_low2.id).unwrap().unwrap().status,
+            ProposalStatus::Accepted
+        );
+    }
+
+    /// Full MCP target ask → accept → replay closure.
+    /// Uses real ActionExecutor.execute → auto-generated Proposal →
+    /// real accept_proposal_with_state → real replay_action_internal.
+    #[tokio::test]
+    async fn mcp_network_ask_real_mcp_source_execute_accept_replay_closure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+
+        // Inject agent_run_store (needed to persist run and for replay)
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+
+        // Set NetworkPolicy: enabled=true, default_decision=ask
+        {
+            let mut config_guard = state.config.lock().await;
+            config_guard.system.network_policy = openlife_core::config::NetworkPolicy {
+                enabled: true,
+                default_decision: "ask".to_string(),
+                domain_allowlist: vec![],
+                domain_denylist: vec![],
+                tool_overrides: std::collections::HashMap::new(),
+            };
+        }
+
+        // Build a fresh McpRegistry. The default builtin wrappers (including
+        // mcp.call_tool) are already registered with correct metadata.
+        let mut reg = openlife_core::mcp::McpRegistry::new();
+        let run_id = "run-mcp-real-exec".to_string();
+        let step_index: u32 = 0;
+
+        // Register the real target with ToolSource::Mcp.
+        // We do NOT re-register mcp.call_tool — the default builtin already exists.
+
+        // 2. Register real target with ToolSource::Mcp
+        let target_name = "test_mcp_network_tool";
+        reg.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                name: target_name.to_string(),
+                id: target_name.to_string(),
+                description: "A mock MCP network tool".to_string(),
+                parameters: serde_json::json!({}),
+                permission_level: "low".to_string(),
+                risk_level: "low".to_string(),
+                version: "1.0.0".to_string(),
+                source: openlife_core::tool_manifest::ToolSource::Mcp {
+                    server_name: "test-server".to_string(),
+                },
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".to_string(),
+                tags: vec!["execution".to_string()],
+            },
+            std::sync::Arc::new(|_args| Ok("mock-mcp-ok".to_string())),
+        );
+
+        // Replace state registry with custom one
+        Arc::get_mut(&mut state).unwrap().mcp_registry = Arc::new(tokio::sync::Mutex::new(reg));
+
+        // 3. Grant permission to wrapper mcp.call_tool so only target gates
+        {
+            let perm = state.tool_permission_store.lock().await;
+            perm.grant(
+                "mcp.call_tool",
+                "builtin",
+                "medium",
+                "external_side_effect",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        // 4. Build ActionExecutor and ActionContext
+        let executor = openlife_core::agent::action_executor::ActionExecutor::new(
+            openlife_core::agent::action_executor::ActionExecutorConfig {
+                allow_writes: true,
+                allow_cloud: true,
+                timeout_seconds: 120,
+                consume_allow_once: true,
+            },
+        );
+
+        let network_policy = {
+            let config = state.config.lock().await;
+            config.system.network_policy.clone()
+        };
+
+        let ac = openlife_core::agent::action_executor::ActionContext {
+            registry: state.mcp_registry.clone(),
+            permission_store: state.tool_permission_store.clone(),
+            audit_store: state.mcp_audit_store.clone(),
+            privacy_engine: state.privacy_engine.clone(),
+            safe_paths: vec![],
+            life_model: None,
+            memory_store: None,
+            proposal_store: state.proposal_store.clone(),
+            agent_run_store: state.agent_run_store.clone(),
+            event_store: None,
+            network_policy: Some(network_policy),
+            calendar_ics_paths: vec![],
+            execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
+            agent_spec: None,
+        };
+
+        // 5. Execute mcp.call_tool targeting the MCP tool with server argument
+        let request = openlife_core::agent::action_executor::AgentActionRequest {
+            action_type: "builtin_tool".to_string(),
+            target: "mcp.call_tool".to_string(),
+            input: serde_json::json!({
+                "arguments": {
+                    "tool_name": target_name,
+                    "server": "test-server",
+                    "arguments": {}
+                }
+            }),
+            source_run_id: Some(run_id.clone()),
+            step_index,
+        };
+        let exec_result = executor.execute(request, &ac).await.unwrap();
+
+        // 6. Assert first execution: needs confirmation
+        assert_eq!(
+            exec_result.status,
+            openlife_core::agent::action_executor::ActionExecutionStatus::NeedsConfirmation,
+            "first execution must require confirmation"
+        );
+        assert_eq!(exec_result.action.status, "needs_confirmation");
+        let scope = exec_result
+            .action
+            .tool_scope
+            .as_ref()
+            .expect("action must have tool_scope");
+        assert_eq!(scope.tool_name, target_name);
+        // Source must be the real MCP source, not "builtin"
+        assert_eq!(scope.source, "mcp:test-server");
+        assert_eq!(scope.risk_level, "low");
+        assert_eq!(scope.action_type, "read");
+        assert!(scope.capabilities.contains(&"network".to_string()));
+        assert!(scope.capabilities.contains(&"read".to_string()));
+        let action = exec_result.action.clone();
+
+        // 7. Write the pending action into a real AgentRun
+        let mut run = openlife_core::agent::AgentRun::new_tool_execution_run("mcp.call_tool");
+        run.id = run_id.clone();
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(action.clone());
+        let action_id = action.id.clone();
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+
+        // 8. Read auto-generated Proposal from ProposalStore
+        let (proposal_id, proposal_after) = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            let pending = store.list_pending_proposals(20).unwrap();
+            // Should have exactly one ToolPermission proposal
+            let tp_proposals: Vec<_> = pending
+                .into_iter()
+                .filter(|p| {
+                    p.proposal_type == ProposalType::ToolPermission
+                        && p.run_id.as_deref() == Some(&run_id)
+                })
+                .collect();
+            assert_eq!(
+                tp_proposals.len(),
+                1,
+                "should have exactly one ToolPermission proposal for this run"
+            );
+            let p = &tp_proposals[0];
+            assert_eq!(p.proposal_type, ProposalType::ToolPermission);
+            assert_eq!(
+                p.run_id.as_deref(),
+                Some(run_id.as_str()),
+                "proposal must be linked to the run"
+            );
+
+            // Assert proposal metadata uses TARGET manifest, not wrapper
+            let after = &p.after;
+            assert_eq!(
+                after.get("tool_name").and_then(|v| v.as_str()),
+                Some(target_name),
+                "proposal after.tool_name must be target, not wrapper"
+            );
+            assert_eq!(
+                after.get("source").and_then(|v| v.as_str()),
+                Some("mcp:test-server"),
+                "proposal after.source must be mcp:test-server, not builtin"
+            );
+            assert_eq!(
+                after.get("risk_level").and_then(|v| v.as_str()),
+                Some("low"),
+                "proposal after.risk_level must be low, not medium"
+            );
+            assert_eq!(
+                after.get("action_type").and_then(|v| v.as_str()),
+                Some("read"),
+                "proposal after.action_type must be read, not external_side_effect"
+            );
+            assert_eq!(
+                after.get("network_policy_ask").and_then(|v| v.as_bool()),
+                Some(true),
+            );
+            // Capabilities should include target capabilities
+            let caps = after.get("capabilities").and_then(|v| v.as_array());
+            assert!(
+                caps.is_some_and(|arr| {
+                    let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                    strs.contains(&"network") && strs.contains(&"read")
+                }),
+                "proposal after.capabilities must contain network and read"
+            );
+            // blocked_action.target should be mcp.call_tool (the execution entry point)
+            assert_eq!(
+                after
+                    .get("blocked_action")
+                    .and_then(|v| v.get("target"))
+                    .and_then(|v| v.as_str()),
+                Some("mcp.call_tool"),
+            );
+
+            (p.id.clone(), p.after.clone())
+        };
+
+        // 9. Accept the Proposal via real accept_proposal_with_state
+        let accept_result = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            accept_result.get("success").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        assert_eq!(
+            accept_result.get("can_continue").and_then(|v| v.as_bool()),
+            Some(true),
+            "accept should signal can_continue=true"
+        );
+        assert_eq!(
+            accept_result
+                .get("continue_run_id")
+                .and_then(|v| v.as_str()),
+            Some(run_id.as_str()),
+        );
+        assert_eq!(
+            accept_result
+                .get("continue_action_id")
+                .and_then(|v| v.as_str()),
+            Some(action_id.as_str()),
+        );
+
+        // 10. Assert ToolPermissionStore has the target permission
+        {
+            let perm = state.tool_permission_store.lock().await;
+            let decision = perm
+                .peek(
+                    target_name,
+                    "mcp:test-server",
+                    "low",
+                    "read",
+                    &["network".to_string(), "read".to_string()],
+                )
+                .unwrap();
+            assert!(
+                decision.allowed,
+                "target permission must be allowed after accept"
+            );
+        }
+
+        // 11. Replay the blocked action — must go through mcp.call_tool wrapper
+        let replayed = crate::commands::agent::replay_action_internal(&run_id, &action_id, &state)
+            .await
+            .unwrap();
+
+        // 12. Assert replay: succeeded with mock output, not blocked
+        assert_eq!(
+            replayed.status, "succeeded",
+            "replay must succeed, got status={} error={:?}",
+            replayed.status, replayed.error
+        );
+        assert_eq!(
+            replayed.target.as_deref(),
+            Some("mcp.call_tool"),
+            "replay target must be the wrapper mcp.call_tool, not the tool_scope tool"
+        );
+        // Output must contain the mock MCP target response (stored as {"text": "..."})
+        let replay_output = replayed
+            .output
+            .as_ref()
+            .and_then(|v| v.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            replay_output.contains("mock-mcp-ok"),
+            "replay output must contain 'mock-mcp-ok', got '{}'",
+            replay_output
+        );
+        // No error at all
+        assert!(
+            replayed.error.is_none(),
+            "replay must have no error, got '{}'",
+            replayed.error.unwrap_or_default()
+        );
+
+        // 13. No new duplicate pending network-ask proposals
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            let pending = store.list_pending_proposals(20).unwrap();
+            let tp_proposals: Vec<_> = pending
+                .into_iter()
+                .filter(|p| p.proposal_type == ProposalType::ToolPermission)
+                .collect();
+            assert!(
+                tp_proposals.iter().all(|p| p.id != proposal_id),
+                "original proposal must no longer be pending"
+            );
+            // No new network_policy_ask proposals should have been created
+            assert!(
+                tp_proposals.iter().all(|p| {
+                    p.after.get("network_policy_ask").and_then(|v| v.as_bool()) != Some(true)
+                }),
+                "no pending network_policy_ask proposals after accept+replay"
+            );
+        }
+    }
+
+    // Keep the old test as a simpler unit-level verification
+    #[tokio::test]
+    async fn mcp_network_ask_proposal_accept_replay_real_closure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+
+        // Inject agent_run_store so replay works
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+
+        // Register mcp.call_tool and a mock network-capable target tool
+        {
+            let mut reg = state.mcp_registry.lock().await;
+            // Register mcp.call_tool wrapper
+            reg.register_builtin(
+                openlife_core::tool_manifest::ToolManifest {
+                    name: "mcp.call_tool".to_string(),
+                    id: "mcp.call_tool".to_string(),
+                    description: "MCP call tool".to_string(),
+                    parameters: serde_json::json!({}),
+                    permission_level: "medium".to_string(),
+                    risk_level: "medium".to_string(),
+                    version: "1.0.0".to_string(),
+                    source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                    capabilities: vec!["network".to_string(), "external_side_effect".to_string()],
+                    requires_confirmation: false,
+                    enabled: true,
+                    declarative_only: false,
+                    action_type: "external_side_effect".to_string(),
+                    tags: vec!["execution".to_string(), "mcp_wrapper".to_string()],
+                },
+                std::sync::Arc::new(|_args| Ok("ok".to_string())),
+            );
+            // Register the target tool
+            let target_manifest = openlife_core::tool_manifest::ToolManifest {
+                name: "test_network_tool".to_string(),
+                id: "test_network_tool".to_string(),
+                description: "A mock network MCP tool".to_string(),
+                parameters: serde_json::json!({}),
+                permission_level: "low".to_string(),
+                risk_level: "low".to_string(),
+                version: "1.0.0".to_string(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".to_string(),
+                tags: vec!["execution".to_string()],
+            };
+            reg.register_builtin(
+                target_manifest,
+                std::sync::Arc::new(|_args| Ok("mock-ok".to_string())),
+            );
+        }
+
+        // Grant permission to mcp.call_tool so only target network ask gates
+        {
+            let perm = state.tool_permission_store.lock().await;
+            perm.grant(
+                "mcp.call_tool",
+                "builtin",
+                "medium",
+                "external_side_effect",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        // Build a pending run with a blocked action matching the target
+        let run_id = "run-mcp-ask-trials".to_string();
+        let action_id = "action-0-mcp-ask".to_string();
+        let mut run = openlife_core::agent::AgentRun::new_tool_execution_run("mcp.call_tool");
+        run.id = run_id.clone();
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(openlife_core::agent::AgentAction {
+            id: action_id.clone(),
+            action_type: "builtin_tool".to_string(),
+            target: Some("mcp.call_tool".to_string()),
+            input: serde_json::json!({
+                "arguments": {
+                    "tool_name": "test_network_tool",
+                    "arguments": {}
+                }
+            }),
+            output: None,
+            status: "needs_confirmation".to_string(),
+            permission_decision: Some("proposal_required".to_string()),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            timestamp: chrono::Utc::now(),
+            tool_scope: Some(openlife_core::agent::ToolActionScope {
+                tool_id: "test_network_tool".to_string(),
+                tool_name: "test_network_tool".to_string(),
+                source: "builtin".to_string(),
+                risk_level: "low".to_string(),
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                action_type: "read".to_string(),
+                requires_confirmation: true,
+                allowed: false,
+            }),
+        });
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+
+        // Create a Proposal as network_ask_proposal would (with target metadata)
+        let proposal = openlife_core::agent::AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool_permission.builtin.test_network_tool",
+            serde_json::json!({
+                "permission_action": "grant",
+                "tool_name": "test_network_tool",
+                "source": "builtin",
+                "risk_level": "low",
+                "action_type": "read",
+                "policy": "allow_until_revoked",
+                "blocked_action": {
+                    "action_type": "builtin_tool",
+                    "target": "mcp.call_tool",
+                    "input": { "tool_name": "test_network_tool", "arguments": {} },
+                    "source_run_id": run_id,
+                    "step_index": 0,
+                },
+                "reason": "network_policy ask",
+                "auto_generated": true,
+                "network_policy_ask": true,
+            }),
+            "[NetworkPolicy ask] MCP tool needs confirmation",
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        let mut proposal = proposal;
+        proposal.run_id = Some(run_id.clone());
+        let proposal_id = proposal.id.clone();
+        {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.create_proposal(&proposal).unwrap();
+        }
+
+        // Accept the proposal
+        let accept_result = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            accept_result.get("success").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        assert_eq!(
+            accept_result.get("can_continue").and_then(|v| v.as_bool()),
+            Some(true),
+            "accept should return can_continue=true for ToolPermission Proposal"
+        );
+        assert_eq!(
+            accept_result
+                .get("continue_run_id")
+                .and_then(|v| v.as_str()),
+            Some(run_id.as_str()),
+        );
+        assert_eq!(
+            accept_result
+                .get("continue_action_id")
+                .and_then(|v| v.as_str()),
+            Some(action_id.as_str()),
+        );
+
+        // Replay must not block again
+        let replayed = crate::commands::agent::replay_action_internal(&run_id, &action_id, &state)
+            .await
+            .unwrap();
+        assert!(
+            replayed.status != "needs_confirmation",
+            "replay must not be needs_confirmation again, got status={}",
+            replayed.status,
+        );
+
+        // Proposal must still be accepted (no duplicate)
+        let proposals = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.list_pending_proposals(10).unwrap()
+        };
+        assert!(
+            proposals.iter().all(|p| p.id != proposal_id),
+            "accepted proposal should no longer be pending"
+        );
     }
 }

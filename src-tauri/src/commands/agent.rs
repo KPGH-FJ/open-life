@@ -153,11 +153,6 @@ pub(crate) async fn replay_action_internal(
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    let args = action
-        .input
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| action.input.clone());
 
     let executor =
         openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
@@ -186,8 +181,8 @@ pub(crate) async fn replay_action_internal(
 
     let request = openlife_core::agent::AgentActionRequest {
         action_type: action.action_type.clone(),
-        target: tool_scope.tool_name.clone(),
-        input: serde_json::json!({ "arguments": args }),
+        target: action.target.clone().unwrap_or_default(),
+        input: action.input.clone(),
         source_run_id: Some(run_id.to_string()),
         step_index: action_idx as u32,
     };

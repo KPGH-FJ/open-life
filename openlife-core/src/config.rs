@@ -228,6 +228,10 @@ pub struct SystemConfig {
     /// Ollama server base URL (default http://localhost:11434)
     #[serde(default = "default_ollama_base_url")]
     pub ollama_base_url: String,
+    /// Allow legacy builder_apply_signals direct LifeModel writes (default false).
+    /// Set to true only for dev/test; production should use builder_create_proposals.
+    #[serde(default)]
+    pub allow_legacy_builder_direct_apply: bool,
 }
 
 impl Default for SystemConfig {
@@ -248,6 +252,7 @@ impl Default for SystemConfig {
             searxng_url: String::new(),
             execution_sandbox: ExecutionSandboxConfig::default(),
             ollama_base_url: default_ollama_base_url(),
+            allow_legacy_builder_direct_apply: false,
         }
     }
 }
@@ -401,9 +406,17 @@ impl AppConfig {
     }
 
     pub fn effective_cloud_api_key(&self) -> String {
+        // 1. Check OS keyring first (most secure, consistent with llm::effective_api_key)
+        if let Some(key) = crate::keyring_store::get_api_key(&self.llm.provider) {
+            if !key.trim().is_empty() {
+                return key;
+            }
+        }
+        // 2. Fall back to configured key in config.yaml
         if !self.llm.openai_key.trim().is_empty() {
             return self.llm.openai_key.clone();
         }
+        // 3. Fall back to environment variable
         match self.llm.provider.as_str() {
             "deepseek" => std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
             "openrouter" => std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
@@ -554,5 +567,26 @@ local_model: ""
         assert_eq!(config.llm.provider, "deepseek");
         assert!(!config.llm.embedding_enabled);
         assert_eq!(config.effective_provider_label(), "DeepSeek");
+    }
+
+    #[test]
+    fn effective_cloud_api_key_falls_back_to_env_when_config_empty() {
+        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        let mut config = AppConfig::default();
+        config.llm.provider = "deepseek".to_string();
+        config.llm.openai_key = String::new();
+        std::env::set_var("DEEPSEEK_API_KEY", "sk-env-deepseek-test-key");
+        let effective = config.effective_cloud_api_key();
+        assert_eq!(effective, "sk-env-deepseek-test-key");
+        std::env::remove_var("DEEPSEEK_API_KEY");
+    }
+
+    #[test]
+    fn allow_legacy_builder_direct_apply_defaults_false() {
+        let config = AppConfig::default();
+        assert!(
+            !config.system.allow_legacy_builder_direct_apply,
+            "legacy builder_apply_signals must be disabled by default"
+        );
     }
 }

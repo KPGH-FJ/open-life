@@ -27,6 +27,7 @@ import {
   editProposal,
   getSystemDiagnostics,
   getConfig,
+  replayAgentAction,
   type AgentProposal,
   type AppConfig,
   type SystemDiagnostics,
@@ -128,6 +129,11 @@ export default function ProposalReviewPage() {
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
   const [safePaths, setSafePaths] = useState<string[]>([]);
   const [expandedEvidence, setExpandedEvidence] = useState<Set<string>>(new Set());
+  const [continueInfo, setContinueInfo] = useState<{
+    runId: string;
+    actionId: string;
+  } | null>(null);
+  const [replaying, setReplaying] = useState(false);
 
   const safeMode = isSafeMode(diagnostics);
   const safeModeReason = getSafeModeReason(diagnostics);
@@ -200,6 +206,7 @@ export default function ProposalReviewPage() {
     setActingId(proposal.id);
     setError(null);
     setNotice(null);
+    setContinueInfo(null);
 
     // Prevent accepting unsupported proposal types
     if (action === "accept" && isUnsupportedType(proposal.proposalType)) {
@@ -212,8 +219,17 @@ export default function ProposalReviewPage() {
 
     try {
       if (action === "accept") {
-        await acceptProposal(proposal.id);
+        const res = await acceptProposal(proposal.id);
         setNotice(appliedNotice(proposal));
+        // If backend signals the action can be replayed, expose it to the user
+        const canCont = res.canContinue ?? res.can_continue;
+        if (canCont) {
+          const runId = res.continueRunId ?? res.continue_run_id;
+          const actionId = res.continueActionId ?? res.continue_action_id;
+          if (runId && actionId) {
+            setContinueInfo({ runId, actionId });
+          }
+        }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
         setNotice(`已拒绝：${proposal.affectedPath}`);
@@ -235,6 +251,27 @@ export default function ProposalReviewPage() {
       }
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handleReplay = async () => {
+    if (!continueInfo) return;
+    setReplaying(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await replayAgentAction(continueInfo.runId, continueInfo.actionId);
+      setNotice(
+        `已重放动作，状态：${result.status}${
+          result.error ? ` — ${result.error.slice(0, 100)}` : ""
+        }`
+      );
+      setContinueInfo(null);
+      await load();
+    } catch (e) {
+      setError(`重放失败：${String(e)}`);
+    } finally {
+      setReplaying(false);
     }
   };
 
@@ -350,6 +387,17 @@ export default function ProposalReviewPage() {
         {notice && (
           <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             {notice}
+            {continueInfo && (
+              <div className="mt-2">
+                <button
+                  onClick={handleReplay}
+                  disabled={replaying}
+                  className="inline-flex items-center gap-1 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {replaying ? "重放中…" : "继续执行已批准的动作"}
+                </button>
+              </div>
+            )}
           </div>
         )}
         {error && (

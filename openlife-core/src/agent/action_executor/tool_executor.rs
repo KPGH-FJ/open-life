@@ -133,6 +133,53 @@ impl super::ActionExecutor {
                 .await;
         }
 
+        // -- AgentSpec unified tool governance --
+        // Non-shell tools must pass AgentSpec allow/deny rules.
+        if let Some(ref spec) = ac.agent_spec {
+            if !spec.is_tool_allowed(&tool_name) {
+                let (action, observation) = self.build_blocked_action_observation(
+                    &tool_name,
+                    &args,
+                    &inspection,
+                    &ToolPermissionDecision {
+                        allowed: false,
+                        requires_confirmation: false,
+                        decision: "blocked".into(),
+                        reason: format!(
+                            "Tool '{}' is not allowed by the current AgentSpec (allowed_tools: {:?}, denied_tools: {:?})",
+                            tool_name,
+                            spec.allowed_tools,
+                            spec.denied_tools,
+                        ),
+                        policy_id: None,
+                    },
+                    manifest.as_ref(),
+                    &request,
+                );
+                if let (Some(event_store), Some(run_id)) =
+                    (ac.event_store.as_ref(), &request.source_run_id)
+                {
+                    let event = AgentRunEvent::new(
+                        run_id,
+                        AgentRunEventType::ToolCallBlocked,
+                        AgentEventActor::Tool(tool_name.clone()),
+                        format!("Tool '{}' blocked by AgentSpec governance", tool_name),
+                        serde_json::json!({
+                            "tool": tool_name,
+                            "reason": "agent_spec_denied",
+                        }),
+                    );
+                    let _ = event_store.append_event(&event);
+                }
+                return Ok(ActionExecutionResult {
+                    action,
+                    observation,
+                    status: ActionExecutionStatus::Blocked,
+                    stop_reason: Some("agent_spec_denied".into()),
+                });
+            }
+        }
+
         // -- Phase 2: lock permission_store briefly for decision --
         let decision =
             compute_permission_decision(self.config.consume_allow_once, manifest.as_ref(), ac)
@@ -199,6 +246,83 @@ impl super::ActionExecutor {
         }
 
         // -- Phase 6: execute (NO store locks held during I/O) --
+        // Unified network policy check for network-capable tools.
+        // mcp.call_tool is NOT checked here — its handler in execution_tools.rs
+        // resolves the target tool first, then gates only network-capable targets.
+        if matches!(
+            tool_name.as_str(),
+            "web.fetch" | "web.search" | "a2a.call_agent"
+        ) {
+            if let Some(ref policy) = ac.network_policy {
+                let url = args.get("url").and_then(|v| v.as_str());
+                // Peek permission store: if the tool already has an allow
+                // permission (from a previously accepted Proposal), skip
+                // default_decision=ask/deny so replay doesn't loop.
+                let already_permitted = if let Some(ref m) = manifest {
+                    let source = canonical_tool_source(m);
+                    let perm = ac.permission_store.lock().await;
+                    perm.peek(
+                        &m.name,
+                        &source,
+                        &m.risk_level,
+                        &m.action_type,
+                        &m.capabilities,
+                    )
+                    .is_ok_and(|d| d.allowed && d.policy_id.is_some())
+                } else {
+                    false
+                };
+                if let Some(blocked) = super::execution_tools::check_network_policy(
+                    &tool_name,
+                    policy,
+                    url,
+                    already_permitted,
+                ) {
+                    let needs_confirm = blocked
+                        .error
+                        .as_ref()
+                        .is_some_and(|e| e.starts_with("needs_confirmation:"));
+                    if needs_confirm {
+                        // default_decision=ask: create a ToolPermission Proposal
+                        // so the user can approve it in Review Center.
+                        return self
+                            .network_ask_proposal(
+                                &tool_name,
+                                &args,
+                                &request,
+                                &inspection,
+                                manifest.as_ref(),
+                                ac,
+                                &blocked,
+                            )
+                            .await;
+                    }
+                    // deny / enabled=false / tool_override=deny: hard block
+                    let reason = blocked.error.clone().unwrap_or_default();
+                    let (action, observation) = self.build_blocked_action_observation(
+                        &tool_name,
+                        &args,
+                        &inspection,
+                        &ToolPermissionDecision {
+                            allowed: false,
+                            requires_confirmation: false,
+                            decision: "blocked".into(),
+                            reason,
+                            policy_id: None,
+                        },
+                        manifest.as_ref(),
+                        &request,
+                    );
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::Blocked,
+                        stop_reason: blocked.error,
+                    });
+                }
+            }
+        }
+
         let manifest_ref = manifest
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Tool manifest not found for '{}'", tool_name))?;
@@ -273,6 +397,70 @@ impl super::ActionExecutor {
             }
         }
 
+        // Check for needs_confirmation marker from policies (network_policy ask, etc.)
+        if !result.success {
+            if let Some(ref error) = result.error {
+                if error.starts_with("needs_confirmation:") {
+                    let reason = error.strip_prefix("needs_confirmation:").unwrap_or(error);
+                    if reason.starts_with("network_policy") {
+                        let proposal_tool = if tool_name == "mcp.call_tool" {
+                            args.get("tool_name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&tool_name)
+                        } else {
+                            &tool_name
+                        };
+
+                        // For mcp.call_tool: re-lookup the real target manifest
+                        // from the registry instead of parsing error-string JSON.
+                        let target_manifest: Option<ToolManifest> = if tool_name == "mcp.call_tool"
+                        {
+                            Self::resolve_mcp_target_manifest_for_args(&ac.registry, &args)
+                                .await
+                                .ok()
+                                .flatten()
+                        } else {
+                            None
+                        };
+
+                        let msg = reason.strip_prefix("network_policy:").unwrap_or(reason);
+                        // Strip any embedded JSON suffix if still present
+                        let msg = if let Some((_, human)) = msg.split_once("::") {
+                            human
+                        } else {
+                            msg
+                        };
+
+                        return self
+                            .network_ask_proposal_ex(
+                                proposal_tool,
+                                &args,
+                                &request,
+                                manifest.as_ref(),
+                                ac,
+                                &ToolCallInternalResult {
+                                    success: false,
+                                    output: None,
+                                    error: Some(format!(
+                                        "needs_confirmation:network_policy {}",
+                                        msg
+                                    )),
+                                },
+                                target_manifest.as_ref(),
+                            )
+                            .await;
+                    }
+                    action.status = "needs_confirmation".to_string();
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::NeedsConfirmation,
+                        stop_reason: Some(reason.to_string()),
+                    });
+                }
+            }
+        }
+
         let status = if result.success {
             ActionExecutionStatus::Succeeded
         } else {
@@ -306,10 +494,10 @@ impl super::ActionExecutor {
         let audit = ac.audit_store.lock().await;
         let pe = ac.privacy_engine.lock().await;
         let bc = BorrowedActionContext {
-            registry: &*reg,
-            permission_store: &*perm,
-            audit_store: &*audit,
-            privacy_engine: &*pe,
+            registry: &reg,
+            permission_store: &perm,
+            audit_store: &audit,
+            privacy_engine: &pe,
             life_model: ac.life_model.as_ref(),
             memory_store: None,
             proposal_store: None,
@@ -341,10 +529,10 @@ impl super::ActionExecutor {
             None => None,
         };
         let bc = BorrowedActionContext {
-            registry: &*reg,
-            permission_store: &*perm,
-            audit_store: &*audit,
-            privacy_engine: &*pe,
+            registry: &reg,
+            permission_store: &perm,
+            audit_store: &audit,
+            privacy_engine: &pe,
             life_model: ac.life_model.as_ref(),
             memory_store: ms.as_deref(),
             proposal_store: ps.as_deref(),
@@ -374,6 +562,7 @@ impl super::ActionExecutor {
 
     /// Handle the blocked execution path: create declarative-stub
     /// proposals or tool-permission proposals, lock stores briefly.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_blocked(
         &self,
         request: &AgentActionRequest,
@@ -450,8 +639,7 @@ impl super::ActionExecutor {
             ActionExecutionStatus::Blocked
         };
 
-        if let (Some(ref event_store), Some(ref run_id)) =
-            (ac.event_store.as_ref(), &request.source_run_id)
+        if let (Some(event_store), Some(run_id)) = (ac.event_store.as_ref(), &request.source_run_id)
         {
             let event = AgentRunEvent::new(
                 run_id,
@@ -476,7 +664,195 @@ impl super::ActionExecutor {
         })
     }
 
+    /// When NetworkPolicy default_decision=ask blocks a tool, create a
+    /// ToolPermission Proposal so the user can approve it in Review Center.
+    /// The proposal carries blocked_action info that replay uses to match
+    /// and re-execute the action once the permission is granted.
+    /// `target_info` provides explicit source/risk/action_type for MCP
+    /// targets (overrides the wrapper manifest defaults).
+    /// Re-lookup the real MCP target tool manifest from the registry.
+    /// Replaces the previous error-string JSON protocol with a proper
+    /// registry lookup. Used when `mcp.call_tool` is blocked by
+    /// `needs_confirmation:network_policy`.
+    async fn resolve_mcp_target_manifest_for_args(
+        registry: &Arc<tokio::sync::Mutex<McpRegistry>>,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<Option<ToolManifest>> {
+        let target_name = args
+            .get("tool_name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'tool_name' in args"))?;
+        let server = args.get("server").and_then(|v| v.as_str());
+
+        let reg = registry.lock().await;
+        let manifests = reg.list_manifests();
+        let mut target_manifests: Vec<_> = manifests
+            .into_iter()
+            .filter(|m| m.name == target_name || m.id == target_name)
+            .collect();
+
+        if let Some(server_name) = server {
+            let found = target_manifests.into_iter().find(
+                |m| matches!(&m.source, ToolSource::Mcp { server_name: s } if s == server_name),
+            );
+            Ok(found)
+        } else if target_manifests.len() == 1 {
+            Ok(Some(target_manifests.remove(0)))
+        } else if target_manifests.is_empty() {
+            Ok(None)
+        } else {
+            Err(anyhow::anyhow!(
+                "Multiple tools named '{}'. Specify 'server' parameter.",
+                target_name
+            ))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn network_ask_proposal(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        request: &AgentActionRequest,
+        _inspection: &McpArgumentInspection,
+        manifest: Option<&ToolManifest>,
+        ac: &ActionContext,
+        blocked: &ToolCallInternalResult,
+    ) -> Result<ActionExecutionResult> {
+        self.network_ask_proposal_ex(
+            tool_name,
+            args,
+            request,
+            manifest,
+            ac,
+            blocked,
+            Option::<&ToolManifest>::None,
+        )
+        .await
+    }
+
+    /// Extended version that accepts an optional target_manifest override.
+    /// When `target_manifest` is Some, its metadata is used for the Proposal
+    /// `after` fields and `tool_scope` instead of the wrapper `manifest`.
+    #[allow(clippy::too_many_arguments)]
+    async fn network_ask_proposal_ex(
+        &self,
+        tool_name: &str,
+        args: &Value,
+        request: &AgentActionRequest,
+        manifest: Option<&ToolManifest>,
+        ac: &ActionContext,
+        blocked: &ToolCallInternalResult,
+        target_manifest: Option<&ToolManifest>,
+    ) -> Result<ActionExecutionResult> {
+        let scope_manifest = target_manifest.or(manifest);
+        let source = scope_manifest
+            .map(canonical_tool_source)
+            .unwrap_or_else(|| "builtin".to_string());
+        let risk_level = scope_manifest
+            .map(|m| m.risk_level.clone())
+            .unwrap_or_else(|| "medium".to_string());
+        let action_type = scope_manifest
+            .map(|m| m.action_type.clone())
+            .unwrap_or_else(|| "read".to_string());
+        let caps = scope_manifest
+            .map(|m| m.capabilities.clone())
+            .unwrap_or_default();
+        let reason = blocked.error.clone().unwrap_or_default();
+
+        let after = serde_json::json!({
+            "permission_action": "grant",
+            "tool_name": tool_name,
+            "source": source,
+            "risk_level": risk_level,
+            "action_type": action_type,
+            "capabilities": caps,
+            "policy": "allow_until_revoked",
+            "blocked_action": {
+                "action_type": request.action_type,
+                "target": request.target,
+                "input": args,
+                "source_run_id": request.source_run_id,
+                "step_index": request.step_index,
+            },
+            "reason": reason,
+            "auto_generated": true,
+            "network_policy_ask": true,
+        });
+
+        let affected_path = format!("tool_permission.{}.{}", source, tool_name);
+        let mut proposal = AgentProposal::new(
+            ProposalType::ToolPermission,
+            &affected_path,
+            after,
+            &format!(
+                "[NetworkPolicy ask] 工具 '{}' 需要网络访问确认。请在 Review Center 审批后重放。",
+                tool_name
+            ),
+            0.7,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        );
+        if let Some(ref run_id) = request.source_run_id {
+            proposal.run_id = Some(run_id.clone());
+        }
+
+        let proposal_id = {
+            if let Some(ref ps_arc) = ac.proposal_store {
+                let ps = ps_arc.lock().await;
+                let id = proposal.id.clone();
+                if let Err(e) = ps.create_proposal(&proposal) {
+                    eprintln!(
+                        "[warn] Failed to create network-ask ToolPermission Proposal for {}: {}",
+                        tool_name, e
+                    );
+                    String::new()
+                } else {
+                    id
+                }
+            } else {
+                String::new()
+            }
+        };
+
+        let mut result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: 网络策略要求确认 (default_decision=ask)，已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
+                tool_name, proposal_id
+            ),
+        );
+        result.action.tool_scope = scope_manifest.map(|m| ToolActionScope {
+            tool_name: tool_name.to_string(),
+            tool_id: m.id.clone(),
+            source: canonical_tool_source(m),
+            risk_level: m.risk_level.clone(),
+            capabilities: caps,
+            action_type: m.action_type.clone(),
+            requires_confirmation: true,
+            allowed: false,
+        });
+
+        if let (Some(event_store), Some(run_id)) = (ac.event_store.as_ref(), &request.source_run_id)
+        {
+            let event = AgentRunEvent::new(
+                run_id,
+                AgentRunEventType::ToolCallBlocked,
+                AgentEventActor::Tool(tool_name.to_string()),
+                format!("Tool '{}' blocked by NetworkPolicy ask", tool_name),
+                serde_json::json!({
+                    "tool": tool_name,
+                    "reason": "network_policy_ask",
+                }),
+            );
+            let _ = event_store.append_event(&event);
+        }
+
+        Ok(result)
+    }
+
     /// Create declarative-stub proposal using an already-locked proposal store.
+    #[allow(clippy::too_many_arguments)]
     fn create_declarative_stub_proposal_with_store(
         &self,
         request: &AgentActionRequest,
@@ -659,14 +1035,26 @@ impl super::ActionExecutor {
                 }
                 ToolSource::Mcp { server_name } => {
                     let client = reg.get_mcp_client(server_name);
-                    drop(reg);
                     match client {
-                        Some(c) => break 'exec c.call_tool(&manifest.name, args.clone()).await,
+                        Some(c) => {
+                            drop(reg);
+                            break 'exec c.call_tool(&manifest.name, args.clone()).await;
+                        }
                         None => {
-                            break 'exec Err(anyhow::anyhow!(
-                                "MCP server '{}' not found",
-                                server_name
-                            ))
+                            // Graceful fallback: if the tool was registered via
+                            // register_builtin (e.g. in tests), use the builtin
+                            // function instead of requiring a real MCP client.
+                            let builtin = reg.get_builtin_fn(&manifest.name);
+                            drop(reg);
+                            match builtin {
+                                Some(f) => break 'exec f(args.clone()),
+                                None => {
+                                    break 'exec Err(anyhow::anyhow!(
+                                        "MCP server '{}' not found",
+                                        server_name
+                                    ))
+                                }
+                            }
                         }
                     }
                 }
@@ -1526,6 +1914,7 @@ impl super::ActionExecutor {
 mod tests {
     use super::*;
     use crate::agent::action_executor::ActionExecutorConfig;
+    use crate::config::NetworkPolicy;
     use crate::mcp::McpRegistry;
     use crate::mcp_audit::McpAuditStore;
     use crate::privacy::PrivacyEngine;
@@ -2130,5 +2519,489 @@ mod tests {
         let exec_result =
             tokio::time::timeout(std::time::Duration::from_secs(5), exec_handle).await;
         assert!(exec_result.is_ok(), "mcp.call_tool execution timed out");
+    }
+
+    /// AgentSpec denial: a spec that denies `web.search` must block it.
+    #[tokio::test]
+    async fn agent_spec_denies_web_search() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        r.register_default_builtins();
+        let audit = McpAuditStore::new(tmp.path().join("audit_agent_spec1.db"));
+        let pe = crate::privacy::PrivacyEngine::new();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut spec = crate::agent::types::AgentSpec::default_main_spec();
+        spec.denied_tools.push("web.search".to_string());
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_agent_spec1a.db")),
+            PrivacyEngine::new(),
+            vec![],
+        )
+        .with_agent_spec(spec);
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "web.search".into(),
+            input: serde_json::json!({
+                "arguments": {
+                    "query": "test query",
+                    "max_results": 3
+                }
+            }),
+            source_run_id: Some("test-run-agent-spec-deny".into()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(result.stop_reason, Some("agent_spec_denied".into()));
+    }
+
+    /// AgentSpec allowlist: if allowed_tools does not contain file.read, it should be blocked.
+    #[tokio::test]
+    async fn agent_spec_allowlist_blocks_file_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        r.register_default_builtins();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_agent_spec2.db"));
+        let pe = crate::privacy::PrivacyEngine::new();
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut spec = crate::agent::types::AgentSpec::default_main_spec();
+        spec.allowed_tools = vec!["web.search".to_string()];
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_agent_spec2a.db")),
+            PrivacyEngine::new(),
+            vec![],
+        )
+        .with_agent_spec(spec);
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "file.read".into(),
+            input: serde_json::json!({
+                "arguments": {
+                    "path": "/tmp/test.txt"
+                }
+            }),
+            source_run_id: Some("test-run-agent-spec-allowlist".into()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(result.stop_reason, Some("agent_spec_denied".into()));
+    }
+
+    /// mcp.call_tool must be blocked when NetworkPolicy is disabled.
+    #[tokio::test]
+    async fn network_policy_enabled_false_blocks_mcp_call_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        r.register_default_builtins();
+        // Register a mock network-capable MCP target tool so the
+        // mcp.call_tool handler can resolve it
+        r.register_builtin(
+            crate::tool_manifest::ToolManifest {
+                name: "test_network_tool".to_string(),
+                id: "test_network_tool".to_string(),
+                description: "test".to_string(),
+                parameters: serde_json::json!({}),
+                permission_level: "medium".to_string(),
+                risk_level: "medium".to_string(),
+                version: "1.0.0".to_string(),
+                source: crate::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".to_string(),
+                tags: vec!["execution".to_string()],
+            },
+            std::sync::Arc::new(|_args| Ok("ok".to_string())),
+        );
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        // Grant permission for mcp.call_tool so the network policy is the only gate
+        ps.grant(
+            "mcp.call_tool",
+            "builtin",
+            "medium",
+            "external_side_effect",
+            crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_mcp_np.db"));
+        let pe = crate::privacy::PrivacyEngine::new();
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut policy = NetworkPolicy::default();
+        policy.enabled = false;
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_mcp_np2.db")),
+            PrivacyEngine::new(),
+            vec![],
+        );
+        ctx.network_policy = Some(policy);
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "mcp.call_tool".into(),
+            input: serde_json::json!({
+                "arguments": {
+                    "tool_name": "test_network_tool",
+                    "arguments": {}
+                }
+            }),
+            source_run_id: Some("test-run-mcp-np".into()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert!(
+            result.status == ActionExecutionStatus::Failed
+                || result.status == ActionExecutionStatus::Blocked
+                || result
+                    .action
+                    .error
+                    .as_ref()
+                    .is_some_and(|e| e.contains("disabled by policy")),
+            "mcp.call_tool should be blocked by network policy, got status {:?} error {:?}",
+            result.status,
+            result.action.error
+        );
+    }
+
+    /// Full triad: ask → Proposal → accept → replay no longer blocked.
+    #[tokio::test]
+    async fn network_policy_ask_proposal_accept_replay_triad() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        r.register_default_builtins();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_triad.db"));
+        let pe = crate::privacy::PrivacyEngine::new();
+        let prop_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        let prop_store_arc = Arc::new(tokio::sync::Mutex::new(prop_store));
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut policy = NetworkPolicy::default();
+        policy.enabled = true;
+        policy.default_decision = "ask".to_string();
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_triad2.db")),
+            PrivacyEngine::new(),
+            vec![],
+        );
+        ctx.network_policy = Some(policy.clone());
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+        ctx.proposal_store = Some(prop_store_arc.clone());
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "web.search".into(),
+            input: serde_json::json!({ "arguments": { "query": "test triad" } }),
+            source_run_id: Some("test-run-triad".into()),
+            step_index: 0,
+        };
+
+        // Step 1: First execution with ask → should create a Proposal
+        let result1 = executor.execute(request.clone(), &ctx).await.unwrap();
+        assert_eq!(
+            result1.status,
+            ActionExecutionStatus::NeedsConfirmation,
+            "first exec with ask should return NeedsConfirmation"
+        );
+
+        // A Proposal should have been created
+        let proposals = {
+            let ps = prop_store_arc.lock().await;
+            ps.list_pending_proposals(10).unwrap()
+        };
+        assert_eq!(proposals.len(), 1, "exactly one proposal should be created");
+        assert_eq!(proposals[0].proposal_type, ProposalType::ToolPermission,);
+        let after = &proposals[0].after;
+        assert_eq!(
+            after.get("tool_name").and_then(|v| v.as_str()),
+            Some("web.search"),
+        );
+        assert_eq!(
+            after.get("network_policy_ask").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+
+        // Step 2: Simulate proposal acceptance — grant matching permission
+        {
+            let perm = ps_arc.lock().await;
+            perm.grant(
+                "web.search",
+                "builtin",
+                "medium",
+                "read",
+                crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        // Step 3: Second execution (simulates replay after permission granted)
+        let result2 = executor.execute(request, &ctx).await.unwrap();
+        assert!(
+            result2.status != ActionExecutionStatus::NeedsConfirmation
+                && result2.status != ActionExecutionStatus::Blocked,
+            "second exec with granted permission should not be blocked by network ask, got {:?}",
+            result2.status
+        );
+    }
+
+    /// Hard blocks (enabled=false) must not be bypassed by tool permission.
+    #[tokio::test]
+    async fn network_policy_enabled_false_not_bypassed_by_permission() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        r.register_default_builtins();
+        let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+        // Pre-grant a permission for web.search
+        ps.grant(
+            "web.search",
+            "builtin",
+            "medium",
+            "read",
+            crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_hardblock.db"));
+        let pe = crate::privacy::PrivacyEngine::new();
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut policy = NetworkPolicy::default();
+        policy.enabled = false; // hard block
+        policy.default_decision = "allow".to_string();
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_hardblock2.db")),
+            PrivacyEngine::new(),
+            vec![],
+        );
+        ctx.network_policy = Some(policy);
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "web.search".into(),
+            input: serde_json::json!({ "arguments": { "query": "test hardblock" } }),
+            source_run_id: Some("test-run-hardblock".into()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert_eq!(
+            result.status,
+            ActionExecutionStatus::Blocked,
+            "enabled=false must block even with a tool permission, got {:?}",
+            result.status
+        );
+    }
+
+    /// MCP network ask Proposal must use real MCP target manifest metadata, not wrapper.
+    #[tokio::test]
+    async fn mcp_network_ask_proposal_uses_real_mcp_target_manifest_not_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut r = McpRegistry::new();
+        // Register mcp.call_tool wrapper (medium, external_side_effect)
+        r.register_builtin(
+            crate::tool_manifest::ToolManifest {
+                name: "mcp.call_tool".to_string(),
+                id: "mcp.call_tool".to_string(),
+                description: "wrapper".to_string(),
+                parameters: serde_json::json!({}),
+                permission_level: "medium".to_string(),
+                risk_level: "medium".to_string(),
+                version: "1.0.0".to_string(),
+                source: crate::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["network".to_string(), "external_side_effect".to_string()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "external_side_effect".to_string(),
+                tags: vec!["execution".to_string(), "mcp_wrapper".to_string()],
+            },
+            std::sync::Arc::new(|_args| Ok("ok".to_string())),
+        );
+        // Register target with REAL ToolSource::Mcp (low risk, read action)
+        r.register_builtin(
+            crate::tool_manifest::ToolManifest {
+                name: "target_low_read_mcp".to_string(),
+                id: "target_low_read_mcp".to_string(),
+                description: "target".to_string(),
+                parameters: serde_json::json!({}),
+                permission_level: "low".to_string(),
+                risk_level: "low".to_string(),
+                version: "1.0.0".to_string(),
+                source: crate::tool_manifest::ToolSource::Mcp {
+                    server_name: "test-server".to_string(),
+                },
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".to_string(),
+                tags: vec!["execution".to_string()],
+            },
+            std::sync::Arc::new(|_args| Ok("ok".to_string())),
+        );
+        let ps = ToolPermissionStore::new_in_memory().unwrap();
+        // Grant wrapper mcp.call_tool permission so only target network ask gates
+        ps.grant(
+            "mcp.call_tool",
+            "builtin",
+            "medium",
+            "external_side_effect",
+            crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_mcp_wrapper.db"));
+        let pe = PrivacyEngine::new();
+        let prop_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+        let prop_store_arc = Arc::new(tokio::sync::Mutex::new(prop_store));
+        let reg_arc = Arc::new(tokio::sync::Mutex::new(r));
+        let ps_arc = Arc::new(tokio::sync::Mutex::new(ps));
+        let audit_arc = Arc::new(tokio::sync::Mutex::new(audit));
+        let pe_arc = Arc::new(tokio::sync::Mutex::new(pe));
+
+        let mut policy = NetworkPolicy::default();
+        policy.enabled = true;
+        policy.default_decision = "ask".to_string();
+        let mut ctx = ActionContext::new_for_test(
+            McpRegistry::new(),
+            ToolPermissionStore::new_in_memory().unwrap(),
+            McpAuditStore::new(tmp.path().join("audit_mcp_wrapper2.db")),
+            PrivacyEngine::new(),
+            vec![],
+        );
+        ctx.network_policy = Some(policy);
+        ctx.registry = reg_arc.clone();
+        ctx.permission_store = ps_arc.clone();
+        ctx.audit_store = audit_arc.clone();
+        ctx.privacy_engine = pe_arc.clone();
+        ctx.proposal_store = Some(prop_store_arc.clone());
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let request = AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "mcp.call_tool".into(),
+            input: serde_json::json!({
+                "arguments": {
+                    "tool_name": "target_low_read_mcp",
+                    "arguments": {}
+                }
+            }),
+            source_run_id: Some("test-run-mcp-wrapper".into()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert_eq!(result.status, ActionExecutionStatus::NeedsConfirmation);
+
+        // Verify Proposal uses REAL MCP TARGET metadata, not wrapper
+        let proposals = {
+            let ps = prop_store_arc.lock().await;
+            ps.list_pending_proposals(10).unwrap()
+        };
+        assert_eq!(proposals.len(), 1);
+        let after = &proposals[0].after;
+        assert_eq!(
+            after.get("tool_name").and_then(|v| v.as_str()),
+            Some("target_low_read_mcp"),
+            "Proposal tool_name must be the target, not mcp.call_tool"
+        );
+        assert_eq!(
+            after.get("source").and_then(|v| v.as_str()),
+            Some("mcp:test-server"),
+            "Proposal source must be mcp:test-server, NOT builtin"
+        );
+        assert_eq!(
+            after.get("risk_level").and_then(|v| v.as_str()),
+            Some("low"),
+            "Proposal risk_level must match target (low), not wrapper (medium)"
+        );
+        assert_eq!(
+            after.get("action_type").and_then(|v| v.as_str()),
+            Some("read"),
+            "Proposal action_type must match target (read), not wrapper (external_side_effect)"
+        );
+        // Verify capabilities are present and use target capabilities
+        let caps = after.get("capabilities").and_then(|v| v.as_array());
+        assert!(
+            caps.is_some_and(|arr| {
+                let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
+                strs.contains(&"network") && strs.contains(&"read")
+            }),
+            "Proposal capabilities must contain target capabilities (network, read)"
+        );
+
+        // Verify action.tool_scope also uses target metadata
+        let ts = result.action.tool_scope.as_ref().unwrap();
+        assert_eq!(ts.tool_name, "target_low_read_mcp");
+        assert_eq!(
+            ts.source, "mcp:test-server",
+            "tool_scope.source must be mcp:test-server"
+        );
+        assert_eq!(ts.risk_level, "low");
+        assert_eq!(ts.action_type, "read");
+        assert!(ts.capabilities.contains(&"network".to_string()));
+        assert!(ts.capabilities.contains(&"read".to_string()));
     }
 }

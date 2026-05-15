@@ -219,4 +219,116 @@ describe("ProposalReviewPage", () => {
     const runLinks = screen.getAllByText(/Run #/);
     expect(runLinks.length).toBeGreaterThan(0);
   });
+
+  it("shows continue action after accepting replayable tool permission", async () => {
+    // Override mock for this specific test: include a tool_permission proposal
+    // with network_policy_ask, plus acceptProposal returning can_continue,
+    // plus replayAgentAction returning success.
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        return Promise.resolve([
+          {
+            id: "proposal-tp-replay",
+            runId: "run-mcp-replay",
+            proposalType: "tool_permission",
+            source: "manual",
+            sourceDetail: "",
+            affectedPath: "tool_permission.builtin.test_mcp_network_tool",
+            before: null,
+            after: {
+              permission_action: "grant",
+              tool_name: "test_mcp_network_tool",
+              source: "builtin",
+              risk_level: "low",
+              action_type: "read",
+              policy: "allow_until_revoked",
+              network_policy_ask: true,
+              auto_generated: true,
+              reason: "needs_confirmation:network_policy",
+              blocked_action: {
+                action_type: "builtin_tool",
+                target: "mcp.call_tool",
+                source_run_id: "run-mcp-replay",
+                step_index: 0,
+              },
+            },
+            reason: "[NetworkPolicy ask] 需要网络访问确认",
+            confidence: 0.7,
+            riskLevel: "medium",
+            status: "pending",
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+          },
+        ] as any);
+      }
+      if (cmd === "accept_proposal") {
+        return Promise.resolve({
+          success: true,
+          patchResult: {
+            patchId: "patch-replay",
+            success: true,
+            path: "/tool_permission/test_mcp_network_tool",
+            operation: "replace",
+          },
+          can_continue: true,
+          continue_run_id: "run-mcp-replay",
+          continue_action_id: "action-replay",
+        } as any);
+      }
+      if (cmd === "replay_agent_action") {
+        return Promise.resolve({
+          id: "action-replay",
+          status: "succeeded",
+          output: "mock-ok",
+        } as any);
+      }
+      if (cmd === "get_system_diagnostics") {
+        return Promise.resolve({
+          overall: "ok",
+          items: [],
+        } as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(screen.getByText("tool_permission.builtin.test_mcp_network_tool")).toBeInTheDocument();
+
+    // Click accept button ("应用")
+    const acceptBtns = screen.getAllByText("应用");
+    fireEvent.click(acceptBtns[0]);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "accept_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-tp-replay",
+          proposal_id: "proposal-tp-replay",
+        })
+      );
+    });
+
+    // After accept, the "continue" button should appear
+    expect(await screen.findByText("继续执行已批准的动作")).toBeInTheDocument();
+
+    // Click the continue button
+    const continueBtn = screen.getByText("继续执行已批准的动作");
+    fireEvent.click(continueBtn);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "replay_agent_action",
+        expect.objectContaining({
+          runId: "run-mcp-replay",
+          actionId: "action-replay",
+        })
+      );
+    });
+
+    // The replay status should be visible in the notice area
+    expect(await screen.findByText(/已重放动作/)).toBeInTheDocument();
+    expect(screen.getByText(/succeeded/)).toBeInTheDocument();
+  });
 });

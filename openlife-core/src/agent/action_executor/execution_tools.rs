@@ -5,12 +5,92 @@ use crate::agent::action_executor::helpers::{
     search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::config::NetworkPolicy;
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde_json::Value;
 
 use super::ActionContext;
 use super::AgentActionRequest;
+
+/// Evaluate network policy for a tool that makes network requests.
+/// Returns None if the tool is allowed; Some(blocked_result) if blocked.
+/// `url_for_domain` enables domain allowlist/denylist checks (only for tools with
+/// an explicit URL argument, e.g. web.fetch and a2a.call_agent).
+/// `already_permitted` indicates the tool already has an allow permission
+/// (e.g. from a previously accepted ToolPermission Proposal); when true,
+/// `default_decision=ask/deny` is skipped, but hard blocks (enabled=false,
+/// tool_overrides=deny, domain denylist) still apply.
+pub(crate) fn check_network_policy(
+    tool_name: &str,
+    policy: &NetworkPolicy,
+    url_for_domain: Option<&str>,
+    already_permitted: bool,
+) -> Option<ToolCallInternalResult> {
+    if !policy.enabled {
+        return Some(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(
+                "Network tools are disabled by policy. Enable network access in Settings to use web tools."
+                    .to_string(),
+            ),
+        });
+    }
+    if let Some(d) = policy.tool_overrides.get(tool_name) {
+        if d == "deny" {
+            return Some(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!(
+                    "Tool '{}' is denied by network policy override",
+                    tool_name
+                )),
+            });
+        }
+    }
+    if let Some(host) = url_for_domain.and_then(extract_host_from_url) {
+        if policy.domain_denylist.iter().any(|d| host.ends_with(d)) {
+            return Some(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!("Domain '{}' is in the network denylist", host)),
+            });
+        }
+        if !policy.domain_allowlist.is_empty()
+            && !policy.domain_allowlist.iter().any(|d| host.ends_with(d))
+        {
+            return Some(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!("Domain '{}' is not in the network allowlist", host)),
+            });
+        }
+    }
+    // default_decision is only enforced when the tool is not already permitted
+    if already_permitted {
+        return None;
+    }
+    match policy.default_decision.as_str() {
+        "deny" => Some(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(format!(
+                "Tool '{}' is blocked by network policy (default_decision=deny)",
+                tool_name
+            )),
+        }),
+        "ask" => Some(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(format!(
+                "needs_confirmation:network_policy Tool '{}' requires user confirmation before network access (default_decision=ask)",
+                tool_name
+            )),
+        }),
+        _ => None,
+    }
+}
 
 impl super::ActionExecutor {
     /// Execute an Execution tool (file.read, web.fetch, etc.).
@@ -24,67 +104,6 @@ impl super::ActionExecutor {
         ac: &ActionContext,
         request: &AgentActionRequest,
     ) -> Result<ToolCallInternalResult> {
-        // Check network policy for web tools
-        if matches!(tool_name, "web.fetch" | "web.search") {
-            if let Some(ref policy) = ac.network_policy {
-                if !policy.enabled {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(
-                            "Network tools are disabled by policy. Enable network access in Settings to use web tools.".to_string(),
-                        ),
-                    });
-                }
-
-                // Check tool override
-                if let Some(override_decision) = policy.tool_overrides.get(tool_name) {
-                    if override_decision == "deny" {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(format!(
-                                "Tool '{}' is denied by network policy override",
-                                tool_name
-                            )),
-                        });
-                    }
-                }
-
-                // For web.fetch, check domain allowlist/denylist
-                if tool_name == "web.fetch" {
-                    if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
-                        if let Some(host) = extract_host_from_url(url) {
-                            // Check denylist first
-                            if policy.domain_denylist.iter().any(|d| host.ends_with(d)) {
-                                return Ok(ToolCallInternalResult {
-                                    success: false,
-                                    output: None,
-                                    error: Some(format!(
-                                        "Domain '{}' is in the network denylist",
-                                        host
-                                    )),
-                                });
-                            }
-                            // If allowlist is not empty, only allow listed domains
-                            if !policy.domain_allowlist.is_empty()
-                                && !policy.domain_allowlist.iter().any(|d| host.ends_with(d))
-                            {
-                                return Ok(ToolCallInternalResult {
-                                    success: false,
-                                    output: None,
-                                    error: Some(format!(
-                                        "Domain '{}' is not in the network allowlist",
-                                        host
-                                    )),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         match tool_name {
             "file.read" => {
                 let path = args
@@ -362,7 +381,36 @@ impl super::ActionExecutor {
                     (target_manifest, inspection)
                 }; // registry lock released
 
-                // 2. Short-lock permission_store: check target permission
+                // 2. NetworkPolicy gate — only for network-capable MCP targets.
+                // This is checked here (after target resolution) rather than in
+                // execute_tool() so that local/stdio/file MCP tools are not
+                // incorrectly blocked by the global network policy.
+                if target_manifest.capabilities.iter().any(|c| c == "network") {
+                    if let Some(ref policy) = ac.network_policy {
+                        let already_permitted = {
+                            let perm = ac.permission_store.lock().await;
+                            let target_source = canonical_tool_source(&target_manifest);
+                            perm.peek(
+                                &target_manifest.name,
+                                &target_source,
+                                &target_manifest.risk_level,
+                                &target_manifest.action_type,
+                                &target_manifest.capabilities,
+                            )
+                            .is_ok_and(|d| d.allowed && d.policy_id.is_some())
+                        };
+                        if let Some(blocked) = check_network_policy(
+                            &target_manifest.name,
+                            policy,
+                            None,
+                            already_permitted,
+                        ) {
+                            return Ok(blocked);
+                        }
+                    }
+                }
+
+                // 3. Short-lock permission_store: check target permission
                 let target_decision = {
                     let perm = ac.permission_store.lock().await;
                     let target_source = canonical_tool_source(&target_manifest);
@@ -636,5 +684,186 @@ impl super::ActionExecutor {
                 error: Some(format!("Unknown execution tool: {}", tool_name)),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NetworkPolicy;
+
+    fn make_policy(enabled: bool, default_decision: &str) -> NetworkPolicy {
+        NetworkPolicy {
+            enabled,
+            default_decision: default_decision.to_string(),
+            ..NetworkPolicy::default()
+        }
+    }
+
+    #[test]
+    fn check_network_policy_enabled_false_blocks() {
+        let policy = make_policy(false, "allow");
+        let result = check_network_policy("web.search", &policy, None, false);
+        assert!(result.is_some());
+        assert!(result
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("disabled by policy"));
+    }
+
+    #[test]
+    fn check_network_policy_tool_override_deny_blocks() {
+        let mut policy = make_policy(true, "allow");
+        policy
+            .tool_overrides
+            .insert("web.search".into(), "deny".into());
+        let result = check_network_policy("web.search", &policy, None, false);
+        assert!(result.is_some());
+        assert!(result
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("denied by network policy override"));
+    }
+
+    #[test]
+    fn check_network_policy_domain_denylist_blocks() {
+        let mut policy = make_policy(true, "allow");
+        policy.domain_denylist.push("evil.com".to_string());
+        let result =
+            check_network_policy("web.fetch", &policy, Some("https://evil.com/page"), false);
+        assert!(result.is_some());
+        assert!(result.unwrap().error.unwrap().contains("network denylist"));
+    }
+
+    #[test]
+    fn check_network_policy_domain_allowlist_blocks_non_listed() {
+        let mut policy = make_policy(true, "allow");
+        policy.domain_allowlist.push("example.com".to_string());
+        let result =
+            check_network_policy("web.fetch", &policy, Some("https://other.com/page"), false);
+        assert!(result.is_some());
+        assert!(result.unwrap().error.unwrap().contains("network allowlist"));
+    }
+
+    #[test]
+    fn check_network_policy_domain_allowlist_allows_listed() {
+        let mut policy = make_policy(true, "allow");
+        policy.domain_allowlist.push("example.com".to_string());
+        let result = check_network_policy(
+            "web.fetch",
+            &policy,
+            Some("https://example.com/page"),
+            false,
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_network_policy_default_deny_blocks() {
+        let policy = make_policy(true, "deny");
+        let result = check_network_policy("web.search", &policy, None, false);
+        assert!(result.is_some());
+        assert!(result
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("default_decision=deny"));
+    }
+
+    #[test]
+    fn check_network_policy_default_ask_returns_needs_confirmation() {
+        let policy = make_policy(true, "ask");
+        let result = check_network_policy("web.search", &policy, None, false);
+        assert!(result.is_some());
+        let err = result.unwrap().error.unwrap();
+        assert!(err.starts_with("needs_confirmation:network_policy"));
+        assert!(err.contains("default_decision=ask"));
+    }
+
+    #[test]
+    fn check_network_policy_default_ask_skipped_when_already_permitted() {
+        let policy = make_policy(true, "ask");
+        let result = check_network_policy("web.search", &policy, None, true);
+        assert!(
+            result.is_none(),
+            "already_permitted should skip default_decision=ask"
+        );
+    }
+
+    #[test]
+    fn check_network_policy_default_allow_passes() {
+        let policy = make_policy(true, "allow");
+        let result = check_network_policy("web.search", &policy, None, false);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn check_network_policy_blocks_a2a_with_disabled() {
+        let policy = make_policy(false, "allow");
+        let result = check_network_policy(
+            "a2a.call_agent",
+            &policy,
+            Some("https://example.com/a2a"),
+            false,
+        );
+        assert!(result.is_some());
+        assert!(result
+            .unwrap()
+            .error
+            .unwrap()
+            .contains("disabled by policy"));
+    }
+
+    #[test]
+    fn check_network_policy_a2a_domain_enforcement() {
+        let mut policy = make_policy(true, "allow");
+        policy.domain_denylist.push("malicious.com".to_string());
+        let result = check_network_policy(
+            "a2a.call_agent",
+            &policy,
+            Some("https://malicious.com/a2a"),
+            false,
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().error.unwrap().contains("network denylist"));
+    }
+
+    #[test]
+    fn check_network_policy_mcp_call_tool_no_domain_check() {
+        let mut policy = make_policy(true, "allow");
+        policy.domain_denylist.push("evil.com".to_string());
+        let result = check_network_policy("mcp.call_tool", &policy, None, false);
+        assert!(
+            result.is_none(),
+            "mcp without URL should not hit domain denylist"
+        );
+    }
+
+    #[test]
+    fn check_network_policy_hard_blocks_not_bypassed_by_permitted_flag() {
+        // enabled=false, tool_override=deny, domain denylist must still block
+        // even when already_permitted=true
+        let mut policy = make_policy(true, "ask");
+        policy
+            .tool_overrides
+            .insert("web.search".into(), "deny".into());
+        let result = check_network_policy("web.search", &policy, None, true);
+        assert!(
+            result.is_some(),
+            "tool_override=deny must block even when permitted"
+        );
+        assert!(result.unwrap().error.unwrap().contains("override"));
+    }
+
+    #[test]
+    fn check_network_policy_default_deny_skipped_when_already_permitted() {
+        let policy = make_policy(true, "deny");
+        let result = check_network_policy("web.search", &policy, None, true);
+        assert!(
+            result.is_none(),
+            "already_permitted should skip default_decision=deny"
+        );
     }
 }

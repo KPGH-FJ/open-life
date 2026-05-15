@@ -6,6 +6,16 @@ Status: active
 
 > 本文档是当前阶段的最高优先级行动指南。P0-P12 全部 vNext 原语已完成代码实现，`make ci` 全绿 799 测试。当前进入 Post-Beta 架构稳固阶段。
 
+## Codex-Level Upgrade Entry
+
+2026-05-15 新增 Codex / Claude Code 级别 Agent Runtime 升级准备文档。后续涉及 Agent Runtime、ToolRuntime、Replay、Proposal、MCP、AgentSpec、PromptStack、Memory Evolution 的开发任务，必须优先对齐以下文档：
+
+1. [`openlife_codex_level_upgrade_plan.md`](openlife_codex_level_upgrade_plan.md): 总体升级目标、硬约束、P0/P1 阻断项和批次策略。
+2. [`openlife_codex_level_acceptance_matrix.md`](openlife_codex_level_acceptance_matrix.md): 行为验收矩阵，`make ci` 之外的发布门槛。
+3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
+
+这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
+
 ---
 
 ## 零、当前状态基线

@@ -250,20 +250,22 @@ async fn apply_import_payload(
 
 #[tauri::command]
 pub async fn test_api_key(state: State<'_, Arc<AppState>>) -> Result<bool, AppError> {
-    let (base, key) = {
+    let (base, key, provider) = {
         let cfg = state.config.lock().await;
-        (cfg.llm.openai_base.clone(), cfg.llm.openai_key.clone())
+        (
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.provider.clone(),
+        )
     };
-    let api_key = if key.is_empty() {
-        std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
-    } else {
-        key
-    };
+    // Use the canonical key resolution: keyring → config → env
+    let api_key = openlife_core::llm::effective_api_key(&provider, &key);
     if api_key.is_empty() {
         return Ok(false);
     }
     let url = if base.is_empty() {
-        "https://openrouter.ai/api/v1/models".to_string()
+        let default_base = openlife_core::llm::default_base_for_provider(&provider);
+        format!("{}/models", default_base.trim_end_matches('/'))
     } else {
         format!("{}/models", base.trim_end_matches('/'))
     };

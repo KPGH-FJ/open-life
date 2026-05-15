@@ -559,6 +559,7 @@ async fn execute_tool_call(
 ) -> Result<ToolCallResult, String> {
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
+    let network_policy = cfg.system.network_policy.clone();
     drop(cfg);
 
     // Create an AgentRun for direct tool execution audit trail
@@ -582,7 +583,7 @@ async fn execute_tool_call(
             .agent_run_event_store
             .as_ref()
             .map(|es| (**es).clone()),
-        network_policy: None,
+        network_policy: Some(network_policy),
         calendar_ics_paths: Vec::new(),
         execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
         agent_spec: None,

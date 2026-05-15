@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿）**。P0-P12 全部 vNext 原语已完成代码实现：AgentRunEvent (41 种事件)、PromptStack (10 种 Block)、ActionExecutor (ToolRuntime 实现体)/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。下一阶段参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。`make ci` 为发布门控。
+- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿）**。P0-P12 全部 vNext 原语已完成代码实现。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。`make ci` 为发布门控。2026-05-14 全项目审阅修复已交付：Rust clippy 清零、Proposal 批量接受死锁修复、AgentSpec 统一工具治理、NetworkPolicy.default_decision 落地、keyring 一致性修复、safeInvoke 敏感日志脱敏、builder_apply_signals 配置门控、CI 全绿恢复。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -891,7 +891,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-08 | **P11 开发前准备**：P10 Frontend Agent Workspace 已验收；新增 `openlife_vnext_p11_task_specs.md`，将 Beta Trial Readiness 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-08 | **P12 开发前准备**：P11/P11.1 Beta Trial Readiness 已验收；新增 `openlife_vnext_p12_task_specs.md` 与 `openlife_vnext_p12_beta_rc_acceptance_report.md`，将 Beta Release Candidate and User Trial Delivery 接入 README、AGENTS、迁移计划、验收矩阵和 Agent coding prompts | AI Agent |
 | 2026-05-10 | **P12 Beta RC 验收通过 + Post-Beta 完整计划**：`make ci` 全绿 799 测试；AGENTS.md 阶段标记更新为 P12 已验收 + Post-Beta 架构稳固；新增 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md) 完整发展计划（Phase 1-4：P12交付收尾→Post-Beta稳固→生产就绪→v1.0公开）；文档优先级列表更新 | AI Agent |
-| 2026-05-11 | **P0 快速止血**：修复 `current_dir().unwrap()` 崩溃（三级回退链）；PerformanceObserver 泄漏修复 + `cleanupPerformanceMonitoring`；uuid 1.0→1.6 统一；AGENTS.md 全面事实审计修复（目录树补全 agent/ 27 文件、命令计数 138+→134、数据流行号修正、SystemConfig 表 2→18 字段、Tool Taxonomy 移除 snapshot.create P1、已知问题 7/10/13 标记已修复、环境变量表 7 Provider 全列） | AI Agent |
+| 2026-05-11 | **P0 快速止血**：修复 `current_dir().unwrap()` 崩溃（三级回退链）；PerformanceObserver 泄漏修复 + `cleanupPerformanceMonitoring`；uuid 1.0→1.6 统一；AGENTS.md 全面事实审计修复 | AI Agent |
+| 2026-05-14 | **Post-Beta 发布阻断修复**：1) clippy 清零（explicit_auto_deref x8 / needless_borrow x1 / too_many_arguments x2）；2) Proposal 批量接受死锁修复（锁内收集ID→释放后逐个accept）；3) AgentSpec 统一工具治理（execute_tool 路径 is_tool_allowed 检查）；4) NetworkPolicy.default_decision 落地（ask/deny/allow 三态）；5) keyring 一致性（effective_cloud_api_key + test_api_key 走 llm::effective_api_key）；6) safeInvoke 敏感字段脱敏（key/password/token 脱敏 + messages/lifeModel 摘要）；7) builder_apply_signals 配置门控（SystemConfig.allow_legacy_builder_direct_apply 默认 false）；8) 测试补齐（+14 新测试：AgentSpec x2、NetworkPolicy x4、keyring x1、config builder flag x1、proposal batch x1、builder gate x1、safeInvoke 脱敏 x5）。`make ci` 全部通过。 | AI Agent |
 
 ---
 
