@@ -1034,33 +1034,35 @@ mod tests {
             EmotionalState, GoalItem, Goals, Identity, LifeModel, State, ValueItem,
         };
 
-        let mut life_model = LifeModel::default();
-        life_model.identity = Identity {
-            name: "Alice Secret".to_string(),
-            birth_date: Some("1990-01-01".to_string()),
-            values: vec![ValueItem {
-                name: "诚实".to_string(),
-                weight: 90,
-                description: "保持诚实正直".to_string(),
-            }],
-            ..Default::default()
-        };
-        life_model.goals = Goals {
-            short_term: vec![GoalItem {
-                name: "秘密目标".to_string(),
-                description: "不能让人知道的目标".to_string(),
+        let life_model = LifeModel {
+            identity: Identity {
+                name: "Alice Secret".to_string(),
+                birth_date: Some("1990-01-01".to_string()),
+                values: vec![ValueItem {
+                    name: "诚实".to_string(),
+                    weight: 90,
+                    description: "保持诚实正直".to_string(),
+                }],
                 ..Default::default()
-            }],
-            ..Default::default()
-        };
-        life_model.state = State {
-            current_focus: "提升工作效率".to_string(),
-            emotional_state: EmotionalState {
-                current_mood: "平静".to_string(),
-                stress_level: 3,
-                fulfillment_score: 7,
             },
-            recent_events: vec!["敏感事件A".to_string(), "敏感事件B".to_string()],
+            goals: Goals {
+                short_term: vec![GoalItem {
+                    name: "秘密目标".to_string(),
+                    description: "不能让人知道的目标".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            state: State {
+                current_focus: "提升工作效率".to_string(),
+                emotional_state: EmotionalState {
+                    current_mood: "平静".to_string(),
+                    stress_level: 3,
+                    fulfillment_score: 7,
+                },
+                recent_events: vec!["敏感事件A".to_string(), "敏感事件B".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1115,25 +1117,27 @@ mod tests {
     fn test_summary_only_prompt_includes_goal_counts_not_names() {
         use crate::life_model::{GoalItem, Goals, LifeModel};
 
-        let mut life_model = LifeModel::default();
-        life_model.goals = Goals {
-            short_term: vec![
-                GoalItem {
-                    name: "目标A".to_string(),
-                    description: "详细描述A".to_string(),
+        let life_model = LifeModel {
+            goals: Goals {
+                short_term: vec![
+                    GoalItem {
+                        name: "目标A".to_string(),
+                        description: "详细描述A".to_string(),
+                        ..Default::default()
+                    },
+                    GoalItem {
+                        name: "目标B".to_string(),
+                        description: "详细描述B".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                medium_term: vec![GoalItem {
+                    name: "中期目标".to_string(),
+                    description: "中期描述".to_string(),
                     ..Default::default()
-                },
-                GoalItem {
-                    name: "目标B".to_string(),
-                    description: "详细描述B".to_string(),
-                    ..Default::default()
-                },
-            ],
-            medium_term: vec![GoalItem {
-                name: "中期目标".to_string(),
-                description: "中期描述".to_string(),
+                }],
                 ..Default::default()
-            }],
+            },
             ..Default::default()
         };
 
@@ -1291,18 +1295,20 @@ mod tests {
     fn test_prepare_summary_only_cloud_payload_sanitizes_messages() {
         use crate::life_model::{GoalItem, Goals, Identity, LifeModel};
 
-        let mut lm = LifeModel::default();
-        lm.identity = Identity {
-            name: "SecretUser".to_string(),
-            ..Default::default()
-        };
-        lm.goals = Goals {
-            short_term: vec![GoalItem {
-                name: "目标A".to_string(),
-                description: "详细描述A".to_string(),
-                priority: 5,
+        let lm = LifeModel {
+            identity: Identity {
+                name: "SecretUser".to_string(),
                 ..Default::default()
-            }],
+            },
+            goals: Goals {
+                short_term: vec![GoalItem {
+                    name: "目标A".to_string(),
+                    description: "详细描述A".to_string(),
+                    priority: 5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1356,20 +1362,22 @@ mod tests {
     #[test]
     fn test_prepare_cloud_payload_system_prompt_has_goal_counts() {
         use crate::life_model::{GoalItem, Goals, LifeModel};
-        let mut lm = LifeModel::default();
-        lm.goals = Goals {
-            short_term: vec![
-                GoalItem {
-                    name: "A".to_string(),
-                    description: "desc A".to_string(),
-                    ..Default::default()
-                },
-                GoalItem {
-                    name: "B".to_string(),
-                    description: "desc B".to_string(),
-                    ..Default::default()
-                },
-            ],
+        let lm = LifeModel {
+            goals: Goals {
+                short_term: vec![
+                    GoalItem {
+                        name: "A".to_string(),
+                        description: "desc A".to_string(),
+                        ..Default::default()
+                    },
+                    GoalItem {
+                        name: "B".to_string(),
+                        description: "desc B".to_string(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1387,7 +1395,7 @@ mod tests {
 
         // When messages[0] is a system message (PromptStack-assembled),
         // has_prompt_stack should be true
-        let messages_with_prompt_stack = vec![
+        let messages_with_prompt_stack = [
             ChatMessage {
                 role: "system".to_string(),
                 content: "PromptStack system prompt".to_string(),
@@ -1403,7 +1411,7 @@ mod tests {
             .unwrap_or(false);
         assert!(has, "should detect PromptStack system message");
 
-        let messages_without = vec![ChatMessage {
+        let messages_without = [ChatMessage {
             role: "user".to_string(),
             content: "hello".to_string(),
         }];
@@ -1433,8 +1441,8 @@ mod tests {
             content: "hello".to_string(),
         };
 
-        let with = vec![msg_system.clone(), msg_user.clone()];
-        let without = vec![msg_user.clone()];
+        let with = [msg_system.clone(), msg_user.clone()];
+        let without = [msg_user.clone()];
 
         let has_with = with.first().map(|m| m.role == "system").unwrap_or(false);
         let has_without = without.first().map(|m| m.role == "system").unwrap_or(false);
@@ -1471,9 +1479,11 @@ mod tests {
         use crate::life_model::{Identity, LifeModel};
         use crate::llm::ChatMessage;
 
-        let mut lm = LifeModel::default();
-        lm.identity = Identity {
-            name: "Alice Secret".to_string(),
+        let lm = LifeModel {
+            identity: Identity {
+                name: "Alice Secret".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1570,18 +1580,20 @@ mod tests {
         use crate::life_model::{GoalItem, Goals, Identity, LifeModel};
         use crate::llm::ChatMessage;
 
-        let mut lm = LifeModel::default();
-        lm.identity = Identity {
-            name: "Bob".to_string(),
-            ..Default::default()
-        };
-        lm.goals = Goals {
-            short_term: vec![GoalItem {
-                name: "goal-x".to_string(),
-                description: "secret desc".to_string(),
-                priority: 5,
+        let lm = LifeModel {
+            identity: Identity {
+                name: "Bob".to_string(),
                 ..Default::default()
-            }],
+            },
+            goals: Goals {
+                short_term: vec![GoalItem {
+                    name: "goal-x".to_string(),
+                    description: "secret desc".to_string(),
+                    priority: 5,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
             ..Default::default()
         };
 

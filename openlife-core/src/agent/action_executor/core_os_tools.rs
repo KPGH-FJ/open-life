@@ -318,6 +318,7 @@ impl super::ActionExecutor {
                     success: false,
                     output: None,
                     error: Some(format!("Unknown core_os tool: {}", tool_name)),
+                    ..Default::default()
                 });
             }
         };
@@ -326,6 +327,7 @@ impl super::ActionExecutor {
             success: true,
             output: Some(output),
             error: None,
+            ..Default::default()
         })
     }
 

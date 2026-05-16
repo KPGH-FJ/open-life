@@ -246,9 +246,40 @@ impl Drop for McpClient {
 
 pub type BuiltinFn = Arc<dyn Fn(Value) -> Result<String> + Send + Sync>;
 
+/// Mock MCP client for testing. Stores a synchronous call_tool closure
+/// and a call counter so tests can verify real MCP source execution.
+/// Tests register these via `McpRegistry::register_mock_mcp_client`
+/// to simulate MCP servers without spawning real processes.
+pub struct MockMcpClient {
+    pub server_name: String,
+    pub call_fn: Arc<dyn Fn(String, Value) -> Result<String> + Send + Sync>,
+    pub call_count: Arc<AtomicU64>,
+}
+
+impl MockMcpClient {
+    pub fn new(
+        server_name: impl Into<String>,
+        call_fn: impl Fn(String, Value) -> Result<String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            server_name: server_name.into(),
+            call_fn: Arc::new(call_fn),
+            call_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Synchronous call — the call_count is incremented before
+    /// invoking the closure so tests can assert the mock was used.
+    pub fn call(&self, name: &str, arguments: Value) -> Result<String> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        (self.call_fn)(name.to_string(), arguments)
+    }
+}
+
 /// Registry for multiple MCP clients and built-in tools
 pub struct McpRegistry {
     clients: HashMap<String, Arc<McpClient>>,
+    mock_clients: HashMap<String, Arc<MockMcpClient>>,
     tools_cache: Vec<Tool>,
     privacy_engine: PrivacyEngine,
     builtins: HashMap<String, BuiltinFn>,
@@ -283,6 +314,7 @@ impl McpRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
             clients: HashMap::new(),
+            mock_clients: HashMap::new(),
             tools_cache: Vec::new(),
             privacy_engine: PrivacyEngine::new(),
             builtins: HashMap::new(),
@@ -867,6 +899,21 @@ impl McpRegistry {
         self.builtins.get(name).cloned()
     }
 
+    /// Register a mock MCP client for the given server name.
+    /// Tests use this to simulate MCP servers without spawning processes.
+    /// Mock clients are checked AFTER real clients — a real client always
+    /// takes priority.
+    pub fn register_mock_mcp_client(&mut self, server_name: &str, client: MockMcpClient) {
+        self.mock_clients
+            .insert(server_name.to_string(), Arc::new(client));
+    }
+
+    /// Clone the `Arc<MockMcpClient>` for a registered mock MCP server.
+    /// Returns `None` if no mock client is registered for the server.
+    pub fn get_mock_mcp_client(&self, server_name: &str) -> Option<Arc<MockMcpClient>> {
+        self.mock_clients.get(server_name).cloned()
+    }
+
     /// Execute a manifest by its source.
     pub async fn execute_manifest(
         &self,
@@ -1410,17 +1457,19 @@ mod tests {
 
     fn make_enabled_sandbox_for_prompt() -> crate::agent::execution_sandbox::ExecutionSandbox {
         let tmp = std::env::temp_dir().to_string_lossy().to_string();
-        let mut s = crate::agent::execution_sandbox::ExecutionSandbox::default();
-        s.bash_enabled = true;
-        s.cwd = tmp.clone();
-        s.safe_paths = vec![tmp];
-        s
+        crate::agent::execution_sandbox::ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp],
+            ..Default::default()
+        }
     }
 
     fn make_shell_allowing_agentspec() -> crate::agent::types::AgentSpec {
-        let mut spec = crate::agent::types::AgentSpec::default();
-        spec.allowed_tools = vec!["shell.run".into(), "web.search".into()];
-        spec
+        crate::agent::types::AgentSpec {
+            allowed_tools: vec!["shell.run".into(), "web.search".into()],
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
@@ -1442,8 +1491,10 @@ mod tests {
         let mut registry = McpRegistry::new();
         registry.set_builtin_manifest_enabled("shell.run", true);
         let sandbox = make_enabled_sandbox_for_prompt();
-        let mut spec = crate::agent::types::AgentSpec::default();
-        spec.allowed_tools = vec!["goal.read".into()]; // no shell.run
+        let spec = crate::agent::types::AgentSpec {
+            allowed_tools: vec!["goal.read".into()], // no shell.run
+            ..Default::default()
+        };
         let ps = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
         let prompt = registry.tools_prompt_governed(true, &sandbox, &spec, &ps);
         assert!(

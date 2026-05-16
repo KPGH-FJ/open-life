@@ -80,7 +80,7 @@ fn parse_final_only_no_json() {
     let mut tc: u32 = 0;
 
     let result = agent
-        .parse_agent_reply("Hello, how can I help?", &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply("Hello, how can I help?", action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.final_text, "Hello, how can I help?");
@@ -97,7 +97,7 @@ fn parse_json_plain_final() {
 
     let reply = r#"{"final": "Here is my answer"}"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.final_text, "Here is my answer");
@@ -120,7 +120,7 @@ fn parse_json_with_actions() {
             ]
         }"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.final_text, "Let me check that for you");
@@ -147,7 +147,7 @@ fn parse_json_legacy_tool_calls() {
             ]
         }"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.actions.len(), 1);
@@ -167,7 +167,7 @@ fn parse_json_markdown_wrapped() {
 {"final": "Answer from markdown", "actions": []}
 ```"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.final_text, "Answer from markdown");
@@ -185,7 +185,7 @@ fn parse_malformed_json_signals_repair() {
     // Missing closing brace
     let reply = r#"{"final": "oops", "actions": [{"name": "x", "arguments": {}]"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(result.json_parse_failed, "should signal repair needed");
     assert!(result.actions.is_empty());
@@ -202,7 +202,7 @@ fn parse_empty_actions_array_yields_final_only() {
 
     let reply = r#"{"final": "done", "actions": []}"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert!(result.actions.is_empty());
@@ -222,7 +222,7 @@ fn parse_thought_summary_and_warnings_recorded() {
             "warnings": ["low confidence"]
         }"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert!(run.warnings.iter().any(|w| w.contains("thought")));
@@ -240,7 +240,7 @@ fn parse_action_with_alternative_field_names() {
     // Uses "tool" instead of "name" and "input" instead of "arguments"
     let reply = r#"{"final":"ok","actions":[{"tool":"test_tool","input":{"key":"val"}}]}"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.actions.len(), 1);
@@ -398,7 +398,7 @@ fn test_no_tool_response_event_sequence() {
 
     // Simulate no-tool response
     let result = agent
-        .parse_agent_reply("Hello, how can I help?", &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply("Hello, how can I help?", action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert!(result.actions.is_empty());
@@ -479,7 +479,7 @@ fn test_malformed_json_repair_event_sequence() {
     let result = agent
         .parse_agent_reply(
             r#"{"final": "almost valid but missing bracket"#,
-            &action_ctx,
+            action_ctx,
             &mut run,
             &mut tc,
         )
@@ -496,7 +496,7 @@ fn test_malformed_json_repair_event_sequence() {
     // Simulate repair succeeded (valid JSON after repair)
     let repair_reply = r#"{"final": "repaired response"}"#;
     let repair_result = agent
-        .parse_agent_reply(repair_reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(repair_reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!repair_result.json_parse_failed);
     agent.try_record_event(
@@ -577,7 +577,7 @@ fn test_blocked_tool_call_event_sequence() {
     // Parse tool-call reply
     let reply = r#"{"final":"ok","actions":[{"name":"tool1","arguments":{"key":"v1"}}]}"#;
     let result = agent
-        .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+        .parse_agent_reply(reply, action_ctx, &mut run, &mut tc)
         .unwrap();
     assert!(!result.json_parse_failed);
     assert_eq!(result.actions.len(), 1);
@@ -635,7 +635,7 @@ fn test_events_not_recorded_when_store_is_none() {
         "should not persist",
         serde_json::json!({}),
     );
-    let _ = agent.parse_agent_reply("hello", &action_ctx, &mut run, &mut tc);
+    let _ = agent.parse_agent_reply("hello", action_ctx, &mut run, &mut tc);
     agent.try_record_event(
         &run.id,
         crate::agent::types::AgentRunEventType::RunCompleted,
@@ -850,7 +850,7 @@ async fn test_agent_loop_missing_prompt_block_does_not_record_prompt_stack_assem
             crate::agent::types::PrivacyPolicy::CloudAllowed,
             &spec,
             &registry,
-            &action_ctx,
+            action_ctx,
         )
         .await;
 
@@ -926,7 +926,7 @@ async fn test_agent_loop_missing_prompt_block_fails_without_governance_events() 
             crate::agent::types::PrivacyPolicy::CloudAllowed,
             &spec,
             &registry,
-            &action_ctx,
+            action_ctx,
         )
         .await;
 
@@ -1244,4 +1244,56 @@ fn test_agent_loop_config_can_disable_writes_for_planning() {
     // Planner role is still available — proposal-generation tools
     // remain accessible via AgentRole instruction, not this flag.
     assert_eq!(cfg.role, AgentRole::default());
+}
+
+// ── Batch 1: Governed Replay — AgentLoop run creation ─────────────
+
+/// Verify that AgentLoop run_loop_core writes agent_spec_id from
+/// the resolved AgentSpec so that replay can later restore governance.
+#[tokio::test]
+async fn test_agent_loop_run_sets_agent_spec_id() {
+    let mut agent = make_test_agent_loop();
+    agent.config.max_steps = 0;
+
+    let test_spec_id = "main.default".to_string();
+    let agent_spec = crate::agent::types::AgentSpec::default_main_spec();
+
+    let task = crate::agent::types::AgentTask::new(
+        crate::agent::types::AgentTaskKind::Conversation,
+        "test-session",
+    )
+    .with_user_text("test input");
+
+    let life_model = crate::life_model::LifeModel::default();
+    let prompt_registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+    let test_ctx = TestCtx::new();
+    let action_ctx = test_ctx.as_ctx();
+
+    let result = agent
+        .run(
+            &task,
+            &life_model,
+            "",
+            None,
+            crate::privacy::PrivacyEngine::new(),
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            &agent_spec,
+            &prompt_registry,
+            action_ctx,
+        )
+        .await
+        .expect("AgentLoop run should succeed with max_steps=0");
+
+    assert_eq!(
+        result.run.agent_spec_id.as_deref(),
+        Some(test_spec_id.as_str()),
+        "AgentLoop run must have agent_spec_id set from agent_spec; \
+         got {:?}",
+        result.run.agent_spec_id,
+    );
+    assert_eq!(
+        result.run.status,
+        crate::agent::types::AgentRunStatus::Completed,
+        "run with max_steps=0 should complete without LLM call"
+    );
 }

@@ -697,38 +697,39 @@ mod tests {
     use crate::life_model::{GoalItem, Goals, Identity, LifeModel, State};
 
     fn make_test_life_model() -> LifeModel {
-        let mut lm = LifeModel::default();
-        lm.identity = Identity {
-            name: "SecretUser".to_string(),
-            birth_date: Some("1990-01-01".to_string()),
-            values: vec![crate::life_model::ValueItem {
-                name: "诚实".to_string(),
-                weight: 90,
-                description: "保持诚实正直".to_string(),
-            }],
-            ..Default::default()
-        };
-        lm.goals = Goals {
-            short_term: vec![GoalItem {
-                name: "目标A".to_string(),
-                description: "详细描述A".to_string(),
-                priority: 5,
+        LifeModel {
+            identity: Identity {
+                name: "SecretUser".to_string(),
+                birth_date: Some("1990-01-01".to_string()),
+                values: vec![crate::life_model::ValueItem {
+                    name: "诚实".to_string(),
+                    weight: 90,
+                    description: "保持诚实正直".to_string(),
+                }],
                 ..Default::default()
-            }],
-            medium_term: vec![GoalItem {
-                name: "中期目标B".to_string(),
-                description: "详细描述B".to_string(),
-                priority: 6,
+            },
+            goals: Goals {
+                short_term: vec![GoalItem {
+                    name: "目标A".to_string(),
+                    description: "详细描述A".to_string(),
+                    priority: 5,
+                    ..Default::default()
+                }],
+                medium_term: vec![GoalItem {
+                    name: "中期目标B".to_string(),
+                    description: "详细描述B".to_string(),
+                    priority: 6,
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
+            },
+            state: State {
+                current_focus: "提升效率".to_string(),
+                recent_events: vec!["敏感事件X".to_string()],
+                ..Default::default()
+            },
             ..Default::default()
-        };
-        lm.state = State {
-            current_focus: "提升效率".to_string(),
-            recent_events: vec!["敏感事件X".to_string()],
-            ..Default::default()
-        };
-        lm
+        }
     }
 
     fn make_test_context(memory_ctx: &str) -> AssembleOutput {

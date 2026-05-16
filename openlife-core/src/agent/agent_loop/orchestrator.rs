@@ -147,6 +147,7 @@ impl AgentLoop {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
+        run.agent_spec_id = Some(actx.agent_spec.id.clone());
 
         self.try_record_event(
             &run.id,

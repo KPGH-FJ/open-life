@@ -414,8 +414,10 @@ mod tests {
 
     #[test]
     fn disabled_policy_passes_everything() {
-        let mut policy = PrivacyPolicy::default();
-        policy.enabled = false;
+        let policy = PrivacyPolicy {
+            enabled: false,
+            ..Default::default()
+        };
         let engine = PrivacyEngine::with_policy(policy);
         let text = "身份证号 110101199001011234，电话 13800138000";
         let (masked, map) = engine.desensitize(text);

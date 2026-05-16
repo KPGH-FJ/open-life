@@ -499,42 +499,45 @@ mod tests {
     }
 
     fn make_enabled_sandbox() -> ExecutionSandbox {
-        let mut s = ExecutionSandbox::default();
-        s.bash_enabled = true;
-        s.cwd = tmp_dir();
-        s.safe_paths = vec![tmp_dir()];
-        s.timeout_ms = 30_000;
-        s.max_output_bytes = 1024 * 1024;
-        s
+        ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp_dir(),
+            safe_paths: vec![tmp_dir()],
+            timeout_ms: 30_000,
+            max_output_bytes: 1024 * 1024,
+            ..Default::default()
+        }
     }
 
     fn make_restricted_sandbox() -> ExecutionSandbox {
-        let mut s = ExecutionSandbox::default();
-        s.bash_enabled = true;
-        s.cwd = tmp_dir();
-        s.safe_paths = vec![tmp_dir()];
-        s.command_allowlist = vec!["echo".into(), "date".into(), "cat".into(), "ls".into()];
-        s.timeout_ms = 30_000;
-        s.max_output_bytes = 10 * 1024;
-        s
+        ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp_dir(),
+            safe_paths: vec![tmp_dir()],
+            command_allowlist: vec!["echo".into(), "date".into(), "cat".into(), "ls".into()],
+            timeout_ms: 30_000,
+            max_output_bytes: 10 * 1024,
+            ..Default::default()
+        }
     }
 
     fn sandbox_with_safe_tmp() -> ExecutionSandbox {
         let tmp = tmp_dir();
-        let mut s = ExecutionSandbox::default();
-        s.bash_enabled = true;
-        s.cwd = tmp.clone();
-        s.safe_paths = vec![tmp.clone()];
-        s.command_allowlist = vec![
-            "echo".into(),
-            "cat".into(),
-            "grep".into(),
-            "sleep".into(),
-            "find".into(),
-            "ls".into(),
-        ];
-        s.timeout_ms = 30_000;
-        s
+        ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            command_allowlist: vec![
+                "echo".into(),
+                "cat".into(),
+                "grep".into(),
+                "sleep".into(),
+                "find".into(),
+                "ls".into(),
+            ],
+            timeout_ms: 30_000,
+            ..Default::default()
+        }
     }
 
     // ── Fix 1: cwd tests ──────────────────────────────────────────
@@ -563,11 +566,13 @@ mod tests {
 
     #[test]
     fn test_empty_sandbox_cwd_fails_before_spawn() {
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = String::new(); // empty!
-        sandbox.safe_paths = vec![tmp_dir()];
-        sandbox.command_allowlist = vec!["echo".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: String::new(),
+            safe_paths: vec![tmp_dir()],
+            command_allowlist: vec!["echo".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -587,11 +592,13 @@ mod tests {
     fn test_cwd_outside_safe_paths_rejected() {
         let tmp = tmp_dir();
         let bad_cwd = "/root";
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = bad_cwd.into();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.command_allowlist = vec!["echo".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: bad_cwd.into(),
+            safe_paths: vec![tmp.clone()],
+            command_allowlist: vec!["echo".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -617,12 +624,14 @@ mod tests {
         let deny_cwd = format!("{}/secrets", tmp);
         std::fs::create_dir_all(&deny_cwd).ok();
 
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = deny_cwd.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.deny_read_patterns = vec!["**/secrets".into(), "**/secrets/**".into()];
-        sandbox.command_allowlist = vec!["echo".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: deny_cwd.clone(),
+            safe_paths: vec![tmp.clone()],
+            deny_read_patterns: vec!["**/secrets".into(), "**/secrets/**".into()],
+            command_allowlist: vec!["echo".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -708,13 +717,14 @@ mod tests {
         let file_path = format!("{}/Makefile", bad_cwd);
         std::fs::write(&file_path, "bad\n").unwrap();
 
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = bad_cwd.clone();
-        // safe_paths does NOT include tmp or bad_cwd — only a different directory
-        sandbox.safe_paths = vec!["/p9_nonexistent_safe".to_string()];
-        sandbox.command_allowlist = vec!["cat".into()];
-        sandbox.timeout_ms = 30_000;
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: bad_cwd.clone(),
+            safe_paths: vec!["/p9_nonexistent_safe".to_string()],
+            command_allowlist: vec!["cat".into()],
+            timeout_ms: 30_000,
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -1018,12 +1028,14 @@ mod tests {
 
     #[test]
     fn test_sh_basename_still_blocked() {
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp_dir();
-        sandbox.safe_paths = vec![tmp_dir()];
-        sandbox.command_allowlist = vec!["sh".into(), "echo".into()];
-        sandbox.timeout_ms = 30_000;
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp_dir(),
+            safe_paths: vec![tmp_dir()],
+            command_allowlist: vec!["sh".into(), "echo".into()],
+            timeout_ms: 30_000,
+            ..Default::default()
+        };
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
             command: "sh".into(),
@@ -1210,12 +1222,14 @@ mod tests {
     #[test]
     fn test_cat_tmp_env_path_deny_read() {
         let tmp = tmp_dir();
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.deny_read_patterns = vec!["**/.env".into()];
-        sandbox.command_allowlist = vec!["cat".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            deny_read_patterns: vec!["**/.env".into()],
+            command_allowlist: vec!["cat".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let env_path = format!("{}/.env", tmp);
@@ -1387,12 +1401,14 @@ mod tests {
 
     #[test]
     fn test_bash_allowlisted_still_blocked() {
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp_dir();
-        sandbox.safe_paths = vec![tmp_dir()];
-        sandbox.command_allowlist = vec!["bash".into(), "echo".into()];
-        sandbox.timeout_ms = 30_000;
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp_dir(),
+            safe_paths: vec![tmp_dir()],
+            command_allowlist: vec!["bash".into(), "echo".into()],
+            timeout_ms: 30_000,
+            ..Default::default()
+        };
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
             command: "bash".into(),
@@ -1417,13 +1433,15 @@ mod tests {
         let content = "ABCDEFGH".repeat(32 * 1024); // 256KB
         std::fs::write(&large_file, &content).unwrap();
 
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.command_allowlist = vec!["cat".into()];
-        sandbox.timeout_ms = 10_000;
-        sandbox.max_output_bytes = 64 * 1024; // 64KB limit, file is 256KB
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            command_allowlist: vec!["cat".into()],
+            timeout_ms: 10_000,
+            max_output_bytes: 64 * 1024,
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -1452,13 +1470,15 @@ mod tests {
     #[test]
     fn test_output_truncated_at_max_bytes() {
         let tmp = tmp_dir();
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.command_allowlist = vec!["yes".into()];
-        sandbox.timeout_ms = 3_000;
-        sandbox.max_output_bytes = 200; // tiny limit
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            command_allowlist: vec!["yes".into()],
+            timeout_ms: 3_000,
+            max_output_bytes: 200,
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         // "yes" outputs an infinite stream of "y\n" — will be killed by timeout
@@ -1481,13 +1501,15 @@ mod tests {
     #[test]
     fn test_truncated_metadata_correct() {
         let tmp = tmp_dir();
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.command_allowlist = vec!["echo".into()];
-        sandbox.timeout_ms = 30_000;
-        sandbox.max_output_bytes = 5;
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            command_allowlist: vec!["echo".into()],
+            timeout_ms: 30_000,
+            max_output_bytes: 5,
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -1571,12 +1593,14 @@ mod tests {
     #[test]
     fn test_write_policy_denied_blocks_all_shell() {
         let tmp = tmp_dir();
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.write_policy = WritePolicy::Denied;
-        sandbox.command_allowlist = vec!["echo".into(), "date".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            write_policy: WritePolicy::Denied,
+            command_allowlist: vec!["echo".into(), "date".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -1595,12 +1619,14 @@ mod tests {
     #[test]
     fn test_write_policy_proposal_first_allows_read_commands() {
         let tmp = tmp_dir();
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.write_policy = WritePolicy::ProposalFirst;
-        sandbox.command_allowlist = vec!["echo".into(), "date".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            write_policy: WritePolicy::ProposalFirst,
+            command_allowlist: vec!["echo".into(), "date".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         let req = ShellCommandRequest {
@@ -1621,12 +1647,14 @@ mod tests {
         let write_target = format!("{}/p9_write_target.txt", tmp);
         std::fs::write(&write_target, "original").unwrap();
 
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.cwd = tmp.clone();
-        sandbox.safe_paths = vec![tmp.clone()];
-        sandbox.deny_write_patterns = vec![format!("{}/**", tmp)];
-        sandbox.command_allowlist = vec!["echo".into()];
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            cwd: tmp.clone(),
+            safe_paths: vec![tmp.clone()],
+            deny_write_patterns: vec![format!("{}/**", tmp)],
+            command_allowlist: vec!["echo".into()],
+            ..Default::default()
+        };
 
         let executor = ShellExecutor::new(sandbox);
         // Even though /tmp is in safe_paths, deny_write_patterns covers all of /tmp.

@@ -4,6 +4,9 @@ use crate::agent::action_executor::helpers::{
     fetch_url_on_worker_thread, filesystem_access_error, is_path_in_safe_paths,
     search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
 };
+use crate::agent::action_executor::{
+    ExecutionBlockReason, ExecutionFailureKind, ExecutionProposalReason,
+};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::config::NetworkPolicy;
 use anyhow::Result;
@@ -28,43 +31,33 @@ pub(crate) fn check_network_policy(
     already_permitted: bool,
 ) -> Option<ToolCallInternalResult> {
     if !policy.enabled {
-        return Some(ToolCallInternalResult {
-            success: false,
-            output: None,
-            error: Some(
-                "Network tools are disabled by policy. Enable network access in Settings to use web tools."
-                    .to_string(),
-            ),
-        });
+        return Some(ToolCallInternalResult::blocked(
+            ExecutionBlockReason::NetworkPolicyDenied,
+            "Network tools are disabled by policy. Enable network access in Settings to use web tools."
+        ));
     }
     if let Some(d) = policy.tool_overrides.get(tool_name) {
         if d == "deny" {
-            return Some(ToolCallInternalResult {
-                success: false,
-                output: None,
-                error: Some(format!(
-                    "Tool '{}' is denied by network policy override",
-                    tool_name
-                )),
-            });
+            return Some(ToolCallInternalResult::blocked(
+                ExecutionBlockReason::NetworkPolicyDenied,
+                format!("Tool '{}' is denied by network policy override", tool_name),
+            ));
         }
     }
     if let Some(host) = url_for_domain.and_then(extract_host_from_url) {
         if policy.domain_denylist.iter().any(|d| host.ends_with(d)) {
-            return Some(ToolCallInternalResult {
-                success: false,
-                output: None,
-                error: Some(format!("Domain '{}' is in the network denylist", host)),
-            });
+            return Some(ToolCallInternalResult::blocked(
+                ExecutionBlockReason::DomainBlocked,
+                format!("Domain '{}' is in the network denylist", host),
+            ));
         }
         if !policy.domain_allowlist.is_empty()
             && !policy.domain_allowlist.iter().any(|d| host.ends_with(d))
         {
-            return Some(ToolCallInternalResult {
-                success: false,
-                output: None,
-                error: Some(format!("Domain '{}' is not in the network allowlist", host)),
-            });
+            return Some(ToolCallInternalResult::blocked(
+                ExecutionBlockReason::DomainBlocked,
+                format!("Domain '{}' is not in the network allowlist", host),
+            ));
         }
     }
     // default_decision is only enforced when the tool is not already permitted
@@ -72,22 +65,20 @@ pub(crate) fn check_network_policy(
         return None;
     }
     match policy.default_decision.as_str() {
-        "deny" => Some(ToolCallInternalResult {
-            success: false,
-            output: None,
-            error: Some(format!(
+        "deny" => Some(ToolCallInternalResult::blocked(
+            ExecutionBlockReason::NetworkPolicyDenied,
+            format!(
                 "Tool '{}' is blocked by network policy (default_decision=deny)",
                 tool_name
-            )),
-        }),
-        "ask" => Some(ToolCallInternalResult {
-            success: false,
-            output: None,
-            error: Some(format!(
-                "needs_confirmation:network_policy Tool '{}' requires user confirmation before network access (default_decision=ask)",
+            ),
+        )),
+        "ask" => Some(ToolCallInternalResult::needs_confirmation(
+            ExecutionProposalReason::NetworkPolicyAsk,
+            format!(
+                "Tool '{}' requires user confirmation before network access (default_decision=ask)",
                 tool_name
-            )),
-        }),
+            ),
+        )),
         _ => None,
     }
 }
@@ -113,11 +104,10 @@ impl super::ActionExecutor {
 
                 // Validate path is within safe_paths
                 if !is_path_in_safe_paths(path, &ac.safe_paths) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(filesystem_access_error(path, &ac.safe_paths)),
-                    });
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::PathNotSafe,
+                        filesystem_access_error(path, &ac.safe_paths),
+                    ));
                 }
 
                 // Check file size before reading
@@ -125,28 +115,22 @@ impl super::ActionExecutor {
                     .map_err(|e| anyhow::anyhow!("Failed to read file metadata: {}", e))?;
                 let max_size = 100 * 1024; // 100KB limit
                 if metadata.len() > max_size {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::InvalidArguments,
+                        format!(
                             "File size ({} bytes) exceeds maximum allowed ({} bytes)",
                             metadata.len(),
                             max_size
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 match std::fs::read_to_string(path) {
-                    Ok(content) => Ok(ToolCallInternalResult {
-                        success: true,
-                        output: Some(content),
-                        error: None,
-                    }),
-                    Err(e) => Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Failed to read file '{}': {}", path, e)),
-                    }),
+                    Ok(content) => Ok(ToolCallInternalResult::success(content)),
+                    Err(e) => Ok(ToolCallInternalResult::failure(
+                        ExecutionFailureKind::ToolRuntimeError,
+                        format!("Failed to read file '{}': {}", path, e),
+                    )),
                 }
             }
             "calendar.read" => {
@@ -161,42 +145,38 @@ impl super::ActionExecutor {
                     let mut all_calendar_paths: Vec<String> = ac.calendar_ics_paths.to_vec();
                     all_calendar_paths.extend(ac.safe_paths.iter().cloned());
                     if !is_path_in_safe_paths(path, &all_calendar_paths) {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(filesystem_access_error(path, &all_calendar_paths)),
-                        });
+                        return Ok(ToolCallInternalResult::blocked(
+                            ExecutionBlockReason::PathNotSafe,
+                            filesystem_access_error(path, &all_calendar_paths),
+                        ));
                     }
                     let metadata = match std::fs::metadata(path) {
                         Ok(m) => m,
                         Err(e) => {
-                            return Ok(ToolCallInternalResult {
-                                success: false,
-                                output: None,
-                                error: Some(format!("Failed to read ICS file metadata: {}", e)),
-                            });
+                            return Ok(ToolCallInternalResult::failure(
+                                ExecutionFailureKind::ToolRuntimeError,
+                                format!("Failed to read ICS file metadata: {}", e),
+                            ));
                         }
                     };
                     let max_size = 100 * 1024; // 100KB limit, same as file.read
                     if metadata.len() > max_size {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(format!(
+                        return Ok(ToolCallInternalResult::blocked(
+                            ExecutionBlockReason::InvalidArguments,
+                            format!(
                                 "ICS file size ({} bytes) exceeds maximum allowed ({} bytes)",
                                 metadata.len(),
                                 max_size
-                            )),
-                        });
+                            ),
+                        ));
                     }
                     match std::fs::read_to_string(path) {
                         Ok(content) => crate::calendar::parse_ics(&content, range_start, range_end),
                         Err(e) => {
-                            return Ok(ToolCallInternalResult {
-                                success: false,
-                                output: None,
-                                error: Some(format!("Failed to read ICS file '{}': {}", path, e)),
-                            });
+                            return Ok(ToolCallInternalResult::failure(
+                                ExecutionFailureKind::ToolRuntimeError,
+                                format!("Failed to read ICS file '{}': {}", path, e),
+                            ));
                         }
                     }
                 } else {
@@ -224,13 +204,10 @@ impl super::ActionExecutor {
                         }
                     }
                     if all_events.is_empty() {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(
-                                "No .ics files found in safe_paths. Configure calendar_ics_paths in Settings or provide 'source' argument.".to_string(),
-                            ),
-                        });
+                        return Ok(ToolCallInternalResult::failure(
+                            ExecutionFailureKind::ToolRuntimeError,
+                            "No .ics files found in safe_paths. Configure calendar_ics_paths in Settings or provide 'source' argument.",
+                        ));
                     }
                     all_events
                 };
@@ -241,11 +218,7 @@ impl super::ActionExecutor {
                     "count": events.len(),
                 })
                 .to_string();
-                Ok(ToolCallInternalResult {
-                    success: true,
-                    output: Some(output),
-                    error: None,
-                })
+                Ok(ToolCallInternalResult::success(output))
             }
             "web.fetch" => {
                 let url = args
@@ -255,26 +228,24 @@ impl super::ActionExecutor {
 
                 // Validate URL scheme
                 if !url.starts_with("http://") && !url.starts_with("https://") {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::InvalidArguments,
+                        format!(
                             "Invalid URL scheme. Only http:// and https:// are allowed, got: {}",
                             url
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 // Block private IP ranges and localhost
                 if is_private_url(url) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::DomainBlocked,
+                        format!(
                             "URL '{}' points to a private/internal address and is blocked for security",
                             url
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 let result = fetch_url_on_worker_thread(url)?;
@@ -286,21 +257,17 @@ impl super::ActionExecutor {
                 if summarize && result.success && result.output.is_some() {
                     let content = result.output.clone().unwrap_or_default();
                     match summarize_content_blocking(&content, url) {
-                        Ok(summary) => Ok(ToolCallInternalResult {
+                        Ok(summary) => Ok(ToolCallInternalResult::success(summary)),
+                        Err(_) => Ok(ToolCallInternalResult {
                             success: true,
-                            output: Some(summary),
-                            error: None,
+                            output: Some(content),
+                            error: Some(
+                                "Content summarization failed, showing raw content".to_string(),
+                            ),
+                            block_reason: None,
+                            proposal_reason: None,
+                            failure_kind: None,
                         }),
-                        Err(_) => {
-                            // Summarization failed, return original content
-                            Ok(ToolCallInternalResult {
-                                success: true,
-                                output: Some(content),
-                                error: Some(
-                                    "Content summarization failed, showing raw content".to_string(),
-                                ),
-                            })
-                        }
                     }
                 } else {
                     Ok(result)
@@ -319,11 +286,10 @@ impl super::ActionExecutor {
                     .clamp(1, 10) as usize;
 
                 if query.trim().is_empty() {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some("Search query cannot be empty".to_string()),
-                    });
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::InvalidArguments,
+                        "Search query cannot be empty",
+                    ));
                 }
 
                 search_web_on_worker_thread(query, max_results)
@@ -351,35 +317,55 @@ impl super::ActionExecutor {
                         .collect();
 
                     let target_manifest = if let Some(server_name) = server {
-                        target_manifests
+                        match target_manifests
                             .into_iter()
                             .find(|m| matches!(&m.source, crate::tool_manifest::ToolSource::Mcp { server_name: s } if s == server_name))
-                            .ok_or_else(|| anyhow::anyhow!(
-                                "MCP tool '{}' not found on server '{}'",
-                                target_tool_name,
-                                server_name
-                            ))?
+                        {
+                            Some(m) => m,
+                            None => {
+                                return Ok(ToolCallInternalResult::failure(
+                                    ExecutionFailureKind::MissingMcpServer,
+                                    format!(
+                                        "MCP tool '{}' not found on server '{}'",
+                                        target_tool_name, server_name
+                                    ),
+                                ));
+                            }
+                        }
                     } else if target_manifests.len() == 1 {
                         target_manifests.remove(0)
                     } else if target_manifests.is_empty() {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(format!("MCP tool '{}' not found", target_tool_name)),
-                        });
+                        return Ok(ToolCallInternalResult::failure(
+                            ExecutionFailureKind::MissingMcpServer,
+                            format!("MCP tool '{}' not found", target_tool_name),
+                        ));
                     } else {
-                        return Ok(ToolCallInternalResult {
-                            success: false,
-                            output: None,
-                            error: Some(format!(
+                        return Ok(ToolCallInternalResult::blocked(
+                            ExecutionBlockReason::InvalidArguments,
+                            format!(
                                 "Multiple MCP tools named '{}'. Please specify 'server' parameter.",
                                 target_tool_name
-                            )),
-                        });
+                            ),
+                        ));
                     };
                     let inspection = reg.inspect_call_arguments(&target_manifest.name, &tool_args);
                     (target_manifest, inspection)
                 }; // registry lock released
+
+                // 1.5. AgentSpec target-level governance — check real MCP target,
+                // not only the mcp.call_tool wrapper. Wrapper allow in execute_tool()
+                // does NOT imply target allow. deny always wins.
+                if let Some(ref spec) = ac.agent_spec {
+                    if !spec.is_tool_allowed(&target_manifest.name) {
+                        return Ok(ToolCallInternalResult::blocked(
+                            ExecutionBlockReason::AgentSpecDenied,
+                            format!(
+                                "MCP target tool '{}' is denied by the current AgentSpec — wrapper allow for mcp.call_tool does not override target deny (denied_tools: {:?})",
+                                target_manifest.name, spec.denied_tools
+                            ),
+                        ));
+                    }
+                }
 
                 // 2. NetworkPolicy gate — only for network-capable MCP targets.
                 // This is checked here (after target resolution) rather than in
@@ -433,25 +419,32 @@ impl super::ActionExecutor {
                 }; // permission_store lock released
 
                 if !target_decision.allowed || target_decision.requires_confirmation {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
-                            "MCP tool '{}' blocked: {} (decision: {})",
+                    if target_decision.requires_confirmation {
+                        return Ok(ToolCallInternalResult::needs_confirmation(
+                            ExecutionProposalReason::ToolPermissionAsk,
+                            format!(
+                                "MCP tool '{}' requires user confirmation: {} (decision: {})",
+                                target_tool_name, target_decision.reason, target_decision.decision
+                            ),
+                        ));
+                    }
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::ToolPermissionDenied,
+                        format!(
+                            "MCP tool '{}' denied: {} (decision: {})",
                             target_tool_name, target_decision.reason, target_decision.decision
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 if inspection.requires_confirmation && inspection.pii_found {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::PiiDetected,
+                        format!(
                             "MCP tool '{}' blocked: PII detected in arguments",
                             target_tool_name
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 // 3. Execute target tool — NO store locks held
@@ -471,11 +464,10 @@ impl super::ActionExecutor {
 
                 // Validate path is within safe_paths
                 if !path.is_empty() && !is_path_in_safe_paths(path, &ac.safe_paths) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(filesystem_access_error(path, &ac.safe_paths)),
-                    });
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::PathNotSafe,
+                        filesystem_access_error(path, &ac.safe_paths),
+                    ));
                 }
 
                 // Compute content metadata
@@ -567,6 +559,9 @@ impl super::ActionExecutor {
                     success: true,
                     output: Some(result_payload.to_string()),
                     error: None,
+                    block_reason: None,
+                    proposal_reason: None,
+                    failure_kind: None,
                 })
             }
             "task.create_proposal" => {
@@ -626,12 +621,18 @@ impl super::ActionExecutor {
                                 success: true,
                                 output: Some(output),
                                 error: None,
+                                block_reason: None,
+                                proposal_reason: None,
+                                failure_kind: None,
                             })
                         }
                         Err(e) => Ok(ToolCallInternalResult {
                             success: false,
                             output: None,
                             error: Some(format!("Failed to create task proposal: {}", e)),
+                            block_reason: None,
+                            proposal_reason: None,
+                            failure_kind: None,
                         }),
                     }
                 } else {
@@ -639,6 +640,9 @@ impl super::ActionExecutor {
                         success: false,
                         output: None,
                         error: Some("ProposalStore not available in execution context".to_string()),
+                        block_reason: None,
+                        proposal_reason: None,
+                        failure_kind: None,
                     })
                 }
             }
@@ -658,31 +662,28 @@ impl super::ActionExecutor {
 
                 // Validate URL scheme and block private IPs
                 if !agent_url.starts_with("http://") && !agent_url.starts_with("https://") {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Invalid A2A URL scheme: {}", agent_url)),
-                    });
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::InvalidArguments,
+                        format!("Invalid A2A URL scheme: {}", agent_url),
+                    ));
                 }
                 if is_private_url(agent_url) {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!(
+                    return Ok(ToolCallInternalResult::blocked(
+                        ExecutionBlockReason::DomainBlocked,
+                        format!(
                             "A2A agent URL '{}' points to a private address and is blocked",
                             agent_url
-                        )),
-                    });
+                        ),
+                    ));
                 }
 
                 // Run A2A call on blocking thread
                 call_a2a_agent_blocking(agent_url, task_text, session_id)
             }
-            _ => Ok(ToolCallInternalResult {
-                success: false,
-                output: None,
-                error: Some(format!("Unknown execution tool: {}", tool_name)),
-            }),
+            _ => Ok(ToolCallInternalResult::failure(
+                ExecutionFailureKind::ToolRuntimeError,
+                format!("Unknown execution tool: {}", tool_name),
+            )),
         }
     }
 }
@@ -777,9 +778,13 @@ mod tests {
         let policy = make_policy(true, "ask");
         let result = check_network_policy("web.search", &policy, None, false);
         assert!(result.is_some());
-        let err = result.unwrap().error.unwrap();
-        assert!(err.starts_with("needs_confirmation:network_policy"));
-        assert!(err.contains("default_decision=ask"));
+        let r = result.unwrap();
+        assert_eq!(
+            r.proposal_reason,
+            Some(ExecutionProposalReason::NetworkPolicyAsk),
+            "default_decision=ask should have typed proposal_reason"
+        );
+        assert!(r.error.unwrap().contains("default_decision=ask"));
     }
 
     #[test]

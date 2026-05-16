@@ -54,6 +54,91 @@ pub struct AgentActionRequest {
     pub step_index: u32,
 }
 
+/// Typed reason why execution was blocked. Must be used by control flow
+/// instead of string matching on error messages.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExecutionBlockReason {
+    AgentSpecDenied,
+    AgentSpecMissing,
+    ToolPermissionDenied,
+    NetworkPolicyDenied,
+    SandboxDenied,
+    MissingMcpClient,
+    DisabledManifest,
+    DeclarativeOnly,
+    InvalidArguments,
+    ReplaySpecMissing,
+    PathNotSafe,
+    DomainBlocked,
+    PiiDetected,
+    Unknown,
+}
+
+impl std::fmt::Display for ExecutionBlockReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ExecutionBlockReason::AgentSpecDenied => "agent_spec_denied",
+            ExecutionBlockReason::AgentSpecMissing => "agent_spec_missing",
+            ExecutionBlockReason::ToolPermissionDenied => "tool_permission_denied",
+            ExecutionBlockReason::NetworkPolicyDenied => "network_policy_denied",
+            ExecutionBlockReason::SandboxDenied => "sandbox_denied",
+            ExecutionBlockReason::MissingMcpClient => "missing_mcp_client",
+            ExecutionBlockReason::DisabledManifest => "disabled_manifest",
+            ExecutionBlockReason::DeclarativeOnly => "declarative_only",
+            ExecutionBlockReason::InvalidArguments => "invalid_arguments",
+            ExecutionBlockReason::ReplaySpecMissing => "replay_spec_missing",
+            ExecutionBlockReason::PathNotSafe => "path_not_safe",
+            ExecutionBlockReason::DomainBlocked => "domain_blocked",
+            ExecutionBlockReason::PiiDetected => "pii_detected",
+            ExecutionBlockReason::Unknown => "unknown",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+/// Typed reason why execution creates a proposal for user confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExecutionProposalReason {
+    NetworkPolicyAsk,
+    ToolPermissionAsk,
+    HighRiskAction,
+}
+
+impl std::fmt::Display for ExecutionProposalReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ExecutionProposalReason::NetworkPolicyAsk => "network_policy_ask",
+            ExecutionProposalReason::ToolPermissionAsk => "tool_permission_ask",
+            ExecutionProposalReason::HighRiskAction => "high_risk_action",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+/// Typed failure kind for execution errors. Used instead of
+/// string matching on error content.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExecutionFailureKind {
+    ToolRuntimeError,
+    McpClientError,
+    MissingMcpServer,
+    InternalError,
+    SerializationError,
+}
+
+impl std::fmt::Display for ExecutionFailureKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ExecutionFailureKind::ToolRuntimeError => "tool_runtime_error",
+            ExecutionFailureKind::McpClientError => "mcp_client_error",
+            ExecutionFailureKind::MissingMcpServer => "missing_mcp_server",
+            ExecutionFailureKind::InternalError => "internal_error",
+            ExecutionFailureKind::SerializationError => "serialization_error",
+        };
+        write!(f, "{}", s)
+    }
+}
+
 /// Result of executing an action.
 #[derive(Debug, Clone)]
 pub struct ActionExecutionResult {
@@ -61,6 +146,12 @@ pub struct ActionExecutionResult {
     pub observation: AgentObservation,
     pub status: ActionExecutionStatus,
     pub stop_reason: Option<String>,
+    /// Machine-readable reason for Blocked status. None if not blocked.
+    pub block_reason: Option<ExecutionBlockReason>,
+    /// Machine-readable reason for NeedsConfirmation status. None if not.
+    pub proposal_reason: Option<ExecutionProposalReason>,
+    /// Machine-readable failure kind for Failed status. None if not failed.
+    pub failure_kind: Option<ExecutionFailureKind>,
 }
 
 /// Status of action execution.
@@ -258,6 +349,9 @@ impl ActionExecutor {
                 },
                 status: ActionExecutionStatus::Blocked,
                 stop_reason: Some("allow_writes_disabled".to_string()),
+                block_reason: Some(ExecutionBlockReason::ToolPermissionDenied),
+                proposal_reason: None,
+                failure_kind: None,
             });
         }
         match request.action_type.as_str() {

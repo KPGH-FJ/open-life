@@ -260,6 +260,7 @@ impl SubAgentRuntime {
             status_updates: Vec::new(),
             step_count: 0,
             tool_call_count: 0,
+            agent_spec_id: Some(spec.id.clone()),
             deleted_at: None,
             delete_reason: None,
             started_at: Utc::now(),

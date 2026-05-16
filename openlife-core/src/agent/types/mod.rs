@@ -46,6 +46,9 @@ pub enum AgentRunEventType {
     PlanContinuationRequested,
     PlanActionReplayed,
     PlanActionReplayRequested,
+    ReplayStarted,
+    ReplayCompleted,
+    ReplayFailed,
     CompactionCreated,
     /// Unknown or future event type — preserved as-is in the trace.
     /// Older builds reading traces from newer builds use this variant.
@@ -108,6 +111,9 @@ impl std::fmt::Display for AgentRunEventType {
             AgentRunEventType::PlanActionReplayRequested => {
                 write!(f, "plan.action_replay_requested")
             }
+            AgentRunEventType::ReplayStarted => write!(f, "replay.started"),
+            AgentRunEventType::ReplayCompleted => write!(f, "replay.completed"),
+            AgentRunEventType::ReplayFailed => write!(f, "replay.failed"),
             AgentRunEventType::CompactionCreated => write!(f, "compaction.created"),
             AgentRunEventType::Unknown(raw) => write!(f, "{}", raw),
         }
@@ -160,6 +166,9 @@ impl<'de> serde::Deserialize<'de> for AgentRunEventType {
             "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
             "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
             "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
+            "replay.started" => AgentRunEventType::ReplayStarted,
+            "replay.completed" => AgentRunEventType::ReplayCompleted,
+            "replay.failed" => AgentRunEventType::ReplayFailed,
             "compaction.created" => AgentRunEventType::CompactionCreated,
             "run.completed" => AgentRunEventType::RunCompleted,
             "run.failed" => AgentRunEventType::RunFailed,
@@ -647,6 +656,9 @@ pub struct AgentRun {
     /// Number of tool calls made
     #[serde(default)]
     pub tool_call_count: u32,
+    /// AgentSpec id that governed this run. When set, replay must restore this spec.
+    #[serde(default)]
+    pub agent_spec_id: Option<String>,
     pub deleted_at: Option<DateTime<Utc>>,
     pub delete_reason: Option<String>,
     pub started_at: DateTime<Utc>,
@@ -676,6 +688,7 @@ impl AgentRun {
             status_updates: Vec::new(),
             step_count: 0,
             tool_call_count: 0,
+            agent_spec_id: None,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -705,6 +718,7 @@ impl AgentRun {
             status_updates: Vec::new(),
             step_count: 0,
             tool_call_count: 0,
+            agent_spec_id: None,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -734,6 +748,7 @@ impl AgentRun {
             status_updates: Vec::new(),
             step_count: 0,
             tool_call_count: 0,
+            agent_spec_id: None,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -763,6 +778,7 @@ impl AgentRun {
             status_updates: Vec::new(),
             step_count: 0,
             tool_call_count: 0,
+            agent_spec_id: None,
             deleted_at: None,
             delete_reason: None,
             started_at: now,
@@ -796,6 +812,11 @@ impl AgentRun {
 
     pub fn add_generated_proposal(&mut self, proposal_id: &str) {
         self.generated_proposals.push(proposal_id.to_string());
+    }
+
+    pub fn with_agent_spec_id(mut self, spec_id: impl Into<String>) -> Self {
+        self.agent_spec_id = Some(spec_id.into());
+        self
     }
 }
 

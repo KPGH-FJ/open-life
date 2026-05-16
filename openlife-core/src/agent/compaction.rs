@@ -904,7 +904,7 @@ mod tests {
         assert!(result.is_some());
         let r = result.unwrap();
         assert!(r.compacted_messages.len() < original_count);
-        assert_eq!(r.decision.should_compact, true);
+        assert!(r.decision.should_compact);
     }
 
     #[test]

@@ -916,6 +916,7 @@ impl LifeModel {
                 path: patch.path_pointer.clone(),
                 operation: patch.operation.to_string(),
                 error: Some(e.to_string()),
+                blocked_action: None,
             });
         }
 
@@ -932,6 +933,7 @@ impl LifeModel {
                 path: patch.path_pointer.clone(),
                 operation: patch.operation.to_string(),
                 error: Some(format!("Validation failed: {}", report.errors.join(", "))),
+                blocked_action: None,
             });
         }
 
@@ -944,6 +946,7 @@ impl LifeModel {
             path: patch.path_pointer.clone(),
             operation: patch.operation.to_string(),
             error: None,
+            blocked_action: None,
         })
     }
 

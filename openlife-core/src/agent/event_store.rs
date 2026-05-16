@@ -204,6 +204,9 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "plan.continuation_requested" => AgentRunEventType::PlanContinuationRequested,
         "plan.action_replayed" => AgentRunEventType::PlanActionReplayed,
         "plan.action_replay_requested" => AgentRunEventType::PlanActionReplayRequested,
+        "replay.started" => AgentRunEventType::ReplayStarted,
+        "replay.completed" => AgentRunEventType::ReplayCompleted,
+        "replay.failed" => AgentRunEventType::ReplayFailed,
         "compaction.created" => AgentRunEventType::CompactionCreated,
         "run.completed" => AgentRunEventType::RunCompleted,
         "run.failed" => AgentRunEventType::RunFailed,
@@ -551,7 +554,7 @@ mod tests {
         let store = AgentRunEventStore::new_in_memory().unwrap();
         let run_id = "p4-plan-exec-events";
 
-        let event_types = vec![
+        let event_types = [
             AgentRunEventType::PlanExecutionStarted,
             AgentRunEventType::PlanStepStarted,
             AgentRunEventType::PlanStepCompleted,

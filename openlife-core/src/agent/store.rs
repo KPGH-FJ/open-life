@@ -58,7 +58,8 @@ impl AgentRunStore {
                 deleted_at TEXT,
                 delete_reason TEXT,
                 started_at TEXT NOT NULL,
-                finished_at TEXT
+                finished_at TEXT,
+                agent_spec_id TEXT
             )",
             [],
         )?;
@@ -99,6 +100,7 @@ impl AgentRunStore {
             "tool_call_count",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        Self::add_column_if_missing(&conn, "agent_runs", "agent_spec_id", "TEXT")?;
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_agent_runs_session ON agent_runs(session_id, started_at DESC)",
             [],
@@ -179,8 +181,8 @@ impl AgentRunStore {
                 generated_proposals_json, actions_json, observations_json,
                 reasoning_strategy, reasoning_trace_json,
                 status_updates_json, step_count, tool_call_count,
-                deleted_at, delete_reason, started_at, finished_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+                deleted_at, delete_reason, started_at, finished_at, agent_spec_id
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
             params![
                 run.id,
                 run.task_id,
@@ -212,6 +214,7 @@ impl AgentRunStore {
                 run.delete_reason,
                 run.started_at.to_rfc3339(),
                 run.finished_at.map(|t| t.to_rfc3339()),
+                run.agent_spec_id,
             ],
         )?;
         Ok(())
@@ -239,7 +242,8 @@ impl AgentRunStore {
                 tool_call_count = ?14,
                 deleted_at = ?15,
                 delete_reason = ?16,
-                finished_at = ?17
+                finished_at = ?17,
+                agent_spec_id = ?18
             WHERE id = ?1",
             params![
                 run.id,
@@ -267,6 +271,7 @@ impl AgentRunStore {
                 run.deleted_at.map(|t| t.to_rfc3339()),
                 run.delete_reason,
                 run.finished_at.map(|t| t.to_rfc3339()),
+                run.agent_spec_id,
             ],
         )?;
         Ok(())
@@ -283,7 +288,7 @@ impl AgentRunStore {
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
                     status_updates_json, step_count, tool_call_count,
-                    deleted_at, delete_reason, started_at, finished_at
+                    deleted_at, delete_reason, started_at, finished_at, agent_spec_id
              FROM agent_runs WHERE id = ?1",
         )?;
         let row = stmt.query_row([run_id], |row| {
@@ -325,6 +330,8 @@ impl AgentRunStore {
                 "review" => AgentTaskKind::Review,
                 "writing" => AgentTaskKind::Writing,
                 "memory_governance" => AgentTaskKind::MemoryGovernance,
+                "skill" => AgentTaskKind::Skill,
+                "plugin" => AgentTaskKind::Plugin,
                 _ => AgentTaskKind::Conversation,
             };
 
@@ -384,6 +391,7 @@ impl AgentRunStore {
                     .unwrap_or_default(),
                 step_count,
                 tool_call_count,
+                agent_spec_id: row.get(22)?,
                 deleted_at,
                 delete_reason,
                 started_at,
@@ -408,7 +416,7 @@ impl AgentRunStore {
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
                     status_updates_json, step_count, tool_call_count,
-                    deleted_at, delete_reason, started_at, finished_at
+                    deleted_at, delete_reason, started_at, finished_at, agent_spec_id
              FROM agent_runs
              WHERE deleted_at IS NULL
              ORDER BY started_at DESC
@@ -429,7 +437,7 @@ impl AgentRunStore {
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
                     status_updates_json, step_count, tool_call_count,
-                    deleted_at, delete_reason, started_at, finished_at
+                    deleted_at, delete_reason, started_at, finished_at, agent_spec_id
              FROM agent_runs
              WHERE session_id = ?1 AND deleted_at IS NULL
              ORDER BY started_at DESC
@@ -478,6 +486,8 @@ impl AgentRunStore {
             "review" => AgentTaskKind::Review,
             "writing" => AgentTaskKind::Writing,
             "memory_governance" => AgentTaskKind::MemoryGovernance,
+            "skill" => AgentTaskKind::Skill,
+            "plugin" => AgentTaskKind::Plugin,
             _ => AgentTaskKind::Conversation,
         };
 
@@ -537,6 +547,7 @@ impl AgentRunStore {
                 .unwrap_or_default(),
             step_count,
             tool_call_count,
+            agent_spec_id: row.get(22)?,
             deleted_at,
             delete_reason,
             started_at,
@@ -564,7 +575,7 @@ impl AgentRunStore {
                     generated_proposals_json, actions_json, observations_json,
                     reasoning_strategy, reasoning_trace_json,
                     status_updates_json, step_count, tool_call_count,
-                    deleted_at, delete_reason, started_at, finished_at
+                    deleted_at, delete_reason, started_at, finished_at, agent_spec_id
              FROM agent_runs
              WHERE session_id = ?1 AND deleted_at IS NULL
              ORDER BY started_at DESC
@@ -814,18 +825,37 @@ mod tests {
     }
 
     #[test]
+    fn test_update_run_persists_agent_spec_id() {
+        let store = AgentRunStore::new_in_memory().unwrap();
+        let mut run = create_test_run();
+        // Create with None agent_spec_id
+        assert!(run.agent_spec_id.is_none());
+        store.create_run(&run).unwrap();
+
+        // Set agent_spec_id and update
+        run.agent_spec_id = Some("main.default".to_string());
+        store.update_run(&run).unwrap();
+
+        // Verify persisted
+        let fetched = store.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.agent_spec_id,
+            Some("main.default".to_string()),
+            "update_run must persist agent_spec_id"
+        );
+    }
+
+    #[test]
     fn test_restore_run() {
         let store = AgentRunStore::new_in_memory().unwrap();
         let run = create_test_run();
         store.create_run(&run).unwrap();
 
-        // Soft delete
         store.delete_run(&run.id, Some("test deletion")).unwrap();
         let fetched = store.get_run(&run.id).unwrap().unwrap();
         assert!(fetched.deleted_at.is_some());
         assert_eq!(fetched.delete_reason, Some("test deletion".to_string()));
 
-        // Restore
         store.restore_run(&run.id).unwrap();
         let restored = store.get_run(&run.id).unwrap().unwrap();
         assert!(restored.deleted_at.is_none());

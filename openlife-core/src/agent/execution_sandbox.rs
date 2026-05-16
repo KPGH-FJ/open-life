@@ -561,9 +561,10 @@ mod tests {
     use super::*;
 
     fn make_enabled_sandbox() -> ExecutionSandbox {
-        let mut s = ExecutionSandbox::default();
-        s.bash_enabled = true;
-        s
+        ExecutionSandbox {
+            bash_enabled: true,
+            ..Default::default()
+        }
     }
 
     // ── Bash disabled ──────────────────────────────────────────────────
@@ -849,15 +850,17 @@ mod tests {
         assert!(json.contains("dangerousCommandDenylist"));
 
         let deserialized: ExecutionSandbox = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.bash_enabled, false);
+        assert!(!deserialized.bash_enabled);
         assert_eq!(deserialized.network_policy, NetworkPolicy::None);
         assert_eq!(deserialized.write_policy, WritePolicy::ProposalFirst);
     }
 
     #[test]
     fn test_sandbox_with_write_disabled_cannot_write_to_denied_paths() {
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.write_policy = WritePolicy::SafePathsOnly;
+        let sandbox = ExecutionSandbox {
+            write_policy: WritePolicy::SafePathsOnly,
+            ..Default::default()
+        };
 
         assert!(sandbox.is_path_denied_write("/etc/hosts"));
         assert!(sandbox.is_path_denied_write("/System/Library/test"));
@@ -1071,10 +1074,12 @@ mod tests {
 
     #[test]
     fn test_empty_allowlist_blocks_all_commands() {
-        let mut sandbox = ExecutionSandbox::default();
-        sandbox.bash_enabled = true;
-        sandbox.command_allowlist = vec![]; // manually cleared
-                                            // Even safe commands are blocked when allowlist is empty
+        let sandbox = ExecutionSandbox {
+            bash_enabled: true,
+            command_allowlist: vec![], // manually cleared
+            ..Default::default()
+        };
+        // Even safe commands are blocked when allowlist is empty
         let result = sandbox.validate("echo", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty"));

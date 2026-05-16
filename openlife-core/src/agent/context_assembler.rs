@@ -552,8 +552,10 @@ mod tests {
 
     #[test]
     fn test_policy_denies_memory() {
-        let mut policy = ContextPolicy::default();
-        policy.allow_memory = false;
+        let policy = ContextPolicy {
+            allow_memory: false,
+            ..Default::default()
+        };
         let mut input = create_test_input();
         input.memory_hits = vec![MemoryHit {
             id: 1,
@@ -569,8 +571,10 @@ mod tests {
 
     #[test]
     fn test_privacy_note_on_denied_context() {
-        let mut policy = ContextPolicy::default();
-        policy.allow_memory = false;
+        let policy = ContextPolicy {
+            allow_memory: false,
+            ..Default::default()
+        };
         let mut input = create_test_input();
         input.memory_hits = vec![MemoryHit {
             id: 1,
@@ -586,8 +590,10 @@ mod tests {
 
     #[test]
     fn test_event_summary_excludes_raw_sensitive_text() {
-        let mut policy = ContextPolicy::default();
-        policy.allow_memory = false;
+        let policy = ContextPolicy {
+            allow_memory: false,
+            ..Default::default()
+        };
         let mut input = create_test_input();
         input.memory_hits = vec![MemoryHit {
             id: 1,

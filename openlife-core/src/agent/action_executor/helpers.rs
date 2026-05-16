@@ -42,11 +42,73 @@ pub fn set_search_config(provider: &str, brave_key: &str, searxng_url: &str) {
     }
 }
 
-#[derive(Debug)]
+use super::{ExecutionBlockReason, ExecutionFailureKind, ExecutionProposalReason};
+
+#[derive(Debug, Default)]
 pub struct ToolCallInternalResult {
     pub success: bool,
     pub output: Option<String>,
     pub error: Option<String>,
+    pub block_reason: Option<ExecutionBlockReason>,
+    pub proposal_reason: Option<ExecutionProposalReason>,
+    pub failure_kind: Option<ExecutionFailureKind>,
+}
+
+impl ToolCallInternalResult {
+    pub fn new(success: bool, output: Option<String>, error: Option<String>) -> Self {
+        Self {
+            success,
+            output,
+            error,
+            block_reason: None,
+            proposal_reason: None,
+            failure_kind: None,
+        }
+    }
+
+    pub fn success(output: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            output: Some(output.into()),
+            error: None,
+            block_reason: None,
+            proposal_reason: None,
+            failure_kind: None,
+        }
+    }
+
+    pub fn blocked(reason: ExecutionBlockReason, message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: None,
+            error: Some(message.into()),
+            block_reason: Some(reason),
+            proposal_reason: None,
+            failure_kind: None,
+        }
+    }
+
+    pub fn needs_confirmation(reason: ExecutionProposalReason, message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: None,
+            error: Some(message.into()),
+            block_reason: None,
+            proposal_reason: Some(reason),
+            failure_kind: None,
+        }
+    }
+
+    pub fn failure(kind: ExecutionFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: None,
+            error: Some(message.into()),
+            block_reason: None,
+            proposal_reason: None,
+            failure_kind: Some(kind),
+        }
+    }
 }
 
 pub fn canonical_tool_source(manifest: &ToolManifest) -> String {
@@ -101,6 +163,7 @@ pub fn fetch_url_on_worker_thread(url: &str) -> Result<ToolCallInternalResult> {
                 success: false,
                 output: None,
                 error: Some("web.fetch worker thread panicked".to_string()),
+                ..Default::default()
             })
         })
 }
@@ -117,6 +180,7 @@ pub fn search_web_on_worker_thread(
                 success: false,
                 output: None,
                 error: Some("web.search worker thread panicked".to_string()),
+                ..Default::default()
             })
         })
 }
@@ -135,6 +199,7 @@ fn search_web_blocking(query: &str, max_results: usize) -> Result<ToolCallIntern
                         "Search rate limit exceeded. Please wait {} second(s).",
                         5 - elapsed
                     )),
+                    ..Default::default()
                 });
             }
         }
@@ -185,6 +250,7 @@ fn search_duckduckgo_blocking(query: &str, max_results: usize) -> Result<ToolCal
                         status.as_u16(),
                         status.canonical_reason().unwrap_or("Unknown error")
                     )),
+                    ..Default::default()
                 });
             }
 
@@ -206,12 +272,14 @@ fn search_duckduckgo_blocking(query: &str, max_results: usize) -> Result<ToolCal
                         success: true,
                         output: Some(output),
                         error: None,
+                        ..Default::default()
                     })
                 }
                 Err(e) => Ok(ToolCallInternalResult {
                     success: false,
                     output: None,
                     error: Some(format!("Failed to read search response body: {}", e)),
+                    ..Default::default()
                 }),
             }
         }
@@ -219,6 +287,7 @@ fn search_duckduckgo_blocking(query: &str, max_results: usize) -> Result<ToolCal
             success: false,
             output: None,
             error: Some(format!("Search request failed: {}", e)),
+            ..Default::default()
         }),
     }
 }
@@ -246,6 +315,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                     "URL '{}' points to a private/internal address, blocked by security policy",
                     current_url
                 )),
+                ..Default::default()
             });
         }
 
@@ -266,6 +336,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                             error: Some(
                                 "Redirect limit exceeded, blocked by security policy".to_string(),
                             ),
+                            ..Default::default()
                         });
                     }
                     redirects_remaining -= 1;
@@ -288,6 +359,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                                     success: false,
                                     output: None,
                                     error: Some("Invalid redirect Location header".to_string()),
+                                    ..Default::default()
                                 });
                             }
                         }
@@ -299,6 +371,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                             "HTTP {} redirect without Location header",
                             status.as_u16()
                         )),
+                        ..Default::default()
                     });
                 }
                 if status.is_success() {
@@ -315,6 +388,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                                 success: true,
                                 output: Some(truncated),
                                 error: None,
+                                ..Default::default()
                             });
                         }
                         Err(e) => {
@@ -322,6 +396,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                                 success: false,
                                 output: None,
                                 error: Some(format!("Failed to read response body: {}", e)),
+                                ..Default::default()
                             });
                         }
                     }
@@ -334,6 +409,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                             status.as_u16(),
                             status.canonical_reason().unwrap_or("Unknown error")
                         )),
+                        ..Default::default()
                     });
                 }
             }
@@ -342,6 +418,7 @@ fn fetch_url_blocking(url: &str) -> Result<ToolCallInternalResult> {
                     success: false,
                     output: None,
                     error: Some(format!("HTTP request failed: {}", e)),
+                    ..Default::default()
                 });
             }
         }
@@ -536,6 +613,7 @@ fn search_brave_blocking(
             success: false,
             output: None,
             error: Some("Brave search returned no results".to_string()),
+            ..Default::default()
         });
     }
 
@@ -543,6 +621,7 @@ fn search_brave_blocking(
         success: true,
         output: Some(format_search_results(query, &results)),
         error: None,
+        ..Default::default()
     })
 }
 
@@ -606,6 +685,7 @@ fn search_searxng_blocking(
             success: false,
             output: None,
             error: Some("SearXNG search returned no results".to_string()),
+            ..Default::default()
         });
     }
 
@@ -613,6 +693,7 @@ fn search_searxng_blocking(
         success: true,
         output: Some(format_search_results(query, &results)),
         error: None,
+        ..Default::default()
     })
 }
 
@@ -884,17 +965,20 @@ pub fn call_a2a_agent_blocking(
                         success: true,
                         output: Some(text),
                         error: None,
+                        ..Default::default()
                     })
                 }
                 Ok(Err(e)) => Ok(ToolCallInternalResult {
                     success: false,
                     output: None,
                     error: Some(format!("A2A agent call failed: {}", e)),
+                    ..Default::default()
                 }),
                 Err(_) => Ok(ToolCallInternalResult {
                     success: false,
                     output: None,
                     error: Some("A2A agent call timed out after 30 seconds".to_string()),
+                    ..Default::default()
                 }),
             }
         })
@@ -905,6 +989,7 @@ pub fn call_a2a_agent_blocking(
             success: false,
             output: None,
             error: Some("A2A worker thread panicked".to_string()),
+            ..Default::default()
         })
     })
 }

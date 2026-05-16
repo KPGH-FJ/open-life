@@ -177,6 +177,11 @@ pub struct PatchApplyResult {
     pub path: String,
     pub operation: String,
     pub error: Option<String>,
+    /// When applying a ToolPermission proposal, the blocked_action
+    /// carried from the proposal's after field. Used by replay logic
+    /// instead of the legacy __blocked_action__: string protocol.
+    #[serde(default)]
+    pub blocked_action: Option<serde_json::Value>,
 }
 
 /// Error when applying a patch.

@@ -96,6 +96,24 @@ pub async fn list_skills(
     Ok(skills)
 }
 
+/// Production helper: create a governed AgentRun for skill execution.
+///
+/// Extracted so that both `run_skill` and plain-unit tests can assert
+/// the AgentSpec binding without requiring a live LLM scheduler.
+pub(crate) fn build_skill_agent_run(
+    skill_id: &str,
+    input: &Value,
+    agent_spec_id: &str,
+) -> AgentRun {
+    let mut run = AgentRun::new_chat_run(
+        &format!("skill-{}", skill_id),
+        input.get("text").and_then(Value::as_str).unwrap_or(""),
+    );
+    run.kind = AgentTaskKind::Skill;
+    run.agent_spec_id = Some(agent_spec_id.to_string());
+    run
+}
+
 #[tauri::command]
 pub async fn run_skill(
     skill_id: String,
@@ -152,11 +170,7 @@ pub async fn run_skill(
             .await?;
 
     // Create AgentRun before governed execution so events can reference the run_id.
-    let mut run = AgentRun::new_chat_run(
-        &format!("skill-{}", skill_id),
-        input.get("text").and_then(Value::as_str).unwrap_or(""),
-    );
-    run.kind = AgentTaskKind::Skill;
+    let mut run = build_skill_agent_run(&skill_id, &input, &agent_spec.id);
 
     // Record AgentSpecSelected event
     if let Some(ref es) = state.agent_run_event_store {
@@ -525,4 +539,44 @@ pub async fn disable_plugin(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_skill_agent_run;
+    use crate::test_utils::test_app_state;
+    use openlife_core::agent::AgentTaskKind;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn skill_runtime_run_persists_agent_spec_id() {
+        let state = test_app_state();
+
+        let run = build_skill_agent_run("test-skill", &json!({"text": "do thing"}), "main.default");
+
+        assert_eq!(run.kind, AgentTaskKind::Skill);
+        assert_eq!(
+            run.agent_spec_id.as_deref(),
+            Some("main.default"),
+            "build_skill_agent_run must bind agent_spec_id"
+        );
+
+        let run_id = run.id.clone();
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+
+        let fetched = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.get_run(&run_id).unwrap().unwrap()
+        };
+
+        assert_eq!(fetched.kind, AgentTaskKind::Skill);
+        assert_eq!(
+            fetched.agent_spec_id.as_deref(),
+            Some("main.default"),
+            "persisted SkillRuntime run must retain agent_spec_id"
+        );
+    }
 }

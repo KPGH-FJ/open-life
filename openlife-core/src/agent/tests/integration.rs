@@ -7,11 +7,9 @@
 //! 4. Step/tool budget stops execution
 //! 5. Tool failure still records observation
 
-use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::{
-    ActionContext, ActionExecutor, ActionExecutorConfig, AgentEventActor, AgentExecutionBudget,
-    AgentLoop, AgentLoopConfig, AgentObservation, AgentRun, AgentRunEventType, AgentRunStatus,
-    AgentTask, AgentTaskKind,
+    ActionContext, ActionExecutor, ActionExecutorConfig, AgentExecutionBudget, AgentLoop,
+    AgentLoopConfig, AgentObservation, AgentRun, AgentRunStatus, AgentTask, AgentTaskKind,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -84,9 +82,11 @@ async fn test_agent_execution_budget_defaults() {
 /// Test 3: Budget can be customized
 #[tokio::test]
 async fn test_agent_execution_budget_customization() {
-    let mut budget = AgentExecutionBudget::default();
-    budget.max_steps = 2;
-    budget.max_tool_calls = 1;
+    let budget = AgentExecutionBudget {
+        max_steps: 2,
+        max_tool_calls: 1,
+        ..Default::default()
+    };
     assert_eq!(budget.max_steps, 2);
     assert_eq!(budget.max_tool_calls, 1);
 }
@@ -341,7 +341,7 @@ async fn test_proposal_tool_bypass_permission_blocking() {
     let audit_file = tempfile::NamedTempFile::new().unwrap();
     let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
     let privacy_engine = PrivacyEngine::new();
-    let prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
+    let _prop_store = crate::agent::proposal_store::ProposalStore::new_in_memory().unwrap();
 
     // Create a temp dir as safe_path so the filesystem precheck passes
     let safe_dir = tempfile::TempDir::new().unwrap();
@@ -866,8 +866,10 @@ async fn test_sub_agent_shell_attempt_blocked_by_default() {
 #[tokio::test]
 async fn test_plan_bound_agent_spec_denies_shell_execution() {
     // A plan-bound AgentSpec without shell.run in allowed_tools must deny shell.
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["goal.read".into(), "life_model.read".into()],
+        ..Default::default()
+    };
     let allows_shell = spec
         .allowed_tools
         .iter()
@@ -882,8 +884,10 @@ async fn test_plan_bound_agent_spec_denies_shell_execution() {
 async fn test_agent_spec_with_explicit_shell_allows_it() {
     // If an AgentSpec explicitly allows shell.run, the spec permits it.
     // (Runtime sandbox/manifest still must also allow.)
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["goal.read".into(), "shell.run".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["goal.read".into(), "shell.run".into()],
+        ..Default::default()
+    };
     let allows_shell = spec.allowed_tools.iter().any(|t| t.contains("shell"));
     assert!(
         allows_shell,
@@ -954,8 +958,10 @@ async fn test_shell_run_agentspec_denies_blocks_before_permission() {
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
     };
     // AgentSpec explicitly denies shell by not listing it
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["goal.read".into(), "life_model.read".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["goal.read".into(), "life_model.read".into()],
+        ..Default::default()
+    };
     let ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
         .with_execution_sandbox(sandbox)
         .with_agent_spec(spec);
@@ -999,8 +1005,10 @@ async fn test_shell_run_agentspec_allows_continues_to_permission() {
         ..crate::agent::execution_sandbox::ExecutionSandbox::default()
     };
     // AgentSpec allows shell, but permission store denies by default
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["goal.read".into(), "shell.run".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["goal.read".into(), "shell.run".into()],
+        ..Default::default()
+    };
     let ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
         .with_execution_sandbox(sandbox)
         .with_agent_spec(spec);
@@ -1115,8 +1123,10 @@ async fn test_shell_run_success_records_started_and_completed() {
         None,
     )
     .unwrap();
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["shell.run".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["shell.run".into()],
+        ..Default::default()
+    };
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
     let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
         .with_execution_sandbox(sandbox)
@@ -1222,8 +1232,10 @@ async fn test_shell_run_full_governed_success_path() {
         None,
     )
     .unwrap();
-    let mut spec = crate::agent::types::AgentSpec::default();
-    spec.allowed_tools = vec!["shell.run".into()];
+    let spec = crate::agent::types::AgentSpec {
+        allowed_tools: vec!["shell.run".into()],
+        ..Default::default()
+    };
     let event_store = crate::agent::event_store::AgentRunEventStore::new_in_memory().unwrap();
     let mut ctx = ActionContext::new_for_test(reg, ps, audit, pe, vec![])
         .with_execution_sandbox(sandbox)
