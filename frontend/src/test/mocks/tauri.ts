@@ -383,10 +383,13 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "batch_accept_low_risk_proposals":
       return Promise.resolve(0 as T);
     case "accept_proposal":
+      return Promise.resolve({
+        success: true,
+        patchResult: { patchId: "patch-1", success: true, path: "/test", operation: "replace" },
+        canContinue: false,
+        can_continue: false,
+      } as T);
     case "reject_proposal":
-    case "edit_proposal":
-    case "postpone_proposal":
-      return Promise.resolve(undefined as T);
     case "list_tool_permissions":
       return Promise.resolve([
         {
@@ -1174,6 +1177,119 @@ export const mockAgentRunEvents: AgentRunEvent[] = [
     summary: "email.read blocked: declarative-only stub",
     payload: { tool: "email.read", reason: "declarative-only" },
     createdAt: "2026-05-06T10:00:04Z",
+  },
+  {
+    id: "evt-tool-blocked-typed",
+    runId: "run-001",
+    eventType: "tool.call_blocked",
+    actor: "runtime",
+    summary: "web.search blocked by AgentSpec",
+    payload: {
+      status: "blocked",
+      tool_name: "web.search",
+      source: "builtin",
+      block_reason: "agent_spec_denied",
+      proposal_reason: null,
+      failure_kind: null,
+      agent_spec_id: "main.default",
+      human_message: "web.search blocked by AgentSpec",
+    },
+    createdAt: "2026-05-15T10:00:04Z",
+  },
+  {
+    id: "evt-tool-blocked-mcp-target",
+    runId: "run-001",
+    eventType: "tool.call_blocked",
+    actor: "runtime",
+    summary: "mcp.call_tool target blocked",
+    payload: {
+      status: "blocked",
+      tool_name: "mcp.call_tool",
+      source: "builtin",
+      target_tool_name: "remote_search",
+      target_source: "mcp:my-server",
+      wrapper_tool_name: "mcp.call_tool",
+      block_reason: "tool_permission_denied",
+      proposal_reason: null,
+      failure_kind: null,
+      agent_spec_id: "main.default",
+    },
+    createdAt: "2026-05-15T10:00:05Z",
+  },
+  {
+    id: "evt-tool-blocked-network-ask",
+    runId: "run-001",
+    eventType: "tool.call_blocked",
+    actor: "runtime",
+    summary: "web.search needs confirmation via network policy",
+    payload: {
+      status: "needs_confirmation",
+      tool_name: "web.search",
+      source: "builtin",
+      block_reason: null,
+      proposal_reason: "network_policy_ask",
+      proposal_id: "proposal-net-ask-1",
+      failure_kind: null,
+      agent_spec_id: "main.default",
+    },
+    createdAt: "2026-05-15T10:00:06Z",
+  },
+  {
+    id: "evt-replay-started",
+    runId: "run-001",
+    eventType: "replay.started",
+    actor: "runtime",
+    summary: "Replay started for action-1",
+    payload: {
+      status: "started",
+      run_id: "run-001",
+      action_id: "action-replay-1",
+      replay_of_action_id: "action-1",
+      agent_spec_id: "main.default",
+      tool_name: "web.search",
+      source: "builtin",
+    },
+    createdAt: "2026-05-15T10:01:00Z",
+  },
+  {
+    id: "evt-replay-completed",
+    runId: "run-001",
+    eventType: "replay.completed",
+    actor: "runtime",
+    summary: "Replay completed for action-1",
+    payload: {
+      status: "completed",
+      run_id: "run-001",
+      action_id: "action-replay-1",
+      replay_of_action_id: "action-1",
+      agent_spec_id: "main.default",
+      tool_name: "web.search",
+      source: "builtin",
+      block_reason: null,
+      proposal_reason: null,
+      failure_kind: null,
+    },
+    createdAt: "2026-05-15T10:01:01Z",
+  },
+  {
+    id: "evt-replay-failed",
+    runId: "run-001",
+    eventType: "replay.failed",
+    actor: "runtime",
+    summary: "Replay failed: ReplaySpecMissing",
+    payload: {
+      status: "failed",
+      run_id: "run-001",
+      action_id: "action-replay-2",
+      replay_of_action_id: "action-2",
+      human_message: "Replay failed: missing action spec",
+      block_reason: "replay_spec_missing",
+      failure_kind: null,
+      tool_name: "remote_tool",
+      source: "mcp:my-server",
+      agent_spec_id: "main.default",
+    },
+    createdAt: "2026-05-15T10:01:02Z",
   },
   {
     id: "evt-plan-created-001",

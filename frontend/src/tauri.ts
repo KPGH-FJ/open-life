@@ -1264,6 +1264,8 @@ export interface ToolActionScope {
   riskLevel: string;
   capabilities: string[];
   actionType: string;
+  requiresConfirmation?: boolean;
+  allowed?: boolean;
 }
 
 export interface ProviderStatus {
@@ -1648,9 +1650,10 @@ export interface PatchApplyResult {
   path: string;
   operation: string;
   error?: string;
+  blockedAction?: Record<string, unknown>;
 }
 
-export async function acceptProposal(proposalId: string): Promise<{
+export interface AcceptProposalResult {
   success: boolean;
   patchResult: PatchApplyResult;
   patch_result?: PatchApplyResult;
@@ -1660,7 +1663,11 @@ export async function acceptProposal(proposalId: string): Promise<{
   continue_run_id?: string;
   continueActionId?: string;
   continue_action_id?: string;
-}> {
+  blockedAction?: Record<string, unknown>;
+  blocked_action?: Record<string, unknown>;
+}
+
+export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
 }
 

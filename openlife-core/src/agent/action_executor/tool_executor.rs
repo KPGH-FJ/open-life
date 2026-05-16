@@ -1591,17 +1591,38 @@ impl super::ActionExecutor {
     ) -> Result<ActionExecutionResult> {
         let tool_name = "shell.run";
 
-        // Record tool.call_blocked helper
+        // Record tool.call_blocked helper — auto-injects contract-required fields
         let record_blocked = |reason: &str, payload: serde_json::Value| {
             if let (Some(event_store), Some(ref run_id)) =
                 (ctx.event_store.as_ref(), &request.source_run_id)
             {
+                let mut p = payload;
+                // Ensure typed contract fields are present
+                let obj = p.as_object_mut().unwrap();
+                if !obj.contains_key("source") {
+                    obj.insert("source".to_string(), serde_json::json!("builtin"));
+                }
+                if !obj.contains_key("failure_kind") {
+                    obj.insert("failure_kind".to_string(), serde_json::Value::Null);
+                }
+                if !obj.contains_key("proposal_reason") {
+                    obj.insert("proposal_reason".to_string(), serde_json::Value::Null);
+                }
+                if !obj.contains_key("agent_spec_id") {
+                    obj.insert(
+                        "agent_spec_id".to_string(),
+                        ctx.agent_spec
+                            .as_ref()
+                            .map(|s| serde_json::json!(s.id))
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
                 let event = AgentRunEvent::new(
                     run_id,
                     AgentRunEventType::ToolCallBlocked,
                     AgentEventActor::Tool(tool_name.to_string()),
                     format!("shell.run blocked: {}", reason),
-                    payload,
+                    p,
                 );
                 let _ = event_store.append_event(&event);
             }
@@ -1618,6 +1639,7 @@ impl super::ActionExecutor {
                         "reason": reason,
                         "tool_name": tool_name,
                         "status": "blocked",
+                        "block_reason": ExecutionBlockReason::DisabledManifest.to_string(),
                     }),
                 );
                 return Ok(self.build_blocked_result(
@@ -5219,5 +5241,68 @@ mod tests {
         assert_eq!(p["status"], "blocked");
         assert!(p["tool_name"].is_string());
         assert!(!p["block_reason"].is_null());
+    }
+
+    /// shell.run manifest NOT registered (missing) → DisabledManifest typed
+    /// reason in ToolCallBlocked event payload. Verifies the fix for the
+    /// branch at manifest: None that was missing `block_reason`.
+    #[tokio::test]
+    async fn shell_run_manifest_missing_records_typed_tool_call_blocked() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Fresh registry — no shell.run registered at all
+        let reg = McpRegistry::new();
+        let ps = ToolPermissionStore::new_in_memory().unwrap();
+        let audit = McpAuditStore::new(tmp.path().join("audit_sh_miss.db"));
+        let pe = PrivacyEngine::new();
+        let events_db = tmp.path().join("events_sh_miss.db");
+        let event_store = crate::agent::event_store::AgentRunEventStore::new(&events_db).unwrap();
+
+        let sandbox = crate::agent::execution_sandbox::ExecutionSandbox {
+            bash_enabled: true,
+            ..crate::agent::execution_sandbox::ExecutionSandbox::default()
+        };
+
+        let mut ctx = crate::agent::ActionContext::new_for_test(reg, ps, audit, pe, vec![])
+            .with_execution_sandbox(sandbox)
+            .with_agent_spec(crate::agent::types::AgentSpec::default_main_spec());
+        ctx.event_store = Some(event_store.clone());
+
+        let executor = crate::agent::ActionExecutor::new(ActionExecutorConfig::default());
+        let run_id = "run-sh-missing".to_string();
+        let request = crate::agent::AgentActionRequest {
+            action_type: "builtin_tool".into(),
+            target: "shell.run".into(),
+            input: serde_json::json!({"arguments": {"command": "echo hi"}}),
+            source_run_id: Some(run_id.clone()),
+            step_index: 0,
+        };
+
+        let result = executor.execute(request, &ctx).await.unwrap();
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert_eq!(
+            result.block_reason,
+            Some(ExecutionBlockReason::DisabledManifest)
+        );
+
+        let events = event_store.list_events_by_run(&run_id).unwrap();
+        let blocked = events
+            .iter()
+            .find(|e| matches!(e.event_type, AgentRunEventType::ToolCallBlocked))
+            .expect("ToolCallBlocked must be recorded for shell.run manifest missing");
+
+        let p = &blocked.payload;
+        assert_eq!(p["status"], "blocked");
+        assert_eq!(p["tool_name"], "shell.run");
+        assert!(p["source"].is_string());
+        assert!(!p["source"].as_str().unwrap().is_empty());
+        assert_eq!(
+            p["block_reason"],
+            ExecutionBlockReason::DisabledManifest.to_string()
+        );
+        assert!(p["proposal_reason"].is_null());
+        assert!(p["failure_kind"].is_null());
+        // agent_spec_id field must be present (null allowed)
+        assert!(p.get("agent_spec_id").is_some());
     }
 }

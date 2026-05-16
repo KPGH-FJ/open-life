@@ -804,4 +804,229 @@ mod tests {
             .unwrap_or_default();
         assert!(excluded.contains(&"memory".to_string()));
     }
+
+    /// Trace Contract: Verify that tool.call_blocked events with typed governance
+    /// payloads satisfy the mandatory field contract (status, tool_name, source,
+    /// and either block_reason or proposal_reason).
+    #[test]
+    fn test_tool_call_blocked_typed_payload_contract() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-contract";
+
+        // -- Contract case 1: AgentSpec denial --
+        let event1 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "web.search blocked by AgentSpec",
+            serde_json::json!({
+                "status": "blocked",
+                "tool_name": "web.search",
+                "source": "builtin",
+                "block_reason": "agent_spec_denied",
+                "proposal_reason": null,
+                "failure_kind": null,
+                "agent_spec_id": "main.default",
+            }),
+        );
+        store.append_event(&event1).unwrap();
+
+        // -- Contract case 2: NetworkPolicy ask --
+        let event2 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "web.search needs network confirmation",
+            serde_json::json!({
+                "status": "needs_confirmation",
+                "tool_name": "web.search",
+                "source": "builtin",
+                "block_reason": null,
+                "proposal_reason": "network_policy_ask",
+                "proposal_id": "proposal-net-1",
+                "failure_kind": null,
+                "agent_spec_id": "main.default",
+            }),
+        );
+        store.append_event(&event2).unwrap();
+
+        // -- Contract case 3: MCP target block --
+        let event3 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("mcp.call_tool".into()),
+            "mcp.call_tool target denied",
+            serde_json::json!({
+                "status": "blocked",
+                "tool_name": "mcp.call_tool",
+                "source": "builtin",
+                "block_reason": "tool_permission_denied",
+                "proposal_reason": null,
+                "failure_kind": null,
+                "agent_spec_id": "main.default",
+                "target_tool_name": "remote_search",
+                "target_source": "mcp:my-server",
+                "wrapper_tool_name": "mcp.call_tool",
+            }),
+        );
+        store.append_event(&event3).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 3);
+
+        for event in &events {
+            assert_eq!(event.event_type, AgentRunEventType::ToolCallBlocked);
+
+            // Mandatory fields per typed governance contract
+            let status = event.payload.get("status").and_then(|v| v.as_str());
+            let tool_name = event.payload.get("tool_name").and_then(|v| v.as_str());
+            let source = event.payload.get("source").and_then(|v| v.as_str());
+            let block_reason = event.payload.get("block_reason").and_then(|v| v.as_str());
+            let proposal_reason = event
+                .payload
+                .get("proposal_reason")
+                .and_then(|v| v.as_str());
+            let agent_spec_id = event.payload.get("agent_spec_id").and_then(|v| v.as_str());
+
+            assert!(
+                status.is_some_and(|s| s == "blocked" || s == "needs_confirmation"),
+                "tool.call_blocked must have valid status"
+            );
+            assert!(
+                tool_name.is_some_and(|s| !s.is_empty()),
+                "tool.call_blocked must have non-empty tool_name"
+            );
+            assert!(
+                source.is_some_and(|s| !s.is_empty()),
+                "tool.call_blocked must have non-empty source"
+            );
+            assert!(
+                agent_spec_id.is_some_and(|s| !s.is_empty()),
+                "tool.call_blocked must have agent_spec_id"
+            );
+
+            // At least one typed reason must be present
+            let has_reason = block_reason.is_some_and(|s| !s.is_empty() && s != "null")
+                || proposal_reason.is_some_and(|s| !s.is_empty() && s != "null");
+            assert!(
+                has_reason,
+                "tool.call_blocked must have block_reason or proposal_reason"
+            );
+        }
+    }
+
+    /// Trace Contract: Verify that all ReplayFailed events carry at least
+    /// one valid typed reason (block_reason or failure_kind).
+    #[test]
+    fn test_replay_failed_events_have_typed_reason() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-replay-fail-contract";
+
+        // Case 1: Run not found -> block_reason = replay_spec_missing
+        let r1 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Run not found",
+            serde_json::json!({
+                "status": "failed",
+                "run_id": run_id,
+                "action_id": "action-1",
+                "replay_of_action_id": "action-1",
+                "human_message": "Run not found",
+                "block_reason": "replay_spec_missing",
+                "failure_kind": null,
+            }),
+        );
+        store.append_event(&r1).unwrap();
+
+        // Case 2: Store not available -> failure_kind = internal_error
+        let r2 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "AgentRun store not available",
+            serde_json::json!({
+                "status": "failed",
+                "run_id": run_id,
+                "action_id": "action-2",
+                "replay_of_action_id": "action-2",
+                "human_message": "AgentRun store not available",
+                "block_reason": null,
+                "failure_kind": "internal_error",
+            }),
+        );
+        store.append_event(&r2).unwrap();
+
+        // Case 3: Action not found -> block_reason = replay_spec_missing
+        let r3 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Action not found",
+            serde_json::json!({
+                "status": "failed",
+                "run_id": run_id,
+                "action_id": "action-3",
+                "replay_of_action_id": "action-3",
+                "human_message": "Action not found",
+                "block_reason": "replay_spec_missing",
+                "failure_kind": null,
+            }),
+        );
+        store.append_event(&r3).unwrap();
+
+        // Case 4: Executor internal error -> failure_kind = internal_error
+        let r4 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Replay execution failed",
+            serde_json::json!({
+                "status": "failed",
+                "run_id": run_id,
+                "action_id": "action-4",
+                "replay_of_action_id": "action-4",
+                "human_message": "Replay execution failed: some error",
+                "block_reason": null,
+                "failure_kind": "internal_error",
+            }),
+        );
+        store.append_event(&r4).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 4);
+
+        for event in &events {
+            assert_eq!(event.event_type, AgentRunEventType::ReplayFailed);
+            assert_eq!(
+                event.payload.get("status").and_then(|v| v.as_str()),
+                Some("failed")
+            );
+            assert!(event
+                .payload
+                .get("run_id")
+                .and_then(|v| v.as_str())
+                .is_some());
+            assert!(event
+                .payload
+                .get("action_id")
+                .and_then(|v| v.as_str())
+                .is_some());
+            assert!(event
+                .payload
+                .get("replay_of_action_id")
+                .and_then(|v| v.as_str())
+                .is_some());
+
+            let block_reason = event.payload.get("block_reason").and_then(|v| v.as_str());
+            let failure_kind = event.payload.get("failure_kind").and_then(|v| v.as_str());
+            let has_typed_reason = block_reason.is_some_and(|s| !s.is_empty() && s != "null")
+                || failure_kind.is_some_and(|s| !s.is_empty() && s != "null");
+            assert!(
+                has_typed_reason,
+                "ReplayFailed must have at least one typed reason"
+            );
+        }
+    }
 }

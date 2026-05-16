@@ -209,7 +209,7 @@ impl PlanExecutor {
         // Record execution started.
         let mut start_payload = json!({"plan_id": plan_id, "total_steps": plan.steps.len()});
         if let Some(ref spec) = self.agent_spec {
-            start_payload["agentspec_id"] = serde_json::Value::String(spec.id.clone());
+            start_payload["agent_spec_id"] = serde_json::Value::String(spec.id.clone());
         }
         self.record_event(
             run_id,
@@ -285,7 +285,15 @@ impl PlanExecutor {
                         run_id,
                         AgentRunEventType::ToolCallBlocked,
                         format!("tool '{}' blocked by AgentSpec {}", tool_name, spec.id),
-                        json!({"tool_name": tool_name, "agentspec_id": spec.id}),
+                        json!({
+                            "status": "blocked",
+                            "tool_name": tool_name,
+                            "source": "plan_executor",
+                            "block_reason": "agent_spec_denied",
+                            "proposal_reason": null,
+                            "failure_kind": null,
+                            "agent_spec_id": spec.id,
+                        }),
                     );
                     blocked
                 } else {
@@ -1714,7 +1722,7 @@ mod tests {
 
         assert!(outcome.success);
 
-        // PlanExecutionStarted event should include agentspec_id
+        // PlanExecutionStarted event should include agent_spec_id
         let events = es.list_events_by_run(&run_id).unwrap();
         let start_event = events
             .iter()
@@ -1724,15 +1732,15 @@ mod tests {
         assert_eq!(
             start_event
                 .payload
-                .get("agentspec_id")
+                .get("agent_spec_id")
                 .and_then(|v| v.as_str()),
             Some("main.default"),
-            "PlanExecutionStarted should include agentspec_id"
+            "PlanExecutionStarted should include agent_spec_id"
         );
     }
 
     #[tokio::test]
-    async fn test_trace_includes_agentspec_id_on_blocked_tool() {
+    async fn test_trace_includes_agent_spec_id_on_blocked_tool() {
         let (ps, es, run_id) = setup();
         let plan = create_read_only_plan(true);
         let plan_id = plan.id.clone();
@@ -1766,10 +1774,10 @@ mod tests {
         assert_eq!(
             blocked_event
                 .payload
-                .get("agentspec_id")
+                .get("agent_spec_id")
                 .and_then(|v| v.as_str()),
             Some(spec_id.as_str()),
-            "ToolCallBlocked event should include agentspec_id"
+            "ToolCallBlocked event should include agent_spec_id"
         );
     }
 
@@ -1800,7 +1808,7 @@ mod tests {
 
         assert!(outcome.success);
 
-        // PlanExecutionStarted should NOT have agentspec_id when no spec is attached
+        // PlanExecutionStarted should NOT have agent_spec_id when no spec is attached
         let events = es.list_events_by_run(&run_id).unwrap();
         let start_event = events
             .iter()
@@ -1808,7 +1816,7 @@ mod tests {
             .expect("PlanExecutionStarted event should exist");
 
         assert!(
-            start_event.payload.get("agentspec_id").is_none(),
+            start_event.payload.get("agent_spec_id").is_none(),
             "PlanExecutionStarted should NOT have agentspec_id when no spec attached"
         );
     }

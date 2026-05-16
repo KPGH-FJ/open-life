@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_plan_execution_started_includes_agentspec_id() {
+    async fn test_plan_execution_started_includes_agent_spec_id() {
         let plan_store = Arc::new(tokio::sync::Mutex::new(
             openlife_core::agent::PlanStore::new_in_memory().unwrap(),
         ));
@@ -1178,11 +1178,11 @@ mod tests {
             .iter()
             .find(|e| e.event_type == openlife_core::agent::AgentRunEventType::PlanExecutionStarted)
             .expect("PlanExecutionStarted event should exist");
-        let agentspec_id = started_evt
+        let agent_spec_id = started_evt
             .payload
-            .get("agentspec_id")
+            .get("agent_spec_id")
             .and_then(|v| v.as_str());
-        assert_eq!(agentspec_id, Some("main.default"));
+        assert_eq!(agent_spec_id, Some("main.default"));
     }
 
     #[tokio::test]

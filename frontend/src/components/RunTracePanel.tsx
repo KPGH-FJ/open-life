@@ -13,8 +13,11 @@ import {
   ChevronUp,
   Shield,
   EyeOff,
+  Ban,
+  Key,
 } from "lucide-react";
 import type { AgentRunEvent, AgentRunEventType, RedactionSummary } from "@/types";
+import { TypedBadge, getTypedEventDetailViewModel } from "../utils/typedContract";
 
 interface Props {
   events: AgentRunEvent[];
@@ -221,6 +224,9 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "plan.continuation_requested": <Play size={14} className="text-emerald-400" />,
   "plan.action_replayed": <RefreshCw size={14} className="text-green-400" />,
   "plan.action_replay_requested": <Play size={14} className="text-amber-400" />,
+  "replay.started": <RefreshCw size={14} className="text-blue-400" />,
+  "replay.completed": <CheckCircle size={14} className="text-green-400" />,
+  "replay.failed": <XCircle size={14} className="text-red-400" />,
   "compaction.created": <Layers size={14} className="text-orange-400" />,
   "shell.blocked": <Terminal size={14} className="text-red-400" />,
   "shell.completed": <Terminal size={14} className="text-green-400" />,
@@ -234,6 +240,7 @@ function eventBorderClass(eventType: AgentRunEventType): string {
   if (eventType.startsWith("tool.") || eventType.startsWith("shell."))
     return "border-l-emerald-400";
   if (eventType.startsWith("plan.")) return "border-l-cyan-400";
+  if (eventType.startsWith("replay.")) return "border-l-blue-400";
   if (eventType.startsWith("compaction.")) return "border-l-orange-400";
   if (eventType.startsWith("fallback.") || eventType.startsWith("json_repair."))
     return "border-l-amber-400";
@@ -266,6 +273,180 @@ function actorLabel(actor: AgentRunEvent["actor"]): string {
 
 function hasTruncatedMarker(payload: Record<string, unknown>): boolean {
   return payload?.truncated === true || payload?.output_truncated === true;
+}
+
+function badgeColorClass(kind: string, rawReason: string): string {
+  if (kind === "proposal_reason") {
+    return "bg-blue-900/40 text-blue-300 border border-blue-700/40";
+  }
+  if (kind === "failure_kind") {
+    return "bg-red-900/40 text-red-300 border border-red-700/40";
+  }
+  // block_reason – per-reason visual distinction
+  switch (rawReason) {
+    case "agent_spec_denied":
+    case "agent_spec_missing":
+      return "bg-purple-900/40 text-purple-300 border border-purple-700/40";
+    case "tool_permission_denied":
+      return "bg-amber-900/40 text-amber-300 border border-amber-700/40";
+    case "network_policy_denied":
+    case "domain_blocked":
+      return "bg-red-900/40 text-red-300 border border-red-700/40";
+    case "sandbox_denied":
+      return "bg-orange-900/40 text-orange-300 border border-orange-700/40";
+    case "missing_mcp_client":
+      return "bg-red-900/40 text-red-300 border border-red-700/40";
+    case "disabled_manifest":
+    case "declarative_only":
+      return "bg-slate-700/40 text-slate-300 border border-slate-600/40";
+    case "replay_spec_missing":
+      return "bg-rose-900/40 text-rose-300 border border-rose-700/40";
+    case "path_not_safe":
+    case "pii_detected":
+      return "bg-red-900/40 text-red-300 border border-red-700/40";
+    default:
+      return "bg-slate-700/40 text-slate-300 border border-slate-600/40";
+  }
+}
+
+function typedBadgeSpan(badge: TypedBadge | null): React.ReactNode {
+  if (!badge) return null;
+  return (
+    <span
+      className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${badgeColorClass(badge.kind, badge.rawReason)}`}
+    >
+      {badge.label}
+    </span>
+  );
+}
+
+function toneColor(tone: string): string {
+  switch (tone) {
+    case "error":
+      return "text-red-400";
+    case "warning":
+      return "text-amber-400";
+    case "success":
+      return "text-green-400";
+    default:
+      return "text-slate-400";
+  }
+}
+
+function detailIcon(kind: string, titleIconTone: string): React.ReactNode {
+  const cls = toneColor(titleIconTone);
+  switch (kind) {
+    case "tool_call_blocked":
+      return <Ban size={10} className={cls} />;
+    case "replay_started":
+    case "replay_completed":
+      return <CheckCircle size={10} className={cls} />;
+    case "replay_failed":
+      return <XCircle size={10} className={cls} />;
+    default:
+      return null;
+  }
+}
+
+function TypedEventDetailBlock({ vm }: { vm: ReturnType<typeof getTypedEventDetailViewModel> }) {
+  if (vm.kind === "unknown") return null;
+
+  return (
+    <div className="rounded bg-slate-800/50 px-2 py-2 space-y-1.5">
+      {/* Title bar */}
+      <div className="text-slate-400 text-[10px] font-medium flex items-center gap-1.5">
+        {detailIcon(vm.kind, vm.titleIconTone)}
+        {vm.title}
+      </div>
+
+      {/* Meta rows: kind-specific fields */}
+      {(vm.statusLabel || vm.toolName) && (
+        <div className="flex flex-wrap gap-2 text-[10px]">
+          {vm.statusLabel && (
+            <span className="text-slate-400">
+              {vm.kind === "replay_started"
+                ? "状态"
+                : vm.kind === "replay_completed"
+                  ? "结果"
+                  : "状态"}
+              : <span className={toneColor(vm.statusTone ?? "info")}>{vm.statusLabel}</span>
+            </span>
+          )}
+          {vm.toolName && (
+            <span className="text-slate-400">
+              工具: <span className="text-slate-200">{vm.toolName}</span>
+            </span>
+          )}
+          {vm.source && (
+            <span className="text-slate-400">
+              来源: <span className="text-slate-200">{vm.source}</span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* MCP wrapper/target info */}
+      {vm.targetToolName && (
+        <div className="flex flex-wrap gap-2 text-[10px]">
+          <span className="text-amber-400">
+            MCP 包装: <span className="text-amber-200">{vm.wrapperToolName}</span>
+          </span>
+          <span className="text-amber-400">
+            目标工具: <span className="text-amber-200">{vm.targetToolName}</span>
+          </span>
+          <span className="text-amber-400">
+            目标源: <span className="text-amber-200">{vm.targetSource}</span>
+          </span>
+        </div>
+      )}
+
+      {/* Replay-specific meta: replay_of_action_id, agentSpec */}
+      {vm.kind.startsWith("replay") && (vm.replayOfActionId || vm.agentSpecId) && (
+        <div className="flex flex-wrap gap-2 text-[10px]">
+          {vm.replayOfActionId && (
+            <span className="text-slate-400">
+              重放动作: <span className="text-slate-200">{vm.replayOfActionId.slice(0, 12)}…</span>
+            </span>
+          )}
+          {vm.agentSpecId && (
+            <span className="text-slate-400">
+              AgentSpec: <span className="text-slate-300">{vm.agentSpecId}</span>
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Badges */}
+      {vm.badges.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {vm.badges.map((badge, i) => (
+            <span key={`badge-${badge.kind}-${badge.rawReason}-${i}`}>{typedBadgeSpan(badge)}</span>
+          ))}
+        </div>
+      )}
+
+      {/* Block/tool_call_blocked specific: agentSpec + proposal below badges */}
+      {vm.kind === "tool_call_blocked" && vm.agentSpecId && (
+        <div className="text-[10px] text-slate-500">
+          AgentSpec: <span className="text-slate-300">{vm.agentSpecId}</span>
+        </div>
+      )}
+      {vm.kind === "tool_call_blocked" && vm.proposalId && (
+        <div className="text-[10px] text-blue-400 flex items-center gap-1">
+          <Key size={10} />
+          Proposal: <span className="text-blue-300">{vm.proposalId}</span>
+        </div>
+      )}
+
+      {/* humanMessage as auxiliary */}
+      {vm.humanMessage && (
+        <div className="text-[10px] text-slate-500 italic mt-1">
+          {vm.kind === "tool_call_blocked" ? "辅助说明: " : "说明: "}
+          {vm.humanMessage}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function RunTracePanel({ events, runId, show, onToggle }: Props) {
@@ -329,6 +510,9 @@ export default function RunTracePanel({ events, runId, show, onToggle }: Props) 
 
               {expandedId === evt.id && (
                 <div className="px-3 py-2 bg-slate-950/50 border-b border-slate-800/30 space-y-2 text-[11px]">
+                  {/* Typed contract event detail (driven by view model) */}
+                  <TypedEventDetailBlock vm={getTypedEventDetailViewModel(evt)} />
+
                   {Object.keys(evt.payload).length > 0 && (
                     <div className="rounded bg-slate-800/50 px-2 py-2">
                       <div className="text-slate-500 text-[10px] font-medium mb-1 flex items-center gap-1">

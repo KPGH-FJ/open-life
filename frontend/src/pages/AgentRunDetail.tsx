@@ -24,6 +24,7 @@ import {
   ListOrdered,
   History,
 } from "lucide-react";
+import { getTypedActionViewModel } from "../utils/typedContract";
 import RunTracePanel from "../components/RunTracePanel";
 import ToolObservationPanel from "../components/ToolObservationPanel";
 import PlanPanel from "../components/PlanPanel";
@@ -231,160 +232,11 @@ export default function AgentRunDetail() {
           {run.finishedAt && (
             <div className="mb-6 text-xs text-stone-500">
               持续时间:{" "}
-              {(() => {
-                const start = new Date(run.startedAt).getTime();
-                const end = new Date(run.finishedAt).getTime();
-                const diff = Math.round((end - start) / 1000);
-                if (diff < 60) return `${diff} 秒`;
-                return `${Math.floor(diff / 60)} 分 ${diff % 60} 秒`;
-              })()}
-            </div>
-          )}
-
-          {run.userInput && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {run.userInput}
-              </div>
-            </div>
-          )}
-
-          {run.outputPreview && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出预览</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {run.outputPreview}
-              </div>
-            </div>
-          )}
-
-          {run.error && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-red-700 mb-2">错误</h3>
-              <div className="bg-red-50 rounded-lg p-3 text-sm text-red-800">
-                <div className="font-medium">{run.error.message}</div>
-                <div className="text-xs text-red-600 mt-1">
-                  阶段: {run.error.phase} · 可恢复: {run.error.recoverable ? "是" : "否"}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {run.warnings && run.warnings.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-amber-700 mb-2">警告</h3>
-              <div className="bg-amber-50 rounded-lg p-3 text-sm text-amber-800 space-y-1">
-                {run.warnings.map((warning, idx) => (
-                  <div key={warning + idx} className="flex items-start gap-2">
-                    <AlertTriangle size={14} className="text-amber-500 mt-0.5 shrink-0" />
-                    <span>{warning}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {run.contextSummary && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">上下文摘要</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
-                <div>LifeModel 空: {run.contextSummary.lifeModelEmpty ? "是" : "否"}</div>
-                <div>记忆命中: {run.contextSummary.memoryHitCount}</div>
-                <div>工具提示: {run.contextSummary.usedToolsPrompt ? "是" : "否"}</div>
-                <div>脱敏: {run.contextSummary.redactionApplied ? "是" : "否"}</div>
-              </div>
-            </div>
-          )}
-
-          {run.modelRoute && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">模型路由</h3>
-              <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800 space-y-1">
-                <div>Provider: {run.modelRoute.provider}</div>
-                <div>Model: {run.modelRoute.model}</div>
-                <div>Route: {run.modelRoute.routeType}</div>
-                <div>Reason: {run.modelRoute.reason}</div>
-                <div>Privacy: {run.modelRoute.privacyLevel}</div>
-                <div>Retry: {run.modelRoute.retryCount}</div>
-                {run.modelRoute.fallbackReason && (
-                  <div>Fallback: {run.modelRoute.fallbackReason}</div>
-                )}
-                {run.modelRoute.providerHealthIsEstimated !== undefined && (
-                  <div>
-                    Health:{" "}
-                    {run.modelRoute.providerHealthIsEstimated ? "estimated / gray" : "probed"}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Status Timeline */}
-          {run.statusUpdates && run.statusUpdates.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">
-                状态时间线 ({run.statusUpdates.length})
-              </h3>
-              <div className="space-y-1">
-                {run.statusUpdates.map((update, idx) => (
-                  <div
-                    key={update.timestamp + update.phase + idx}
-                    className="flex items-start gap-3 text-sm py-1.5 px-3 rounded-lg hover:bg-stone-50 transition"
-                  >
-                    <div className="flex-shrink-0 w-16 text-xs text-stone-400">
-                      {new Date(update.timestamp).toLocaleTimeString()}
-                    </div>
-                    <div className="flex-shrink-0">
-                      {update.phase === "thinking" && (
-                        <Activity size={14} className="text-blue-500" />
-                      )}
-                      {update.phase === "executing_tool" && (
-                        <Wrench size={14} className="text-amber-500" />
-                      )}
-                      {update.phase === "observing" && <Eye size={14} className="text-green-500" />}
-                      {update.phase === "generating" && (
-                        <Zap size={14} className="text-purple-500" />
-                      )}
-                      {update.phase === "completed" && (
-                        <CheckCircle size={14} className="text-emerald-500" />
-                      )}
-                      {update.phase === "error" && <XCircle size={14} className="text-red-500" />}
-                      {![
-                        "thinking",
-                        "executing_tool",
-                        "observing",
-                        "generating",
-                        "completed",
-                        "error",
-                      ].includes(update.phase) && <Clock size={14} className="text-stone-400" />}
-                    </div>
-                    <div className="flex-1">
-                      <span className="text-xs font-medium text-stone-600">{update.phase}</span>
-                      <span className="text-stone-700 ml-2">{update.message}</span>
-                      {(update.stepIndex !== undefined || update.toolCallIndex !== undefined) && (
-                        <span className="text-xs text-stone-400 ml-2">
-                          {update.stepIndex !== undefined && `step ${update.stepIndex}`}
-                          {update.toolCallIndex !== undefined && ` · tool ${update.toolCallIndex}`}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {run.generatedProposals.length > 0 && (
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">生成的提案</h3>
-              <div className="space-y-2">
-                {run.generatedProposals.map(proposalId => (
-                  <div key={proposalId} className="bg-blue-50 rounded-lg p-3 text-sm text-blue-800">
-                    {proposalId}
-                  </div>
-                ))}
-              </div>
+              {Math.round(
+                (new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000
+              ) < 60
+                ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)} 秒`
+                : `${Math.floor((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000 / 60)} 分 ${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000) % 60} 秒`}
             </div>
           )}
 
@@ -416,149 +268,172 @@ export default function AgentRunDetail() {
                 详细执行时间线 ({run.actions.length + run.observations.length})
               </h3>
               <div className="space-y-2">
-                {(() => {
-                  const timeline = [
-                    ...run.actions.map(a => ({ type: "action" as const, item: a })),
-                    ...run.observations.map(o => ({ type: "observation" as const, item: o })),
-                  ];
-                  timeline.sort((a, b) => {
-                    const timeA = a.item.timestamp ? new Date(a.item.timestamp).getTime() : 0;
-                    const timeB = b.item.timestamp ? new Date(b.item.timestamp).getTime() : 0;
-                    if (Number.isNaN(timeA) || timeA === 0) return 1;
-                    if (Number.isNaN(timeB) || timeB === 0) return -1;
-                    return timeA - timeB;
-                  });
-                  return timeline.map(entry => {
-                    if (entry.type === "action") {
-                      const action = entry.item;
-                      return (
-                        <div
-                          key={action.id}
-                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-blue-400"
-                        >
-                          <div className="font-medium text-stone-800 flex items-center gap-2">
-                            <span className="text-blue-600 text-xs font-bold">ACTION</span>
-                            {action.actionType}
-                            {action.target ? ` · ${action.target}` : ""}
-                            {action.status === "needs_confirmation" && (
-                              <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
-                                <AlertTriangle size={12} /> 待确认
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-stone-500 mt-1">
-                            Status: {action.status} · Permission:{" "}
-                            {action.permissionDecision ?? "n/a"} ·{" "}
-                            {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
-                          </div>
-                          {action.toolScope && (
-                            <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
-                              <div className="font-medium mb-1">Tool Scope:</div>
-                              <div>Tool: {action.toolScope.toolName}</div>
-                              <div>Source: {action.toolScope.source}</div>
-                              <div>Risk: {action.toolScope.riskLevel}</div>
-                              <div>
-                                Capabilities: {action.toolScope.capabilities.join(", ") || "none"}
-                              </div>
+                {run.actions.map(action => {
+                  const vm = getTypedActionViewModel(action);
+                  const borderClass = vm.isBlocked
+                    ? "border-l-amber-400"
+                    : vm.isFailed
+                      ? "border-l-red-400"
+                      : vm.isSuccess
+                        ? "border-l-green-400"
+                        : "border-l-blue-400";
+                  return (
+                    <div
+                      key={action.id}
+                      className={`bg-stone-50 rounded-lg p-3 text-sm border-l-4 ${borderClass}`}
+                    >
+                      <div className="font-medium text-stone-800 flex items-center gap-2">
+                        <span className="text-blue-600 text-xs font-bold">ACTION</span>
+                        {action.actionType}
+                        {action.target ? ` · ${action.target}` : ""}
+                        {vm.needsConfirmation && (
+                          <span className="inline-flex items-center gap-1 text-orange-600 text-xs">
+                            <AlertTriangle size={12} /> 待确认
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs text-stone-500 mt-1">
+                        Status: {action.status} · Permission: {action.permissionDecision ?? "n/a"} ·{" "}
+                        {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
+                      </div>
+                      {vm.typedReasonAvailable && (
+                        <div className="mt-2 space-y-1">
+                          {vm.blockReasonLabel && (
+                            <div className="text-xs bg-red-50 rounded px-2 py-1 text-red-700">
+                              阻断原因: {vm.blockReasonLabel}
                             </div>
                           )}
-                          {/* Linked proposal extraction */}
-                          {(() => {
-                            let proposalId: string | null = null;
-                            if (action.output) {
-                              // Try direct proposal_id
-                              if (typeof action.output === "object" && action.output !== null) {
-                                const direct = (action.output as any).proposal_id;
-                                if (direct) proposalId = direct;
-                                // Try wrapped in text field
-                                const text = (action.output as any).text;
-                                if (text && typeof text === "string") {
-                                  try {
-                                    const parsed = JSON.parse(text);
-                                    if (parsed.proposal_id) proposalId = parsed.proposal_id;
-                                  } catch {
-                                    /* ignore parse error */
-                                  }
-                                }
+                          {vm.proposalReasonLabel && (
+                            <div className="text-xs bg-blue-50 rounded px-2 py-1 text-blue-700">
+                              需确认: {vm.proposalReasonLabel}
+                            </div>
+                          )}
+                          {vm.failureKindLabel && (
+                            <div className="text-xs bg-red-50 rounded px-2 py-1 text-red-700">
+                              失败类型: {vm.failureKindLabel}
+                            </div>
+                          )}
+                          {vm.agentSpecId && (
+                            <div className="text-xs text-stone-500">
+                              AgentSpec: {vm.agentSpecId}
+                            </div>
+                          )}
+                          {vm.proposalId && (
+                            <div className="text-xs text-blue-600">Proposal: {vm.proposalId}</div>
+                          )}
+                        </div>
+                      )}
+                      {/* Legacy: show error as detail only (not for state inference) */}
+                      {action.error && !vm.typedReasonAvailable && (
+                        <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                          {action.error}
+                        </div>
+                      )}
+                      {action.toolScope && (
+                        <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                          <div className="font-medium mb-1">Tool Scope:</div>
+                          <div>Tool: {action.toolScope.toolName}</div>
+                          <div>Source: {action.toolScope.source}</div>
+                          <div>Risk: {action.toolScope.riskLevel}</div>
+                          <div>
+                            Capabilities: {action.toolScope.capabilities.join(", ") || "none"}
+                          </div>
+                        </div>
+                      )}
+                      {(() => {
+                        let proposalId: string | null = null;
+                        if (action.output) {
+                          if (typeof action.output === "object" && action.output !== null) {
+                            const direct = (action.output as any).proposal_id;
+                            if (direct) proposalId = direct;
+                            const text = (action.output as any).text;
+                            if (text && typeof text === "string") {
+                              try {
+                                const parsed = JSON.parse(text);
+                                if (parsed.proposal_id) proposalId = parsed.proposal_id;
+                              } catch {
+                                /* ignore */
                               }
                             }
-                            if (!proposalId && run.generatedProposals.length > 0) {
-                              // Fallback: link to the first generated proposal if action is recent
-                              proposalId = run.generatedProposals[0];
-                            }
-                            return proposalId ? (
-                              <div className="mt-2 text-xs bg-blue-50 rounded p-2">
-                                <div className="font-medium text-blue-800 mb-1">
-                                  Linked Proposal:
-                                </div>
-                                <div className="text-blue-700">{proposalId}</div>
-                                <button
-                                  onClick={() => navigate(`/review?proposal=${proposalId}`)}
-                                  className="mt-1 text-blue-600 hover:text-blue-800 underline"
-                                >
-                                  查看 Proposal
-                                </button>
-                              </div>
-                            ) : null;
-                          })()}
-                          {action.status === "needs_confirmation" && (
-                            <div className="mt-2">
-                              <button
-                                onClick={async () => {
-                                  try {
-                                    await replayAgentAction(run.id, action.id);
-                                    await loadRun(run.id);
-                                  } catch (e) {
-                                    alert(`Replay failed: ${e}`);
-                                  }
-                                }}
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
-                              >
-                                <Play size={12} />
-                                重新执行
-                              </button>
-                            </div>
-                          )}
-                          {action.error && (
-                            <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                              {action.error}
-                            </div>
-                          )}
-                          {action.output && (
-                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                              {JSON.stringify(action.output, null, 2)}
-                            </pre>
-                          )}
-                        </div>
-                      );
-                    } else {
-                      const obs = entry.item;
-                      return (
-                        <div
-                          key={obs.id}
-                          className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400"
-                        >
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
-                            <span className="text-xs text-stone-500">
-                              {new Date(obs.timestamp).toLocaleString()}
-                            </span>
+                          }
+                        }
+                        if (!proposalId && run.generatedProposals.length > 0) {
+                          proposalId = run.generatedProposals[0];
+                        }
+                        if (!proposalId) return null;
+                        return (
+                          <div className="mt-2 text-xs bg-blue-50 rounded p-2">
+                            <div className="font-medium text-blue-800 mb-1">Linked Proposal:</div>
+                            <div className="text-blue-700">{proposalId}</div>
+                            <button
+                              onClick={() => navigate(`/review?proposal=${proposalId}`)}
+                              className="mt-1 text-blue-600 hover:text-blue-800 underline"
+                            >
+                              查看 Proposal
+                            </button>
                           </div>
-                          <div className="text-stone-800">{obs.content}</div>
-                          <div className="text-xs text-stone-500 mt-1">
-                            Source: {obs.source}
-                            {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
-                          </div>
-                          {obs.structuredResult && (
-                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                              {JSON.stringify(obs.structuredResult, null, 2)}
-                            </pre>
-                          )}
+                        );
+                      })()}
+                      {action.status === "needs_confirmation" && (
+                        <div className="mt-2 space-y-2">
+                          <button
+                            onClick={async () => {
+                              try {
+                                const result = await replayAgentAction(run.id, action.id);
+                                await loadRun(run.id);
+                                if (result.status === "blocked" || result.status === "failed") {
+                                  const reason = result.error ?? result.status;
+                                  alert(
+                                    `重放结果: ${result.status}${reason ? ` — ${reason.slice(0, 100)}` : ""}`
+                                  );
+                                }
+                              } catch (e) {
+                                alert(`Replay failed: ${e}`);
+                              }
+                            }}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded bg-orange-600 text-white text-xs hover:bg-orange-700"
+                          >
+                            <Play size={12} />
+                            重新执行
+                          </button>
                         </div>
-                      );
-                    }
-                  });
-                })()}
+                      )}
+                      {action.error && (
+                        <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                          {action.error}
+                        </div>
+                      )}
+                      {action.output && (
+                        <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                          {JSON.stringify(action.output, null, 2)}
+                        </pre>
+                      )}
+                    </div>
+                  );
+                })}
+                {run.observations.map(obs => (
+                  <div
+                    key={obs.id}
+                    className="bg-stone-50 rounded-lg p-3 text-sm border-l-4 border-green-400"
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-green-600 text-xs font-bold">OBSERVATION</span>
+                      <span className="text-xs text-stone-500">
+                        {new Date(obs.timestamp).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="text-stone-800">{obs.content}</div>
+                    <div className="text-xs text-stone-500 mt-1">
+                      Source: {obs.source}
+                      {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
+                    </div>
+                    {obs.structuredResult && (
+                      <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
+                        {JSON.stringify(obs.structuredResult, null, 2)}
+                      </pre>
+                    )}
+                  </div>
+                ))}
               </div>
             </div>
           )}

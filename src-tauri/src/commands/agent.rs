@@ -149,11 +149,25 @@ pub(crate) async fn replay_action_internal(
             .get_run(run_id)
             .map_err(AppError::from)?
             .ok_or_else(|| {
-                record_replay_failed("Run not found", None, None, None, None, None);
+                record_replay_failed(
+                    "Run not found",
+                    Some(ExecutionBlockReason::ReplaySpecMissing),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
                 AppError::not_found("Run not found")
             })?
     } else {
-        record_replay_failed("AgentRun store not available", None, None, None, None, None);
+        record_replay_failed(
+            "AgentRun store not available",
+            None,
+            Some("internal_error"),
+            None,
+            None,
+            None,
+        );
         return Err(AppError::internal("AgentRun store not available"));
     };
 
@@ -162,7 +176,14 @@ pub(crate) async fn replay_action_internal(
         .iter()
         .position(|a| a.id == action_id)
         .ok_or_else(|| {
-            record_replay_failed("Action not found", None, None, None, None, None);
+            record_replay_failed(
+                "Action not found",
+                Some(ExecutionBlockReason::ReplaySpecMissing),
+                None,
+                None,
+                None,
+                None,
+            );
             AppError::not_found("Action not found")
         })?;
 

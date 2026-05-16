@@ -512,4 +512,228 @@ describe("RunTracePanel", () => {
     expect(panelHtml).toContain("deepseek");
     expect(panelHtml).not.toContain("[已隐藏]");
   });
+
+  // ── Batch 5: Typed Execution Contract tests ───────────────────────────
+
+  it("renders tool blocked typed payload with block_reason and agent_spec_id", async () => {
+    const typedBlocked: AgentRunEvent[] = [
+      {
+        id: "evt-typed-blocked",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "web.search blocked by AgentSpec",
+        payload: {
+          status: "blocked",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "agent_spec_denied",
+          proposal_reason: null,
+          failure_kind: null,
+          agent_spec_id: "main.default",
+        },
+        createdAt: "2026-05-15T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={typedBlocked} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-typed-blocked"));
+    expect(screen.getByText("阻断详情 (Typed Contract)")).toBeDefined();
+    expect(screen.getByText("AgentSpec 拒绝")).toBeDefined();
+    expect(screen.getByText("main.default")).toBeDefined();
+    expect(screen.getByText("web.search")).toBeDefined();
+  });
+
+  it("renders replay failed typed payload with block_reason", async () => {
+    const replayFailed: AgentRunEvent[] = [
+      {
+        id: "evt-replay-fail",
+        runId: "run-001",
+        eventType: "replay.failed",
+        actor: "runtime",
+        summary: "Replay failed: missing spec",
+        payload: {
+          status: "failed",
+          run_id: "run-001",
+          action_id: "action-replay-2",
+          replay_of_action_id: "action-original-2",
+          human_message: "Replay failed: missing action spec",
+          block_reason: "replay_spec_missing",
+          failure_kind: null,
+          tool_name: "remote_tool",
+          source: "mcp:my-server",
+          agent_spec_id: "main.default",
+        },
+        createdAt: "2026-05-15T10:01:00Z",
+      },
+    ];
+    render(<RunTracePanel events={replayFailed} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-replay-fail"));
+    expect(screen.getByText("重放失败 (Typed Contract)")).toBeDefined();
+    expect(screen.getByText("缺少重放规格")).toBeDefined();
+    expect(screen.getByText("remote_tool")).toBeDefined();
+    expect(screen.getByText("mcp:my-server")).toBeDefined();
+  });
+
+  it("renders mcp target block wrapper and target fields", async () => {
+    const mcpTargetBlock: AgentRunEvent[] = [
+      {
+        id: "evt-mcp-target",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "mcp.call_tool target blocked",
+        payload: {
+          status: "blocked",
+          tool_name: "mcp.call_tool",
+          source: "builtin",
+          target_tool_name: "remote_search",
+          target_source: "mcp:my-server",
+          wrapper_tool_name: "mcp.call_tool",
+          block_reason: "tool_permission_denied",
+          proposal_reason: null,
+          failure_kind: null,
+          agent_spec_id: "main.default",
+        },
+        createdAt: "2026-05-15T10:00:00Z",
+      },
+    ];
+    render(
+      <RunTracePanel events={mcpTargetBlock} runId="run-001" show={true} onToggle={() => {}} />
+    );
+    await userEvent.click(screen.getByTestId("event-row-evt-mcp-target"));
+    expect(screen.getByText("MCP 包装:")).toBeDefined();
+    expect(screen.getByText("remote_search")).toBeDefined();
+    expect(screen.getByText("mcp:my-server")).toBeDefined();
+    expect(screen.getByText("工具权限拒绝")).toBeDefined();
+  });
+
+  it("renders network policy ask with proposal_id", async () => {
+    const networkAsk: AgentRunEvent[] = [
+      {
+        id: "evt-net-ask",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "web.search needs confirmation",
+        payload: {
+          status: "needs_confirmation",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: null,
+          proposal_reason: "network_policy_ask",
+          proposal_id: "proposal-net-1",
+          failure_kind: null,
+          agent_spec_id: "main.default",
+        },
+        createdAt: "2026-05-15T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={networkAsk} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-net-ask"));
+    expect(screen.getByText("网络策略询问")).toBeDefined();
+    expect(screen.getByText("proposal-net-1")).toBeDefined();
+  });
+
+  it("does not infer reason from message text when typed fields are absent", async () => {
+    // Old-style event with payload missing required typed fields
+    const legacyEvent: AgentRunEvent[] = [
+      {
+        id: "evt-legacy",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "email.read blocked: declarative-only stub",
+        payload: { tool: "email.read", reason: "declarative-only" },
+        createdAt: "2026-05-06T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={legacyEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-legacy"));
+    // Payload fails structural validation (no status, no tool_name, no source) →
+    // parsed as unknown → typed contract section does NOT render
+    expect(screen.queryByText("阻断详情 (Typed Contract)")).toBeNull();
+    // Should NOT have typed reason badges since none present
+    expect(screen.queryByText("AgentSpec 拒绝")).toBeNull();
+    expect(screen.queryByText("工具权限拒绝")).toBeNull();
+  });
+
+  it("renders replay started and completed typed payloads", async () => {
+    const replayEvents: AgentRunEvent[] = [
+      {
+        id: "evt-replay-start",
+        runId: "run-001",
+        eventType: "replay.started",
+        actor: "runtime",
+        summary: "Replay started",
+        payload: {
+          status: "started",
+          run_id: "run-001",
+          action_id: "action-replay-1",
+          replay_of_action_id: "action-orig-1",
+          agent_spec_id: "main.default",
+          tool_name: "web.search",
+          source: "builtin",
+        },
+        createdAt: "2026-05-15T10:01:00Z",
+      },
+      {
+        id: "evt-replay-done",
+        runId: "run-001",
+        eventType: "replay.completed",
+        actor: "runtime",
+        summary: "Replay completed",
+        payload: {
+          status: "completed",
+          run_id: "run-001",
+          action_id: "action-replay-1",
+          replay_of_action_id: "action-orig-1",
+          agent_spec_id: "main.default",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: null,
+          proposal_reason: null,
+          failure_kind: null,
+        },
+        createdAt: "2026-05-15T10:01:01Z",
+      },
+    ];
+    render(<RunTracePanel events={replayEvents} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-replay-start"));
+    expect(screen.getByText("重放开始 (Typed Contract)")).toBeDefined();
+    await userEvent.click(screen.getByTestId("event-row-evt-replay-done"));
+    expect(screen.getByText("重放完成 (Typed Contract)")).toBeDefined();
+    expect(screen.getByText("成功")).toBeDefined();
+  });
+
+  it("renders replay completed blocked with typed reason", async () => {
+    const replayBlocked: AgentRunEvent[] = [
+      {
+        id: "evt-replay-blocked",
+        runId: "run-001",
+        eventType: "replay.completed",
+        actor: "runtime",
+        summary: "Replay completed but blocked",
+        payload: {
+          status: "blocked",
+          run_id: "run-001",
+          action_id: "action-replay-3",
+          replay_of_action_id: "action-orig-3",
+          agent_spec_id: "main.default",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "replay_spec_missing",
+          proposal_reason: null,
+          failure_kind: null,
+        },
+        createdAt: "2026-05-15T10:01:01Z",
+      },
+    ];
+    render(
+      <RunTracePanel events={replayBlocked} runId="run-001" show={true} onToggle={() => {}} />
+    );
+    await userEvent.click(screen.getByTestId("event-row-evt-replay-blocked"));
+    expect(screen.getByText("重放完成 (Typed Contract)")).toBeDefined();
+    expect(screen.getByText("缺少重放规格")).toBeDefined();
+    expect(screen.getByText("已阻断")).toBeDefined();
+  });
 });

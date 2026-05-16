@@ -51,12 +51,20 @@ impl AgentLoop {
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
             if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
+                let blocked_tool_name = action_request.target.clone();
                 self.try_record_event(
                     &run.id,
                     AgentRunEventType::ToolCallBlocked,
                     AgentEventActor::Runtime,
                     "Tool call budget exceeded",
                     serde_json::json!({
+                        "status": "blocked",
+                        "tool_name": blocked_tool_name,
+                        "source": "runtime",
+                        "block_reason": "invalid_arguments",
+                        "proposal_reason": null,
+                        "failure_kind": null,
+                        "agent_spec_id": null,
                         "max_tool_calls": self.config.max_tool_calls,
                         "current_count": *tool_call_count + executed_this_step,
                     }),

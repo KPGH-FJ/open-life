@@ -12,8 +12,10 @@ import {
   ShieldCheck,
   RotateCcw,
   Info,
+  Ban,
 } from "lucide-react";
 import type { ToolCallResult } from "../tauri";
+import { getTypedToolCallViewModel } from "../utils/typedContract";
 
 interface Props {
   call: ToolCallResult;
@@ -82,6 +84,50 @@ function RiskBadge({ level }: { level?: string }) {
   );
 }
 
+function TypedReasonBlock({
+  blockReasonLabel,
+  proposalReasonLabel,
+  failureKindLabel,
+  agentSpecId,
+  proposalId,
+}: {
+  blockReasonLabel: string | null;
+  proposalReasonLabel: string | null;
+  failureKindLabel: string | null;
+  agentSpecId: string | null;
+  proposalId: string | null;
+}) {
+  if (!blockReasonLabel && !proposalReasonLabel && !failureKindLabel && !agentSpecId && !proposalId)
+    return null;
+  return (
+    <div className="rounded-md bg-slate-100 border border-slate-200 p-2 space-y-1 text-[10px]">
+      <div className="font-medium text-slate-600 flex items-center gap-1">
+        <Ban size={10} />
+        Typed Reason
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        {blockReasonLabel && (
+          <span className="px-1 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+            {blockReasonLabel}
+          </span>
+        )}
+        {proposalReasonLabel && (
+          <span className="px-1 py-0.5 rounded bg-blue-100 text-blue-700 font-medium">
+            {proposalReasonLabel}
+          </span>
+        )}
+        {failureKindLabel && (
+          <span className="px-1 py-0.5 rounded bg-red-100 text-red-700 font-medium">
+            {failureKindLabel}
+          </span>
+        )}
+      </div>
+      {agentSpecId && <div className="text-slate-500">AgentSpec: {agentSpecId}</div>}
+      {proposalId && <div className="text-blue-600">Proposal: {proposalId}</div>}
+    </div>
+  );
+}
+
 function PermissionLabel({ decision }: { decision?: string }) {
   const labels: Record<string, string> = {
     allow: "允许",
@@ -130,6 +176,8 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
       setExecuting(false);
     }
   };
+
+  const typedInfo = getTypedToolCallViewModel(call);
 
   const handleReplay = async () => {
     if (!onReplay || replaying) return;
@@ -200,6 +248,13 @@ export default function ToolCallCard({ call, onExecute, onReplay }: Props) {
                 : "该工具调用需要授权确认。"}
             </p>
           </div>
+          <TypedReasonBlock
+            blockReasonLabel={typedInfo.blockReasonLabel}
+            proposalReasonLabel={typedInfo.proposalReasonLabel}
+            failureKindLabel={typedInfo.failureKindLabel}
+            agentSpecId={typedInfo.agentSpecId}
+            proposalId={typedInfo.proposalId}
+          />
           {call.privacy_warnings && call.privacy_warnings.length > 0 && (
             <div className="text-xs text-orange-900 bg-white/80 rounded p-2">
               <div className="font-medium mb-1">隐私提醒:</div>

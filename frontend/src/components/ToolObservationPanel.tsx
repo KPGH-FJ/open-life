@@ -11,8 +11,10 @@ import {
   Eye,
   Info,
   EyeOff,
+  Ban,
 } from "lucide-react";
 import type { AgentRun } from "../tauri";
+import { getTypedActionViewModel } from "../utils/typedContract";
 
 interface Props {
   run: AgentRun;
@@ -69,10 +71,6 @@ function statusBadge(status: string, permissionDecision?: string) {
       {status}
     </span>
   );
-}
-
-function isDeclarativeOnly(toolScope: AgentRun["actions"][number]["toolScope"]): boolean {
-  return toolScope?.capabilities?.includes("declarative_only") ?? false;
 }
 
 function boundedPreview(
@@ -238,12 +236,9 @@ export default function ToolObservationPanel({ run }: Props) {
       <div className="space-y-2">
         {toolActions.map(action => {
           const scope = action.toolScope;
-          const isBlocked =
-            action.status === "blocked" ||
-            action.status === "needs_confirmation" ||
-            action.permissionDecision === "deny" ||
-            action.permissionDecision === "ask_every_time";
-          const isFailed = action.status === "failed" || action.error;
+          const vm = getTypedActionViewModel(action);
+          const isBlocked = vm.isBlocked;
+          const isFailed = vm.isFailed;
           const isExpanded = expandedTools.has(action.id);
 
           return (
@@ -278,7 +273,7 @@ export default function ToolObservationPanel({ run }: Props) {
                 </span>
                 {statusBadge(action.status, action.permissionDecision)}
                 {scope && riskBadge(scope.riskLevel)}
-                {scope && isDeclarativeOnly(scope) && (
+                {vm.isDeclarativeOnly && (
                   <span className="text-[10px] text-stone-400 bg-stone-100 px-1.5 py-0.5 rounded border border-stone-200">
                     声明-only
                   </span>
@@ -303,6 +298,13 @@ export default function ToolObservationPanel({ run }: Props) {
                     <div className="flex flex-wrap gap-x-4 gap-y-1 text-stone-500">
                       <span>来源: {scope.source}</span>
                       <span>类型: {scope.actionType}</span>
+                      {scope.riskLevel && <span>风险: {scope.riskLevel}</span>}
+                      {scope.requiresConfirmation !== undefined && (
+                        <span>需要确认: {scope.requiresConfirmation ? "是" : "否"}</span>
+                      )}
+                      {scope.allowed !== undefined && (
+                        <span>已授权: {scope.allowed ? "是" : "否"}</span>
+                      )}
                       {scope.capabilities.length > 0 && (
                         <span>能力: {scope.capabilities.join(", ")}</span>
                       )}
@@ -321,22 +323,79 @@ export default function ToolObservationPanel({ run }: Props) {
                     )}
                   </div>
 
-                  {/* Block reason */}
+                  {/* Block reason — with typed distinction */}
                   {isBlocked && (
                     <div className="rounded bg-orange-100/50 border border-orange-200 px-3 py-2 space-y-1">
                       <div className="font-medium text-orange-800 flex items-center gap-1.5">
                         <Info size={12} /> 阻断原因
                       </div>
-                      <div className="text-orange-700">
-                        {action.status === "blocked"
-                          ? "该工具调用被权限策略或沙盒规则阻断。"
-                          : "该工具调用需要用户授权确认。"}
-                      </div>
-                      {scope && isDeclarativeOnly(scope) && (
-                        <div className="text-orange-600 text-[11px]">
-                          <EyeOff size={10} className="inline mr-1" />
-                          此工具为声明式 (declarative-only)，不具备实际执行能力。
-                        </div>
+                      {vm.typedReasonAvailable ? (
+                        <>
+                          {vm.blockReasonLabel && (
+                            <div className="text-red-700 text-[11px] font-medium">
+                              {vm.blockReasonLabel}
+                            </div>
+                          )}
+                          {vm.proposalReasonLabel && (
+                            <div className="text-blue-700 text-[11px] font-medium">
+                              需确认: {vm.proposalReasonLabel}
+                            </div>
+                          )}
+                          {vm.failureKindLabel && (
+                            <div className="text-red-700 text-[11px] font-medium">
+                              失败类型: {vm.failureKindLabel}
+                            </div>
+                          )}
+                          {vm.agentSpecId && (
+                            <div className="text-stone-600 text-[11px]">
+                              AgentSpec: {vm.agentSpecId}
+                            </div>
+                          )}
+                          {vm.proposalId && (
+                            <div className="text-blue-600 text-[11px]">
+                              Proposal: {vm.proposalId}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          {scope && scope.allowed === false && (
+                            <div className="text-orange-700 text-[11px]">
+                              ToolScope 标记为未授权 (allowed=false)
+                            </div>
+                          )}
+                          {action.status === "blocked" && !scope && (
+                            <div className="text-orange-700">
+                              该工具调用被权限策略或沙盒规则阻断。
+                            </div>
+                          )}
+                          {action.status === "blocked" && scope && scope.allowed !== false && (
+                            <div className="text-orange-700">
+                              该工具调用被权限策略或沙盒规则阻断。
+                            </div>
+                          )}
+                          {action.status === "needs_confirmation" && (
+                            <div className="text-orange-700">该工具调用需要用户授权确认。</div>
+                          )}
+                          {action.permissionDecision === "ask_every_time" && (
+                            <div className="text-orange-700 text-[11px] flex items-center gap-1">
+                              <Ban size={10} />
+                              策略: 每次询问 (ask_every_time)
+                            </div>
+                          )}
+                          {action.permissionDecision === "deny" && (
+                            <div className="text-red-700 text-[11px] flex items-center gap-1">
+                              <Ban size={10} />
+                              策略: 拒绝 (deny)
+                            </div>
+                          )}
+                          {scope && vm.isDeclarativeOnly && (
+                            <div className="text-orange-600 text-[11px]">
+                              <EyeOff size={10} className="inline mr-1" />
+                              此工具为声明式 (declarative-only)，不具备实际执行能力。
+                            </div>
+                          )}
+                        </>
                       )}
                       <Link
                         to="/review"

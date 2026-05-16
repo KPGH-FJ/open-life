@@ -476,4 +476,177 @@ describe("ToolObservationPanel", () => {
     expect(screen.getByText(/估算/)).toBeDefined();
     expect(screen.getByText(/字符/)).toBeDefined();
   });
+
+  // ── Batch 5: Typed Execution Contract tests ───────────────────────────
+
+  it("renders tool scope with source and risk level and allowed/requiresConfirmation fields", async () => {
+    const run = makeRun({
+      actions: [
+        {
+          id: "action-typed-scope",
+          actionType: "tool_call",
+          status: "blocked",
+          input: {},
+          timestamp: "2026-05-15T10:00:05Z",
+          toolScope: {
+            toolId: "file.write_proposal",
+            toolName: "file.write_proposal",
+            source: "builtin",
+            riskLevel: "high",
+            capabilities: ["write"],
+            actionType: "write",
+            requiresConfirmation: true,
+            allowed: false,
+          },
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <ToolObservationPanel run={run} />
+      </MemoryRouter>
+    );
+    await userEvent.click(screen.getByText("file.write_proposal"));
+    expect(screen.getByText("来源: builtin")).toBeDefined();
+    expect(screen.getByText("风险: high")).toBeDefined();
+    expect(screen.getByText("需要确认: 是")).toBeDefined();
+    expect(screen.getByText("已授权: 否")).toBeDefined();
+    expect(screen.getByText("ToolScope 标记为未授权 (allowed=false)")).toBeDefined();
+  });
+
+  it("renders denied permission decision with visual distinction", async () => {
+    const run = makeRun({
+      actions: [
+        {
+          id: "action-deny",
+          actionType: "tool_call",
+          status: "blocked",
+          permissionDecision: "deny",
+          input: {},
+          timestamp: "2026-05-15T10:00:05Z",
+          toolScope: {
+            toolId: "web.search",
+            toolName: "web.search",
+            source: "builtin",
+            riskLevel: "medium",
+            capabilities: ["network"],
+            actionType: "read",
+          },
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <ToolObservationPanel run={run} />
+      </MemoryRouter>
+    );
+    await userEvent.click(screen.getByText("web.search"));
+    expect(screen.getByText("策略: 拒绝 (deny)")).toBeDefined();
+  });
+
+  it("renders needs_confirmation state from typed action status", async () => {
+    const run = makeRun({
+      actions: [
+        {
+          id: "action-needsconf",
+          actionType: "mcp_tool_call",
+          status: "needs_confirmation",
+          permissionDecision: "ask_every_time",
+          input: {},
+          timestamp: "2026-05-15T10:00:05Z",
+          toolScope: {
+            toolId: "web.search",
+            toolName: "web.search",
+            source: "builtin",
+            riskLevel: "medium",
+            capabilities: ["network"],
+            actionType: "read",
+            allowed: false,
+          },
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <ToolObservationPanel run={run} />
+      </MemoryRouter>
+    );
+    await userEvent.click(screen.getByText("web.search"));
+    expect(screen.getByText("该工具调用需要用户授权确认。")).toBeDefined();
+    expect(screen.getByText("策略: 每次询问 (ask_every_time)")).toBeDefined();
+  });
+
+  // ── Hardened: invalid typed reasons are never displayed ──
+
+  it("invalid block_reason not displayed as typed reason label", async () => {
+    const run = makeRun({
+      actions: [
+        {
+          id: "action-invalid-reason",
+          actionType: "tool_call",
+          status: "blocked",
+          input: {},
+          output: { block_reason: "unknown_random_string" },
+          timestamp: "2026-05-15T10:00:05Z",
+          toolScope: {
+            toolId: "web.search",
+            toolName: "web.search",
+            source: "builtin",
+            riskLevel: "medium",
+            capabilities: ["network"],
+            actionType: "read",
+            allowed: false,
+          },
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <ToolObservationPanel run={run} />
+      </MemoryRouter>
+    );
+    await userEvent.click(screen.getByText("web.search"));
+    // Typed reason availability is false → fallback path used
+    // Fallback messages appear instead of typed label
+    expect(screen.getByText("ToolScope 标记为未授权 (allowed=false)")).toBeDefined();
+    // The typed reason labels (red/orange text) should not contain the invalid text
+    const reasonSection = document.querySelector(".bg-orange-100\\/50");
+    if (reasonSection) {
+      const typedLabels = reasonSection.querySelectorAll(".text-red-700, .text-blue-700");
+      for (const label of typedLabels) {
+        expect(label.textContent).not.toContain("unknown_random_string");
+      }
+    }
+  });
+
+  it("empty block_reason not displayed", async () => {
+    const run = makeRun({
+      actions: [
+        {
+          id: "action-empty-reason",
+          actionType: "tool_call",
+          status: "blocked",
+          input: {},
+          output: { block_reason: "" },
+          timestamp: "2026-05-15T10:00:05Z",
+          toolScope: {
+            toolId: "web.search",
+            toolName: "web.search",
+            source: "builtin",
+            riskLevel: "medium",
+            capabilities: ["network"],
+            actionType: "read",
+          },
+        },
+      ],
+    });
+    render(
+      <MemoryRouter>
+        <ToolObservationPanel run={run} />
+      </MemoryRouter>
+    );
+    await userEvent.click(screen.getByText("web.search"));
+    // Generic blocked message should appear
+    expect(screen.getByText("该工具调用被权限策略或沙盒规则阻断。")).toBeDefined();
+  });
 });

@@ -279,6 +279,9 @@ export type AgentRunEventType =
   | "plan.continuation_requested"
   | "plan.action_replayed"
   | "plan.action_replay_requested"
+  | "replay.started"
+  | "replay.completed"
+  | "replay.failed"
   | "compaction.created"
   | "shell.blocked"
   | "shell.completed"
@@ -318,6 +321,104 @@ export interface AgentRunEventTimelineProps {
   events: AgentRunEvent[];
   runId: string;
 }
+
+// ── Typed Execution Contracts (Batch 5) ───────────────────────────────
+
+/** String representations of ExecutionBlockReason (Rust enum). */
+export type ExecutionBlockReason =
+  | "agent_spec_denied"
+  | "agent_spec_missing"
+  | "tool_permission_denied"
+  | "network_policy_denied"
+  | "sandbox_denied"
+  | "missing_mcp_client"
+  | "disabled_manifest"
+  | "declarative_only"
+  | "invalid_arguments"
+  | "replay_spec_missing"
+  | "path_not_safe"
+  | "domain_blocked"
+  | "pii_detected"
+  | "unknown";
+
+/** String representations of ExecutionProposalReason (Rust enum). */
+export type ExecutionProposalReason =
+  | "network_policy_ask"
+  | "tool_permission_ask"
+  | "high_risk_action";
+
+/** String representations of ExecutionFailureKind (Rust enum). */
+export type ExecutionFailureKind =
+  | "tool_runtime_error"
+  | "mcp_client_error"
+  | "missing_mcp_server"
+  | "internal_error"
+  | "serialization_error";
+
+/** Unified ToolCallBlocked event payload contract (Batch 4). */
+export interface ToolCallBlockedPayload {
+  status: "blocked" | "needs_confirmation";
+  tool_name: string;
+  source: string;
+  block_reason: ExecutionBlockReason | null;
+  proposal_reason: ExecutionProposalReason | null;
+  failure_kind: null; // always null for ToolCallBlocked
+  agent_spec_id: string | null;
+  human_message?: string;
+  // mcp.call_tool wrapper block extras
+  target_tool_name?: string;
+  target_source?: string;
+  wrapper_tool_name?: string;
+  // NetworkPolicy ask extras
+  proposal_id?: string;
+}
+
+/** ReplayStarted event payload. */
+export interface ReplayStartedPayload {
+  status: "started";
+  run_id: string;
+  action_id: string;
+  replay_of_action_id: string;
+  agent_spec_id: string;
+  tool_name: string;
+  source: string;
+}
+
+/** ReplayCompleted event payload. */
+export interface ReplayCompletedPayload {
+  status: "completed" | "blocked" | "needs_confirmation";
+  run_id: string;
+  action_id: string;
+  replay_of_action_id: string;
+  agent_spec_id: string;
+  tool_name: string;
+  source: string;
+  block_reason: ExecutionBlockReason | null;
+  proposal_reason: ExecutionProposalReason | null;
+  failure_kind: ExecutionFailureKind | null;
+}
+
+/** ReplayFailed event payload. */
+export interface ReplayFailedPayload {
+  status: "failed";
+  run_id: string;
+  action_id: string;
+  replay_of_action_id: string;
+  human_message: string;
+  block_reason: ExecutionBlockReason | null;
+  failure_kind: ExecutionFailureKind | null;
+  tool_name: string | null;
+  source: string | null;
+  agent_spec_id: string | null;
+}
+
+/** Typed payload union discriminated by the event's `eventType` field. */
+export type TypedEventPayload =
+  | { kind: "tool_call_blocked"; data: ToolCallBlockedPayload }
+  | { kind: "replay_started"; data: ReplayStartedPayload }
+  | { kind: "replay_completed"; data: ReplayCompletedPayload }
+  | { kind: "replay_failed"; data: ReplayFailedPayload }
+  | { kind: "unknown"; data: Record<string, unknown> };
 
 // ── AgentPlan types ────────────────────────────────────────────────────
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { listAgentRuns, deleteAgentRun, type AgentRun } from "../tauri";
+import { listAgentRuns, deleteAgentRun, listAgentRunEvents, type AgentRun } from "../tauri";
+import type { AgentRunEvent } from "../types";
 import {
   Activity,
   Clock,
@@ -14,7 +15,9 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
+  Ban,
 } from "lucide-react";
+import { getTypedRunHints } from "../utils/typedContract";
 
 function statusIcon(status: string) {
   switch (status) {
@@ -47,6 +50,75 @@ function kindLabel(kind: string): string {
   return labels[kind] || kind;
 }
 
+function typedRunHint(run: AgentRun, events: AgentRunEvent[]): React.ReactNode {
+  const typedHints = getTypedRunHints(events);
+  const hints: React.ReactNode[] = [];
+
+  // Typed hints from event payloads (highest priority)
+  for (const th of typedHints) {
+    const cls =
+      th.severity === "error"
+        ? "text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded border border-red-100"
+        : th.severity === "warning"
+          ? "text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-100"
+          : "text-[10px] text-stone-500 bg-stone-50 px-1.5 py-0.5 rounded border border-stone-100";
+    hints.push(
+      <span key={th.key} className={`inline-flex items-center gap-1 ${cls}`}>
+        {th.severity === "error" ? (
+          <Ban size={10} />
+        ) : th.severity === "warning" ? (
+          <AlertTriangle size={10} />
+        ) : (
+          <RotateCcw size={10} />
+        )}
+        {th.text}
+      </span>
+    );
+  }
+
+  // Fallback: if no typed hints, show action status counts
+  if (typedHints.length === 0) {
+    const blockedActions = run.actions.filter(a => a.status === "blocked");
+    const needsConfActions = run.actions.filter(a => a.status === "needs_confirmation");
+
+    if (blockedActions.length > 0) {
+      hints.push(
+        <span
+          key="blocked"
+          className="inline-flex items-center gap-1 text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded border border-red-100"
+        >
+          <Ban size={10} /> {blockedActions.length} 个工具被阻断
+        </span>
+      );
+    }
+    if (needsConfActions.length > 0) {
+      hints.push(
+        <span
+          key="needsconf"
+          className="inline-flex items-center gap-1 text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-100"
+        >
+          <AlertTriangle size={10} /> {needsConfActions.length} 个工具待确认
+        </span>
+      );
+    }
+
+    const replayFailedEvents = events.filter(e => e.eventType === "replay.failed");
+    if (replayFailedEvents.length > 0) {
+      hints.push(
+        <span
+          key="replayfail"
+          className="inline-flex items-center gap-1 text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded border border-red-100"
+        >
+          <RotateCcw size={10} /> {replayFailedEvents.length} 次重放失败
+        </span>
+      );
+    }
+  }
+
+  if (hints.length === 0) return null;
+  return <div className="flex flex-wrap gap-1 mt-1.5">{hints}</div>;
+}
+
 const PAGE_SIZE = 20;
 
 export default function RunsPage() {
@@ -59,6 +131,7 @@ export default function RunsPage() {
   const [selectedRuns, setSelectedRuns] = useState<Set<string>>(new Set());
   const [showTrash, setShowTrash] = useState(false);
   const [page, setPage] = useState(0);
+  const [runEvents, setRunEvents] = useState<Map<string, AgentRunEvent[]>>(new Map());
   const navigate = useNavigate();
 
   const loadRuns = useCallback(async () => {
@@ -67,6 +140,21 @@ export default function RunsPage() {
       const data = await listAgentRuns(100, 0);
       setRuns(data);
       setError(null);
+      // Fetch events for ALL loaded runs — typed governance events (replay.failed,
+      // tool.call_blocked, etc.) must be discovered from the event stream, not inferred
+      // from action status. Per-run errors are isolated.
+      const newEvents = new Map<string, AgentRunEvent[]>();
+      await Promise.all(
+        data.map(async r => {
+          try {
+            const evts = await listAgentRunEvents(r.id);
+            newEvents.set(r.id, evts);
+          } catch {
+            /* ignore per-run errors */
+          }
+        })
+      );
+      setRunEvents(newEvents);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -379,6 +467,7 @@ export default function RunsPage() {
                           {run.generatedProposals.length} 个提案
                         </div>
                       )}
+                      {typedRunHint(run, runEvents.get(run.id) ?? [])}
                     </div>
                   </div>
                 </div>

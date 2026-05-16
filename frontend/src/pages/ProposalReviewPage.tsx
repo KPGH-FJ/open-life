@@ -31,8 +31,14 @@ import {
   type AgentProposal,
   type AppConfig,
   type SystemDiagnostics,
+  type AcceptProposalResult,
 } from "../tauri";
 import { isSafeMode, getSafeModeReason } from "../utils/safeMode";
+import {
+  extractTypedActionOutcome,
+  getTypedOutcomeLabels,
+  getTypedProposalHint,
+} from "../utils/typedContract";
 
 function valuePreview(value: unknown): string {
   if (value === null || value === undefined) return "空";
@@ -219,8 +225,15 @@ export default function ProposalReviewPage() {
 
     try {
       if (action === "accept") {
-        const res = await acceptProposal(proposal.id);
-        setNotice(appliedNotice(proposal));
+        const res: AcceptProposalResult = await acceptProposal(proposal.id);
+        let noticeText = appliedNotice(proposal);
+        if (proposal.proposalType === "tool_permission") {
+          const hint = getTypedProposalHint(proposal);
+          if (hint.isNetworkPolicyAsk) {
+            noticeText += ` · 网络策略确认: 工具 ${hint.toolName ?? "unknown"} 已授权`;
+          }
+        }
+        setNotice(noticeText);
         // If backend signals the action can be replayed, expose it to the user
         const canCont = res.canContinue ?? res.can_continue;
         if (canCont) {
@@ -228,6 +241,18 @@ export default function ProposalReviewPage() {
           const actionId = res.continueActionId ?? res.continue_action_id;
           if (runId && actionId) {
             setContinueInfo({ runId, actionId });
+          }
+        }
+        // Show blocked_action info if present
+        const blockedAct = res.blockedAction ?? res.blocked_action;
+        if (blockedAct && typeof blockedAct === "object") {
+          const ba = blockedAct as Record<string, unknown>;
+          if (ba.action_type || ba.target) {
+            setNotice(
+              n =>
+                (n ?? appliedNotice(proposal)) +
+                ` · 已解除阻断动作: ${ba.action_type ?? "?"}:${ba.target ?? "?"}`
+            );
           }
         }
       } else if (action === "reject") {
@@ -261,11 +286,41 @@ export default function ProposalReviewPage() {
     setError(null);
     try {
       const result = await replayAgentAction(continueInfo.runId, continueInfo.actionId);
-      setNotice(
-        `已重放动作，状态：${result.status}${
-          result.error ? ` — ${result.error.slice(0, 100)}` : ""
-        }`
-      );
+      const outcome = extractTypedActionOutcome(result);
+      let statusMsg = `已重放动作，状态：${outcome.status}`;
+
+      const outcomeLabels = getTypedOutcomeLabels(outcome);
+
+      // Check typed reasons first, not error text
+      if (outcome.typedReasonAvailable) {
+        if (outcomeLabels.blockReasonLabel) {
+          statusMsg += ` · 阻断原因: ${outcomeLabels.blockReasonLabel}`;
+        }
+        if (outcomeLabels.proposalReasonLabel) {
+          statusMsg += ` · 需确认: ${outcomeLabels.proposalReasonLabel}`;
+        }
+        if (outcomeLabels.failureKindLabel) {
+          statusMsg += ` · 失败类型: ${outcomeLabels.failureKindLabel}`;
+        }
+        if (outcome.agentSpecId) {
+          statusMsg += ` · AgentSpec: ${outcome.agentSpecId}`;
+        }
+        if (outcome.proposalId) {
+          statusMsg += ` · Proposal: ${outcome.proposalId}`;
+        }
+      } else if (
+        outcome.status === "blocked" ||
+        outcome.status === "failed" ||
+        outcome.status === "needs_confirmation"
+      ) {
+        statusMsg += " · typed reason unavailable";
+      }
+
+      if (outcome.toolName) {
+        statusMsg += ` · ToolScope: ${outcome.toolName} (${outcome.source ?? "?"})`;
+      }
+
+      setNotice(statusMsg);
       setContinueInfo(null);
       await load();
     } catch (e) {
