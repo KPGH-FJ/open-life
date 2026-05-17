@@ -15,9 +15,18 @@ import {
   getTypedReasonBadgesFromToolCall,
   getTypedOutcomeLabels,
   getTypedEventDetailViewModel,
+  getTypedEventExplanation,
+  getTypedRunExplanation,
 } from "@/utils/typedContract";
 import type { AgentRunEvent, AgentRunEventType } from "@/types";
 import type { AgentAction, ToolCallResult, AgentProposal } from "@/tauri";
+import {
+  successfulGovernedRun,
+  agentSpecDeniedToolRun,
+  needsConfirmationRun,
+  replayFailedRun,
+  malformedAndUnknownRun,
+} from "@/test/fixtures/agentRunEvents";
 
 function makeEvent(
   overrides: Partial<AgentRunEvent> & { eventType: AgentRunEventType }
@@ -1712,5 +1721,717 @@ describe("non-standard tool.call_blocked payloads degrade gracefully", () => {
     const vm = getTypedRunEventViewModel(event);
     // No status, source → structural validation fails
     expect(vm.typedKind).toBe("unknown");
+  });
+});
+
+// =====================================================================
+// NEW: getTypedEventExplanation
+// =====================================================================
+
+describe("getTypedEventExplanation", () => {
+  it("tool.call_blocked blocked + agent_spec_denied → error tone, adjust_agent_spec nextStep", () => {
+    const event = makeEvent({
+      eventType: "tool.call_blocked",
+      payload: {
+        status: "blocked",
+        tool_name: "web.search",
+        source: "builtin",
+        block_reason: "agent_spec_denied",
+        agent_spec_id: "main.default",
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("error");
+    expect(exp.whatHappened).toContain("web.search");
+    expect(exp.whatHappened).toContain("阻断");
+    expect(exp.why).toContain("AgentSpec 拒绝");
+    expect(exp.nextStep).toContain("调整 AgentSpec");
+    expect(exp.debugFacts.some(f => f.label === "agentSpecId")).toBe(true);
+    // Must NOT infer from summary
+    expect(exp.why).not.toContain("summary");
+  });
+
+  it("tool.call_blocked needs_confirmation + network_policy_ask → warning tone", () => {
+    const event = makeEvent({
+      eventType: "tool.call_blocked",
+      payload: {
+        status: "needs_confirmation",
+        tool_name: "web.search",
+        source: "builtin",
+        proposal_reason: "network_policy_ask",
+        proposal_id: "prop-1",
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("warning");
+    expect(exp.whatHappened).toContain("确认");
+    expect(exp.why).toContain("网络策略询问");
+    expect(exp.nextStep).toContain("Review Center");
+  });
+
+  it("replay.completed completed → success tone", () => {
+    const event = makeEvent({
+      eventType: "replay.completed",
+      payload: {
+        status: "completed",
+        run_id: "run-1",
+        action_id: "a1",
+        replay_of_action_id: "orig-1",
+        agent_spec_id: "main.default",
+        tool_name: "web.search",
+        source: "builtin",
+        block_reason: null,
+        proposal_reason: null,
+        failure_kind: null,
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("success");
+    expect(exp.whatHappened).toContain("成功");
+  });
+
+  it("replay.completed blocked → error tone, blockReason in why", () => {
+    const event = makeEvent({
+      eventType: "replay.completed",
+      payload: {
+        status: "blocked",
+        run_id: "run-1",
+        action_id: "a1",
+        replay_of_action_id: "orig-1",
+        agent_spec_id: "main.default",
+        tool_name: "t",
+        source: "builtin",
+        block_reason: "replay_spec_missing",
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("error");
+    expect(exp.why).toContain("缺少重放规格");
+  });
+
+  it("replay.failed with block_reason → error tone, nextStep actionable", () => {
+    const event = makeEvent({
+      eventType: "replay.failed",
+      payload: {
+        status: "failed",
+        run_id: "run-1",
+        action_id: "a1",
+        replay_of_action_id: "orig-1",
+        block_reason: "replay_spec_missing",
+        human_message: "noise: this is text, ignore",
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("error");
+    expect(exp.whatHappened).toContain("失败");
+    expect(exp.why).toContain("缺少重放规格");
+    expect(exp.nextStep).toBeDefined();
+    // Next step must come from typed reason, not from human_message noise
+    expect(exp.nextStep).not.toContain("noise");
+  });
+
+  it("replay.failed with failure_kind → error tone, failureKind in debugFacts", () => {
+    const event = makeEvent({
+      eventType: "replay.failed",
+      payload: {
+        status: "failed",
+        run_id: "run-1",
+        action_id: "a1",
+        replay_of_action_id: "orig-1",
+        failure_kind: "missing_mcp_server",
+        human_message: "error occurred",
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("error");
+    expect(exp.why).toContain("缺少 MCP 服务器");
+    expect(exp.debugFacts.some(f => f.label === "failureKind")).toBe(true);
+  });
+
+  it("unknown event fallback → info tone, safe message", () => {
+    const event = makeEvent({
+      eventType: "run.created",
+      payload: { session_id: "sess-1" },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("info");
+    expect(exp.whatHappened).toContain("未识别");
+    expect(exp.why).toBeNull();
+    expect(exp.impact).toBeNull();
+    expect(exp.debugFacts.length).toBeGreaterThan(0);
+  });
+
+  it("malformed known event fallback → info tone, does not crash", () => {
+    const event = makeEvent({
+      eventType: "replay.failed",
+      summary: "Replay failed: noise text",
+      payload: {
+        status: "failed",
+        run_id: "run-1",
+        action_id: "a1",
+        replay_of_action_id: "orig-1",
+        human_message: "noise text with replay_spec_missing keyword",
+        // NO block_reason, NO failure_kind → fails structural validation → unknown fallback
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("info");
+    expect(exp.whatHappened).toContain("未识别");
+    // Must NOT contain "缺少重放规格" since it only exists in human_message/summary, not typed fields
+    expect(exp.why).toBeNull();
+  });
+
+  it("malformed tool.call_blocked fallback → safe fallback, no crash", () => {
+    const event = makeEvent({
+      eventType: "tool.call_blocked",
+      summary: "broken event",
+      payload: {
+        // Missing required typed fields → falls to unknown
+      },
+    });
+    const exp = getTypedEventExplanation(event);
+    expect(exp.tone).toBe("info");
+    expect(exp.whatHappened).toContain("未识别");
+  });
+});
+
+// =====================================================================
+// NEW: getTypedRunExplanation
+// =====================================================================
+
+describe("getTypedRunExplanation", () => {
+  it("all success run → success tone, empty nextActions (no kind:none)", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "run.created",
+        payload: {},
+      }),
+      makeEvent({
+        eventType: "tool.call_started",
+        payload: { tool_name: "t" },
+      }),
+      makeEvent({
+        eventType: "tool.call_completed",
+        payload: { tool_name: "t" },
+      }),
+      makeEvent({
+        eventType: "run.completed",
+        payload: { stop_reason: "no_tools" },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("success");
+    expect(exp.headline).toContain("完成");
+    expect(exp.primaryReason).toBeNull();
+    expect(exp.toolSummary.completed).toBe(1);
+    // Success path → empty nextActions (no kind:none filler)
+    expect(exp.nextActions).toEqual([]);
+  });
+
+  it("needs confirmation run → warning tone, review_proposal nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "tool.call_blocked",
+        payload: {
+          status: "needs_confirmation",
+          tool_name: "web.search",
+          source: "builtin",
+          proposal_reason: "network_policy_ask",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "running", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("warning");
+    expect(exp.primaryReason).toContain("确认");
+    expect(exp.nextActions.some(a => a.kind === "review_proposal")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "grant_permission")).toBe(true);
+  });
+
+  it("AgentSpec denied run → error tone, adjust_agent_spec nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "tool.call_blocked",
+        payload: {
+          status: "blocked",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "agent_spec_denied",
+          agent_spec_id: "main.default",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "running", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toContain("AgentSpec");
+    expect(exp.nextActions.some(a => a.kind === "adjust_agent_spec")).toBe(true);
+  });
+
+  it("replay failed run → error tone, retry_replay and inspect_trace nextActions", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "replay.failed",
+        payload: {
+          status: "failed",
+          run_id: "run-1",
+          action_id: "a1",
+          replay_of_action_id: "orig-1",
+          block_reason: "replay_spec_missing",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.nextActions.some(a => a.kind === "retry_replay")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.replaySummary.failed).toBe(1);
+  });
+
+  it("mixed tool blocked + replay failed → error tone, combined nextActions", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "tool.call_blocked",
+        payload: {
+          status: "blocked",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "network_policy_denied",
+        },
+      }),
+      makeEvent({
+        eventType: "replay.failed",
+        payload: {
+          status: "failed",
+          run_id: "run-1",
+          action_id: "a1",
+          replay_of_action_id: "orig-1",
+          block_reason: "replay_spec_missing",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.toolSummary.blocked).toBe(1);
+    expect(exp.replaySummary.failed).toBe(1);
+    expect(exp.nextActions.some(a => a.kind === "retry_replay")).toBe(true);
+  });
+
+  it("summary misleading but typed payload correct → typed wins", () => {
+    // summary contains "completed successfully" but typed payload shows broken
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "tool.call_blocked",
+        summary: "Everything completed successfully — IGNORE THIS TEXT",
+        payload: {
+          status: "blocked",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "agent_spec_denied",
+          agent_spec_id: "main.default",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    // Typed payload shows blocked → outcome should NOT be success
+    expect(exp.outcomeTone).not.toBe("success");
+    expect(exp.primaryReason).toContain("AgentSpec");
+  });
+
+  it("summary contains reason but typed payload absent → no typed reason inference, malformed warning", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "replay.failed",
+        summary: "Replay failed: replay_spec_missing in summary text",
+        payload: {
+          status: "failed",
+          run_id: "run-1",
+          action_id: "a1",
+          replay_of_action_id: "orig-1",
+          human_message: "replay_spec_missing occurred",
+          // NO block_reason, NO failure_kind → fails structural validation → malformed known typed
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    // No typed reason → replay FAILED is not counted via typed path
+    // replaySummary.failed comes from typed replay_failed events only
+    expect(exp.replaySummary.failed).toBe(0);
+    // The event was parsed as unknown → malformed known typed → warning, not retry_replay
+    expect(exp.outcomeTone).toBe("warning");
+    expect(exp.primaryReason).toBe("运行 trace 中存在无法解析的治理事件");
+    expect(exp.nextActions.some(a => a.kind === "retry_replay")).toBe(false);
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("无法解析的治理事件"))).toBe(true);
+  });
+
+  it("extracts agentSpecId from agent_spec.selected event (snake_case, real backend)", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "agent_spec.selected",
+        summary: "AgentSpec selected",
+        payload: {
+          agent_spec_id: "main.default",
+          role: "main",
+          privacy_policy: "local_only",
+        },
+      }),
+      makeEvent({
+        eventType: "run.completed",
+        payload: {},
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.agentSpecId).toBe("main.default");
+  });
+
+  it("extracts prompt block count and IDs from prompt_stack.assembled (snake_case, real backend)", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "prompt_stack.assembled",
+        summary: "PromptStack assembled",
+        payload: {
+          agent_spec_id: "main.default",
+          prompt_blocks: [
+            { id: "base_system", version: "1.0.0", purpose: "system prompt" },
+            { id: "privacy_rule", version: "1.0.0", purpose: "privacy rule" },
+            { id: "tools_manifest", version: "1.0.0", purpose: "tool list" },
+          ],
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.promptBlockCount).toBe(3);
+    expect(exp.promptBlockIds).toEqual(["base_system", "privacy_rule", "tools_manifest"]);
+    // agent_spec_id from prompt_stack.assembled should also populate agentSpecId
+    expect(exp.agentSpecId).toBe("main.default");
+  });
+
+  it("extracts contextPolicy from context_governance.applied (snake_case, real backend)", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "context_governance.applied",
+        summary: "Context governance applied",
+        payload: {
+          agent_spec_id: "main.default",
+          context_included: ["lifemodel_summary", "goals"],
+          context_excluded: [],
+          privacy_policy: "cloud_allowed",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.contextPolicy).toBe("cloud_allowed");
+  });
+
+  it("extracts contextPolicy from orchestrator.rs path (agent_spec_privacy_policy field)", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "context_governance.applied",
+        summary: "Context governance applied",
+        payload: {
+          agent_spec_id: "main.default",
+          context_included: ["lifemodel_summary"],
+          context_excluded: [],
+          agent_spec_privacy_policy: "local_only",
+          effective_privacy_policy: "local_only",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.contextPolicy).toBe("local_only");
+  });
+
+  it("agentSpecId extracted from agent_spec.selected uses snake_case priority over camelCase", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "agent_spec.selected",
+        summary: "Spec selected",
+        payload: {
+          agent_spec_id: "real.spec",
+          agentSpecId: "fake.spec",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.agentSpecId).toBe("real.spec");
+  });
+
+  it("contextPolicy from context_governance uses snake_case priority over camelCase", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "context_governance.applied",
+        summary: "Governance applied",
+        payload: {
+          privacy_policy: "local_only",
+          privacyPolicy: "cloud_allowed",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.contextPolicy).toBe("local_only");
+  });
+
+  it("promptBlockCount is null when prompt_stack.assembled event not present", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "run.completed",
+        payload: {},
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.promptBlockCount).toBeNull();
+    expect(exp.promptBlockIds).toEqual([]);
+  });
+
+  it("promptBlockCount handles empty prompt_blocks array", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "prompt_stack.assembled",
+        summary: "Empty prompt stack",
+        payload: {
+          agent_spec_id: "main.default",
+          prompt_blocks: [],
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.promptBlockCount).toBe(0);
+    expect(exp.promptBlockIds).toEqual([]);
+  });
+
+  it("prompt_block_count in developerBullets when blocks exist", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "prompt_stack.assembled",
+        summary: "Prompt stack assembled",
+        payload: {
+          agent_spec_id: "main.default",
+          prompt_blocks: [{ id: "base_system", version: "1.0.0" }],
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.developerBullets.some(b => b.includes("Prompt blocks: 1 blocks"))).toBe(true);
+  });
+
+  it("empty events → info tone, default headline, developerBullets has event count", () => {
+    const exp = getTypedRunExplanation([], { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("info");
+    expect(exp.headline).toContain("运行记录");
+    expect(exp.userFacingBullets).toHaveLength(1);
+    expect(exp.userFacingBullets[0]).toContain("无显著事件");
+    expect(exp.developerBullets.some(b => b.includes("事件总数"))).toBe(true);
+    expect(exp.nextActions).toEqual([]);
+  });
+
+  it("contextPolicy fallback: agent_spec.selected.privacy_policy used when no context_governance event", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "agent_spec.selected",
+        summary: "Selected spec",
+        payload: {
+          agent_spec_id: "main.default",
+          role: "main",
+          privacy_policy: "local_only",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.contextPolicy).toBe("local_only");
+  });
+
+  it("contextPolicy: context_governance.applied wins over agent_spec.selected fallback", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "agent_spec.selected",
+        summary: "Spec selected",
+        payload: {
+          agent_spec_id: "main.default",
+          privacy_policy: "local_only",
+        },
+      }),
+      makeEvent({
+        eventType: "context_governance.applied",
+        summary: "Governance applied",
+        payload: {
+          agent_spec_id: "main.default",
+          privacy_policy: "cloud_allowed",
+        },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    // context_governance.applied has higher priority
+    expect(exp.contextPolicy).toBe("cloud_allowed");
+  });
+
+  it("summary with local_only/cloud_allowed keywords does NOT set contextPolicy", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "run.created",
+        summary: "Run started with cloud_allowed policy — IGNORE THIS TEXT",
+        payload: { local_only: false },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    // No agent_spec.selected or context_governance.applied → contextPolicy stays null
+    expect(exp.contextPolicy).toBeNull();
+  });
+
+  // ── Fixture-based end-to-end tests ────────────────────────────────
+
+  it("fixture: successfulGovernedRun → success tone, agentSpecId, prompt blocks, empty nextActions", () => {
+    // Sanity: fixture array is non-empty, contains expected events
+    expect(successfulGovernedRun.length).toBeGreaterThan(0);
+    expect(successfulGovernedRun.some(e => e.eventType === "run.completed")).toBe(true);
+    expect(successfulGovernedRun.some(e => e.eventType === "tool.call_completed")).toBe(true);
+
+    const exp = getTypedRunExplanation(successfulGovernedRun, {
+      status: "completed",
+      kind: "conversation",
+    });
+    expect(exp.outcomeTone).toBe("success");
+    expect(exp.primaryReason).toBeNull();
+    expect(exp.agentSpecId).toBe("main.default");
+    expect(exp.promptBlockCount).toBe(3);
+    expect(exp.promptBlockIds).toEqual(["base_system", "privacy_rule", "tools_manifest"]);
+    expect(exp.contextPolicy).toBe("local_only");
+    expect(exp.toolSummary.started).toBe(1);
+    expect(exp.toolSummary.completed).toBe(1);
+    expect(exp.developerBullets.some(b => b.includes("AgentSpec: main.default"))).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("Prompt blocks: 3 blocks"))).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("隐私策略: local_only"))).toBe(true);
+    expect(exp.nextActions).toEqual([]);
+  });
+
+  it("fixture: agentSpecDeniedToolRun → error tone, adjust_agent_spec nextAction", () => {
+    const exp = getTypedRunExplanation(agentSpecDeniedToolRun, {
+      status: "completed",
+      kind: "conversation",
+    });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toContain("AgentSpec 拒绝了工具执行");
+    expect(exp.agentSpecId).toBe("main.strict");
+    expect(exp.promptBlockCount).toBe(2);
+    expect(exp.contextPolicy).toBe("local_only");
+    expect(exp.nextActions.some(a => a.kind === "adjust_agent_spec")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "review_proposal")).toBe(false);
+  });
+
+  it("fixture: needsConfirmationRun → warning tone, review_proposal + grant_permission nextActions", () => {
+    const exp = getTypedRunExplanation(needsConfirmationRun, {
+      status: "running",
+      kind: "conversation",
+    });
+    expect(exp.outcomeTone).toBe("warning");
+    expect(exp.primaryReason).toContain("工具需要用户确认");
+    expect(exp.nextActions.some(a => a.kind === "review_proposal")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "grant_permission")).toBe(true);
+    expect(exp.userFacingBullets.some(b => b.includes("需要确认"))).toBe(true);
+  });
+
+  it("fixture: replayFailedRun → error tone, retry_replay + inspect_trace nextActions", () => {
+    const exp = getTypedRunExplanation(replayFailedRun, {
+      status: "completed",
+      kind: "conversation",
+    });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toContain("重放动作失败");
+    expect(exp.replaySummary.failed).toBe(1);
+    expect(exp.nextActions.some(a => a.kind === "retry_replay")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+  });
+
+  it("fixture: malformedAndUnknownRun → warning tone, inspect_trace nextAction, malformed count", () => {
+    const exp = getTypedRunExplanation(malformedAndUnknownRun, {
+      status: "completed",
+      kind: "conversation",
+    });
+    // Known typed event types with malformed payloads → trace contract warning
+    // Does NOT crash; does NOT infer specific block_reason/failure_kind from summary
+    expect(exp.outcomeTone).toBe("warning");
+    expect(exp.primaryReason).toBe("运行 trace 中存在无法解析的治理事件");
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.nextActions.some(a => a.kind === "adjust_agent_spec")).toBe(false);
+    expect(exp.developerBullets.some(b => b.includes("无法解析的治理事件"))).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("无法解析的治理事件: 2"))).toBe(true);
+  });
+
+  it("tool.call_failed → error tone, inspect_trace nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "tool.call_started",
+        payload: { tool_name: "web.search", source: "builtin" },
+      }),
+      makeEvent({
+        eventType: "tool.call_failed",
+        payload: { tool_name: "web.search", source: "builtin", error: "timeout" },
+      }),
+      makeEvent({
+        eventType: "run.completed",
+        payload: { stop_reason: "no_tools" },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toBe("运行中出现未分类错误");
+    expect(exp.toolSummary.failed).toBe(1);
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.userFacingBullets.some(b => b.includes("工具调用失败"))).toBe(true);
+  });
+
+  it("run.failed → error tone, inspect_trace nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "run.failed",
+        payload: { error: "execution timeout" },
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "failed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toBe("运行中出现未分类错误");
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+  });
+
+  it("model.failed → error tone, inspect_trace nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "model.failed",
+        payload: { error: "cloud model error", recoverable: false },
+      }),
+      makeEvent({
+        eventType: "run.completed",
+        payload: {},
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.primaryReason).toBe("运行中出现未分类错误");
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("存在通用失败事件"))).toBe(true);
+  });
+
+  it("model.call_failed → error tone, inspect_trace nextAction", () => {
+    const events: AgentRunEvent[] = [
+      makeEvent({
+        eventType: "model.call_failed",
+        payload: { provider: "deepseek", model: "deepseek-chat", error: "500" },
+      }),
+      makeEvent({
+        eventType: "run.completed",
+        payload: {},
+      }),
+    ];
+    const exp = getTypedRunExplanation(events, { status: "completed", kind: "conversation" });
+    expect(exp.outcomeTone).toBe("error");
+    expect(exp.nextActions.some(a => a.kind === "inspect_trace")).toBe(true);
+    expect(exp.developerBullets.some(b => b.includes("存在通用失败事件"))).toBe(true);
+  });
+
+  it("successfulGovernedRun still has empty nextActions (no regression)", () => {
+    const exp = getTypedRunExplanation(successfulGovernedRun, {
+      status: "completed",
+      kind: "conversation",
+    });
+    expect(exp.outcomeTone).toBe("success");
+    expect(exp.nextActions).toEqual([]);
   });
 });

@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import RunTracePanel from "@/components/RunTracePanel";
 import type { AgentRunEvent } from "@/types";
+import { agentSpecDeniedToolRun, malformedAndUnknownRun } from "@/test/fixtures/agentRunEvents";
 
 const mockEvents: AgentRunEvent[] = [
   {
@@ -538,9 +539,10 @@ describe("RunTracePanel", () => {
     render(<RunTracePanel events={typedBlocked} runId="run-001" show={true} onToggle={() => {}} />);
     await userEvent.click(screen.getByTestId("event-row-evt-typed-blocked"));
     expect(screen.getByText("阻断详情 (Typed Contract)")).toBeDefined();
-    expect(screen.getByText("AgentSpec 拒绝")).toBeDefined();
-    expect(screen.getByText("main.default")).toBeDefined();
-    expect(screen.getByText("web.search")).toBeDefined();
+    expect(screen.getAllByText("AgentSpec 拒绝").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("main.default").length).toBeGreaterThanOrEqual(1);
+    // Tool name appears in both explanation and detail blocks
+    expect(screen.getAllByText("web.search").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders replay failed typed payload with block_reason", async () => {
@@ -569,9 +571,10 @@ describe("RunTracePanel", () => {
     render(<RunTracePanel events={replayFailed} runId="run-001" show={true} onToggle={() => {}} />);
     await userEvent.click(screen.getByTestId("event-row-evt-replay-fail"));
     expect(screen.getByText("重放失败 (Typed Contract)")).toBeDefined();
-    expect(screen.getByText("缺少重放规格")).toBeDefined();
-    expect(screen.getByText("remote_tool")).toBeDefined();
-    expect(screen.getByText("mcp:my-server")).toBeDefined();
+    expect(screen.getAllByText("缺少重放规格").length).toBeGreaterThanOrEqual(1);
+    // Tool name "remote_tool" appears in explanation debugFacts and detail block
+    expect(screen.getAllByText("remote_tool").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("mcp:my-server").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders mcp target block wrapper and target fields", async () => {
@@ -602,9 +605,9 @@ describe("RunTracePanel", () => {
     );
     await userEvent.click(screen.getByTestId("event-row-evt-mcp-target"));
     expect(screen.getByText("MCP 包装:")).toBeDefined();
-    expect(screen.getByText("remote_search")).toBeDefined();
-    expect(screen.getByText("mcp:my-server")).toBeDefined();
-    expect(screen.getByText("工具权限拒绝")).toBeDefined();
+    expect(screen.getAllByText("remote_search").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("mcp:my-server").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("工具权限拒绝").length).toBeGreaterThanOrEqual(1);
   });
 
   it("renders network policy ask with proposal_id", async () => {
@@ -630,8 +633,8 @@ describe("RunTracePanel", () => {
     ];
     render(<RunTracePanel events={networkAsk} runId="run-001" show={true} onToggle={() => {}} />);
     await userEvent.click(screen.getByTestId("event-row-evt-net-ask"));
-    expect(screen.getByText("网络策略询问")).toBeDefined();
-    expect(screen.getByText("proposal-net-1")).toBeDefined();
+    expect(screen.getAllByText("网络策略询问").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("proposal-net-1").length).toBeGreaterThanOrEqual(1);
   });
 
   it("does not infer reason from message text when typed fields are absent", async () => {
@@ -735,5 +738,185 @@ describe("RunTracePanel", () => {
     expect(screen.getByText("重放完成 (Typed Contract)")).toBeDefined();
     expect(screen.getByText("缺少重放规格")).toBeDefined();
     expect(screen.getByText("已阻断")).toBeDefined();
+  });
+
+  // ── Batch 6: Explainability tests ────────────────────────────────────
+
+  it("expanded typed event shows user-facing explanation before raw payload", async () => {
+    const typedBlocked: AgentRunEvent[] = [
+      {
+        id: "evt-explain-blocked",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "web.search blocked by AgentSpec",
+        payload: {
+          status: "blocked",
+          tool_name: "web.search",
+          source: "builtin",
+          block_reason: "agent_spec_denied",
+          agent_spec_id: "main.default",
+        },
+        createdAt: "2026-05-16T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={typedBlocked} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-explain-blocked"));
+
+    // Event explanation block should render (user-facing)
+    expect(screen.getByTestId("event-explanation-evt-explain-blocked")).toBeDefined();
+    // User-facing explanation describes what happened
+    expect(screen.getAllByText(/工具.*被.*阻断/).length).toBeGreaterThanOrEqual(1);
+    // Typed reason appears in explanation
+    expect(screen.getAllByText(/AgentSpec 拒绝/).length).toBeGreaterThanOrEqual(1);
+    // Raw payload still available
+    expect(screen.getByText("事件载荷")).toBeDefined();
+  });
+
+  it("unknown / malformed event shows fallback explanation and does not crash", async () => {
+    const unknownEvent: AgentRunEvent[] = [
+      {
+        id: "evt-explain-unknown",
+        runId: "run-001",
+        eventType: "run.created",
+        actor: "runtime",
+        summary: "Simple run created",
+        payload: { session_id: "sess-1" },
+        createdAt: "2026-05-16T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={unknownEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-explain-unknown"));
+
+    // Fallback explanation should render
+    expect(screen.getByTestId("event-explanation-evt-explain-unknown")).toBeDefined();
+    // Fallback message is user-friendly
+    expect(screen.getByText("这是一个未识别的运行事件")).toBeDefined();
+    // Raw payload still available
+    expect(screen.getByText("事件载荷")).toBeDefined();
+  });
+
+  it("malformed tool.call_blocked with no typed fields shows fallback, no crash", async () => {
+    const malformed: AgentRunEvent[] = [
+      {
+        id: "evt-explain-malformed",
+        runId: "run-001",
+        eventType: "tool.call_blocked",
+        actor: "runtime",
+        summary: "broken block event",
+        payload: { tool: "email.read", reason: "declarative-only" },
+        createdAt: "2026-05-16T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={malformed} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-explain-malformed"));
+
+    // Fallback explanation should render (payload lacks typed fields → unknown)
+    expect(screen.getByTestId("event-explanation-evt-explain-malformed")).toBeDefined();
+    expect(screen.getByText("这是一个未识别的运行事件")).toBeDefined();
+  });
+
+  it("event explanation does not infer reason from summary text", async () => {
+    // Summary text says "network_policy_denied" but payload has no typed fields
+    const summaryEvent: AgentRunEvent[] = [
+      {
+        id: "evt-explain-summary",
+        runId: "run-001",
+        eventType: "replay.failed",
+        actor: "runtime",
+        summary: "Replay failed: network_policy_denied in summary (IGNORE)",
+        payload: {
+          status: "failed",
+          run_id: "run-001",
+          action_id: "a1",
+          replay_of_action_id: "orig-1",
+          human_message: "Error: network_policy_denied (noise in human_message)",
+          // NO block_reason, NO failure_kind → fails structural validation
+        },
+        createdAt: "2026-05-16T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={summaryEvent} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-explain-summary"));
+
+    // Payload fails structural validation → fallback explanation
+    expect(screen.getByTestId("event-explanation-evt-explain-summary")).toBeDefined();
+    expect(screen.getByText("这是一个未识别的运行事件")).toBeDefined();
+    // Must NOT contain "网络策略拒绝" from summary text
+    expect(screen.queryByText("网络策略拒绝")).toBeNull();
+  });
+
+  it("raw payload remains available in expanded debug section alongside explanation", async () => {
+    const replayFailed: AgentRunEvent[] = [
+      {
+        id: "evt-explain-replayfail",
+        runId: "run-001",
+        eventType: "replay.failed",
+        actor: "runtime",
+        summary: "Replay failed",
+        payload: {
+          status: "failed",
+          run_id: "run-001",
+          action_id: "a1",
+          replay_of_action_id: "orig-1",
+          block_reason: "replay_spec_missing",
+          human_message: "details",
+        },
+        createdAt: "2026-05-16T10:00:00Z",
+      },
+    ];
+    render(<RunTracePanel events={replayFailed} runId="run-001" show={true} onToggle={() => {}} />);
+    await userEvent.click(screen.getByTestId("event-row-evt-explain-replayfail"));
+
+    // Explanation is present
+    expect(screen.getByTestId("event-explanation-evt-explain-replayfail")).toBeDefined();
+    // Raw payload section is also present
+    expect(screen.getByText("事件载荷")).toBeDefined();
+    // Typed detail block is also present
+    expect(screen.getByText("重放失败 (Typed Contract)")).toBeDefined();
+  });
+
+  // ── Fixture-based explainability end-to-end tests ──────────────────
+
+  it("fixture: agentSpecDeniedToolRun — events render without crash, typed detail visible", async () => {
+    render(
+      <RunTracePanel
+        events={agentSpecDeniedToolRun}
+        runId="run-fixture"
+        show={true}
+        onToggle={() => {}}
+      />
+    );
+    // Expand the blocked event
+    const evtId = agentSpecDeniedToolRun.find(e => e.eventType === "tool.call_blocked")!.id;
+    await userEvent.click(screen.getByTestId(`event-row-${evtId}`));
+    // User-facing explanation before raw payload
+    expect(screen.getByTestId(`event-explanation-${evtId}`)).toBeDefined();
+    // Typed contract detail visible
+    expect(screen.getByText("阻断详情 (Typed Contract)")).toBeDefined();
+    expect(screen.getByText("AgentSpec 拒绝")).toBeDefined();
+    expect(screen.getAllByText("main.strict").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("fixture: malformedAndUnknownRun — UI does not crash, malformed events show fallback", async () => {
+    render(
+      <RunTracePanel
+        events={malformedAndUnknownRun}
+        runId="run-fixture"
+        show={true}
+        onToggle={() => {}}
+      />
+    );
+    // All events render without crash
+    for (const evt of malformedAndUnknownRun) {
+      expect(screen.getByTestId(`event-row-${evt.id}`)).toBeDefined();
+    }
+    // Expand the malformed tool.call_blocked
+    const blockedEvt = malformedAndUnknownRun.find(e => e.eventType === "tool.call_blocked")!;
+    await userEvent.click(screen.getByTestId(`event-row-${blockedEvt.id}`));
+    // Fallback explanation (no typed reason parsed for invalid reason value)
+    expect(screen.getByTestId(`event-explanation-${blockedEvt.id}`)).toBeDefined();
+    // Must NOT infer reason from summary text
+    expect(screen.queryByText("AgentSpec 拒绝")).toBeNull();
   });
 });

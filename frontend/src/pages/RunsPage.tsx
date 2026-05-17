@@ -17,7 +17,7 @@ import {
   RefreshCw,
   Ban,
 } from "lucide-react";
-import { getTypedRunHints } from "../utils/typedContract";
+import { getTypedRunHints, getTypedRunExplanation } from "../utils/typedContract";
 
 function statusIcon(status: string) {
   switch (status) {
@@ -51,10 +51,33 @@ function kindLabel(kind: string): string {
 }
 
 function typedRunHint(run: AgentRun, events: AgentRunEvent[]): React.ReactNode {
+  const explanation = getTypedRunExplanation(events, run);
   const typedHints = getTypedRunHints(events);
   const hints: React.ReactNode[] = [];
 
-  // Typed hints from event payloads (highest priority)
+  // Primary reason from run-level explanation (highest priority, typed contract)
+  if (explanation.primaryReason) {
+    const cls =
+      explanation.outcomeTone === "error"
+        ? "text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded border border-red-100"
+        : explanation.outcomeTone === "warning"
+          ? "text-[10px] text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded border border-orange-100"
+          : "text-[10px] text-stone-500 bg-stone-50 px-1.5 py-0.5 rounded border border-stone-100";
+    hints.push(
+      <span key="primary-reason" className={`inline-flex items-center gap-1 ${cls}`}>
+        {explanation.outcomeTone === "error" ? (
+          <Ban size={10} />
+        ) : explanation.outcomeTone === "warning" ? (
+          <AlertTriangle size={10} />
+        ) : (
+          <RotateCcw size={10} />
+        )}
+        {explanation.primaryReason}
+      </span>
+    );
+  }
+
+  // Typed hints from event payloads (supplemental detail)
   for (const th of typedHints) {
     const cls =
       th.severity === "error"

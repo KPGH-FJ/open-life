@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type { AgentRunEvent, AgentRunEventType, RedactionSummary } from "@/types";
 import { TypedBadge, getTypedEventDetailViewModel } from "../utils/typedContract";
+import EventExplanationBlock from "./EventExplanationBlock";
 
 interface Props {
   events: AgentRunEvent[];
@@ -510,6 +511,9 @@ export default function RunTracePanel({ events, runId, show, onToggle }: Props) 
 
               {expandedId === evt.id && (
                 <div className="px-3 py-2 bg-slate-950/50 border-b border-slate-800/30 space-y-2 text-[11px]">
+                  {/* Event-level explanation (user-facing first, from typed contract) */}
+                  <EventExplanationBlock event={evt} />
+
                   {/* Typed contract event detail (driven by view model) */}
                   <TypedEventDetailBlock vm={getTypedEventDetailViewModel(evt)} />
 

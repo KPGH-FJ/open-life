@@ -877,6 +877,695 @@ export function getTypedRunHints(events: AgentRunEvent[]): TypedRunHint[] {
 }
 
 // =====================================================================
+// NEW: Event-level Explainability — TypedEventExplanationViewModel
+// =====================================================================
+
+export interface TypedEventExplanationViewModel {
+  title: string;
+  tone: "success" | "warning" | "error" | "info";
+  whatHappened: string;
+  why: string | null;
+  impact: string | null;
+  nextStep: string | null;
+  debugFacts: Array<{ label: string; value: string }>;
+}
+
+/**
+ * Produce a user/developer-facing explanation for a single AgentRunEvent.
+ *
+ * Built entirely from typed payload data (via parseTypedEventPayload).
+ * NEVER inspects summary/human_message for reason inference.
+ * Unknown/malformed events return a safe fallback.
+ */
+export function getTypedEventExplanation(event: AgentRunEvent): TypedEventExplanationViewModel {
+  const parsed = parseTypedEventPayload(event);
+
+  // ── Helper: tool call blocked ──────────────────────────────────────
+  function toolCallBlockedExplanation(): TypedEventExplanationViewModel {
+    const d = parsed.kind === "tool_call_blocked" ? parsed.data : null;
+    if (!d) return unknownFallback();
+
+    const toolLabel = d.tool_name || "未知工具";
+    const sourceLabel = d.source || "未知来源";
+
+    if (d.status === "needs_confirmation") {
+      const reasonLabel = isValidProposalReason(d.proposal_reason)
+        ? PROPOSAL_REASON_LABELS[d.proposal_reason]
+        : null;
+      const whyText = reasonLabel ? `因为：${reasonLabel}` : "需要用户确认才能继续执行";
+      const impactText = `工具 "${toolLabel}" 的执行被暂停，等待你的决定`;
+      const nextStepText = `请前往 Review Center 审查并确认相关提案`;
+      const debugFacts: Array<{ label: string; value: string }> = [
+        { label: "eventType", value: "tool.call_blocked" },
+        { label: "status", value: "needs_confirmation" },
+        { label: "toolName", value: toolLabel },
+        { label: "source", value: sourceLabel },
+      ];
+      if (d.agent_spec_id) debugFacts.push({ label: "agentSpecId", value: d.agent_spec_id });
+      if (d.proposal_id) debugFacts.push({ label: "proposalId", value: d.proposal_id });
+      if (d.proposal_reason) debugFacts.push({ label: "proposalReason", value: d.proposal_reason });
+
+      return {
+        title: `需要确认：${toolLabel}`,
+        tone: "warning",
+        whatHappened: `工具 "${toolLabel}" 需要你的确认才能继续执行`,
+        why: whyText,
+        impact: impactText,
+        nextStep: nextStepText,
+        debugFacts,
+      };
+    }
+
+    // status === "blocked"
+    const blockLabel = isValidBlockReason(d.block_reason)
+      ? BLOCK_REASON_LABELS[d.block_reason]
+      : null;
+    const whyText = blockLabel ? `因为：${blockLabel}` : "工具调用被系统安全策略阻断";
+
+    let impactText: string;
+    let nextStepText: string | null;
+    const debugFacts: Array<{ label: string; value: string }> = [
+      { label: "eventType", value: "tool.call_blocked" },
+      { label: "status", value: "blocked" },
+      { label: "toolName", value: toolLabel },
+      { label: "source", value: sourceLabel },
+    ];
+
+    if (d.block_reason === "agent_spec_denied") {
+      impactText = `AgentSpec 阻止了 "${toolLabel}" 的执行`;
+      nextStepText = `请调整 AgentSpec 配置以允许该工具，或使用其他方式完成任务`;
+      if (d.agent_spec_id) debugFacts.push({ label: "agentSpecId", value: d.agent_spec_id });
+    } else if (d.block_reason === "network_policy_denied" || d.block_reason === "domain_blocked") {
+      impactText = `网络策略拒绝了 "${toolLabel}" 的网络访问`;
+      nextStepText = `请调整网络策略或手动授予访问权限`;
+    } else if (d.block_reason === "tool_permission_denied") {
+      impactText = `工具权限策略拒绝了 "${toolLabel}" 的执行`;
+      nextStepText = `请授予 "${toolLabel}" 的权限`;
+    } else if (d.block_reason === "missing_mcp_client") {
+      impactText = `缺少 "${toolLabel}" 所需的 MCP 客户端连接`;
+      nextStepText = `请检查 MCP 服务器是否已启动并重新注册`;
+    } else if (d.block_reason === "disabled_manifest" || d.block_reason === "declarative_only") {
+      impactText = `"${toolLabel}" 在当前环境中不可用（声明式或已禁用）`;
+      nextStepText = null;
+    } else {
+      impactText = `工具 "${toolLabel}" 被阻断`;
+      nextStepText = `请检查系统日志了解详情`;
+    }
+
+    if (d.block_reason) debugFacts.push({ label: "blockReason", value: d.block_reason });
+    if (d.agent_spec_id) debugFacts.push({ label: "agentSpecId", value: d.agent_spec_id });
+    if (d.target_tool_name) debugFacts.push({ label: "targetToolName", value: d.target_tool_name });
+    if (d.target_source) debugFacts.push({ label: "targetSource", value: d.target_source });
+
+    return {
+      title: `工具被阻断：${toolLabel}`,
+      tone: "error",
+      whatHappened: `工具 "${toolLabel}" 被系统安全策略阻断`,
+      why: whyText,
+      impact: impactText,
+      nextStep: nextStepText,
+      debugFacts,
+    };
+  }
+
+  // ── Helper: replay started ──────────────────────────────────────────
+  function replayStartedExplanation(): TypedEventExplanationViewModel {
+    const d = parsed.kind === "replay_started" ? parsed.data : null;
+    if (!d) return unknownFallback();
+
+    return {
+      title: `重放开始：${d.tool_name || "未知工具"}`,
+      tone: "info",
+      whatHappened: `开始重放之前的动作，工具："${d.tool_name || "未知工具"}"`,
+      why: "用户或系统触发了动作重放",
+      impact: "正在重新执行之前被暂停或被阻断的动作",
+      nextStep: "等待重放结果",
+      debugFacts: [
+        { label: "eventType", value: "replay.started" },
+        { label: "status", value: "started" },
+        { label: "toolName", value: d.tool_name },
+        { label: "source", value: d.source },
+        { label: "actionId", value: d.action_id },
+        { label: "replayOfActionId", value: d.replay_of_action_id },
+        { label: "agentSpecId", value: d.agent_spec_id },
+      ],
+    };
+  }
+
+  // ── Helper: replay completed ────────────────────────────────────────
+  function replayCompletedExplanation(): TypedEventExplanationViewModel {
+    const d = parsed.kind === "replay_completed" ? parsed.data : null;
+    if (!d) return unknownFallback();
+
+    const toolLabel = d.tool_name || "未知工具";
+    const debugFacts: Array<{ label: string; value: string }> = [
+      { label: "eventType", value: "replay.completed" },
+      { label: "status", value: d.status },
+      { label: "toolName", value: toolLabel },
+      { label: "source", value: d.source },
+      { label: "actionId", value: d.action_id },
+      { label: "replayOfActionId", value: d.replay_of_action_id },
+      { label: "agentSpecId", value: d.agent_spec_id },
+    ];
+
+    if (d.status === "completed") {
+      return {
+        title: `重放成功：${toolLabel}`,
+        tone: "success",
+        whatHappened: `重放动作 "${toolLabel}" 执行成功`,
+        why: null,
+        impact: "之前被暂停或被阻断的动作已成功执行",
+        nextStep: null,
+        debugFacts,
+      };
+    }
+
+    if (d.status === "blocked") {
+      const blockLabel = isValidBlockReason(d.block_reason)
+        ? BLOCK_REASON_LABELS[d.block_reason]
+        : null;
+      const whyText = blockLabel ? `因为：${blockLabel}` : "重放被安全策略拒绝";
+      if (d.block_reason) debugFacts.push({ label: "blockReason", value: d.block_reason });
+      if (d.failure_kind) debugFacts.push({ label: "failureKind", value: d.failure_kind });
+
+      return {
+        title: `重放被阻断：${toolLabel}`,
+        tone: "error",
+        whatHappened: `重放动作 "${toolLabel}" 被阻断`,
+        why: whyText,
+        impact: "重放无法完成，请查看原因后调整配置",
+        nextStep: "请检查 AgentSpec 配置或工具权限",
+        debugFacts,
+      };
+    }
+
+    // status === "needs_confirmation"
+    const proposalLabel = isValidProposalReason(d.proposal_reason)
+      ? PROPOSAL_REASON_LABELS[d.proposal_reason]
+      : null;
+    const whyText = proposalLabel ? `因为：${proposalLabel}` : "重放需要用户确认";
+    if (d.proposal_reason) debugFacts.push({ label: "proposalReason", value: d.proposal_reason });
+
+    return {
+      title: `重放需确认：${toolLabel}`,
+      tone: "warning",
+      whatHappened: `重放动作 "${toolLabel}" 需要你的确认`,
+      why: whyText,
+      impact: "重放被暂停，等待你的决定",
+      nextStep: "请前往 Review Center 确认相关提案",
+      debugFacts,
+    };
+  }
+
+  // ── Helper: replay failed ───────────────────────────────────────────
+  function replayFailedExplanation(): TypedEventExplanationViewModel {
+    const d = parsed.kind === "replay_failed" ? parsed.data : null;
+    if (!d) return unknownFallback();
+
+    const toolLabel = d.tool_name || "未知工具";
+    const debugFacts: Array<{ label: string; value: string }> = [
+      { label: "eventType", value: "replay.failed" },
+      { label: "status", value: "failed" },
+      { label: "actionId", value: d.action_id },
+      { label: "replayOfActionId", value: d.replay_of_action_id },
+    ];
+
+    if (d.tool_name) debugFacts.push({ label: "toolName", value: d.tool_name });
+    if (d.source) debugFacts.push({ label: "source", value: d.source });
+    if (d.agent_spec_id) debugFacts.push({ label: "agentSpecId", value: d.agent_spec_id });
+
+    const blockLabel = isValidBlockReason(d.block_reason)
+      ? BLOCK_REASON_LABELS[d.block_reason]
+      : null;
+    const failureLabel = isValidFailureKind(d.failure_kind)
+      ? FAILURE_KIND_LABELS[d.failure_kind]
+      : null;
+    let whyText: string | null = null;
+    let nextStepText: string;
+
+    if (blockLabel) {
+      whyText = `因为：${blockLabel}`;
+      debugFacts.push({ label: "blockReason", value: d.block_reason! });
+      if (d.block_reason === "replay_spec_missing") {
+        nextStepText = "该动作缺少可重放的规格信息，请尝试重新创建任务";
+      } else if (d.block_reason === "agent_spec_denied") {
+        nextStepText = "请调整 AgentSpec 配置以允许重放该工具";
+      } else {
+        nextStepText = "请检查系统配置并重试";
+      }
+    } else if (failureLabel) {
+      whyText = `因为：${failureLabel}`;
+      debugFacts.push({ label: "failureKind", value: d.failure_kind! });
+      if (d.failure_kind === "missing_mcp_server") {
+        nextStepText = "请检查 MCP 服务器是否启动并重新注册";
+      } else if (d.failure_kind === "mcp_client_error") {
+        nextStepText = "MCP 客户端出错，请检查服务器日志";
+      } else {
+        nextStepText = "请查看详细 trace 进行诊断";
+      }
+    } else {
+      nextStepText = "请查看详细 trace 进行诊断";
+    }
+
+    const whatHappened = `重放动作${toolLabel ? ` "${toolLabel}"` : ""}失败`;
+
+    return {
+      title: `重放失败：${toolLabel}`,
+      tone: "error",
+      whatHappened,
+      why: whyText,
+      impact: "之前的操作未能被重放，可能需要手动处理",
+      nextStep: nextStepText,
+      debugFacts,
+    };
+  }
+
+  // ── Helper: unknown/malformed fallback ──────────────────────────────
+  function unknownFallback(): TypedEventExplanationViewModel {
+    return {
+      title: "系统事件",
+      tone: "info",
+      whatHappened: "这是一个未识别的运行事件",
+      why: null,
+      impact: null,
+      nextStep: null,
+      debugFacts: [
+        { label: "eventType", value: event.eventType },
+        { label: "summary", value: event.summary },
+      ],
+    };
+  }
+
+  // ── Dispatch per parsed kind ────────────────────────────────────────
+  switch (parsed.kind) {
+    case "tool_call_blocked":
+      return toolCallBlockedExplanation();
+    case "replay_started":
+      return replayStartedExplanation();
+    case "replay_completed":
+      return replayCompletedExplanation();
+    case "replay_failed":
+      return replayFailedExplanation();
+    default:
+      return unknownFallback();
+  }
+}
+
+// =====================================================================
+// NEW: Run-level Explainability — TypedRunExplanationViewModel
+// =====================================================================
+
+export interface TypedRunExplanationViewModel {
+  headline: string;
+  outcomeTone: "success" | "warning" | "error" | "info";
+  primaryReason: string | null;
+  agentSpecId: string | null;
+  /** Number of prompt blocks assembled (from prompt_blocks array in payload). null = event not present. */
+  promptBlockCount: number | null;
+  /** First few prompt block IDs for display. */
+  promptBlockIds: string[];
+  contextPolicy: string | null;
+  toolSummary: {
+    started: number;
+    completed: number;
+    blocked: number;
+    failed: number;
+    needsConfirmation: number;
+  };
+  replaySummary: {
+    started: number;
+    completed: number;
+    failed: number;
+    blocked: number;
+    needsConfirmation: number;
+  };
+  /**
+   * Suggested user actions derived from typed governance reasons.
+   * Empty array = no user action needed (success / info path).
+   * Non-empty only for error / warning outcomes.
+   */
+  nextActions: Array<{
+    kind:
+      | "review_proposal"
+      | "grant_permission"
+      | "adjust_agent_spec"
+      | "retry_replay"
+      | "inspect_trace";
+    label: string;
+    severity: "warning" | "error";
+  }>;
+  userFacingBullets: string[];
+  developerBullets: string[];
+}
+
+/**
+ * Build a run-level structured explanation from the event timeline.
+ *
+ * All governance information comes from typed payload fields only.
+ * Never inspects summary/human_message/error text for state inference.
+ *
+ * @param events AgentRunEvent timeline for the run
+ * @param run Optional AgentRun for run-level metadata (status, kind, etc.)
+ */
+/**
+ * Event types that carry typed governance payloads (tool.call_blocked,
+ * replay.*). When one of these fails structural validation, it is a
+ * trace-contract warning — not a clean success.
+ */
+const KNOWN_TYPED_EVENT_TYPES = new Set([
+  "tool.call_blocked",
+  "replay.started",
+  "replay.completed",
+  "replay.failed",
+]);
+
+export function getTypedRunExplanation(
+  events: AgentRunEvent[],
+  run?: { status: string; kind: string; outputPreview?: string }
+): TypedRunExplanationViewModel {
+  const toolSummary = { started: 0, completed: 0, blocked: 0, failed: 0, needsConfirmation: 0 };
+  const replaySummary = { started: 0, completed: 0, blocked: 0, failed: 0, needsConfirmation: 0 };
+  const seenBlockReasons = new Set<ExecutionBlockReason>();
+  const seenProposalReasons = new Set<ExecutionProposalReason>();
+  const seenFailureKinds = new Set<ExecutionFailureKind>();
+  let agentSpecId: string | null = null;
+  let promptBlockCount: number | null = null;
+  const promptBlockIds: string[] = [];
+  let contextPolicy: string | null = null;
+  let hasReplayFailed = false;
+  let hasAgentSpecDenied = false;
+  let hasNeedsConfirmation = false;
+  let allSucceeded = true;
+  let malformedKnownTyped = 0;
+  let hasGenericFailure = false;
+
+  for (const event of events) {
+    const parsed = parseTypedEventPayload(event);
+
+    // Detect malformed known typed events: eventType is a governance type
+    // but the payload fails structural validation → parsed.kind === "unknown"
+    if (KNOWN_TYPED_EVENT_TYPES.has(event.eventType) && parsed.kind === "unknown") {
+      malformedKnownTyped++;
+    }
+
+    // Track run-level metadata from non-typed events
+    // ⚠️ Backend emits snake_case payloads. We read snake_case first,
+    //    then fall back to camelCase for legacy test data compatibility.
+    if (event.eventType === "agent_spec.selected") {
+      const p = event.payload as Record<string, unknown>;
+      // agent_spec_id (only first event wins)
+      if (!agentSpecId) {
+        if (typeof p.agent_spec_id === "string") agentSpecId = p.agent_spec_id;
+        else if (typeof p.agentSpecId === "string") agentSpecId = p.agentSpecId;
+      }
+      // privacy_policy as contextPolicy fallback (lower priority than context_governance.applied)
+      if (!contextPolicy) {
+        if (typeof p.privacy_policy === "string") contextPolicy = p.privacy_policy;
+        else if (typeof p.privacyPolicy === "string") contextPolicy = p.privacyPolicy;
+      }
+    }
+    if (event.eventType === "prompt_stack.assembled") {
+      const p = event.payload as Record<string, unknown>;
+      // agent_spec_id from prompt_stack.assembled
+      if (!agentSpecId) {
+        if (typeof p.agent_spec_id === "string") agentSpecId = p.agent_spec_id;
+        // Fallback: camelCase (legacy test data)
+        else if (typeof p.agentSpecId === "string") agentSpecId = p.agentSpecId;
+      }
+      // prompt_blocks array — extract count and IDs
+      if (promptBlockCount === null) {
+        const blocks = p.prompt_blocks ?? p.promptBlocks;
+        if (Array.isArray(blocks)) {
+          promptBlockCount = blocks.length;
+          for (const block of blocks) {
+            if (block && typeof block === "object" && typeof (block as any).id === "string") {
+              promptBlockIds.push((block as any).id as string);
+            }
+          }
+        }
+      }
+    }
+    if (event.eventType === "context_governance.applied") {
+      const p = event.payload as Record<string, unknown>;
+      // context_governance.applied has highest priority for contextPolicy.
+      // Override any fallback from agent_spec.selected.
+      // Primary: snake_case (real backend). orchestrator.rs uses agent_spec_privacy_policy,
+      // execution.rs + streaming.rs use privacy_policy. Accept both.
+      if (typeof p.privacy_policy === "string") contextPolicy = p.privacy_policy;
+      else if (typeof p.agent_spec_privacy_policy === "string")
+        contextPolicy = p.agent_spec_privacy_policy;
+      // Fallback: camelCase (legacy test data)
+      else if (typeof p.privacyPolicy === "string") contextPolicy = p.privacyPolicy;
+    }
+
+    // Count tool calls from typed events
+    if (event.eventType === "tool.call_started") {
+      toolSummary.started++;
+    }
+    if (event.eventType === "tool.call_completed") {
+      toolSummary.completed++;
+    }
+    if (event.eventType === "tool.call_failed") {
+      toolSummary.failed++;
+      allSucceeded = false;
+      hasGenericFailure = true;
+    }
+
+    // Typed tool.call_blocked
+    if (parsed.kind === "tool_call_blocked") {
+      const d = parsed.data;
+      if (d.status === "needs_confirmation") {
+        toolSummary.needsConfirmation++;
+        hasNeedsConfirmation = true;
+        if (isValidProposalReason(d.proposal_reason)) seenProposalReasons.add(d.proposal_reason);
+      } else {
+        toolSummary.blocked++;
+        if (isValidBlockReason(d.block_reason)) {
+          seenBlockReasons.add(d.block_reason);
+          if (d.block_reason === "agent_spec_denied" || d.block_reason === "agent_spec_missing")
+            hasAgentSpecDenied = true;
+        }
+      }
+      if (d.agent_spec_id && !agentSpecId) agentSpecId = d.agent_spec_id;
+      allSucceeded = false;
+    }
+
+    // Typed replay events
+    if (parsed.kind === "replay_started") {
+      replaySummary.started++;
+      if (parsed.data.agent_spec_id && !agentSpecId) agentSpecId = parsed.data.agent_spec_id;
+    }
+    if (parsed.kind === "replay_completed") {
+      const d = parsed.data;
+      if (d.status === "completed") replaySummary.completed++;
+      else if (d.status === "blocked") {
+        replaySummary.blocked++;
+        if (isValidBlockReason(d.block_reason)) seenBlockReasons.add(d.block_reason);
+        if (isValidFailureKind(d.failure_kind)) seenFailureKinds.add(d.failure_kind);
+        allSucceeded = false;
+      } else if (d.status === "needs_confirmation") {
+        replaySummary.needsConfirmation++;
+        if (isValidProposalReason(d.proposal_reason)) seenProposalReasons.add(d.proposal_reason);
+        hasNeedsConfirmation = true;
+        allSucceeded = false;
+      }
+    }
+    if (parsed.kind === "replay_failed") {
+      replaySummary.failed++;
+      hasReplayFailed = true;
+      if (isValidBlockReason(parsed.data.block_reason))
+        seenBlockReasons.add(parsed.data.block_reason);
+      if (isValidFailureKind(parsed.data.failure_kind))
+        seenFailureKinds.add(parsed.data.failure_kind);
+      allSucceeded = false;
+    }
+
+    // run.failed / model.failed / model.call_failed
+    if (
+      event.eventType === "run.failed" ||
+      event.eventType === "model.failed" ||
+      event.eventType === "model.call_failed"
+    ) {
+      allSucceeded = false;
+      hasGenericFailure = true;
+    }
+  }
+
+  // ── Build nextActions from typed reasons ────────────────────────────
+  const nextActions: TypedRunExplanationViewModel["nextActions"] = [];
+
+  // needs_confirmation → review/grant
+  if (hasNeedsConfirmation) {
+    nextActions.push({
+      kind: "review_proposal",
+      label: "前往 Review Center 审查待确认提案",
+      severity: "warning",
+    });
+    nextActions.push({
+      kind: "grant_permission",
+      label: "授予所需工具权限",
+      severity: "warning",
+    });
+  }
+
+  // agent_spec_denied → adjust_agent_spec
+  if (hasAgentSpecDenied) {
+    nextActions.push({
+      kind: "adjust_agent_spec",
+      label: "调整 AgentSpec 配置以允许被拒绝的工具",
+      severity: "error",
+    });
+  }
+
+  // replay.failed → retry_replay or inspect_trace
+  if (hasReplayFailed) {
+    nextActions.push({
+      kind: "retry_replay",
+      label: "重放失败，检查原因后重试",
+      severity: "error",
+    });
+    nextActions.push({
+      kind: "inspect_trace",
+      label: "查看详细 trace 进行诊断",
+      severity: "error",
+    });
+  }
+
+  // ═══ Fallback: error/warning with no typed-reason nextActions ═══════
+  // Generic failures (tool.call_failed, run.failed, model.failed) and
+  // malformed known typed events are not covered by the typed-reason
+  // nextActions above.  When the outcome will be error/warning but
+  // nextActions is empty, inject inspect_trace so users always have a
+  // next step.
+  //
+  // This does NOT add actions for success/info runs.
+
+  // ── Build outcome tone ──────────────────────────────────────────────
+  let outcomeTone: TypedRunExplanationViewModel["outcomeTone"];
+  if (hasReplayFailed || hasAgentSpecDenied || toolSummary.failed > 0 || hasGenericFailure) {
+    outcomeTone = "error";
+  } else if (hasNeedsConfirmation) {
+    outcomeTone = "warning";
+  } else if (malformedKnownTyped > 0) {
+    // Known governance event types with unparseable payloads → trace
+    // contract warning.  Does not crash; does not infer from summary.
+    outcomeTone = "warning";
+  } else if (allSucceeded && events.some(e => e.eventType === "run.completed")) {
+    outcomeTone = "success";
+  } else {
+    outcomeTone = "info";
+  }
+
+  // ── Fallback inspect_trace for any non-success/no nextActions ───────
+  if (nextActions.length === 0 && outcomeTone !== "success" && outcomeTone !== "info") {
+    nextActions.push({
+      kind: "inspect_trace",
+      label: "查看详细 trace 进行诊断",
+      severity: outcomeTone === "error" ? "error" : "warning",
+    });
+  }
+
+  // ── Build primaryReason from typed reasons ──────────────────────────
+  let primaryReason: string | null = null;
+  if (hasAgentSpecDenied) {
+    primaryReason = "AgentSpec 拒绝了工具执行";
+  } else if (hasReplayFailed) {
+    primaryReason = "重放动作失败";
+  } else if (hasNeedsConfirmation) {
+    primaryReason = "工具需要用户确认";
+  } else if (seenBlockReasons.size > 0) {
+    primaryReason = `工具被阻断：${Array.from(seenBlockReasons)
+      .map(r => BLOCK_REASON_LABELS[r])
+      .join("、")}`;
+  } else if (hasGenericFailure) {
+    primaryReason = "运行中出现未分类错误";
+  } else if (malformedKnownTyped > 0) {
+    primaryReason = "运行 trace 中存在无法解析的治理事件";
+  }
+
+  // ── Build headline ──────────────────────────────────────────────────
+  const kindLabel = run?.kind ? run.kind : "AgentRun";
+  let headline: string;
+  if (outcomeTone === "success") {
+    headline = `${kindLabel} 运行完成，所有工具执行成功`;
+  } else if (outcomeTone === "error") {
+    headline = `${kindLabel} 运行遇到问题`;
+  } else if (outcomeTone === "warning") {
+    headline = `${kindLabel} 运行需要你的确认`;
+  } else {
+    headline = `${kindLabel} 运行记录`;
+  }
+
+  // ── Build userFacingBullets ─────────────────────────────────────────
+  const userFacingBullets: string[] = [];
+  if (toolSummary.started > 0) userFacingBullets.push(`发起了 ${toolSummary.started} 次工具调用`);
+  if (toolSummary.completed > 0) userFacingBullets.push(`${toolSummary.completed} 次工具调用成功`);
+  if (toolSummary.blocked > 0) userFacingBullets.push(`${toolSummary.blocked} 次工具调用被阻断`);
+  if (toolSummary.failed > 0) userFacingBullets.push(`${toolSummary.failed} 次工具调用失败`);
+  if (toolSummary.needsConfirmation > 0)
+    userFacingBullets.push(`${toolSummary.needsConfirmation} 次工具调用需要确认`);
+  if (replaySummary.started > 0) userFacingBullets.push(`发起了 ${replaySummary.started} 次重放`);
+  if (replaySummary.completed > 0) userFacingBullets.push(`${replaySummary.completed} 次重放成功`);
+  if (replaySummary.failed > 0) userFacingBullets.push(`${replaySummary.failed} 次重放失败`);
+  if (replaySummary.blocked > 0) userFacingBullets.push(`${replaySummary.blocked} 次重放被阻断`);
+  if (replaySummary.needsConfirmation > 0)
+    userFacingBullets.push(`${replaySummary.needsConfirmation} 次重放需确认`);
+
+  if (userFacingBullets.length === 0) {
+    userFacingBullets.push("运行已完成，无显著事件");
+  }
+
+  // ── Build developerBullets ──────────────────────────────────────────
+  const developerBullets: string[] = [];
+  if (agentSpecId) developerBullets.push(`AgentSpec: ${agentSpecId}`);
+  if (promptBlockCount !== null) {
+    const idsPreview =
+      promptBlockIds.length > 0
+        ? ` (${promptBlockIds.slice(0, 5).join(", ")}${promptBlockIds.length > 5 ? "…" : ""})`
+        : "";
+    developerBullets.push(`Prompt blocks: ${promptBlockCount} blocks${idsPreview}`);
+  }
+  if (contextPolicy) developerBullets.push(`隐私策略: ${contextPolicy}`);
+  if (seenBlockReasons.size > 0)
+    developerBullets.push(
+      `阻断原因: ${Array.from(seenBlockReasons)
+        .map(r => BLOCK_REASON_LABELS[r])
+        .join("、")}`
+    );
+  if (seenProposalReasons.size > 0)
+    developerBullets.push(
+      `需确认原因: ${Array.from(seenProposalReasons)
+        .map(r => PROPOSAL_REASON_LABELS[r])
+        .join("、")}`
+    );
+  if (seenFailureKinds.size > 0)
+    developerBullets.push(
+      `失败类型: ${Array.from(seenFailureKinds)
+        .map(f => FAILURE_KIND_LABELS[f])
+        .join("、")}`
+    );
+  if (hasReplayFailed) developerBullets.push("存在重放失败事件");
+  if (hasGenericFailure) developerBullets.push("存在通用失败事件 (run/model/call_failed)");
+  if (malformedKnownTyped > 0) developerBullets.push(`无法解析的治理事件: ${malformedKnownTyped}`);
+  developerBullets.push(`事件总数: ${events.length}`);
+
+  return {
+    headline,
+    outcomeTone,
+    primaryReason,
+    agentSpecId,
+    promptBlockCount,
+    promptBlockIds,
+    contextPolicy,
+    toolSummary,
+    replaySummary,
+    nextActions,
+    userFacingBullets,
+    developerBullets,
+  };
+}
+
+// =====================================================================
 // Helpers
 // =====================================================================
 

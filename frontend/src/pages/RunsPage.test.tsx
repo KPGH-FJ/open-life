@@ -4,6 +4,12 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import RunsPage from "./RunsPage";
 import { mockInvoke } from "@/test/mocks/tauri";
+import {
+  successfulGovernedRun,
+  agentSpecDeniedToolRun,
+  replayFailedRun,
+  malformedAndUnknownRun,
+} from "@/test/fixtures/agentRunEvents";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -333,7 +339,13 @@ describe("RunsPage contract", () => {
     );
 
     // Must show typed hint from event stream, not from action status
-    expect(await screen.findByText("工具被阻断：网络策略拒绝")).toBeInTheDocument();
+    // Wait for run card to render first
+    await waitFor(() => {
+      expect(screen.getByText("succeeded-with-blocked-event")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText(/工具被阻断：网络策略拒绝/).length).toBeGreaterThanOrEqual(1);
+    });
   });
 
   it("does not show typed reason when summary contains reason but payload lacks typed field", async () => {
@@ -391,5 +403,308 @@ describe("RunsPage contract", () => {
     });
     // "缺少重放规格" must NOT appear (it's only in the summary text, not typed payload)
     expect(screen.queryByText("缺少重放规格")).toBeNull();
+  });
+
+  // ── Batch 6: Explainability hint tests ───────────────────────────────
+
+  it("run list explanation hint uses typed payload from getTypedRunExplanation", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-explain-1",
+            taskId: "task-explain",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "explain test",
+            outputPreview: "explain test output",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") {
+        return Promise.resolve([
+          {
+            id: "evt-blocked",
+            runId: "run-explain-1",
+            eventType: "tool.call_blocked",
+            actor: "runtime",
+            summary: "AgentSpec blocked web.search",
+            payload: {
+              status: "blocked",
+              tool_name: "web.search",
+              source: "builtin",
+              block_reason: "agent_spec_denied",
+              agent_spec_id: "main.default",
+            },
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    // Primary reason from run-level explanation should be shown
+    expect(await screen.findByText(/AgentSpec 拒绝了工具执行/)).toBeInTheDocument();
+  });
+
+  it("misleading summary does not create false hint", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-misleading",
+            taskId: "task-misleading",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "misleading summary test",
+            outputPreview: "misleading run",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") {
+        return Promise.resolve([
+          {
+            id: "evt-misleading",
+            runId: "run-misleading",
+            eventType: "tool.call_blocked",
+            actor: "runtime",
+            // Summary says "completed successfully" but typed payload says agent_spec_denied
+            summary: "completed successfully — everything is fine (MISLEADING)",
+            payload: {
+              status: "blocked",
+              tool_name: "web.search",
+              source: "builtin",
+              block_reason: "agent_spec_denied",
+              agent_spec_id: "main.default",
+            },
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    // Hint must come from typed payload (AgentSpec 拒绝了工具执行), not misleading summary
+    expect(await screen.findByText(/AgentSpec 拒绝了工具执行/)).toBeInTheDocument();
+    // Must NOT show a success hint from the misleading summary
+    expect(screen.queryByText("completed successfully")).toBeNull();
+  });
+
+  it("pure typed events still produce preview hint via primary reason", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-pure-typed",
+            taskId: "task-pure",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "pure typed test",
+            outputPreview: "all typed",
+            generatedProposals: [],
+            actions: [
+              {
+                id: "action-1",
+                actionType: "tool_call",
+                status: "succeeded",
+                input: {},
+                timestamp: new Date().toISOString(),
+              },
+            ],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") {
+        return Promise.resolve([
+          {
+            id: "evt-1",
+            runId: "run-pure-typed",
+            eventType: "run.completed",
+            actor: "runtime",
+            summary: "run completed",
+            payload: { stop_reason: "no_tools" },
+            createdAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    // No primary reason (success case) → fallback to no hint or fallback counts
+    // (all actions succeeded, no failure events → no special hints needed)
+    await waitFor(() => {
+      expect(screen.getByText("all typed")).toBeInTheDocument();
+    });
+  });
+
+  // ── Fixture-based explainability preview tests ─────────────────────
+
+  it("fixture: successfulGovernedRun — no primaryReason, no misleading hint", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-fixture-success",
+            taskId: "task-fixture-success",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "fixture success test",
+            outputPreview: "fixture success output",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") return Promise.resolve(successfulGovernedRun);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("fixture success output")).toBeInTheDocument();
+    });
+    // success run has empty nextActions → no primaryReason → no hint badge
+    // The primaryReason is null, so getTypedRunExplanation won't produce a hint
+  });
+
+  it("fixture: agentSpecDeniedToolRun — primaryReason visible in list", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-fixture-denied",
+            taskId: "task-fixture-denied",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "fixture denied test",
+            outputPreview: "fixture denied output",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") return Promise.resolve(agentSpecDeniedToolRun);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText(/AgentSpec 拒绝了工具执行/)).toBeInTheDocument();
+  });
+
+  it("fixture: replayFailedRun — primaryReason visible in list", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-fixture-replayfail",
+            taskId: "task-fixture-replayfail",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "fixture replay fail",
+            outputPreview: "fixture replay output",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") return Promise.resolve(replayFailedRun);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText(/重放动作失败/)).toBeInTheDocument();
+    expect(await screen.findByText(/重放失败：缺少重放规格/)).toBeInTheDocument();
+  });
+
+  it("fixture: malformedAndUnknownRun — no crash, no misleading hint from summary", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") {
+        return Promise.resolve([
+          {
+            id: "run-fixture-malformed",
+            taskId: "task-fixture-malformed",
+            sessionId: "session-1",
+            status: "completed",
+            kind: "conversation",
+            userInput: "fixture malformed test",
+            outputPreview: "fixture malformed output",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            startedAt: new Date().toISOString(),
+          },
+        ]);
+      }
+      if (cmd === "list_agent_run_events") return Promise.resolve(malformedAndUnknownRun);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <RunsPage />
+      </MemoryRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("fixture malformed output")).toBeInTheDocument();
+    });
+    // malformed known typed events → warning primaryReason, NOT silent success
+    // Does not crash; does not infer specific block_reason from summary
+    expect(await screen.findByText(/无法解析/)).toBeInTheDocument();
   });
 });

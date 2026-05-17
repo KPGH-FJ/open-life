@@ -372,5 +372,179 @@ All 11 replay.failed emission paths now carry at least one valid typed reason.
 | Date | Update |
 |------|--------|
 | 2026-05-16 | **Post-Beta Audit Fixes**: ReplayFailed early paths 1-3 now carry typed reasons; tools.rs budget exceeded now compliant; plan_executor.rs `agentspec_id` → `agent_spec_id` fix; shell.run closure auto-injects contract fields. All production ToolCallBlocked/ReplayFailed emitters now satisfy typed payload contract. |
+| 2026-05-16 | **Explainability Layer**: Added `getTypedEventExplanation`, `getTypedRunExplanation`, `TypedRunExplanationViewModel`, `TypedEventExplanationViewModel` to `typedContract.ts`. Added `EventExplanationBlock` and `RunExplanationPanel` components. Integrated into `RunTracePanel`, `AgentRunDetail`, and `RunsPage`. See Section 10. |
+| 2026-05-16 | **Explainability Snake-Case Fix**: Fixed `getTypedRunExplanation` metadata extraction to read real backend snake_case fields (`agent_spec_id`, `privacy_policy`, `agent_spec_privacy_policy`, `prompt_blocks`). Removed fake `promptStackId` field — replaced with `promptBlockCount` / `promptBlockIds` extracted from `prompt_blocks` array (Scheme B). Added snake_case priority with camelCase backward-compat fallback. Updated `TypedRunExplanationViewModel` interface. Updated `RunExplanationPanel` developer display. Added 9 new tests covering real payload contracts. |
+| 2026-05-16 | **Post-Beta Explainability Quality Hardening**: Added `frontend/src/test/fixtures/agentRunEvents.ts` with 5 real-world snake_case event timeline fixtures (successfulGovernedRun, agentSpecDeniedToolRun, needsConfirmationRun, replayFailedRun, malformedAndUnknownRun). Removed `kind: "none"` nextAction — success/info runs now have empty `nextActions` array. `RunExplanationPanel` hides "建议操作" section when `nextActions` is empty. `nextActions` severity narrowed to `"warning" | "error"` (no more `"info"` noise). Added 13 fixture-based end-to-end tests across typedContract, RunTracePanel, AgentRunDetail, and RunsPage. Updated sections 10.2, 10.6, 10.7, 10.8. |
+| 2026-05-16 | **nextActions Fallback & Malformed Known Typed Event Fix**: Added `nextActions` fallback rule: when `outcomeTone` is error/warning and no typed-reason-driven nextActions exist, `inspect_trace` is auto-appended. Generic failures (`tool.call_failed`, `run.failed`, `model.failed`, `model.call_failed`) now all set `hasGenericFailure` and surface `primaryReason: "运行中出现未分类错误"`. Known typed event types with malformed payloads now produce `outcomeTone: "warning"`, `primaryReason: "运行 trace 中存在无法解析的治理事件"`, malformed count in developerBullets, and `inspect_trace` nextAction — no longer treated as clean success. Unknown event types (`custom.unknown_event`) do NOT trigger malformed warning. Added `KNOWED_TYPED_EVENT_TYPES` set and `malformedKnownTyped` counter. Added 5 new unit tests (generic failure x3, malformed semantics, regression guard). Updated sections 10.2, 10.7, 10.8, 10.9, 10.10. |
 
-*Related: `plans/frontend_typed_contract_notes.md`, `plans/openlife_post_beta_roadmap.md`, `plans/current_agent_runtime_audit.md`*
+## 10. Explainability Layer
+
+### 10.1 Boundary: Typed Contract vs. Explainability
+
+| Layer | Responsible For | File |
+|-------|----------------|------|
+| **Typed Contract** | Parse payloads, validate typed fields, produce typed view models | `frontend/src/utils/typedContract.ts` |
+| **Explainability** | Produce user/developer-facing explanations from typed view models | `frontend/src/utils/typedContract.ts` (same file) |
+| **UI Rendering** | Display explanation views, badges, lists | `RunTracePanel`, `RunExplanationPanel`, `EventExplanationBlock`, `AgentRunDetail`, `RunsPage` |
+
+**Hard rule:** `summary` / `human_message` / `error` text is never used for state inference in explanation helpers. Only typed payload fields (`block_reason`, `proposal_reason`, `failure_kind`, `agent_spec_id`, `proposal_id`, `status`) determine what the explanation says.
+
+### 10.2 Run-Level Explanation (`getTypedRunExplanation`)
+
+**Input:** `AgentRunEvent[]` timeline + optional `{status, kind}` from AgentRun.
+
+**Output:** `TypedRunExplanationViewModel` with:
+- `headline`, `outcomeTone` — run-level summary
+- `primaryReason` — the most important typed reason (from block_reasons, proposal_reasons, failure_kinds)
+- `agentSpecId` — extracted from `agent_spec_id` field in `agent_spec.selected` or `prompt_stack.assembled` or typed events (snake_case, real backend)
+- `promptBlockCount` / `promptBlockIds` — extracted from `prompt_blocks` array in `prompt_stack.assembled` (snake_case, real backend). No `prompt_stack_id` field exists in backend payloads.
+- `contextPolicy` — extracted from `privacy_policy` (execution/streaming path) or `agent_spec_privacy_policy` (orchestrator path) in `context_governance.applied`, or from `privacy_policy` in `agent_spec.selected` (snake_case, real backend)
+- `toolSummary`, `replaySummary` — counters from typed events
+- `nextActions` — actionable items derived from typed reasons (not from summary text)
+- `userFacingBullets`, `developerBullets` — plain-language items
+
+**Metadata field precedence:** All metadata fields use **snake_case priority** matching real backend payloads. camelCase is a backward-compat fallback for legacy test data only.
+
+| Event Type | Real Backend Fields (snake_case) | camelCase Fallback |
+|-----------|--------------------------------|-------------------|
+| `agent_spec.selected` | `agent_spec_id`, `role`, `privacy_policy` | `agentSpecId` |
+| `prompt_stack.assembled` | `agent_spec_id`, `prompt_blocks[]` (no `prompt_stack_id`) | — |
+| `context_governance.applied` | `privacy_policy` (exec/streaming), or `agent_spec_privacy_policy` (orchestrator) | `privacyPolicy` |
+
+**PromptStack scheme:** Scheme B — frontend extracts block count and IDs from `prompt_blocks` array. No `prompt_stack_id` field exists in the backend; adding one would create a fake contract. The block trace captures real data (block ids, versions, purposes) without leaking prompt content.
+
+**nextActions derivation:**
+
+| Condition | nextAction.kind | Severity |
+|-----------|----------------|----------|
+| Any `tool.call_blocked` with `needs_confirmation` | `review_proposal`, `grant_permission` | warning |
+| Any `tool.call_blocked` with `agent_spec_denied` | `adjust_agent_spec` | error |
+| Any `replay.failed` with typed reason | `retry_replay`, `inspect_trace` | error |
+| Generic failure (tool.call_failed, run.failed, model.failed, model.call_failed) without typed reasons | `inspect_trace` | error |
+| Malformed known typed events without other errors | `inspect_trace` | warning |
+| All clear (success / info / no governance issues) | **(empty array)** — no user action needed | — |
+
+**nextActions semantics:**
+- **Empty array** (`nextActions.length === 0`): the run completed without governance issues. No "建议操作" section is rendered in `RunExplanationPanel`.
+- **Non-empty array**: only appears for error / warning outcomes. Every entry has a real action (`review_proposal`, `grant_permission`, `adjust_agent_spec`, `retry_replay`, `inspect_trace`) with `severity: "warning" | "error"`.
+- **Fallback rule**: when `outcomeTone` is `"error"` or `"warning"` and no typed-reason-driven nextActions exist, `inspect_trace` is automatically appended so users always have a diagnostic next step. Generic failures (`tool.call_failed`, `run.failed`, `model.failed`) and malformed known typed events all trigger this fallback.
+- The `kind: "none"` filler no longer exists. Success / info runs do not display misleading "查看运行 trace" or "查看详细 trace 进行审计" suggestions.
+- `nextActions` is derived exclusively from typed payload fields (`block_reason`, `proposal_reason`, `failure_kind`) or the presence of error/warning outcome. It never uses `summary`, `human_message`, or `error` text as a state source.
+
+**Fallback:** Empty events → `outcomeTone: "info"`, `headline: "运行记录"`, `userFacingBullets: ["无显著事件"]`.
+
+### 10.3 Event-Level Explanation (`getTypedEventExplanation`)
+
+**Input:** Single `AgentRunEvent`.
+
+**Output:** `TypedEventExplanationViewModel` with:
+- `title`, `tone` — event summary
+- `whatHappened` — user-facing description
+- `why` — typed reason label (null if none)
+- `impact` — what this means for the user
+- `nextStep` — actionable suggestion
+- `debugFacts` — label/value pairs (eventType, toolName, source, agentSpecId, proposalId, actionId, replayOfActionId)
+
+**Supported event types (typed explanation):**
+
+| Event Type | Status Variants | Explanation Quality |
+|-----------|----------------|-------------------|
+| `tool.call_blocked` | blocked, needs_confirmation | Full (user-facing whatHappened/why/impact/nextStep) |
+| `replay.started` | started | Full |
+| `replay.completed` | completed, blocked, needs_confirmation | Full per-status |
+| `replay.failed` | failed (with block_reason or failure_kind) | Full |
+
+**Unknown/malformed fallback:**
+- `whatHappened: "这是一个未识别的运行事件"`
+- `tone: "info"`
+- `why/impact/nextStep: null`
+- `debugFacts` contains `eventType` and `summary`
+
+### 10.4 UI Integration
+
+| UI Component | What Shows |
+|-------------|-----------|
+| `RunTracePanel` | `EventExplanationBlock` first in expanded event, then TypedEventDetailBlock, then raw payload |
+| `AgentRunDetail` | `RunExplanationPanel` above the trace timeline |
+| `RunsPage` | `primaryReason` from run-level explanation displayed as hint badge |
+
+### 10.5 Events With Only Generic Debug Display
+
+These event types do not have user-facing explanation yet, and show only in the generic event row + raw payload:
+- `run.created`, `run.completed`, `run.failed`
+- `model.call_started`, `model.call_completed`, `model.call_failed`, `model.failed`
+- `tool.call_started`, `tool.call_completed`, `tool.call_failed`
+- `context.assembled`, `agent_spec.selected`, `prompt_stack.assembled`, `context_governance.applied`
+- `proposal.created`, `fallback.*`, `json_repair.*`, `compaction.created`
+- `plan.*` events
+- `shell.blocked`, `shell.completed`
+
+These are non-governance events that don't carry typed payloads with block/proposal/failure reasons. They display in `RunTracePanel` as generic event rows with raw payload.
+
+### 10.6 Test Coverage
+
+| Test File | What's Tested |
+|-----------|--------------|
+| `typedContract.test.ts` | `getTypedEventExplanation`: tool_call_blocked (agent_spec_denied, network_policy_ask), replay.completed (completed, blocked), replay.failed (block_reason, failure_kind), unknown fallback, malformed fallback. `getTypedRunExplanation`: all success, needs confirmation, AgentSpec denied, replay failed, mixed, summary misleading but typed correct, summary has reason but typed absent (now produces malformed warning), agentSpecId/promptBlockCount/promptBlockIds/contextPolicy extraction (snake_case real backend + camelCase compat fallback), contextPolicy fallback from agent_spec.selected, empty events. **Fixture-based**: successfulGovernedRun (success, empty nextActions), agentSpecDeniedToolRun (error, adjust_agent_spec), needsConfirmationRun (warning, review/grant), replayFailedRun (error, retry/inspect), malformedAndUnknownRun (warning, inspect_trace, malformed count). **Generic failure**: tool.call_failed, run.failed, model.failed, model.call_failed all produce error tone + inspect_trace. |
+| `RunTracePanel.test.tsx` | Expanded typed event shows user-facing explanation before raw payload. Unknown/malformed event shows fallback. Event explanation does not infer from summary text. Raw payload remains in debug section. **Fixture-based**: agentSpecDeniedToolRun (typed detail visible, user-facing explanation), malformedAndUnknownRun (no crash, fallback). |
+| `AgentRunDetail.test.tsx` | Run-level explanation panel above trace. AgentSpec denied → adjust_agent_spec. Needs confirmation → review/grant. Replay failed → retry/inspect. **Fixture-based**: successfulGovernedRun (no 建议操作, no misleading hint, developer info present), agentSpecDeniedToolRun, needsConfirmationRun, replayFailedRun. |
+| `RunsPage.test.tsx` | Explanation hint from typed payload. Misleading summary doesn't create false hint. Pure typed events still produce preview hint. **Fixture-based**: successfulGovernedRun (no primaryReason, no misleading hint), agentSpecDeniedToolRun (primaryReason visible), replayFailedRun (primaryReason visible), malformedAndUnknownRun (no crash, no misleading hint). |
+
+### 10.7 Real Event Fixtures
+
+**File:** `frontend/src/test/fixtures/agentRunEvents.ts`
+
+Five real-world event timeline fixtures for end-to-end explainability validation. All fixtures use **snake_case payloads** matching the real backend contract. No fixture uses `summary`, `human_message`, or `error` text as a state source.
+
+| Fixture | Event Types Included | Purpose |
+|---------|---------------------|---------|
+| `successfulGovernedRun` | `agent_spec.selected`, `prompt_stack.assembled`, `context_governance.applied`, `tool.call_started`, `tool.call_completed`, `run.completed` | Validates success path: agentSpecId, prompt blocks, privacy policy extraction; empty nextActions. |
+| `agentSpecDeniedToolRun` | `agent_spec.selected`, `prompt_stack.assembled`, `context_governance.applied`, `tool.call_blocked` (status: "blocked", block_reason: "agent_spec_denied"), `run.completed` | Validates AgentSpec deny: error tone, adjust_agent_spec nextAction, main.strict spec ID. |
+| `needsConfirmationRun` | `agent_spec.selected`, `prompt_stack.assembled`, `context_governance.applied`, `tool.call_blocked` (status: "needs_confirmation", proposal_reason: "network_policy_ask", proposal_id: "prop-network-ask-001"), `run.completed` | Validates needs confirmation: warning tone, review/grant nextActions, proposal_id. |
+| `replayFailedRun` | `agent_spec.selected`, `prompt_stack.assembled`, `replay.failed` (block_reason: "replay_spec_missing"), `run.completed` | Validates replay failure: error tone, retry_replay + inspect_trace nextActions, replaySummary.failed. |
+| `malformedAndUnknownRun` | `tool.call_blocked` (invalid block_reason enum), `replay.failed` (null reasons), `custom.unknown_event`, `run.completed` | Validates soft-fail: no crash, warning tone (NOT success), malformed count in developerBullets, inspect_trace nextAction, no inference from summary text. |
+
+**Import path:** `@/test/fixtures/agentRunEvents`
+
+**Usage in tests:**
+```typescript
+import { successfulGovernedRun } from "@/test/fixtures/agentRunEvents";
+const exp = getTypedRunExplanation(successfulGovernedRun, { status: "completed", kind: "conversation" });
+```
+
+### 10.8 nextActions Semantic Contract
+
+| Run Outcome | `nextActions.length` | UI Behavior |
+|------------|---------------------|-------------|
+| success / info (no governance issues) | 0 (empty array) | `RunExplanationPanel` shows NO "建议操作" section |
+| warning (needs_confirmation) | 1-2 | Shows "建议操作" with `review_proposal` + `grant_permission` |
+| warning (malformed known typed events) | 1 | Shows "建议操作" with `inspect_trace` |
+| error (agent_spec_denied, replay_failed) | 1-3 | Shows "建议操作" with `adjust_agent_spec` and/or `retry_replay` + `inspect_trace` |
+| error (generic failure: tool.call_failed, run.failed, model.failed, model.call_failed) | 1 | Shows "建议操作" with `inspect_trace` |
+
+**Anti-patterns prevented:**
+- No `kind: "none"` filler action that creates noise under success runs.
+- No duplicate "查看运行 trace" + "查看详细 trace 进行审计" on success paths.
+- error/warning always has at least one nextAction (fallback `inspect_trace`).
+- Developer info remains collapsible and out of the way.
+- Success runs display only headline + summary bullets + collapsible developer section.
+
+### 10.9 Malformed Known Typed Events
+
+When a known governance event type (`tool.call_blocked`, `replay.started`, `replay.completed`, `replay.failed`) has a payload that fails structural validation:
+
+- **outcomeTone**: `"warning"` (raised from `"info"`/`"success"` if no higher-priority error exists)
+- **primaryReason**: `"运行 trace 中存在无法解析的治理事件"`
+- **nextActions**: `inspect_trace` with `severity: "warning"` (via fallback rule)
+- **developerBullets**: includes `"无法解析的治理事件: N"` count
+- **Hard rule**: never infers specific `block_reason` / `proposal_reason` / `failure_kind` from `summary` or `human_message` text
+- **Unknown event types** (`custom.unknown_event` etc.) are NOT counted as malformed — they do not affect outcomeTone
+
+### 10.10 Generic Failure Fallback
+
+When `tool.call_failed`, `run.failed`, `model.failed`, or `model.call_failed` events exist but no typed governance reasons are present:
+
+- **outcomeTone**: `"error"`
+- **primaryReason**: `"运行中出现未分类错误"`
+- **nextActions**: `inspect_trace` with `severity: "error"` (via fallback rule)
+- **developerBullets**: includes `"存在通用失败事件"`

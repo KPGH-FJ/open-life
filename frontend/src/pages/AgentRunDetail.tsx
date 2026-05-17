@@ -28,6 +28,7 @@ import { getTypedActionViewModel } from "../utils/typedContract";
 import RunTracePanel from "../components/RunTracePanel";
 import ToolObservationPanel from "../components/ToolObservationPanel";
 import PlanPanel from "../components/PlanPanel";
+import RunExplanationPanel from "../components/RunExplanationPanel";
 
 function statusIcon(status: string) {
   switch (status) {
@@ -237,6 +238,13 @@ export default function AgentRunDetail() {
               ) < 60
                 ? `${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000)} 秒`
                 : `${Math.floor((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000 / 60)} 分 ${Math.round((new Date(run.finishedAt).getTime() - new Date(run.startedAt).getTime()) / 1000) % 60} 秒`}
+            </div>
+          )}
+
+          {/* Run-level explanation (typed contract driven) */}
+          {events.length > 0 && (
+            <div className="mb-6">
+              <RunExplanationPanel events={events} run={run} />
             </div>
           )}
 
