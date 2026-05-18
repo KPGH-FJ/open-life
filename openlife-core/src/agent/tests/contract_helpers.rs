@@ -131,6 +131,25 @@ pub fn assert_array_items_have_field(
     }
 }
 
+/// Assert the payload contains a field whose value is either a non-empty
+/// string or `null`.  The field must exist — a missing field panics.
+///
+/// This matches the `agent_spec_id` contract for `tool.call_blocked` where
+/// `None` (no AgentSpec in scope, e.g. budget exceeded) is serialised as
+/// `null` and the frontend `typedContract.ts` parser accepts both
+/// `string | null`.
+pub fn assert_has_optional_string_or_null(payload: &serde_json::Value, field: &str) {
+    let val = payload
+        .get(field)
+        .unwrap_or_else(|| panic!("payload missing field '{}'", field));
+    assert!(
+        val.is_null() || val.as_str().is_some_and(|s| !s.is_empty()),
+        "payload field '{}' must be a non-empty string or null, got: {:?}",
+        field,
+        val
+    );
+}
+
 /// Assert the payload does NOT contain the given field.
 pub fn assert_field_absent(payload: &serde_json::Value, field: &str) {
     assert!(
@@ -222,5 +241,31 @@ mod tests {
             "proposal_reason": null,
         });
         assert_no_typed_reason(&payload, &["block_reason", "proposal_reason"]);
+    }
+
+    #[test]
+    fn test_optional_string_or_null_accepts_string() {
+        let payload = serde_json::json!({"agent_spec_id": "main.default"});
+        assert_has_optional_string_or_null(&payload, "agent_spec_id");
+    }
+
+    #[test]
+    fn test_optional_string_or_null_accepts_null() {
+        let payload = serde_json::json!({"agent_spec_id": null});
+        assert_has_optional_string_or_null(&payload, "agent_spec_id");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_optional_string_or_null_rejects_empty_string() {
+        let payload = serde_json::json!({"agent_spec_id": ""});
+        assert_has_optional_string_or_null(&payload, "agent_spec_id");
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_optional_string_or_null_rejects_missing_field() {
+        let payload = serde_json::json!({});
+        assert_has_optional_string_or_null(&payload, "agent_spec_id");
     }
 }

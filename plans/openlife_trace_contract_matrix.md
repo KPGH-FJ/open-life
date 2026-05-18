@@ -143,9 +143,9 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 
 ### 2.4 `replay.failed` — Tier 1 Governance
 
-**Must-have typed fields:** At least one of `block_reason`\|`failure_kind`; also `status` ("failed"), `run_id`, `action_id`, `replay_of_action_id`.
+**Must-have typed fields:** At least one of `block_reason`|`failure_kind`; also `status` ("failed"), `run_id`, `action_id`, `replay_of_action_id`.
 
-**Emission sites:** `commands/agent.rs` — 7 distinct early-failure paths via `record_replay_failed` closure. All include at minimum `status`, `run_id`, `action_id`, `replay_of_action_id`, plus `human_message`. Some include `block_reason`, `failure_kind`, `tool_name`, `source`, `agent_spec_id`.
+**Emission sites:** `commands/agent.rs` — 7 early-failure paths via `record_replay_failed` closure + 1 execution-outcome path when `exec_result.status == Failed`. All use `build_replay_failed_payload`. Early-failure paths include `human_message`; some include `block_reason`, `failure_kind`, `tool_name`, `source`, `agent_spec_id`. Outcome path: priority `block_reason` → `failure_kind` → fallback `internal_error`; `tool_name`/`source`/`agent_spec_id` via `extra`.
 
 ---
 
@@ -333,8 +333,8 @@ A change to any builder function is **immediately reflected** in both production
 | `test_agent_spec_selected_payload_contract` | `agent_spec.selected` | `build_agent_spec_selected_payload` |
 | `test_prompt_stack_assembled_payload_contract` | `prompt_stack.assembled` | `build_prompt_stack_assembled_payload` |
 | `test_context_governance_applied_payload_contract` | `context_governance.applied` | `build_context_governance_applied_payload` (both emitter variants) |
-| `test_tool_call_blocked_typed_payload_contract` | `tool.call_blocked` | Pre-existing (validates `status`, `tool_name`, `source`, `block_reason`\|`proposal_reason`) |
-| `test_replay_failed_events_have_typed_reason` | `replay.failed` | Pre-existing (validates `status`, `run_id`, `action_id`, `replay_of_action_id`, valid typed reason) |
+| `test_tool_call_blocked_typed_payload_contract` | `tool.call_blocked` (4 variants) | `build_tool_call_blocked_payload` — **now builder-driven** (AgentSpec deny, NetworkPolicy ask, MCP target block, budget exceeded with `agent_spec_id: null`) |
+| `test_replay_failed_events_have_typed_reason` | `replay.failed` (4 variants) | `build_replay_failed_payload` — **now builder-driven** (replay_spec_missing x2, internal_error x2) |
 | `test_generic_failure_events_round_trip` | `model.failed`, `model.call_failed`, `tool.call_failed`, `run.failed` | `build_model_failed_payload`, `build_model_call_failed_payload`, `build_tool_call_failed_payload`, `build_run_failed_payload` |
 | `test_tool_call_blocked_rejects_invalid_enum_reason` | `tool.call_blocked` (invalid reason) | `build_tool_call_blocked_payload` with `"not_a_real_enum_variant"` — rejected by `assert_no_typed_reason` |
 | `test_replay_failed_rejects_invalid_enum_reason` | `replay.failed` (invalid reason) | `build_replay_failed_payload` with `"not_a_real_enum_variant"` — rejected by `assert_no_typed_reason` |
@@ -362,6 +362,7 @@ Values like `"not_a_real_enum_variant"`, empty strings, and `"null"` are **rejec
 | Helper | Signature | Purpose |
 |--------|-----------|---------|
 | `assert_has_string` | `(payload, field)` | Assert non-empty string field present |
+| `assert_has_optional_string_or_null` | `(payload, field)` | Assert field exists and value is non-empty string or `null` (e.g. `agent_spec_id` in `tool.call_blocked` when no AgentSpec in scope) |
 | `assert_has_array` | `(payload, field)` | Assert non-empty array field present |
 | `assert_has_array_allow_empty` | `(payload, field)` | Assert array field present (may be empty) |
 | `assert_array_items_have_field` | `(payload, array_field, item_field)` | Assert each array element has sub-field |
@@ -493,21 +494,276 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 
 ---
 
-## 9. Update Log
+## 9. Trace Contract Drift Audit
+
+### 9.1 Purpose
+
+The trace contract drift audit is a **CI-enforceable source-code scanning test** that prevents developers from bypassing `trace_payloads::build_*_payload` builders when emitting typed governance events. It is a lightweight, deterministic, *no-runtime* test — it reads source files at test time and performs text-level scanning, similar to a linter targeted at the typed payload contract.
+
+**This audit does NOT:**
+- Replace runtime contract tests (`event_store.rs`, `contract_helpers.rs`)
+- Scan generic events (`RunCreated`, `ToolCallStarted`, etc.)
+- Block normal `serde_json::json!` usage outside governance events
+- Parse Rust AST — it uses simple text-window scanning on sanitised source
+
+**This audit DOES:**
+- Flag any production emission of the audited governance event types if their payload is not constructed via the required builder
+- Run in CI as part of `cargo test -p openlife-core trace_contract_audit`
+- Include both positive and negative unit tests on synthetic snippets
+- **Mask Rust comments and string literals** before scanning, preventing tokens hidden inside comments/strings from creating false passes or false-positive emission counts
+
+### 9.2 Implementation
+
+**File:** `openlife-core/src/agent/tests/trace_contract_audit.rs`
+
+**Test name:** `all_production_files_use_required_builders`
+
+**Integration point:** `openlife-core/src/agent/tests/mod.rs`
+
+**Scanning algorithm:**
+1. Read each target production file relative to workspace root.
+2. Split at the last `#[cfg(test)]` marker (detected on **original** source) — everything after is excluded.
+3. **Sanitise** the production source: Rust line comments (`// …`), block comments (`/* … */`), regular string literals (`"…"` with escape handling), and raw string literals (`r"…"`, `r#"…"#`, …) are masked with spaces (newlines preserved).
+4. Locate every occurrence of the event enum token in the **sanitised** source only.
+5. Build a symmetric window around each occurrence on the sanitised source.
+6. Check that at least one required builder name appears in the window (on sanitised source).
+7. If no builder found → **violation** (test fails).
+8. If `expected_emissions` is set and count ≠ expected → **violation**.
+9. If `expected_emissions` is `None` and count < `min_emissions` → **warning**.
+
+**Source sanitisation details:**
+- `// …` — line comment content replaced with spaces, trailing newline preserved.
+- `/* … */` — block comment content replaced with spaces (newlines inside preserved). Non-nested; unterminated block comments masked through end-of-input.
+- `"…"` — regular string literal content replaced with spaces. Escape sequences (`\\`, `\"`, `\n`, etc.) consume two positions.
+- `r"…"` / `r#"…"#` / `r##"…"##` — raw string literal content replaced with spaces. Closing delimiter detected by matching hash count.
+- Snippet output for violations uses the **original** (unsanitised) source for developer readability.
+
+### 9.3 Audited Events & Builders
+
+| Event | Required Builder(s) | Production Files Scanned | Exact Count | Window |
+|-------|-------------------|------------------------|-------------|--------|
+| `AgentRunEventType::ToolCallBlocked` | `build_tool_call_blocked_payload` | `tool_executor.rs` | 6 | 1200 |
+| `AgentRunEventType::ToolCallBlocked` | `build_tool_call_blocked_payload` | `tools.rs` | 1 | 900 |
+| `AgentRunEventType::ToolCallBlocked` | `build_tool_call_blocked_payload` | `plan_executor.rs` | 1 | 900 |
+| `AgentRunEventType::ReplayFailed` | `build_replay_failed_payload` | `src-tauri/src/commands/agent.rs` | 2 | 1500 |
+| `AgentRunEventType::ReplayStarted` | `build_replay_started_payload` | `src-tauri/src/commands/agent.rs` | 1 | 900 |
+| `AgentRunEventType::ReplayCompleted` | `build_replay_completed_payload` | `src-tauri/src/commands/agent.rs` | 1 | 1800 |
+| `AgentRunEventType::AgentSpecSelected` | `build_agent_spec_selected_payload` | `streaming.rs`, `execution.rs`, `orchestrator.rs` | 1 each | 900 |
+| `AgentRunEventType::PromptStackAssembled` | `build_prompt_stack_assembled_payload` | `streaming.rs`, `execution.rs`, `orchestrator.rs` | 1 each | 900 |
+| `AgentRunEventType::ContextGovernanceApplied` | `build_context_governance_applied_payload` | `streaming.rs`, `execution.rs`, `orchestrator.rs` | 1 each | 900 |
+
+**Window policy (May 2026 revision):**
+- **Default window: ±900 chars** (previously ±1500). In practice builder calls are 1–10 lines from the event enum token; 900 is conservative.
+- **tool_executor.rs: ±1200** — larger file (~5.4k lines) with deeply-nested helper closures.
+- **agent.rs ReplayFailed: ±1500** — event token in early `let event_type = if …` expression, builder ~21 lines later inside nested `if let Some(ref event_store)` block (~1365 chars).
+- **agent.rs ReplayCompleted: ±1800** — longest span: event token at L428 in `let event_type = if …`, builder at L457 inside deeply nested payload branch (~1740 chars).
+
+**Exact emission count (`expected_emissions`):**
+- Every audit rule now specifies the exact number of production-code event occurrences.
+- If the count changes (additions or removals), the audit **fails** — forcing a deliberate rule update and preventing silent drift.
+- `min_emissions` is retained as a fallback for future rules whose count is legitimately variable (not used by any current rule).
+
+### 9.4 Negative / Unit Tests
+
+The audit module includes 26 tests (10 original synthetic tests + 10 new sanitisation negative tests + 5 original + 1 count-mismatch test):
+
+**Positive/negative on compliance (original):**
+
+| Test | Verifies |
+|------|----------|
+| `negative_tool_call_blocked_without_builder_fails` | Event token present, builder absent → violation |
+| `positive_tool_call_blocked_with_builder_passes` | Both present → no violation |
+| `negative_replay_failed_without_builder_fails` | ReplayFailed without builder → violation |
+| `negative_replay_failed_hand_written_serialized_payload_fails` | Hand-written `json!` without builder → violation |
+| `negative_replay_failed_using_completed_builder_is_violation` | ReplayFailed + `build_replay_completed_payload` = violation |
+| `positive_replay_failed_with_correct_builder_passes` | ReplayFailed + `build_replay_failed_payload` = passes |
+| `positive_replay_completed_with_builder_passes` | ReplayCompleted + builder = passes |
+| `positive_context_governance_applied_with_builder_passes` | ContextGovernanceApplied + builder = passes |
+| `negative_agent_spec_selected_without_builder_fails` | AgentSpecSelected without builder → violation |
+| `builder_too_far_outside_window_is_violation` | Builder outside ±window → violation |
+| `test_region_content_is_excluded` | Test code after `#[cfg(test)]` is correctly excluded |
+| `audit_does_not_flag_unrelated_serde_json_invocation` | Normal `json!` usage not flagged |
+| `expected_emissions_fails_on_count_mismatch` | Exact count mismatch → violation |
+
+**Source sanitisation negative tests (new in May 2026 revision):**
+
+| Test | What false pass / false positive it prevents |
+|------|---------------------------------------------|
+| `event_token_in_line_comment_is_ignored` | Event token `// AgentRunEventType::ToolCallBlocked` → not counted, no violation |
+| `event_token_in_block_comment_is_ignored` | Event token `/* … AgentRunEventType::ToolCallBlocked … */` → not counted |
+| `event_token_in_string_literal_is_ignored` | Event token `"AgentRunEventType::ToolCallBlocked"` in string → not counted |
+| `builder_in_line_comment_does_not_pass_real_event` | Builder `// build_tool_call_blocked_payload` + json! event → still violates |
+| `builder_in_block_comment_does_not_pass_real_event` | Builder `/* build_tool_call_blocked_payload */` + json! event → still violates |
+| `builder_in_string_literal_does_not_pass_real_event` | Builder `"build_tool_call_blocked_payload"` in string + json! event → still violates |
+| `builder_in_raw_string_does_not_pass_real_event` | Builder `r#"build_tool_call_blocked_payload"#` in raw string + json! event → still violates |
+| `builder_in_raw_string_double_hash_does_not_pass` | Builder `r##"build_tool_call_blocked_payload"##` → still violates |
+| `string_with_escaped_quote_is_fully_masked` | `"foo \" bar"` escape handling — token after `\"` not leaked |
+| `test_region_detection_ignores_cfg_test_in_comment` | `// #[cfg(test)]` comment → not mistaken for real test split |
+| `adjacent_event_with_different_builder_not_masked` | Adjacent AgentSpecSelected builder + ToolCallBlocked json! → ToolCallBlocked audit still fails |
+| `min_emissions_warning_when_too_few_production_emissions` | `min_emissions` fallback works (when `expected_emissions` is `None`) |
+
+### 9.5 How to Add a New Event to the Audit
+
+When a new typed governance event type is introduced and must use a specific builder:
+
+1. Add a new `AuditRule::new(...)` entry in `audit_rules()` in `trace_contract_audit.rs`.
+2. Set `expected_emissions: Some(N)` to the exact number of production emission sites. For files whose count is legitimately variable, use `expected_emissions: None` with `min_emissions` — add a comment explaining why.
+3. Set `required_builders: &["..."].` The slice supports multiple builders if an event has genuinely distinct valid construction paths, but in practice each event should map to a single canonical builder. Multi-builder rules require explicit justification.
+4. Choose `window_chars`: start with 900 (default). Only increase if the builder is far from the event token — document the measured distance in a code comment.
+5. Run `cargo test -p openlife-core trace_contract_audit` to verify.
+6. Run `make ci` for full regression.
+
+### 9.6 Failure Messages
+
+When a violation is found, the test assertion produces a readable message:
+
+```
+VIOLATION in src-tauri/src/commands/agent.rs:426 — `AgentRunEventType::ReplayFailed`
+  emitted but none of ["build_replay_failed_payload"]
+  found within ±1500 chars (sanitised source).
+  near: ...[code snippet around the violation]...
+```
+
+Count mismatches produce:
+
+```
+COUNT MISMATCH in openlife-core/src/agent/action_executor/tool_executor.rs — expected
+exactly 6 production emissions of `AgentRunEventType::ToolCallBlocked`, found 7.
+The audit rule may be stale or emissions were added/removed without updating the rule.
+```
+
+Both are sufficient for a developer to locate and fix the drift.
+
+---
+
+## 9.5 AgentRunEvent Contract Coverage
+
+### 9.5.1 Purpose
+
+The **event contract coverage manifest** (`event_contract_manifest()` in `trace_contract_audit.rs`) is the single source of truth that classifies every `AgentRunEventType` variant.  Its goals:
+
+1. **No orphan variants** — every enum variant must have an explicit classification and a reason.
+2. **No drift between manifest and audit rules** — every `ProductionAudited` entry must have a matching `AuditRule`; every `AuditRule` must have a matching `ProductionAudited` manifest entry.
+3. **No silent additions** — if a developer adds a new `AgentRunEventType` variant without updating the manifest, `all_enum_variants_have_manifest_entry` fails.
+4. **No empty reasons** — `IntentionallyExcluded` events must document *why*.
+
+### 9.5.2 Classification Tiers
+
+| Tier | `EventContractStatus` | Meaning | What's required |
+|------|-----------------------|---------|-----------------|
+| 1 | **ProductionAudited** | Event has a typed payload builder in `trace_payloads.rs` **and** at least one `AuditRule`. | `source_file`, `builder`, `expected_emissions`, `window_chars` per audit rule. |
+| 2 | **IntentionallyExcluded** | Event has a typed builder but is not (yet) in the audit. | Non-empty `reason` explaining exclusion. No `AuditRule` required. |
+| 3 | **LegacyInternalOnly** | Runtime lifecycle / infrastructure event; no typed governance payload. | Non-empty `reason`. No `AuditRule` required. |
+| 4 | **TypeOnlyNoDirectEmission** | Enum variant never directly emitted by production code. | Non-empty `reason`. No `AuditRule` required. |
+
+### 9.5.3 Current Event Classification Summary
+
+| Tier | Count | Events |
+|------|-------|--------|
+| ProductionAudited | 7 | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |
+| IntentionallyExcluded | 4 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed |
+| LegacyInternalOnly | 32 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, ProposalCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |
+| TypeOnlyNoDirectEmission | 1 | Unknown |
+| **Total** | **44** | |
+
+### 9.5.4 Admission Rules for Each Tier
+
+**ProductionAudited:**
+- Must have a typed payload builder in `trace_payloads.rs`.
+- Must have at least one `AuditRule` in `audit_rules()` with `event_token`, `file_rel_path`, `required_builders`, `expected_emissions`, `window_chars`.
+- Must have `production_rule_tokens` in the manifest matching the audit rule tokens.
+- Change in production emission count → CI fails (exact count mismatch).
+
+**IntentionallyExcluded:**
+- Must have a non-empty `reason` in the manifest explaining why the event is excluded from the audit.
+- A typed builder is optional but typical for these events.
+
+**LegacyInternalOnly:**
+- Must have a non-empty `reason` in the manifest.
+- No typed builder expected.
+- No audit rule expected.
+
+**TypeOnlyNoDirectEmission:**
+- Must have a non-empty `reason` in the manifest.
+- No typed builder expected.
+- No audit rule expected.
+- Examples: `Unknown(String)` variant for forward compatibility.
+
+### 9.5.5 Developer Workflow for New Events
+
+1. Add the new `AgentRunEventType` variant to `types/mod.rs`.
+2. **If it needs a typed payload:** create a `build_*_payload` function in `trace_payloads.rs`.
+3. **If it's a governance event (Tier 1):**
+   - Add one or more `AuditRule` entries in `audit_rules()`.
+   - Add an `EventContractEntry::ProductionAudited` in `event_contract_manifest()` with the matching `production_rule_tokens`.
+4. **If it's a generic event (Tier 2):** add an `IntentionallyExcluded` entry with a reason.
+5. **If it's a lifecycle event (Tier 3):** add a `LegacyInternalOnly` entry with a reason.
+6. **If it's type-only (Tier 4):** add a `TypeOnlyNoDirectEmission` entry.
+7. Add positive/negative contract tests in `event_store.rs` and/or `trace_contract_audit.rs`.
+8. Run `cargo test -p openlife-core trace_contract_audit` to verify.
+9. Update this document (Section 9.5.3 count and Section 10 changelog).
+10. Run `make ci`.
+
+### 9.5.6 Coverage Enforcement Tests
+
+All event contract tests are prefixed `event_contract_` and live in `trace_contract_audit.rs`. Run them with:
+
+```
+cargo test -p openlife-core event_contract -- --nocapture
+```
+
+**Positive tests (call validators on real data):**
+
+| Test | Verifies |
+|------|----------|
+| `event_contract_all_enum_variants_have_manifest_entry` | Every `AgentRunEventType` variant has a manifest entry; no stale entries |
+| `event_contract_production_audited_events_have_audit_rules` | Every `ProductionAudited` entry has matching `AuditRule`(s); every audit rule has a `ProductionAudited` manifest entry; counts match |
+| `event_contract_intentionally_excluded_have_reason` | No `IntentionallyExcluded` entry has an empty reason |
+| `event_contract_no_duplicate_events` | No duplicate event names in manifest |
+| `event_contract_document_matches_manifest` | Parses `trace_contract_matrix.md` Section 9.5.3 table and verifies: tier events match manifest, counts match, Total row matches, no forbidden stale strings |
+| `event_contract_parse_enum_finds_44_variants` | Enum parser finds exactly 44 variants |
+| `event_contract_parse_enum_sanitised_no_paren_in_names` | Parser strips tuple data (no parenthesised names) |
+
+**Negative tests (construct bad input, call validators, assert failure):**
+
+| Test | What it proves |
+|------|---------------|
+| `event_contract_missing_manifest_entry_fails` | Enum variant without manifest entry → `validate_manifest_against_enum` fails |
+| `event_contract_stale_manifest_entry_fails` | Manifest entry for removed variant → fails with "stale" |
+| `event_contract_production_audited_without_rule_fails` | `ProductionAudited` with non-existent rule token → `validate_manifest_against_audit_rules` fails |
+| `event_contract_audit_rule_without_production_manifest_fails` | Audit rule for event demoted from `ProductionAudited` → fails |
+| `event_contract_intentionally_excluded_empty_reason_fails` | `IntentionallyExcluded` with empty reason → fails with "empty reason" |
+| `event_contract_duplicate_in_manifest_fails` | Duplicate event name in manifest → `validate_no_duplicate_events` fails |
+| `event_contract_document_missing_summary_table_fails` | No 9.5.3 table in doc → `validate_document_against_manifest` fails with "classification summary" |
+| `event_contract_document_missing_total_row_fails` | Table has tier rows but no Total row → fails with "Total row" |
+| `event_contract_document_total_mismatch_fails` | All tier rows correct but Total row is 99 → fails with "99" |
+| `event_contract_document_duplicate_event_fails` | Same event twice in one tier → fails with "duplicate" |
+| `event_contract_document_production_list_mismatch_fails` | Doc `ProductionAudited` count 99 but manifest has 7 → fails |
+| `event_contract_document_forbidden_string_fails` | Document contains the stale string "all 45 variants" → fails with "forbidden" |
+
+> **Note:** `cargo test -p openlife-core trace_contract_audit` runs all 43 tests (26 builder-audit + 17 event contract). `cargo test -p openlife-core event_contract` runs only the 19 event contract tests (7 positive + 12 negative).
+
+---
+
+## 10. Update Log
 
 | Date | Update |
 |------|--------|
-| 2026-05-18 | **ToolCallBlocked Production Builder Convergence**: Migrated all 15 production `tool.call_blocked` emission sites across `tool_executor.rs` (7 sites + 7 shell.run paths), `agent_loop/tools.rs` (budget exceeded), and `plan_executor.rs` (AgentSpec deny) to `trace_payloads::build_tool_call_blocked_payload`. Changed `agent_spec_id` parameter from `impl Into<String>` to `Option<impl Into<String>>` — `None` serialises to `null` (budget exceeded, missing spec). `extra` merge uses `or_insert` so core fields are never overwritten. Replaced `record_blocked` closure in shell.run with `emit_blocked` helper delegating to builder. Added 9 new tests: `agent_spec_id=None` contract round-trip, `agent_spec_id=Some` contract round-trip, 4 production-helper tests now validated through `contract_helpers::assert_has_typed_reason`. Zero hand-written tool.call_blocked payloads remain in production. |
+| 2026-05-18 | **Event Contract Coverage Manifest**: Added `event_contract_manifest()` — a classification of all 44 `AgentRunEventType` variants into 4 tiers (ProductionAudited x7, IntentionallyExcluded x4, LegacyInternalOnly x32, TypeOnlyNoDirectEmission x1). Added `parse_agent_run_event_type_variants()` — extracts enum variants from `types/mod.rs` source. Added 11 coverage enforcement tests. Added validator functions (`validate_manifest_against_enum`, `validate_manifest_against_audit_rules`, `validate_intentionally_excluded_reasons`, `validate_document_against_manifest`). Document now verified against manifest at test time — mismatch fails CI. `make ci` passes. |
+| 2026-05-18 | **Trace Contract Audit Hardening**: Source sanitisation — Rust comments (`//`/`/* */`) and string literals (`"…"`/`r#*"…"#*`) are now masked before scanning, preventing tokens in comments/strings from creating false passes or false-positive emission counts. Added `expected_emissions: Option<usize>` to `AuditRule` — all audit rules now use exact emission counts (previously only `min_emissions`). Default window narrowed from ±1500 to ±900 chars (exceptions documented with measured-distance justification). Added 10 new negative tests covering line comments, block comments, regular strings, raw strings, double-hash raw strings, escaped-quote strings, `#[cfg(test)]` in comments, and adjacent-event non-masking. `make ci` passes. No production code changes. |
+| 2026-05-18 | **ReplayFailed Builder Separation**: Fixed `src-tauri/src/commands/agent.rs` replay outcome path — `ReplayFailed` now exclusively uses `build_replay_failed_payload` (was incorrectly unified with `build_replay_completed_payload`). Failed path: priority `block_reason` → `failure_kind` → fallback `internal_error`, with `tool_name`/`source`/`agent_spec_id` via `extra`. Succeeded/Blocked/NeedsConfirmation continue using `build_replay_completed_payload`. Audit rule tightened to only allow `build_replay_failed_payload` for `ReplayFailed`. Added `negative_replay_failed_using_completed_builder_is_violation` test. Replaced permissive `positive_replay_failed_with_either_builder_passes` with `positive_replay_failed_with_correct_builder_passes`. Restored Sections 11.3-11.10 (Explainability) that were truncated in previous edit. |
+| 2026-05-18 | **Trace Contract Drift Audit**: Added `openlife-core/src/agent/tests/trace_contract_audit.rs` — a CI-enforceable source-code scanning test. Covers 7 event types across 7 production files. See Section 9. |
+| 2026-05-18 | **Builder-Driven Test Cleanup**: Converted `test_tool_call_blocked_typed_payload_contract` (3 hand-written JSON cases → 4 builder-driven cases including `agent_spec_id: null` budget-exceeded) and `test_replay_failed_events_have_typed_reason` (4 hand-written JSON cases → 4 builder-driven cases) to use `trace_payloads::build_*` functions exclusively. Added `assert_has_optional_string_or_null` helper in `contract_helpers.rs` — `agent_spec_id` contract now requires field existence but allows `string | null`. Added 4 new helper tests (`optional_string_or_null_accepts_string`, `_accepts_null`, `_rejects_empty_string`, `_rejects_missing_field`). Assertions in both contract tests now use `contract_helpers::*` helpers exclusively (no more ad hoc `v.as_str().is_some_and(...)` logic). **All typed governance contract tests (`tool.call_blocked`, `replay.started`, `replay.completed`, `replay.failed`, `agent_spec.selected`, `prompt_stack.assembled`, `context_governance.applied`, generic failures) are now fully builder-driven — zero hand-written typed payloads remain in Rust contract tests.** |
 | 2026-05-17 | **Production Payload Builder + Enum Validation**: Created `openlife-core/src/agent/trace_payloads.rs` with production payload builder functions. Refactored 7 emit sites across `streaming.rs`, `execution.rs`, `orchestrator.rs`, and `agent.rs` to delegate to the shared builders. Contract tests now call the same builders — hand-written JSON is no longer the sole contract proof. `assert_has_typed_reason` now validates against production enum variant strings (`allowed_block_reasons`, `allowed_proposal_reasons`, `allowed_failure_kinds`). Invalid enum values like `"not_a_real_enum_variant"` are rejected, matching frontend `typedContract.ts`. Added `assert_no_typed_reason` helper for malformed payload verification. Added 4 new contract tests (invalid enum rejection x2, valid enum regression x2). |
 | 2026-05-16 | **Post-Beta Audit Fixes**: ReplayFailed early paths 1-3 now carry typed reasons; tools.rs budget exceeded now compliant; plan_executor.rs `agentspec_id` → `agent_spec_id` fix; shell.run closure auto-injects contract fields. All production ToolCallBlocked/ReplayFailed emitters now satisfy typed payload contract. |
-| 2026-05-16 | **Explainability Layer**: Added `getTypedEventExplanation`, `getTypedRunExplanation`, `TypedRunExplanationViewModel`, `TypedEventExplanationViewModel` to `typedContract.ts`. Added `EventExplanationBlock` and `RunExplanationPanel` components. Integrated into `RunTracePanel`, `AgentRunDetail`, and `RunsPage`. See Section 10. |
+| 2026-05-16 | **Explainability Layer**: Added `getTypedEventExplanation`, `getTypedRunExplanation`, `TypedRunExplanationViewModel`, `TypedEventExplanationViewModel` to `typedContract.ts`. Added `EventExplanationBlock` and `RunExplanationPanel` components. Integrated into `RunTracePanel`, `AgentRunDetail`, and `RunsPage`. See Section 11 (Explainability Layer). |
 | 2026-05-16 | **Explainability Snake-Case Fix**: Fixed `getTypedRunExplanation` metadata extraction to read real backend snake_case fields (`agent_spec_id`, `privacy_policy`, `agent_spec_privacy_policy`, `prompt_blocks`). Removed fake `promptStackId` field — replaced with `promptBlockCount` / `promptBlockIds` extracted from `prompt_blocks` array (Scheme B). Added snake_case priority with camelCase backward-compat fallback. Updated `TypedRunExplanationViewModel` interface. Updated `RunExplanationPanel` developer display. Added 9 new tests covering real payload contracts. |
-| 2026-05-16 | **Post-Beta Explainability Quality Hardening**: Added `frontend/src/test/fixtures/agentRunEvents.ts` with 5 real-world snake_case event timeline fixtures (successfulGovernedRun, agentSpecDeniedToolRun, needsConfirmationRun, replayFailedRun, malformedAndUnknownRun). Removed `kind: "none"` nextAction — success/info runs now have empty `nextActions` array. `RunExplanationPanel` hides "建议操作" section when `nextActions` is empty. `nextActions` severity narrowed to `"warning" | "error"` (no more `"info"` noise). Added 13 fixture-based end-to-end tests across typedContract, RunTracePanel, AgentRunDetail, and RunsPage. Updated sections 10.2, 10.6, 10.7, 10.8. |
-| 2026-05-16 | **nextActions Fallback & Malformed Known Typed Event Fix**: Added `nextActions` fallback rule: when `outcomeTone` is error/warning and no typed-reason-driven nextActions exist, `inspect_trace` is auto-appended. Generic failures (`tool.call_failed`, `run.failed`, `model.failed`, `model.call_failed`) now all set `hasGenericFailure` and surface `primaryReason: "运行中出现未分类错误"`. Known typed event types with malformed payloads now produce `outcomeTone: "warning"`, `primaryReason: "运行 trace 中存在无法解析的治理事件"`, malformed count in developerBullets, and `inspect_trace` nextAction — no longer treated as clean success. Unknown event types (`custom.unknown_event`) do NOT trigger malformed warning. Added `KNOWED_TYPED_EVENT_TYPES` set and `malformedKnownTyped` counter. Added 5 new unit tests (generic failure x3, malformed semantics, regression guard). Updated sections 10.2, 10.7, 10.8, 10.9, 10.10. |
+| 2026-05-16 | **Post-Beta Explainability Quality Hardening**: Added `frontend/src/test/fixtures/agentRunEvents.ts` with 5 real-world snake_case event timeline fixtures (successfulGovernedRun, agentSpecDeniedToolRun, needsConfirmationRun, replayFailedRun, malformedAndUnknownRun). Removed `kind: "none"` nextAction — success/info runs now have empty `nextActions` array. `RunExplanationPanel` hides "建议操作" section when `nextActions` is empty. `nextActions` severity narrowed to `"warning" | "error"` (no more `"info"` noise). Added 13 fixture-based end-to-end tests across typedContract, RunTracePanel, AgentRunDetail, and RunsPage. Updated sections 11.2, 11.6, 11.7, 11.8. |
+| 2026-05-16 | **nextActions Fallback & Malformed Known Typed Event Fix**: Added `nextActions` fallback rule: when `outcomeTone` is error/warning and no typed-reason-driven nextActions exist, `inspect_trace` is auto-appended. Generic failures (`tool.call_failed`, `run.failed`, `model.failed`, `model.call_failed`) now all set `hasGenericFailure` and surface `primaryReason: "运行中出现未分类错误"`. Known typed event types with malformed payloads now produce `outcomeTone: "warning"`, `primaryReason: "运行 trace 中存在无法解析的治理事件"`, malformed count in developerBullets, and `inspect_trace` nextAction — no longer treated as clean success. Unknown event types (`custom.unknown_event`) do NOT trigger malformed warning. Added `KNOWED_TYPED_EVENT_TYPES` set and `malformedKnownTyped` counter. Added 5 new unit tests (generic failure x3, malformed semantics, regression guard). Updated sections 11.2, 11.7, 11.8, 11.9, 11.10. |
 
-## 10. Explainability Layer
+## 11. Explainability Layer
 
-### 10.1 Boundary: Typed Contract vs. Explainability
+### 11.1 Boundary: Typed Contract vs. Explainability
 
 | Layer | Responsible For | File |
 |-------|----------------|------|
@@ -517,7 +773,7 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 
 **Hard rule:** `summary` / `human_message` / `error` text is never used for state inference in explanation helpers. Only typed payload fields (`block_reason`, `proposal_reason`, `failure_kind`, `agent_spec_id`, `proposal_id`, `status`) determine what the explanation says.
 
-### 10.2 Run-Level Explanation (`getTypedRunExplanation`)
+### 11.2 Run-Level Explanation (`getTypedRunExplanation`)
 
 **Input:** `AgentRunEvent[]` timeline + optional `{status, kind}` from AgentRun.
 
@@ -561,7 +817,7 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 
 **Fallback:** Empty events → `outcomeTone: "info"`, `headline: "运行记录"`, `userFacingBullets: ["无显著事件"]`.
 
-### 10.3 Event-Level Explanation (`getTypedEventExplanation`)
+### 11.3 Event-Level Explanation (`getTypedEventExplanation`)
 
 **Input:** Single `AgentRunEvent`.
 
@@ -588,7 +844,7 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 - `why/impact/nextStep: null`
 - `debugFacts` contains `eventType` and `summary`
 
-### 10.4 UI Integration
+### 11.4 UI Integration
 
 | UI Component | What Shows |
 |-------------|-----------|
@@ -596,7 +852,7 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 | `AgentRunDetail` | `RunExplanationPanel` above the trace timeline |
 | `RunsPage` | `primaryReason` from run-level explanation displayed as hint badge |
 
-### 10.5 Events With Only Generic Debug Display
+### 11.5 Events With Only Generic Debug Display
 
 These event types do not have user-facing explanation yet, and show only in the generic event row + raw payload:
 - `run.created`, `run.completed`, `run.failed`
@@ -609,7 +865,7 @@ These event types do not have user-facing explanation yet, and show only in the 
 
 These are non-governance events that don't carry typed payloads with block/proposal/failure reasons. They display in `RunTracePanel` as generic event rows with raw payload.
 
-### 10.6 Test Coverage
+### 11.6 Test Coverage
 
 | Test File | What's Tested |
 |-----------|--------------|
@@ -618,7 +874,7 @@ These are non-governance events that don't carry typed payloads with block/propo
 | `AgentRunDetail.test.tsx` | Run-level explanation panel above trace. AgentSpec denied → adjust_agent_spec. Needs confirmation → review/grant. Replay failed → retry/inspect. **Fixture-based**: successfulGovernedRun (no 建议操作, no misleading hint, developer info present), agentSpecDeniedToolRun, needsConfirmationRun, replayFailedRun. |
 | `RunsPage.test.tsx` | Explanation hint from typed payload. Misleading summary doesn't create false hint. Pure typed events still produce preview hint. **Fixture-based**: successfulGovernedRun (no primaryReason, no misleading hint), agentSpecDeniedToolRun (primaryReason visible), replayFailedRun (primaryReason visible), malformedAndUnknownRun (no crash, no misleading hint). |
 
-### 10.7 Real Event Fixtures
+### 11.7 Real Event Fixtures
 
 **File:** `frontend/src/test/fixtures/agentRunEvents.ts`
 
@@ -640,7 +896,7 @@ import { successfulGovernedRun } from "@/test/fixtures/agentRunEvents";
 const exp = getTypedRunExplanation(successfulGovernedRun, { status: "completed", kind: "conversation" });
 ```
 
-### 10.8 nextActions Semantic Contract
+### 11.8 nextActions Semantic Contract
 
 | Run Outcome | `nextActions.length` | UI Behavior |
 |------------|---------------------|-------------|
@@ -657,7 +913,7 @@ const exp = getTypedRunExplanation(successfulGovernedRun, { status: "completed",
 - Developer info remains collapsible and out of the way.
 - Success runs display only headline + summary bullets + collapsible developer section.
 
-### 10.9 Malformed Known Typed Events
+### 11.9 Malformed Known Typed Events
 
 When a known governance event type (`tool.call_blocked`, `replay.started`, `replay.completed`, `replay.failed`) has a payload that fails structural validation:
 
@@ -668,7 +924,7 @@ When a known governance event type (`tool.call_blocked`, `replay.started`, `repl
 - **Hard rule**: never infers specific `block_reason` / `proposal_reason` / `failure_kind` from `summary` or `human_message` text
 - **Unknown event types** (`custom.unknown_event` etc.) are NOT counted as malformed — they do not affect outcomeTone
 
-### 10.10 Generic Failure Fallback
+### 11.10 Generic Failure Fallback
 
 When `tool.call_failed`, `run.failed`, `model.failed`, or `model.call_failed` events exist but no typed governance reasons are present:
 

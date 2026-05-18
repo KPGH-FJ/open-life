@@ -430,11 +430,30 @@ pub(crate) async fn replay_action_internal(
     let human_msg = format!("Replay {} for action {}", outcome_status, action_id);
 
     if let Some(ref event_store) = state.agent_run_event_store {
-        let event = AgentRunEvent::new(
-            run_id,
-            event_type,
-            AgentEventActor::Runtime,
-            human_msg,
+        let payload = if exec_result.status == ActionExecutionStatus::Failed {
+            let (block_reason, failure_kind) = match (
+                exec_result.block_reason.as_ref(),
+                exec_result.failure_kind.as_ref(),
+            ) {
+                (Some(br), _) => (Some(br.to_string()), None),
+                (None, Some(fk)) => (None, Some(fk.to_string())),
+                (None, None) => (None, Some("internal_error".to_string())),
+            };
+            let extra = serde_json::json!({
+                "tool_name": replay_tool_name,
+                "source": replay_source,
+                "agent_spec_id": agent_spec_id,
+            });
+            trace_payloads::build_replay_failed_payload(
+                run_id,
+                action_id,
+                action_id,
+                &human_msg,
+                block_reason,
+                failure_kind,
+                Some(extra),
+            )
+        } else {
             trace_payloads::build_replay_completed_payload(
                 outcome_status,
                 run_id,
@@ -446,7 +465,14 @@ pub(crate) async fn replay_action_internal(
                 exec_result.block_reason.map(|r| r.to_string()),
                 exec_result.proposal_reason.map(|r| r.to_string()),
                 exec_result.failure_kind.map(|r| r.to_string()),
-            ),
+            )
+        };
+        let event = AgentRunEvent::new(
+            run_id,
+            event_type,
+            AgentEventActor::Runtime,
+            human_msg,
+            payload,
         );
         let _ = event_store.append_event(&event);
     }
