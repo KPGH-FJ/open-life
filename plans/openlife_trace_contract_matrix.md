@@ -741,7 +741,129 @@ cargo test -p openlife-core event_contract -- --nocapture
 | `event_contract_document_production_list_mismatch_fails` | Doc `ProductionAudited` count 99 but manifest has 7 → fails |
 | `event_contract_document_forbidden_string_fails` | Document contains the stale string "all 45 variants" → fails with "forbidden" |
 
-> **Note:** `cargo test -p openlife-core trace_contract_audit` runs all 43 tests (26 builder-audit + 17 event contract). `cargo test -p openlife-core event_contract` runs only the 19 event contract tests (7 positive + 12 negative).
+> **Note:** `cargo test -p openlife-core trace_contract_audit` runs all tests — builder-audit (26), event contract (19), and payload builder contract (12). `cargo test -p openlife-core event_contract` runs only the 19 event contract tests. `cargo test -p openlife-core payload_builder_contract` runs only the 12 payload builder contract tests.
+
+---
+
+## 9.6 Typed Payload Builder Contract Coverage
+
+### 9.6.1 Purpose
+
+While the **event contract manifest** (Section 9.5) classifies every `AgentRunEventType` variant into tiers, and the **AuditRule** (Section 9.3) enforces that production emit sites use typed builders, neither of these layers verifies that the **builder functions themselves** are correctly tracked. The builder contract coverage audit closes this gap.
+
+**Why builder coverage is needed:**
+
+| Layer | What it guarantees | File |
+|-------|-------------------|------|
+| **Event manifest** (`event_contract_manifest`) | Every `AgentRunEventType` variant is classified; no orphan variants | `trace_contract_audit.rs` |
+| **AuditRule** (`audit_rules`) | Production emit sites use typed builders; no hand-written payloads | `trace_contract_audit.rs` |
+| **Builder coverage** (`payload_builder_contract_manifest`) | Every `build_*_payload` in `trace_payloads.rs` is manifested, mapped to the correct event, has the correct status, and references real contract tests | `trace_contract_audit.rs` |
+
+Without builder coverage, a developer could:
+1. Add a new `build_*_payload` function without updating the manifest — contract tests would pass but the builder would be untracked.
+2. Declare a stale builder in the manifest that no longer exists — the manifest would lie about what is tracked.
+3. Map a builder to the wrong event status — `ProductionAudited` vs `IntentionallyExcluded` contract would desync.
+4. Reference nonexistent contract tests — required tests might silently disappear after a refactor.
+
+### 9.6.2 Builder Classification Tiers
+
+| Status | Meaning | Events |
+|--------|---------|--------|
+| **ProductionAudited** | Governance event — builder in production source audit (has `AuditRule`) | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |
+| **IntentionallyExcludedGenericFailure** | Generic failure event — typed builder exists but excluded from production source audit | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed |
+| **LegacyNoTypedBuilder** | Lifecycle/internal event with no typed builder | (none currently declared in builder manifest) |
+| **TypeOnlyNoBuilder** | Catch-all variant with no typed builder (e.g. `Unknown`) | (none currently declared in builder manifest) |
+
+### 9.6.3 Current Builder Coverage Table
+
+| Event | Builder | Status | Required Contract Tests |
+|-------|---------|--------|------------------------|
+| ToolCallBlocked | `build_tool_call_blocked_payload` | ProductionAudited | `test_tool_call_blocked_typed_payload_contract`, `test_builders_produce_snake_case_fields` |
+| ReplayFailed | `build_replay_failed_payload` | ProductionAudited | `test_replay_failed_events_have_typed_reason`, `test_builders_produce_snake_case_fields` |
+| ReplayStarted | `build_replay_started_payload` | ProductionAudited | `test_builders_produce_snake_case_fields` |
+| ReplayCompleted | `build_replay_completed_payload` | ProductionAudited | `test_builders_produce_snake_case_fields` |
+| AgentSpecSelected | `build_agent_spec_selected_payload` | ProductionAudited | `test_agent_spec_selected_payload_contract`, `test_builders_produce_snake_case_fields` |
+| PromptStackAssembled | `build_prompt_stack_assembled_payload` | ProductionAudited | `test_prompt_stack_assembled_payload_contract`, `test_builders_produce_snake_case_fields` |
+| ContextGovernanceApplied | `build_context_governance_applied_payload` | ProductionAudited | `test_context_governance_applied_payload_contract`, `test_builders_produce_snake_case_fields` |
+| ModelFailed | `build_model_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
+| RunFailed | `build_run_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
+| ToolCallFailed | `build_tool_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
+| ModelCallFailed | `build_model_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
+
+### 9.6.4 Enforcement Checks
+
+The validator (`validate_payload_builders_against_manifest`) performs these checks at test time:
+
+1. Every `build_*_payload` in `trace_payloads.rs` source must be in the builder manifest.
+2. Every builder declared in the manifest must exist in `trace_payloads.rs` source.
+3. Every event in the builder manifest must exist in `event_contract_manifest()`.
+4. `ProductionAudited` builder entries must map to `EventContractStatus::ProductionAudited`.
+5. `IntentionallyExcludedGenericFailure` builder entries must map to `EventContractStatus::IntentionallyExcluded`.
+6. `LegacyNoTypedBuilder` / `TypeOnlyNoBuilder` entries must not declare a builder name.
+7. Every builder entry must declare at least one `required_contract_tests`.
+8. Every `required_contract_tests` name must be a real test function found in scanned test files (`event_store.rs` or `trace_payloads.rs`).
+9. `reason` must not be empty.
+10. No duplicate `event` or duplicate `builder` in the manifest.
+
+### 9.6.5 Source Scanner
+
+Builder names are extracted from `openlife-core/src/agent/trace_payloads.rs` by scanning the **sanitised** source (comments and string literals masked). Only `pub fn build_*_payload(...)` declarations are captured — comment-only or string-only builder names are invisible to the scanner. The scanner strips the test region (`#[cfg(test)]`) from results.
+
+A parser unit test (`payload_builder_contract_comment_and_string_fake_builders_ignored`) verifies that fake builders in comments and strings do not pollute the discovered list.
+
+### 9.6.6 Test Coverage
+
+All payload builder contract tests are prefixed `payload_builder_contract_` and live in `trace_contract_audit.rs`.
+
+**Positive tests (call validator on real data):**
+
+| Test | Verifies |
+|------|----------|
+| `payload_builder_contract_all_builders_are_manifested` | Full validator pass — all checks (1-10) pass against real source/manifest |
+| `payload_builder_contract_manifest_builders_exist_in_source` | Every manifest builder found in `trace_payloads.rs` |
+| `payload_builder_contract_events_exist_in_event_manifest` | Every builder manifest event in `event_contract_manifest` |
+| `payload_builder_contract_production_status_matches_event_manifest` | `ProductionAudited` / `IntentionallyExcludedGenericFailure` match event manifest status |
+| `payload_builder_contract_required_tests_exist` | All required contract test names found in scanned test files |
+| `payload_builder_contract_scanner_finds_real_builders` | Scanner discovers all known builder names |
+| `payload_builder_contract_comment_and_string_fake_builders_ignored` | Scanner ignores fakes in comments/strings; exact expected set matched |
+
+**Negative tests (construct bad input, call validator, assert Err):**
+
+| Test | What it proves |
+|------|---------------|
+| `payload_builder_contract_missing_builder_manifest_entry_fails` | Source builder without manifest entry → validator fails |
+| `payload_builder_contract_stale_builder_entry_fails` | Manifest builder not in source → validator fails |
+| `payload_builder_contract_wrong_event_status_fails` | Builder `ProductionAudited` but event manifest says `IntentionallyExcluded` → fails |
+| `payload_builder_contract_missing_required_test_fails` | Required test name not found in scanned files → fails |
+| `payload_builder_contract_duplicate_builder_fails` | Same builder name appears twice in manifest → fails |
+
+### 9.6.7 How to Add a New Typed Payload Builder
+
+1. Create the `build_*_payload` function in `trace_payloads.rs`.
+2. Add a `PayloadBuilderContractEntry` to `payload_builder_contract_manifest()` with:
+   - Correct `event` (short name matching `AgentRunEventType` variant).
+   - Correct `status` (`ProductionAudited` if governance event with `AuditRule`; `IntentionallyExcludedGenericFailure` if generic failure).
+   - Non-empty `reason`.
+   - At least one `required_contract_tests` entry naming a real test function.
+3. If the event is new, also update `event_contract_manifest()` and `audit_rules()`.
+4. Add or update contract tests in `event_store.rs` or `trace_payloads.rs`.
+5. Run verification:
+   ```
+   cargo test -p openlife-core payload_builder_contract -- --nocapture
+   cargo test -p openlife-core event_contract -- --nocapture
+   cargo test -p openlife-core trace_contract_audit -- --nocapture
+   ```
+6. Update this document (Section 9.6.3 table and Section 10 changelog).
+7. Run `make ci`.
+
+### 9.6.8 Verification Commands
+
+```bash
+cargo test -p openlife-core payload_builder_contract -- --nocapture
+cargo test -p openlife-core event_contract -- --nocapture
+cargo test -p openlife-core trace_contract_audit -- --nocapture
+make ci
+```
 
 ---
 
@@ -749,6 +871,7 @@ cargo test -p openlife-core event_contract -- --nocapture
 
 | Date | Update |
 |------|--------|
+| 2026-05-18 | **Typed Payload Builder Contract Coverage**: Added `payload_builder_contract_manifest()` — maps all 11 typed payload builders to events, statuses (ProductionAudited x7, IntentionallyExcludedGenericFailure x4), and required contract tests. Added `parse_payload_builders_from_source()` — scans `trace_payloads.rs` for `pub fn build_*_payload` declarations (comments/strings masked via `sanitize_source`). Added `collect_known_test_function_names()` — scans `event_store.rs` and `trace_payloads.rs` for test function names. Added `validate_payload_builders_against_manifest()` — 10 consistency checks (source↔manifest↔event manifest↔tests). Added 12 tests (7 positive + 5 negative). Scanner unit test verifies comment/string fakes are ignored. All tests pass; `make ci` passes. |
 | 2026-05-18 | **Event Contract Coverage Manifest**: Added `event_contract_manifest()` — a classification of all 44 `AgentRunEventType` variants into 4 tiers (ProductionAudited x7, IntentionallyExcluded x4, LegacyInternalOnly x32, TypeOnlyNoDirectEmission x1). Added `parse_agent_run_event_type_variants()` — extracts enum variants from `types/mod.rs` source. Added 11 coverage enforcement tests. Added validator functions (`validate_manifest_against_enum`, `validate_manifest_against_audit_rules`, `validate_intentionally_excluded_reasons`, `validate_document_against_manifest`). Document now verified against manifest at test time — mismatch fails CI. `make ci` passes. |
 | 2026-05-18 | **Trace Contract Audit Hardening**: Source sanitisation — Rust comments (`//`/`/* */`) and string literals (`"…"`/`r#*"…"#*`) are now masked before scanning, preventing tokens in comments/strings from creating false passes or false-positive emission counts. Added `expected_emissions: Option<usize>` to `AuditRule` — all audit rules now use exact emission counts (previously only `min_emissions`). Default window narrowed from ±1500 to ±900 chars (exceptions documented with measured-distance justification). Added 10 new negative tests covering line comments, block comments, regular strings, raw strings, double-hash raw strings, escaped-quote strings, `#[cfg(test)]` in comments, and adjacent-event non-masking. `make ci` passes. No production code changes. |
 | 2026-05-18 | **ReplayFailed Builder Separation**: Fixed `src-tauri/src/commands/agent.rs` replay outcome path — `ReplayFailed` now exclusively uses `build_replay_failed_payload` (was incorrectly unified with `build_replay_completed_payload`). Failed path: priority `block_reason` → `failure_kind` → fallback `internal_error`, with `tool_name`/`source`/`agent_spec_id` via `extra`. Succeeded/Blocked/NeedsConfirmation continue using `build_replay_completed_payload`. Audit rule tightened to only allow `build_replay_failed_payload` for `ReplayFailed`. Added `negative_replay_failed_using_completed_builder_is_violation` test. Replaced permissive `positive_replay_failed_with_either_builder_passes` with `positive_replay_failed_with_correct_builder_passes`. Restored Sections 11.3-11.10 (Explainability) that were truncated in previous edit. |

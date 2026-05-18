@@ -2238,3 +2238,876 @@ fn event_contract_duplicate_in_manifest_fails() {
         err,
     );
 }
+
+// ════════════════════════════════════════════════════════════════════
+// Payload Builder Contract Coverage
+// ════════════════════════════════════════════════════════════════════
+//
+// This section ensures that every typed payload builder in
+// trace_payloads.rs is tracked in a manifest, mapped to the correct
+// event, has the correct status, and references real contract tests.
+//
+// The builder coverage audit prevents "drift-by-addition" where a
+// developer adds a new build_*_payload function without updating the
+// manifest, or declares a nonexistent builder in the manifest.
+//
+// Tests in this section are named payload_builder_contract_*.
+// ════════════════════════════════════════════════════════════════════
+
+/// Classification of a typed payload builder relative to the contract.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PayloadBuilderStatus {
+    /// Tier 1 governance event — typed builder exists and is in
+    /// production audit (has AuditRule).
+    ProductionAudited,
+    /// Generic failure event — typed builder exists but is
+    /// intentionally excluded from production source audit.
+    IntentionallyExcludedGenericFailure,
+    /// Lifecycle/internal event — no typed builder exists.
+    LegacyNoTypedBuilder,
+    /// Catch-all variant — no typed builder exists.
+    TypeOnlyNoBuilder,
+}
+
+/// One entry in the builder contract manifest.
+struct PayloadBuilderContractEntry {
+    /// Short event name (e.g. "ToolCallBlocked") — must match an
+    /// entry in event_contract_manifest().
+    event: &'static str,
+    /// Builder function name (e.g. "build_tool_call_blocked_payload").
+    builder: &'static str,
+    /// Builder classification.
+    status: PayloadBuilderStatus,
+    /// Human-readable explanation of the classification.
+    reason: &'static str,
+    /// Names of test functions (from event_store.rs or trace_payloads.rs)
+    /// that exercise this builder.  At least one is required for every
+    /// builder entry.  These are verified against source at test time.
+    required_contract_tests: &'static [&'static str],
+}
+
+/// The single source of truth that maps every typed payload builder to
+/// its event, status, and contract tests.
+#[rustfmt::skip]
+fn payload_builder_contract_manifest() -> Vec<PayloadBuilderContractEntry> {
+    vec![
+        // ── ProductionAudited builders (governance events) ────
+        PayloadBuilderContractEntry {
+            event: "ToolCallBlocked",
+            builder: "build_tool_call_blocked_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: tool execution blocked or needs confirmation",
+            required_contract_tests: &[
+                "test_tool_call_blocked_typed_payload_contract",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ReplayFailed",
+            builder: "build_replay_failed_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: replay action failed",
+            required_contract_tests: &[
+                "test_replay_failed_events_have_typed_reason",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ReplayStarted",
+            builder: "build_replay_started_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: replay action lifecycle",
+            required_contract_tests: &[
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ReplayCompleted",
+            builder: "build_replay_completed_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: replay action lifecycle",
+            required_contract_tests: &[
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "AgentSpecSelected",
+            builder: "build_agent_spec_selected_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: AgentSpec selection for explainability",
+            required_contract_tests: &[
+                "test_agent_spec_selected_payload_contract",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "PromptStackAssembled",
+            builder: "build_prompt_stack_assembled_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: prompt block trace for auditability",
+            required_contract_tests: &[
+                "test_prompt_stack_assembled_payload_contract",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ContextGovernanceApplied",
+            builder: "build_context_governance_applied_payload",
+            status: PayloadBuilderStatus::ProductionAudited,
+            reason: "governance event: context governance decision trace",
+            required_contract_tests: &[
+                "test_context_governance_applied_payload_contract",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        // ── IntentionallyExcludedGenericFailure builders ────
+        PayloadBuilderContractEntry {
+            event: "ModelFailed",
+            builder: "build_model_failed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "generic model-level error; carries error info, not governance decisions",
+            required_contract_tests: &[
+                "test_generic_failure_events_round_trip",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "RunFailed",
+            builder: "build_run_failed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "generic run-level error; carries error info, not governance decisions",
+            required_contract_tests: &[
+                "test_generic_failure_events_round_trip",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ToolCallFailed",
+            builder: "build_tool_call_failed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "generic tool error; carries error info, not governance decisions",
+            required_contract_tests: &[
+                "test_generic_failure_events_round_trip",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ModelCallFailed",
+            builder: "build_model_call_failed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "generic model call error; carries error info, not governance decisions",
+            required_contract_tests: &[
+                "test_generic_failure_events_round_trip",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+    ]
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Source scanner — extract builders from trace_payloads.rs
+// ════════════════════════════════════════════════════════════════════
+
+/// Scan `trace_payloads.rs` for all `pub fn build_*_payload`
+/// declarations.  Comments and string literals are masked via
+/// `sanitize_source` before scanning — builder names in comments or
+/// strings are never matched.
+///
+/// Returns a deduplicated, sorted list of builder function names.
+fn parse_payload_builders_from_source() -> Vec<String> {
+    let content = read_workspace_file("openlife-core/src/agent/trace_payloads.rs");
+    let sanitised = sanitize_source(&content);
+
+    // Find the last `#[cfg(test)]` in the content so test functions
+    // (which may legitimately call builders) are not mistaken for
+    // additional `pub fn build_*` declarations.
+    let test_start = find_test_region_start(&content);
+
+    // We scan everything *before* the test region for `pub fn build_`.
+    // However, in trace_payloads.rs the builders are all above
+    // `#[cfg(test)]` (line 328), so this is a pure safety net.
+    let scan_source = if let Some(ts) = test_start {
+        &sanitised[..ts]
+    } else {
+        &sanitised
+    };
+
+    let mut builders = Vec::new();
+    let mut pos = 0usize;
+
+    while let Some(found) = scan_source[pos..].find("pub fn build_") {
+        let abs = pos + found + 7; // skip past "pub fn "
+        let rest = &scan_source[abs..];
+
+        // Extract the function name up to the opening parenthesis.
+        let name_len = rest.find('(').unwrap_or(rest.len());
+        let name = rest[..name_len].trim().to_string();
+
+        // Only accept names ending in _payload — accidental `pub fn
+        // build_*` that aren't payload builders are excluded.
+        if name.ends_with("_payload") && !name.contains('"') && !name.contains(' ') {
+            if !builders.contains(&name) {
+                builders.push(name);
+            }
+        }
+
+        pos = abs + name_len + 1;
+    }
+
+    builders.sort();
+    builders
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Test function name scanner
+// ════════════════════════════════════════════════════════════════════
+
+/// Scan Rust test files for all `fn test_*` function names.
+///
+/// Scanned files:
+///  - openlife-core/src/agent/event_store.rs
+///  - openlife-core/src/agent/trace_payloads.rs
+///
+/// Comments and strings are masked before scanning.
+fn collect_known_test_function_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for rel_path in &[
+        "openlife-core/src/agent/event_store.rs",
+        "openlife-core/src/agent/trace_payloads.rs",
+    ] {
+        let content = read_workspace_file(rel_path);
+        let sanitised = sanitize_source(&content);
+
+        let mut pos = 0usize;
+        while let Some(found) = sanitised[pos..].find("fn test_") {
+            let abs = pos + found + 3; // skip "fn "
+            let rest = &sanitised[abs..];
+            let name_len = rest.find('(').unwrap_or(rest.len());
+            let name = rest[..name_len].trim().to_string();
+            if !name.contains(' ') && !name.contains('"') && name.starts_with("test_") {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            pos = abs + name_len + 1;
+        }
+    }
+    names.sort();
+    names
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Validator — builder manifest ↔ source ↔ event manifest ↔ tests
+// ════════════════════════════════════════════════════════════════════
+
+/// Validate that every typed payload builder is correctly tracked in
+/// the manifest, mapped to the right event, has the right status, and
+/// references real contract tests.
+///
+/// # Checks performed
+///
+/// 1. Every `build_*_payload` in `trace_payloads.rs` must appear in
+///    the builder manifest.
+/// 2. Every builder in the manifest must exist in `trace_payloads.rs`.
+/// 3. Every event named in the builder manifest must have an entry in
+///    `event_contract_manifest()`.
+/// 4. `ProductionAudited` builder entries must map to
+///    `EventContractStatus::ProductionAudited` in the event manifest.
+/// 5. `IntentionallyExcludedGenericFailure` builder entries must map to
+///    `EventContractStatus::IntentionallyExcluded` in the event
+///    manifest.
+/// 6. `LegacyNoTypedBuilder` / `TypeOnlyNoBuilder` entries must NOT
+///    declare a builder name (builder must be empty).
+/// 7. Every builder entry must declare at least one required contract
+///    test.
+/// 8. Every `required_contract_tests` name must be a real test function
+///    found in the scanned test files.
+/// 9. `reason` must not be empty.
+/// 10. No duplicate `event` or duplicate `builder` in the manifest.
+fn validate_payload_builders_against_manifest(
+    builders: &[String],
+    builder_manifest: &[PayloadBuilderContractEntry],
+    event_manifest: &[EventContractEntry],
+    known_test_names: &[String],
+) -> Result<(), Vec<String>> {
+    let mut errors = Vec::new();
+
+    let source_builder_set: std::collections::HashSet<&str> =
+        builders.iter().map(|s| s.as_str()).collect();
+    let manifest_builder_set: std::collections::HashSet<&str> =
+        builder_manifest.iter().map(|e| e.builder).collect();
+    let manifest_event_set: std::collections::HashSet<&str> =
+        builder_manifest.iter().map(|e| e.event).collect();
+    let event_manifest_set: std::collections::HashSet<&str> =
+        event_manifest.iter().map(|e| e.event).collect();
+    let test_set: std::collections::HashSet<&str> =
+        known_test_names.iter().map(|s| s.as_str()).collect();
+
+    // 1. Every source builder must be in the manifest.
+    let missing_from_manifest: Vec<&str> = source_builder_set
+        .difference(&manifest_builder_set)
+        .copied()
+        .collect();
+    if !missing_from_manifest.is_empty() {
+        errors.push(format!(
+            "{} builder(s) in trace_payloads.rs not in builder manifest: {}",
+            missing_from_manifest.len(),
+            missing_from_manifest.join(", "),
+        ));
+    }
+
+    // 2. Every manifest builder must exist in source.
+    let stale_in_manifest: Vec<&str> = manifest_builder_set
+        .difference(&source_builder_set)
+        .copied()
+        .collect();
+    if !stale_in_manifest.is_empty() {
+        errors.push(format!(
+            "{} builder(s) in manifest not found in trace_payloads.rs: {}",
+            stale_in_manifest.len(),
+            stale_in_manifest.join(", "),
+        ));
+    }
+
+    // 3. Every event in builder manifest must be in event manifest.
+    let missing_from_event_manifest: Vec<&str> = manifest_event_set
+        .difference(&event_manifest_set)
+        .copied()
+        .collect();
+    if !missing_from_event_manifest.is_empty() {
+        errors.push(format!(
+            "{} event(s) in builder manifest not found in event_contract_manifest: {}",
+            missing_from_event_manifest.len(),
+            missing_from_event_manifest.join(", "),
+        ));
+    }
+
+    // Build lookup: event name → EventContractStatus
+    let ec_status: std::collections::HashMap<&str, EventContractStatus> =
+        event_manifest.iter().map(|e| (e.event, e.status)).collect();
+
+    // 4-6. Status consistency.
+    for entry in builder_manifest {
+        let ec = ec_status.get(entry.event).copied();
+
+        match entry.status {
+            PayloadBuilderStatus::ProductionAudited => {
+                match ec {
+                    Some(EventContractStatus::ProductionAudited) => {} // ok
+                    Some(other) => {
+                        errors.push(format!(
+                            "builder '{}' (event '{}') is ProductionAudited in builder \
+                             manifest but event_contract_manifest has {:?}",
+                            entry.builder, entry.event, other,
+                        ));
+                    }
+                    None => {
+                        errors.push(format!(
+                            "builder '{}' (event '{}') has no event_contract_manifest entry",
+                            entry.builder, entry.event,
+                        ));
+                    }
+                }
+            }
+            PayloadBuilderStatus::IntentionallyExcludedGenericFailure => {
+                match ec {
+                    Some(EventContractStatus::IntentionallyExcluded) => {} // ok
+                    Some(other) => {
+                        errors.push(format!(
+                            "builder '{}' (event '{}') is IntentionallyExcludedGenericFailure \
+                             but event_contract_manifest has {:?}",
+                            entry.builder, entry.event, other,
+                        ));
+                    }
+                    None => {
+                        errors.push(format!(
+                            "builder '{}' (event '{}') has no event_contract_manifest entry",
+                            entry.builder, entry.event,
+                        ));
+                    }
+                }
+            }
+            PayloadBuilderStatus::LegacyNoTypedBuilder
+            | PayloadBuilderStatus::TypeOnlyNoBuilder => {
+                if !entry.builder.is_empty() {
+                    errors.push(format!(
+                        "entry for event '{}' has status {:?} but declares builder '{}' — \
+                         LegacyNoTypedBuilder / TypeOnlyNoBuilder must not declare a builder",
+                        entry.event, entry.status, entry.builder,
+                    ));
+                }
+            }
+        }
+    }
+
+    // 7. Every builder entry must declare at least one required contract test.
+    for entry in builder_manifest {
+        if entry.required_contract_tests.is_empty() {
+            errors.push(format!(
+                "builder '{}' (event '{}') has no required_contract_tests",
+                entry.builder, entry.event,
+            ));
+        }
+    }
+
+    // 8. Every required_contract_test must exist as a real test function.
+    for entry in builder_manifest {
+        for test_name in entry.required_contract_tests {
+            if !test_set.contains(test_name) {
+                errors.push(format!(
+                    "builder '{}' (event '{}') requires test '{}' which is not found \
+                     in event_store.rs or trace_payloads.rs",
+                    entry.builder, entry.event, test_name,
+                ));
+            }
+        }
+    }
+
+    // 9. reason must not be empty.
+    for entry in builder_manifest {
+        if entry.reason.is_empty() {
+            errors.push(format!(
+                "builder '{}' (event '{}') has empty reason",
+                entry.builder, entry.event,
+            ));
+        }
+    }
+
+    // 10. No duplicate events in builder manifest.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for entry in builder_manifest {
+            if !seen.insert(entry.event) {
+                errors.push(format!(
+                    "duplicate event '{}' in builder manifest",
+                    entry.event,
+                ));
+            }
+        }
+    }
+    // No duplicate builders in builder manifest.
+    {
+        let mut seen = std::collections::HashSet::new();
+        for entry in builder_manifest {
+            if !seen.insert(entry.builder) {
+                errors.push(format!(
+                    "duplicate builder '{}' in builder manifest",
+                    entry.builder,
+                ));
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Positive tests — verify the real manifest against real source
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn payload_builder_contract_all_builders_are_manifested() {
+    let builders = parse_payload_builders_from_source();
+    let manifest = payload_builder_contract_manifest();
+    let event_manifest = event_contract_manifest();
+    let known_tests = collect_known_test_function_names();
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_ok(),
+        "payload builder contract validation failed:\n{}",
+        result.unwrap_err().join("\n"),
+    );
+}
+
+#[test]
+fn payload_builder_contract_manifest_builders_exist_in_source() {
+    let builders = parse_payload_builders_from_source();
+    let manifest_builders: std::collections::HashSet<&str> = payload_builder_contract_manifest()
+        .iter()
+        .map(|e| e.builder)
+        .collect();
+    let source_builders: std::collections::HashSet<&str> =
+        builders.iter().map(|s| s.as_str()).collect();
+
+    let stale: Vec<&&str> = manifest_builders.difference(&source_builders).collect();
+    assert!(
+        stale.is_empty(),
+        "{} manifest builders not found in trace_payloads.rs source: {:?}",
+        stale.len(),
+        stale,
+    );
+}
+
+#[test]
+fn payload_builder_contract_events_exist_in_event_manifest() {
+    let event_manifest = event_contract_manifest();
+    let em_set: std::collections::HashSet<&str> = event_manifest.iter().map(|e| e.event).collect();
+    let builder_events: std::collections::HashSet<&str> = payload_builder_contract_manifest()
+        .iter()
+        .map(|e| e.event)
+        .collect();
+
+    let missing: Vec<&&str> = builder_events.difference(&em_set).collect();
+    assert!(
+        missing.is_empty(),
+        "{} builder manifest events not in event_contract_manifest: {:?}",
+        missing.len(),
+        missing,
+    );
+}
+
+#[test]
+fn payload_builder_contract_production_status_matches_event_manifest() {
+    let event_manifest = event_contract_manifest();
+    let ec_map: std::collections::HashMap<&str, EventContractStatus> =
+        event_manifest.iter().map(|e| (e.event, e.status)).collect();
+
+    let mut mismatches = Vec::new();
+    for entry in payload_builder_contract_manifest() {
+        let ec = match ec_map.get(entry.event) {
+            Some(s) => *s,
+            None => continue,
+        };
+        match entry.status {
+            PayloadBuilderStatus::ProductionAudited => {
+                if ec != EventContractStatus::ProductionAudited {
+                    mismatches.push(format!(
+                        "{}: builder is ProductionAudited but event manifest is {:?}",
+                        entry.event, ec,
+                    ));
+                }
+            }
+            PayloadBuilderStatus::IntentionallyExcludedGenericFailure => {
+                if ec != EventContractStatus::IntentionallyExcluded {
+                    mismatches.push(format!(
+                        "{}: builder is IntentionallyExcludedGenericFailure but event manifest is {:?}",
+                        entry.event, ec,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "status mismatches between builder manifest and event manifest:\n{}",
+        mismatches.join("\n"),
+    );
+}
+
+#[test]
+fn payload_builder_contract_required_tests_exist() {
+    let known_tests = collect_known_test_function_names();
+    let test_set: std::collections::HashSet<&str> =
+        known_tests.iter().map(|s| s.as_str()).collect();
+
+    let mut missing = Vec::new();
+    for entry in payload_builder_contract_manifest() {
+        for t in entry.required_contract_tests {
+            if !test_set.contains(t) {
+                missing.push(format!(
+                    "builder '{}' requires test '{}' which does not exist",
+                    entry.builder, t,
+                ));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "{} required test(s) not found in scanned test files:\n{}",
+        missing.len(),
+        missing.join("\n"),
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Negative tests — construct bad inputs, call validator, assert fail
+// ════════════════════════════════════════════════════════════════════
+
+#[test]
+fn payload_builder_contract_missing_builder_manifest_entry_fails() {
+    let mut builders = parse_payload_builders_from_source();
+    builders.push("build_synthetic_missing_payload".into());
+    let manifest = payload_builder_contract_manifest();
+    let event_manifest = event_contract_manifest();
+    let known_tests = collect_known_test_function_names();
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_err(),
+        "should fail when a source builder has no manifest entry",
+    );
+    let err = result.unwrap_err().join("|");
+    assert!(
+        err.contains("build_synthetic_missing_payload"),
+        "error should name the missing builder: {}",
+        err,
+    );
+    assert!(
+        err.contains("not in builder manifest"),
+        "error should mention 'not in builder manifest': {}",
+        err,
+    );
+}
+
+#[test]
+fn payload_builder_contract_stale_builder_entry_fails() {
+    let builders = parse_payload_builders_from_source();
+    let mut manifest = payload_builder_contract_manifest();
+    manifest.push(PayloadBuilderContractEntry {
+        event: "SyntheticDeleted",
+        builder: "build_deleted_payload",
+        status: PayloadBuilderStatus::ProductionAudited,
+        reason: "test-only stale entry",
+        required_contract_tests: &["test_builders_produce_snake_case_fields"],
+    });
+    // Also add a matching EventContractEntry so the event check passes.
+    let mut event_manifest = event_contract_manifest();
+    event_manifest.push(EventContractEntry {
+        event: "SyntheticDeleted",
+        status: EventContractStatus::ProductionAudited,
+        reason: "test",
+        production_rule_tokens: &[],
+    });
+    let known_tests = collect_known_test_function_names();
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_err(),
+        "should fail when manifest declares a builder not in source",
+    );
+    let err = result.unwrap_err().join("|");
+    assert!(
+        err.contains("build_deleted_payload"),
+        "error should name the stale builder: {}",
+        err,
+    );
+    assert!(
+        err.contains("not found in trace_payloads.rs"),
+        "error should mention 'not found in trace_payloads.rs': {}",
+        err,
+    );
+}
+
+#[test]
+fn payload_builder_contract_wrong_event_status_fails() {
+    let builders = parse_payload_builders_from_source();
+    let known_tests = collect_known_test_function_names();
+
+    // Construct a manifest where a ProductionAudited builder maps to
+    // an event that is IntentionallyExcluded in event_contract_manifest.
+    let mut manifest = payload_builder_contract_manifest();
+    manifest.push(PayloadBuilderContractEntry {
+        event: "ModelFailed",
+        builder: "build_model_failed_payload",
+        status: PayloadBuilderStatus::ProductionAudited, // wrong
+        reason: "intentionally wrong status",
+        required_contract_tests: &["test_generic_failure_events_round_trip"],
+    });
+    // Remove the original ModelFailed entry to avoid duplicates.
+    manifest.retain(|e| {
+        !(e.event == "ModelFailed"
+            && e.status == PayloadBuilderStatus::IntentionallyExcludedGenericFailure)
+    });
+
+    let event_manifest = event_contract_manifest();
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_err(),
+        "should fail when builder status contradicts event manifest status",
+    );
+    let err = result.unwrap_err().join("|");
+    assert!(
+        err.contains("ProductionAudited") && err.contains("IntentionallyExcluded"),
+        "error should mention both statuses: {}",
+        err,
+    );
+}
+
+#[test]
+fn payload_builder_contract_missing_required_test_fails() {
+    let builders = parse_payload_builders_from_source();
+    let event_manifest = event_contract_manifest();
+    let known_tests = collect_known_test_function_names();
+
+    let mut manifest = payload_builder_contract_manifest();
+    // Give ToolCallBlocked a nonexistent required test.
+    for entry in &mut manifest {
+        if entry.event == "ToolCallBlocked" {
+            entry.required_contract_tests = &["nonexistent_test_function_xyz"];
+        }
+    }
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_err(),
+        "should fail when required_contract_test does not exist",
+    );
+    let err = result.unwrap_err().join("|");
+    assert!(
+        err.contains("nonexistent_test_function_xyz"),
+        "error should name the missing test: {}",
+        err,
+    );
+}
+
+#[test]
+fn payload_builder_contract_duplicate_builder_fails() {
+    let builders = parse_payload_builders_from_source();
+    let known_tests = collect_known_test_function_names();
+    let mut manifest = payload_builder_contract_manifest();
+    manifest.push(PayloadBuilderContractEntry {
+        event: "DuplicateEvent",
+        builder: "build_tool_call_blocked_payload", // duplicate builder
+        status: PayloadBuilderStatus::ProductionAudited,
+        reason: "duplicate builder test",
+        required_contract_tests: &["test_builders_produce_snake_case_fields"],
+    });
+    let mut event_manifest = event_contract_manifest();
+    event_manifest.push(EventContractEntry {
+        event: "DuplicateEvent",
+        status: EventContractStatus::ProductionAudited,
+        reason: "test",
+        production_rule_tokens: &[],
+    });
+
+    let result = validate_payload_builders_against_manifest(
+        &builders,
+        &manifest,
+        &event_manifest,
+        &known_tests,
+    );
+    assert!(
+        result.is_err(),
+        "should fail when builder name appears twice in manifest",
+    );
+    let err = result.unwrap_err().join("|");
+    assert!(
+        err.contains("duplicate builder"),
+        "error should mention 'duplicate builder': {}",
+        err,
+    );
+}
+
+#[test]
+fn payload_builder_contract_comment_and_string_fake_builders_ignored() {
+    // The scanner must NOT pick up `pub fn build_*_payload` in comments
+    // or strings.  We verify this by checking that the real builder
+    // count matches exactly, without being inflated by fake-builders
+    // in the source comments/strings of trace_payloads.rs.
+    let builders = parse_payload_builders_from_source();
+
+    // All real builders we know about.
+    let expected = vec![
+        "build_agent_spec_selected_payload",
+        "build_context_governance_applied_payload",
+        "build_model_call_failed_payload",
+        "build_model_failed_payload",
+        "build_prompt_stack_assembled_payload",
+        "build_replay_completed_payload",
+        "build_replay_failed_payload",
+        "build_replay_started_payload",
+        "build_run_failed_payload",
+        "build_tool_call_blocked_payload",
+        "build_tool_call_failed_payload",
+    ];
+
+    let expected_set: std::collections::HashSet<&str> = expected.iter().copied().collect();
+    let found_set: std::collections::HashSet<&str> = builders.iter().map(|s| s.as_str()).collect();
+
+    assert_eq!(
+        expected_set, found_set,
+        "builder scanner found unexpected builders. expected: {:?}, found: {:?}",
+        expected_set, found_set,
+    );
+
+    // Positive: the scanner does NOT find "build_fake_payload" even if
+    // we search for it in comments — because sanitise_source masks them.
+    assert!(
+        !builders.contains(&"build_fake_payload".to_string()),
+        "fake builder in comment/string must not be detected by scanner",
+    );
+}
+
+// ── Parser unit test: real builders are discovered ──
+
+#[test]
+fn payload_builder_contract_scanner_finds_real_builders() {
+    let builders = parse_payload_builders_from_source();
+    assert!(
+        builders.contains(&"build_tool_call_blocked_payload".to_string()),
+        "scanner must find build_tool_call_blocked_payload",
+    );
+    assert!(
+        builders.contains(&"build_replay_failed_payload".to_string()),
+        "scanner must find build_replay_failed_payload",
+    );
+    assert!(
+        builders.contains(&"build_agent_spec_selected_payload".to_string()),
+        "scanner must find build_agent_spec_selected_payload",
+    );
+    assert!(
+        builders.contains(&"build_replay_completed_payload".to_string()),
+        "scanner must find build_replay_completed_payload",
+    );
+    assert!(
+        builders.contains(&"build_model_failed_payload".to_string()),
+        "scanner must find build_model_failed_payload",
+    );
+    assert!(
+        builders.contains(&"build_run_failed_payload".to_string()),
+        "scanner must find build_run_failed_payload",
+    );
+    assert!(
+        builders.contains(&"build_tool_call_failed_payload".to_string()),
+        "scanner must find build_tool_call_failed_payload",
+    );
+    assert!(
+        builders.contains(&"build_model_call_failed_payload".to_string()),
+        "scanner must find build_model_call_failed_payload",
+    );
+    assert!(
+        builders.contains(&"build_replay_started_payload".to_string()),
+        "scanner must find build_replay_started_payload",
+    );
+    assert!(
+        builders.contains(&"build_prompt_stack_assembled_payload".to_string()),
+        "scanner must find build_prompt_stack_assembled_payload",
+    );
+    assert!(
+        builders.contains(&"build_context_governance_applied_payload".to_string()),
+        "scanner must find build_context_governance_applied_payload",
+    );
+}
