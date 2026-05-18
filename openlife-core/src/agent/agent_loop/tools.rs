@@ -6,6 +6,7 @@ use super::types::AgentLoopResult;
 use super::types::StepResult;
 use super::AgentLoop;
 use crate::agent::action_executor::{ActionContext, ActionExecutionStatus, AgentActionRequest};
+use crate::agent::trace_payloads;
 use crate::agent::types::AgentAction;
 use crate::agent::types::{
     AgentEventActor, AgentLoopPhase, AgentLoopStatusUpdate, AgentObservation, AgentRun,
@@ -57,17 +58,19 @@ impl AgentLoop {
                     AgentRunEventType::ToolCallBlocked,
                     AgentEventActor::Runtime,
                     "Tool call budget exceeded",
-                    serde_json::json!({
-                        "status": "blocked",
-                        "tool_name": blocked_tool_name,
-                        "source": "runtime",
-                        "block_reason": "invalid_arguments",
-                        "proposal_reason": null,
-                        "failure_kind": null,
-                        "agent_spec_id": null,
-                        "max_tool_calls": self.config.max_tool_calls,
-                        "current_count": *tool_call_count + executed_this_step,
-                    }),
+                    trace_payloads::build_tool_call_blocked_payload(
+                        "blocked",
+                        &blocked_tool_name,
+                        "runtime",
+                        None::<&str>,
+                        Some("invalid_arguments"),
+                        None::<&str>,
+                        None::<&str>,
+                        Some(serde_json::json!({
+                            "max_tool_calls": self.config.max_tool_calls,
+                            "current_count": *tool_call_count + executed_this_step,
+                        })),
+                    ),
                 );
                 let obs = self.create_budget_exceeded_observation(run, *tool_call_count);
                 observations.push(obs.clone());

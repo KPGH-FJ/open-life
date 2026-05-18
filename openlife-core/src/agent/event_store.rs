@@ -1029,4 +1029,551 @@ mod tests {
             );
         }
     }
+
+    // ── Trace Contract: agent_spec.selected payload ──────────────────
+    //
+    //  Uses the production payload builder so that a change to the
+    //  builder automatically flows into the contract test.  The builder
+    //  is the single source-of-truth shared by:
+    //    - src-tauri/src/streaming.rs
+    //    - src-tauri/src/commands/execution.rs
+    //    - openlife-core/src/agent/agent_loop/orchestrator.rs
+    //
+    //  If this test fails, production emits changed WITHOUT the builder.
+    //
+    /// Verify that agent_spec.selected payloads (from the production
+    /// builder) carry agent_spec_id, role, privacy_policy in
+    /// snake_case — matching the frontend explainability contract.
+    #[test]
+    fn test_agent_spec_selected_payload_contract() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-agent-spec-selected";
+
+        let payload =
+            trace_payloads::build_agent_spec_selected_payload("main.default", "main", "local_only");
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::AgentSpecSelected,
+            AgentEventActor::Runtime,
+            "AgentSpec main.default selected",
+            payload,
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentRunEventType::AgentSpecSelected);
+
+        let payload = &events[0].payload;
+        contract_helpers::assert_has_string(payload, "agent_spec_id");
+        contract_helpers::assert_has_string(payload, "role");
+        contract_helpers::assert_has_string(payload, "privacy_policy");
+
+        assert_eq!(payload["agent_spec_id"].as_str(), Some("main.default"));
+        assert_eq!(payload["role"].as_str(), Some("main"));
+        assert_eq!(payload["privacy_policy"].as_str(), Some("local_only"));
+    }
+
+    // ── Trace Contract: prompt_stack.assembled payload ──────────────
+    //
+    //  Uses the production payload builder.  Contract: prompt_blocks
+    //  array items have `id`.  No prompt_stack_id field (Scheme B).
+
+    /// Verify that prompt_stack.assembled payloads (from the production
+    /// builder) carry agent_spec_id and prompt_blocks (array with `id`
+    /// items).  PromptStack Scheme B is enforced — no prompt_stack_id.
+    #[test]
+    fn test_prompt_stack_assembled_payload_contract() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-prompt-stack";
+
+        let blocks = serde_json::json!([
+            {"id": "base_system", "version": "1.0.0", "purpose": "system prompt"},
+            {"id": "privacy_rule", "version": "1.0.0", "purpose": "privacy rule"},
+        ]);
+        let payload = trace_payloads::build_prompt_stack_assembled_payload("main.default", blocks);
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::PromptStackAssembled,
+            AgentEventActor::Runtime,
+            "PromptStack assembled with 2 blocks",
+            payload,
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event_type,
+            AgentRunEventType::PromptStackAssembled
+        );
+
+        let payload = &events[0].payload;
+        contract_helpers::assert_has_string(payload, "agent_spec_id");
+        contract_helpers::assert_has_array(payload, "prompt_blocks");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "id");
+
+        // Scheme B: no prompt_stack_id / promptStackId field
+        contract_helpers::assert_field_absent(payload, "prompt_stack_id");
+        contract_helpers::assert_field_absent(payload, "promptStackId");
+    }
+
+    // ── Trace Contract: context_governance.applied payload ──────────
+    //
+    //  Uses the production payload builder for both StreamingExecution
+    //  and Orchestrator paths.  streaming.rs uses StreamingExecution,
+    //  orchestrator.rs uses Orchestrator.
+
+    /// Verify that context_governance.applied payloads (from the
+    /// production builder) carry the correct fields for both the
+    /// streaming/execution path and the orchestrator path.
+    #[test]
+    fn test_context_governance_applied_payload_contract() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+        use crate::agent::trace_payloads::ContextGovernanceEmitter;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-context-gov";
+
+        // Case 1: streaming/execution path — uses `privacy_policy`
+        let payload1 = trace_payloads::build_context_governance_applied_payload(
+            "main.default",
+            vec!["lifemodel_summary".into(), "goals".into()],
+            vec!["raw_health_data".into()],
+            "local_only",
+            ContextGovernanceEmitter::StreamingExecution,
+        );
+        let e1 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ContextGovernanceApplied,
+            AgentEventActor::Runtime,
+            "Context governance applied (streaming path)",
+            payload1,
+        );
+        store.append_event(&e1).unwrap();
+
+        // Case 2: orchestrator path — uses `agent_spec_privacy_policy`
+        let payload2 = trace_payloads::build_context_governance_applied_payload(
+            "main.strict",
+            vec!["lifemodel_summary".into()],
+            vec!["memory".into()],
+            "local_only",
+            ContextGovernanceEmitter::Orchestrator,
+        );
+        let e2 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ContextGovernanceApplied,
+            AgentEventActor::Runtime,
+            "Context governance applied (orchestrator path)",
+            payload2,
+        );
+        store.append_event(&e2).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 2);
+
+        for event in &events {
+            assert_eq!(
+                event.event_type,
+                AgentRunEventType::ContextGovernanceApplied
+            );
+            let payload = &event.payload;
+            contract_helpers::assert_has_string(payload, "agent_spec_id");
+            contract_helpers::assert_has_array_allow_empty(payload, "context_included");
+            contract_helpers::assert_has_array_allow_empty(payload, "context_excluded");
+
+            let has_privacy = payload
+                .get("privacy_policy")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+                || payload
+                    .get("agent_spec_privacy_policy")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+            assert!(
+                has_privacy,
+                "context_governance.applied must have privacy_policy or agent_spec_privacy_policy"
+            );
+        }
+    }
+
+    // ── Trace Contract: generic failure event surface ────────────────
+    //
+    //  Uses the production payload builders.
+
+    /// Verify that generic failure event payloads produced by the
+    /// production builders survive event store round-trip.
+    #[test]
+    fn test_generic_failure_events_round_trip() {
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-generic-failures";
+
+        let e1 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelFailed,
+            AgentEventActor::Runtime,
+            "Governance failure",
+            trace_payloads::build_model_failed_payload("main.default", "some governance error"),
+        );
+        store.append_event(&e1).unwrap();
+
+        let e2 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ModelCallFailed,
+            AgentEventActor::Agent,
+            "Calling deepseek-chat failed",
+            trace_payloads::build_model_call_failed_payload(
+                "openrouter",
+                "deepseek-chat",
+                "timeout",
+            ),
+        );
+        store.append_event(&e2).unwrap();
+
+        let e3 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallFailed,
+            AgentEventActor::Tool("web.search".into()),
+            "Tool 'web.search' failed",
+            trace_payloads::build_tool_call_failed_payload("web.search", "network error"),
+        );
+        store.append_event(&e3).unwrap();
+
+        let e4 = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::RunFailed,
+            AgentEventActor::Runtime,
+            "Run failed due to error",
+            trace_payloads::build_run_failed_payload("budget exceeded"),
+        );
+        store.append_event(&e4).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 4);
+
+        assert_eq!(events[0].event_type, AgentRunEventType::ModelFailed);
+        assert_eq!(events[1].event_type, AgentRunEventType::ModelCallFailed);
+        assert_eq!(events[2].event_type, AgentRunEventType::ToolCallFailed);
+        assert_eq!(events[3].event_type, AgentRunEventType::RunFailed);
+
+        for event in &events {
+            let payload_str = serde_json::to_string(&event.payload).unwrap();
+            assert!(
+                !payload_str.is_empty() && payload_str != "{}",
+                "failure event {} must have non-empty payload",
+                event.event_type
+            );
+        }
+    }
+
+    // ── Trace Contract: typed governance malformed + enum prevention ─
+
+    /// Verify that tool.call_blocked payloads with invalid enum
+    /// variants (like "not_a_real_enum_variant") are rejected by the
+    /// typed-reason validation — same semantics as frontend
+    /// typedContract.ts malformedKnownTyped warning.
+    #[test]
+    fn test_tool_call_blocked_rejects_invalid_enum_reason() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-invalid-enum";
+
+        // Build with a valid status/tool_name/source but invalid block_reason
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "Blocked with invalid reason",
+            trace_payloads::build_tool_call_blocked_payload(
+                "blocked",
+                "web.search",
+                "builtin",
+                Some("main.default"),
+                Some("not_a_real_enum_variant"),
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        // Structural fields present
+        assert_eq!(payload["status"].as_str(), Some("blocked"));
+        assert_eq!(payload["tool_name"].as_str(), Some("web.search"));
+        assert_eq!(payload["source"].as_str(), Some("builtin"));
+
+        // Typed reason must NOT be valid — the string exists but is not a known enum
+        contract_helpers::assert_no_typed_reason(payload, &["block_reason", "proposal_reason"]);
+    }
+
+    /// Verify that replay.failed payloads with invalid enum variants
+    /// are rejected.
+    #[test]
+    fn test_replay_failed_rejects_invalid_enum_reason() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-replay-invalid-enum";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Replay failed — invalid reason",
+            trace_payloads::build_replay_failed_payload(
+                run_id,
+                "a1",
+                "orig-1",
+                "Replay failed — invalid reason",
+                Some("not_a_real_enum_variant"),
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentRunEventType::ReplayFailed);
+
+        let payload = &events[0].payload;
+        assert_eq!(payload["status"].as_str(), Some("failed"));
+
+        // Must NOT be valid — unknown variant
+        contract_helpers::assert_no_typed_reason(payload, &["block_reason", "failure_kind"]);
+    }
+
+    /// Verify that tool.call_blocked with valid block_reason passes
+    /// the typed-reason helper (regression test — valid enum must work).
+    #[test]
+    fn test_tool_call_blocked_with_valid_block_reason_passes() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-valid";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "Blocked by AgentSpec",
+            trace_payloads::build_tool_call_blocked_payload(
+                "blocked",
+                "web.search",
+                "builtin",
+                Some("main.default"),
+                Some("agent_spec_denied"),
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        contract_helpers::assert_has_typed_reason(payload, &["block_reason", "proposal_reason"]);
+    }
+
+    /// Verify that replay.failed with valid block_reason passes the
+    /// typed-reason helper.
+    #[test]
+    fn test_replay_failed_with_valid_reason_passes() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-replay-valid";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Run not found",
+            trace_payloads::build_replay_failed_payload(
+                run_id,
+                "a1",
+                "orig-1",
+                "Run not found",
+                Some("replay_spec_missing"),
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        contract_helpers::assert_has_typed_reason(payload, &["block_reason", "failure_kind"]);
+    }
+
+    /// Verify that a proposal_reason using an invalid enum variant is
+    /// rejected.
+    #[test]
+    fn test_tool_call_blocked_rejects_null_reasons() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-malformed";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "Blocked for unknown reason",
+            trace_payloads::build_tool_call_blocked_payload(
+                "blocked",
+                "web.search",
+                "builtin",
+                Some("main.default"),
+                None::<&str>,
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        assert_eq!(payload["status"].as_str(), Some("blocked"));
+        assert_eq!(payload["tool_name"].as_str(), Some("web.search"));
+        assert_eq!(payload["source"].as_str(), Some("builtin"));
+
+        contract_helpers::assert_no_typed_reason(payload, &["block_reason", "proposal_reason"]);
+    }
+
+    /// Verify that replay.failed events with null reasons fail the
+    /// typed-reason validation.
+    #[test]
+    fn test_replay_failed_rejects_null_reasons() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-replay-null";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ReplayFailed,
+            AgentEventActor::Runtime,
+            "Replay failed — no typed reason",
+            trace_payloads::build_replay_failed_payload(
+                run_id,
+                "a1",
+                "orig-1",
+                "Replay failed — no typed reason",
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentRunEventType::ReplayFailed);
+
+        let payload = &events[0].payload;
+        assert_eq!(payload["status"].as_str(), Some("failed"));
+
+        contract_helpers::assert_no_typed_reason(payload, &["block_reason", "failure_kind"]);
+    }
+
+    /// Verify tool.call_blocked with agent_spec_id=None passes the
+    /// typed-reason helper — agents like runtime budget exceeded have
+    /// no AgentSpec in scope.
+    #[test]
+    fn test_tool_call_blocked_none_agent_spec_id_passes() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-no-spec";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Runtime,
+            "Budget exceeded",
+            trace_payloads::build_tool_call_blocked_payload(
+                "blocked",
+                "file.read",
+                "runtime",
+                None::<&str>,
+                Some("invalid_arguments"),
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        assert_eq!(payload["agent_spec_id"], serde_json::Value::Null);
+        contract_helpers::assert_has_typed_reason(payload, &["block_reason", "proposal_reason"]);
+    }
+
+    /// Verify tool.call_blocked with agent_spec_id=Some passes the
+    /// typed-reason helper — real AgentSpec deny path.
+    #[test]
+    fn test_tool_call_blocked_some_agent_spec_id_passes() {
+        use crate::agent::tests::contract_helpers;
+        use crate::agent::trace_payloads;
+
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "tc-blocked-with-spec";
+
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ToolCallBlocked,
+            AgentEventActor::Tool("web.search".into()),
+            "Blocked by AgentSpec",
+            trace_payloads::build_tool_call_blocked_payload(
+                "blocked",
+                "web.search",
+                "builtin",
+                Some("custom.spec"),
+                Some("agent_spec_denied"),
+                None::<&str>,
+                None::<&str>,
+                None,
+            ),
+        );
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload;
+
+        assert_eq!(payload["agent_spec_id"].as_str(), Some("custom.spec"));
+        contract_helpers::assert_has_typed_reason(payload, &["block_reason", "proposal_reason"]);
+    }
 }

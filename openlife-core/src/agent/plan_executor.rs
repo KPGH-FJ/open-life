@@ -1,6 +1,7 @@
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::plan_store::PlanStore;
 use crate::agent::sub_agent::{ReviewAgentOutput, ReviewIssue};
+use crate::agent::trace_payloads;
 use crate::agent::types::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -285,15 +286,16 @@ impl PlanExecutor {
                         run_id,
                         AgentRunEventType::ToolCallBlocked,
                         format!("tool '{}' blocked by AgentSpec {}", tool_name, spec.id),
-                        json!({
-                            "status": "blocked",
-                            "tool_name": tool_name,
-                            "source": "plan_executor",
-                            "block_reason": "agent_spec_denied",
-                            "proposal_reason": null,
-                            "failure_kind": null,
-                            "agent_spec_id": spec.id,
-                        }),
+                        trace_payloads::build_tool_call_blocked_payload(
+                            "blocked",
+                            tool_name,
+                            "plan_executor",
+                            Some(spec.id.clone()),
+                            Some("agent_spec_denied"),
+                            None::<&str>,
+                            None::<&str>,
+                            None,
+                        ),
                     );
                     blocked
                 } else {

@@ -9,6 +9,7 @@ use super::AgentActionRequest;
 use super::BorrowedActionContext;
 use super::{ExecutionBlockReason, ExecutionFailureKind, ExecutionProposalReason};
 use crate::agent::shell_executor::{ShellCommandRequest, ShellExecutor};
+use crate::agent::trace_payloads;
 use crate::agent::types::{
     AgentAction, AgentEventActor, AgentObservation, AgentProposal, AgentRunEvent,
     AgentRunEventType, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
@@ -165,16 +166,19 @@ impl super::ActionExecutor {
                         AgentRunEventType::ToolCallBlocked,
                         AgentEventActor::Tool(tool_name.clone()),
                         format!("Tool '{}' blocked by AgentSpec governance", tool_name),
-                        serde_json::json!({
-                            "status": "blocked",
-                            "tool_name": tool_name,
-                            "source": manifest.as_ref().map(canonical_tool_source).unwrap_or_default(),
-                            "reason": "agent_spec_denied",
-                            "block_reason": ExecutionBlockReason::AgentSpecDenied.to_string(),
-                            "proposal_reason": serde_json::Value::Null,
-                            "failure_kind": serde_json::Value::Null,
-                            "agent_spec_id": spec.id.clone(),
-                        }),
+                        trace_payloads::build_tool_call_blocked_payload(
+                            "blocked",
+                            tool_name,
+                            manifest
+                                .as_ref()
+                                .map(canonical_tool_source)
+                                .unwrap_or_default(),
+                            Some(spec.id.clone()),
+                            Some(ExecutionBlockReason::AgentSpecDenied.to_string()),
+                            None::<&str>,
+                            None::<&str>,
+                            Some(serde_json::json!({"reason": "agent_spec_denied"})),
+                        ),
                     );
                     let _ = event_store.append_event(&event);
                 }
@@ -423,18 +427,20 @@ impl super::ActionExecutor {
                         AgentRunEventType::ToolCallBlocked,
                         AgentEventActor::Tool(tool_name.clone()),
                         "mcp.call_tool target denied by AgentSpec".to_string(),
-                        serde_json::json!({
-                            "status": "blocked",
-                            "tool_name": tool_name,
-                            "source": "builtin",
-                            "target_tool_name": target_tool_name,
-                            "target_source": action.tool_scope.as_ref().map(|s| s.source.clone()),
-                            "wrapper_tool_name": "mcp.call_tool",
-                            "block_reason": ExecutionBlockReason::AgentSpecDenied.to_string(),
-                            "proposal_reason": serde_json::Value::Null,
-                            "failure_kind": serde_json::Value::Null,
-                            "agent_spec_id": ac.agent_spec.as_ref().map(|s| s.id.clone()),
-                        }),
+                        trace_payloads::build_tool_call_blocked_payload(
+                            "blocked",
+                            tool_name,
+                            "builtin",
+                            ac.agent_spec.as_ref().map(|s| s.id.clone()),
+                            Some(ExecutionBlockReason::AgentSpecDenied.to_string()),
+                            None::<&str>,
+                            None::<&str>,
+                            Some(serde_json::json!({
+                                "target_tool_name": target_tool_name,
+                                "target_source": action.tool_scope.as_ref().map(|s| s.source.clone()),
+                                "wrapper_tool_name": "mcp.call_tool",
+                            })),
+                        ),
                     );
                     let _ = event_store.append_event(&event);
                 }
@@ -468,18 +474,20 @@ impl super::ActionExecutor {
                         AgentRunEventType::ToolCallBlocked,
                         AgentEventActor::Tool(tool_name.clone()),
                         format!("mcp.call_tool target blocked: {:?}", result.block_reason),
-                        serde_json::json!({
-                            "status": "blocked",
-                            "tool_name": tool_name,
-                            "source": "builtin",
-                            "target_tool_name": target_tool_name,
-                            "target_source": action.tool_scope.as_ref().map(|s| s.source.clone()),
-                            "wrapper_tool_name": "mcp.call_tool",
-                            "block_reason": result.block_reason.as_ref().map(|r| r.to_string()),
-                            "proposal_reason": serde_json::Value::Null,
-                            "failure_kind": serde_json::Value::Null,
-                            "agent_spec_id": ac.agent_spec.as_ref().map(|s| s.id.clone()),
-                        }),
+                        trace_payloads::build_tool_call_blocked_payload(
+                            "blocked",
+                            tool_name,
+                            "builtin",
+                            ac.agent_spec.as_ref().map(|s| s.id.clone()),
+                            result.block_reason.as_ref().map(|r| r.to_string()),
+                            None::<&str>,
+                            None::<&str>,
+                            Some(serde_json::json!({
+                                "target_tool_name": target_tool_name,
+                                "target_source": action.tool_scope.as_ref().map(|s| s.source.clone()),
+                                "wrapper_tool_name": "mcp.call_tool",
+                            })),
+                        ),
                     );
                     let _ = event_store.append_event(&event);
                 }
@@ -794,16 +802,22 @@ impl super::ActionExecutor {
                 AgentRunEventType::ToolCallBlocked,
                 AgentEventActor::Tool(tool_name.to_string()),
                 format!("Tool '{}' blocked: {}", tool_name, decision.reason),
-                serde_json::json!({
-                    "status": if needs_confirmation { "needs_confirmation" } else { "blocked" },
-                    "tool_name": tool_name,
-                    "source": manifest.map(canonical_tool_source).unwrap_or_else(|| "builtin".to_string()),
-                    "reason": decision.reason,
-                    "block_reason": block_reason.as_ref().map(|r| r.to_string()),
-                    "proposal_reason": proposal_reason.as_ref().map(|r| r.to_string()),
-                    "failure_kind": serde_json::Value::Null,
-                    "agent_spec_id": ac.agent_spec.as_ref().map(|s| s.id.clone()),
-                }),
+                trace_payloads::build_tool_call_blocked_payload(
+                    if needs_confirmation {
+                        "needs_confirmation"
+                    } else {
+                        "blocked"
+                    },
+                    tool_name,
+                    manifest
+                        .map(canonical_tool_source)
+                        .unwrap_or_else(|| "builtin".to_string()),
+                    ac.agent_spec.as_ref().map(|s| s.id.clone()),
+                    block_reason.as_ref().map(|r| r.to_string()),
+                    proposal_reason.as_ref().map(|r| r.to_string()),
+                    None::<&str>,
+                    Some(serde_json::json!({"reason": decision.reason.clone()})),
+                ),
             );
             let _ = event_store.append_event(&event);
         }
@@ -997,17 +1011,21 @@ impl super::ActionExecutor {
                 AgentRunEventType::ToolCallBlocked,
                 AgentEventActor::Tool(tool_name.to_string()),
                 format!("Tool '{}' blocked by NetworkPolicy ask", tool_name),
-                serde_json::json!({
-                    "status": "needs_confirmation",
-                    "tool_name": tool_name,
-                    "source": scope_manifest.map(canonical_tool_source).unwrap_or_else(|| "builtin".to_string()),
-                    "reason": "network_policy_ask",
-                    "block_reason": serde_json::Value::Null,
-                    "proposal_reason": ExecutionProposalReason::NetworkPolicyAsk.to_string(),
-                    "proposal_id": proposal_id.clone(),
-                    "failure_kind": serde_json::Value::Null,
-                    "agent_spec_id": ac.agent_spec.as_ref().map(|s| s.id.clone()),
-                }),
+                trace_payloads::build_tool_call_blocked_payload(
+                    "needs_confirmation",
+                    tool_name,
+                    scope_manifest
+                        .map(canonical_tool_source)
+                        .unwrap_or_else(|| "builtin".to_string()),
+                    ac.agent_spec.as_ref().map(|s| s.id.clone()),
+                    None::<&str>,
+                    Some(ExecutionProposalReason::NetworkPolicyAsk.to_string()),
+                    None::<&str>,
+                    Some(serde_json::json!({
+                        "reason": "network_policy_ask",
+                        "proposal_id": proposal_id.clone(),
+                    })),
+                ),
             );
             let _ = event_store.append_event(&event);
         }
@@ -1591,38 +1609,30 @@ impl super::ActionExecutor {
     ) -> Result<ActionExecutionResult> {
         let tool_name = "shell.run";
 
-        // Record tool.call_blocked helper — auto-injects contract-required fields
-        let record_blocked = |reason: &str, payload: serde_json::Value| {
+        // Record tool.call_blocked via unified builder
+        let emit_blocked = |reason: &str,
+                            status: &str,
+                            block_reason: Option<ExecutionBlockReason>,
+                            proposal_reason: Option<ExecutionProposalReason>,
+                            extra: Option<Value>| {
             if let (Some(event_store), Some(ref run_id)) =
                 (ctx.event_store.as_ref(), &request.source_run_id)
             {
-                let mut p = payload;
-                // Ensure typed contract fields are present
-                let obj = p.as_object_mut().unwrap();
-                if !obj.contains_key("source") {
-                    obj.insert("source".to_string(), serde_json::json!("builtin"));
-                }
-                if !obj.contains_key("failure_kind") {
-                    obj.insert("failure_kind".to_string(), serde_json::Value::Null);
-                }
-                if !obj.contains_key("proposal_reason") {
-                    obj.insert("proposal_reason".to_string(), serde_json::Value::Null);
-                }
-                if !obj.contains_key("agent_spec_id") {
-                    obj.insert(
-                        "agent_spec_id".to_string(),
-                        ctx.agent_spec
-                            .as_ref()
-                            .map(|s| serde_json::json!(s.id))
-                            .unwrap_or(serde_json::Value::Null),
-                    );
-                }
                 let event = AgentRunEvent::new(
                     run_id,
                     AgentRunEventType::ToolCallBlocked,
                     AgentEventActor::Tool(tool_name.to_string()),
                     format!("shell.run blocked: {}", reason),
-                    p,
+                    trace_payloads::build_tool_call_blocked_payload(
+                        status,
+                        tool_name,
+                        "builtin",
+                        ctx.agent_spec.as_ref().map(|s| s.id.clone()),
+                        block_reason.map(|r| r.to_string()),
+                        proposal_reason.map(|r| r.to_string()),
+                        None::<&str>,
+                        extra,
+                    ),
                 );
                 let _ = event_store.append_event(&event);
             }
@@ -1633,14 +1643,12 @@ impl super::ActionExecutor {
             Some(m) => m,
             None => {
                 let reason = "shell.run tool is not registered";
-                record_blocked(
+                emit_blocked(
                     reason,
-                    serde_json::json!({
-                        "reason": reason,
-                        "tool_name": tool_name,
-                        "status": "blocked",
-                        "block_reason": ExecutionBlockReason::DisabledManifest.to_string(),
-                    }),
+                    "blocked",
+                    Some(ExecutionBlockReason::DisabledManifest),
+                    None,
+                    Some(serde_json::json!({"reason": reason})),
                 );
                 return Ok(self.build_blocked_result(
                     tool_name,
@@ -1658,14 +1666,12 @@ impl super::ActionExecutor {
 
         if !manifest.enabled {
             let reason = "shell.run is disabled in manifest";
-            record_blocked(
+            emit_blocked(
                 reason,
-                serde_json::json!({
-                    "reason": reason,
-                    "tool_name": tool_name,
-                    "status": "blocked",
-                    "block_reason": ExecutionBlockReason::DisabledManifest.to_string(),
-                }),
+                "blocked",
+                Some(ExecutionBlockReason::DisabledManifest),
+                None,
+                Some(serde_json::json!({"reason": reason})),
             );
             return Ok(self.build_blocked_result(
                 tool_name,
@@ -1682,14 +1688,12 @@ impl super::ActionExecutor {
 
         if manifest.declarative_only {
             let reason = "shell.run is declarative-only (no executor available)";
-            record_blocked(
+            emit_blocked(
                 reason,
-                serde_json::json!({
-                    "reason": reason,
-                    "tool_name": tool_name,
-                    "status": "blocked",
-                    "block_reason": ExecutionBlockReason::DeclarativeOnly.to_string(),
-                }),
+                "blocked",
+                Some(ExecutionBlockReason::DeclarativeOnly),
+                None,
+                Some(serde_json::json!({"reason": reason})),
             );
             return Ok(self.build_blocked_result(
                 tool_name,
@@ -1708,15 +1712,12 @@ impl super::ActionExecutor {
         let sandbox = ctx.execution_sandbox;
         if !sandbox.bash_enabled {
             let reason = "shell execution is disabled (sandbox.bash_enabled = false)";
-            record_blocked(
+            emit_blocked(
                 reason,
-                serde_json::json!({
-                    "reason": reason,
-                    "tool_name": tool_name,
-                    "status": "blocked",
-                    "block_reason": ExecutionBlockReason::SandboxDenied.to_string(),
-                    "bash_enabled": false,
-                }),
+                "blocked",
+                Some(ExecutionBlockReason::SandboxDenied),
+                None,
+                Some(serde_json::json!({"reason": reason, "bash_enabled": false})),
             );
             return Ok(self.build_blocked_result(
                 tool_name,
@@ -1739,15 +1740,12 @@ impl super::ActionExecutor {
             }
             Some(_) => {
                 let reason = "AgentSpec denied shell.run";
-                record_blocked(
+                emit_blocked(
                     reason,
-                    serde_json::json!({
-                        "reason": reason,
-                        "tool_name": tool_name,
-                        "status": "blocked",
-                        "block_reason": ExecutionBlockReason::AgentSpecDenied.to_string(),
-                        "agent_spec_id": ctx.agent_spec.map(|s| s.id.clone()),
-                    }),
+                    "blocked",
+                    Some(ExecutionBlockReason::AgentSpecDenied),
+                    None,
+                    Some(serde_json::json!({"reason": reason})),
                 );
                 return Ok(self.build_blocked_result(
                     tool_name,
@@ -1764,14 +1762,12 @@ impl super::ActionExecutor {
             None => {
                 let reason =
                     "AgentSpec missing: cannot execute shell.run without governed AgentSpec";
-                record_blocked(
+                emit_blocked(
                     reason,
-                    serde_json::json!({
-                        "reason": reason,
-                        "tool_name": tool_name,
-                        "status": "blocked",
-                        "block_reason": ExecutionBlockReason::AgentSpecMissing.to_string(),
-                    }),
+                    "blocked",
+                    Some(ExecutionBlockReason::AgentSpecMissing),
+                    None,
+                    Some(serde_json::json!({"reason": reason})),
                 );
                 return Ok(self.build_blocked_result(
                     tool_name,
@@ -1824,17 +1820,28 @@ impl super::ActionExecutor {
                 "shell.run permission denied"
             };
 
-            record_blocked(
+            emit_blocked(
                 reason,
-                serde_json::json!({
+                if needs_confirmation {
+                    "needs_confirmation"
+                } else {
+                    "blocked"
+                },
+                if needs_confirmation {
+                    None
+                } else {
+                    Some(ExecutionBlockReason::ToolPermissionDenied)
+                },
+                if needs_confirmation {
+                    Some(ExecutionProposalReason::ToolPermissionAsk)
+                } else {
+                    None
+                },
+                Some(serde_json::json!({
                     "reason": reason,
-                    "tool_name": tool_name,
-                    "status": if needs_confirmation { "needs_confirmation" } else { "blocked" },
-                    "block_reason": if needs_confirmation { serde_json::Value::Null } else { serde_json::json!(ExecutionBlockReason::ToolPermissionDenied.to_string()) },
-                    "proposal_reason": if needs_confirmation { serde_json::json!(ExecutionProposalReason::ToolPermissionAsk.to_string()) } else { serde_json::Value::Null },
                     "needs_confirmation": needs_confirmation,
                     "permission_decision": perm_decision.decision,
-                }),
+                })),
             );
 
             if needs_confirmation {
@@ -5057,6 +5064,7 @@ mod tests {
     // ── Event payload contract tests ─────────────────────────────────
 
     /// ToolCallBlocked event from AgentSpec deny must have all contract fields.
+    /// Validated through production builder + contract_helpers.
     #[tokio::test]
     async fn tool_call_blocked_event_payload_has_contract_fields() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5120,6 +5128,41 @@ mod tests {
         assert!(p["block_reason"].is_string());
         assert!(!p["block_reason"].as_str().unwrap().is_empty());
         assert!(p["agent_spec_id"].is_string());
+
+        // Production helper must also pass contract_helpers typed reason validation
+        crate::agent::tests::contract_helpers::assert_has_typed_reason(
+            p,
+            &["block_reason", "proposal_reason"],
+        );
+    }
+
+    /// ToolCallBlocked payload from builder with None agent_spec_id
+    /// must still pass contract helper validation.
+    #[test]
+    fn builder_tool_call_blocked_none_agent_spec_id_passes_contract() {
+        use crate::agent::trace_payloads;
+
+        let p = trace_payloads::build_tool_call_blocked_payload(
+            "blocked",
+            "web.search",
+            "runtime",
+            None::<&str>,
+            Some("invalid_arguments"),
+            None::<&str>,
+            None::<&str>,
+            Some(serde_json::json!({
+                "max_tool_calls": 6,
+                "current_count": 6,
+            })),
+        );
+        assert_eq!(p["status"], "blocked");
+        assert_eq!(p["agent_spec_id"], serde_json::Value::Null);
+        assert_eq!(p["block_reason"], "invalid_arguments");
+
+        crate::agent::tests::contract_helpers::assert_has_typed_reason(
+            &p,
+            &["block_reason", "proposal_reason"],
+        );
     }
 
     /// NetworkPolicy ask event must have contract fields including proposal_id.
@@ -5193,6 +5236,12 @@ mod tests {
         assert!(p["proposal_id"].is_string());
         assert!(!p["proposal_id"].as_str().unwrap().is_empty());
         assert!(p["agent_spec_id"].is_string());
+
+        // Production helper must pass contract_helpers typed reason validation
+        crate::agent::tests::contract_helpers::assert_has_typed_reason(
+            p,
+            &["block_reason", "proposal_reason"],
+        );
     }
 
     /// shell.run blocked event must have contract fields.
@@ -5241,6 +5290,12 @@ mod tests {
         assert_eq!(p["status"], "blocked");
         assert!(p["tool_name"].is_string());
         assert!(!p["block_reason"].is_null());
+
+        // Production helper must pass contract_helpers typed reason validation
+        crate::agent::tests::contract_helpers::assert_has_typed_reason(
+            p,
+            &["block_reason", "proposal_reason"],
+        );
     }
 
     /// shell.run manifest NOT registered (missing) → DisabledManifest typed
@@ -5304,5 +5359,11 @@ mod tests {
         assert!(p["failure_kind"].is_null());
         // agent_spec_id field must be present (null allowed)
         assert!(p.get("agent_spec_id").is_some());
+
+        // Production helper must pass contract_helpers typed reason validation
+        crate::agent::tests::contract_helpers::assert_has_typed_reason(
+            p,
+            &["block_reason", "proposal_reason"],
+        );
     }
 }

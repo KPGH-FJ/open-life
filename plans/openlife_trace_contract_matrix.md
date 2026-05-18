@@ -1,6 +1,6 @@
 # OpenLife Trace Contract Matrix
 
-Date: 2026-05-16
+Date: 2026-05-18
 
 Status: active
 
@@ -112,20 +112,22 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 
 **Must-have typed fields:** `status`, `tool_name`, `source`, and either `block_reason` or `proposal_reason`.
 
-**Emission sites with full typed payload:**
+**Emission sites — all converged to `build_tool_call_blocked_payload` builder:**
 
-| File | Line | Has `status` | Has `tool_name` | Has `source` | Has `block_reason` | Has `proposal_reason` | Has `agent_spec_id` | Extra fields |
+| File | Site | Has `status` | Has `tool_name` | Has `source` | Has `block_reason` | Has `proposal_reason` | Has `agent_spec_id` | Extra fields |
 |------|------|-------------|-----------------|-------------|--------------------|------------------------|---------------------|-------------|
-| `tool_executor.rs` | 163-178 | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ | `reason` (text) |
-| `tool_executor.rs` | 421-438 | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ | `target_tool_name`, `target_source`, `wrapper_tool_name` |
-| `tool_executor.rs` | 466-483 | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ | `target_tool_name`, `target_source`, `wrapper_tool_name` |
-| `tool_executor.rs` | 792-808 | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ | `reason` (text) |
-| `tool_executor.rs` | 995-1012 | ✅ needs_confirmation | ✅ | ✅ | ❌ null | ✅ | ✅ | `reason` (text), `proposal_id` |
-| `tool_executor.rs` | 1599-1606 (shell.run) | ✅ | ✅ | ✅ (auto-injected) | ✅ | ❌ null (auto-injected) | ✅ (auto-injected) | 7 call sites; closure auto-injects `source`/`failure_kind`/`proposal_reason`/`agent_spec_id` |
-| `tools.rs` | 54-63 | ✅ blocked | ✅ | ✅ (`"runtime"`) | ✅ (`"invalid_arguments"`) | ❌ null | ❌ null | `max_tool_calls`, `current_count` preserved |
-| `plan_executor.rs` | 284-288 | ✅ blocked | ✅ | ✅ (`"plan_executor"`) | ✅ (`"agent_spec_denied"`) | ❌ null | ✅ (`agent_spec_id` — fixed from `agentspec_id`) | `agent_spec_id` key corrected |
+| `tool_executor.rs` | AgentSpec deny (Phase 1) | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ Some(spec.id) | `reason` (text) |
+| `tool_executor.rs` | mcp.call_tool target AgentSpec deny | ✅ blocked | ✅ | ✅ (`"builtin"`) | ✅ | ❌ null | ✅ Some | `target_tool_name`, `target_source`, `wrapper_tool_name` |
+| `tool_executor.rs` | mcp.call_tool target hard block | ✅ blocked | ✅ | ✅ (`"builtin"`) | ✅ | ❌ null | ✅ Some | `target_tool_name`, `target_source`, `wrapper_tool_name` |
+| `tool_executor.rs` | handle_blocked (policy) | ✅ blocked/needs_confirmation | ✅ | ✅ | ✅ | ✅\|null | ✅ Some | `reason` (text) |
+| `tool_executor.rs` | network_ask_proposal_ex | ✅ needs_confirmation | ✅ | ✅ | ❌ null | ✅ | ✅ Some | `reason` (text), `proposal_id` |
+| `tool_executor.rs` | shell.run (7 paths) | ✅ blocked/needs_confirmation | ✅ (`"shell.run"`) | ✅ (`"builtin"`) | ✅ | ✅\|null | ✅ Some | `reason`, `bash_enabled`, `needs_confirmation`, `permission_decision` |
+| `tools.rs` | budget exceeded | ✅ blocked | ✅ | ✅ (`"runtime"`) | ✅ (`"invalid_arguments"`) | ❌ null | ❌ **None** | `max_tool_calls`, `current_count` |
+| `plan_executor.rs` | AgentSpec deny | ✅ blocked | ✅ | ✅ (`"plan_executor"`) | ✅ (`"agent_spec_denied"`) | ❌ null | ✅ Some | — |
 
-**Risk:** None — all production `ToolCallBlocked` emitters now satisfy the standard typed payload contract. The `tools.rs:54` budget exceeded case and `plan_executor.rs:284` AgentSpec deny case were fixed in the Post-Beta Audit.
+**All sites use `trace_payloads::build_tool_call_blocked_payload` — zero hand-written tool_call_blocked payloads remain in production.
+
+**Risk:** None — all production `ToolCallBlocked` emitters now use `trace_payloads::build_tool_call_blocked_payload`. Zero hand-written payloads remain. The builder enforces the standard contract shape across all 15 call sites. Contract tests and production share the same builder, eliminating desynchronisation risk.
 
 ### 2.2 `replay.started` — Tier 1 Governance
 
@@ -304,6 +306,90 @@ Performs structural validation on each known event type. If required fields are 
 
 ---
 
+## 6.5 Backend Contract Tests (Trace Explainability)
+
+> **Production payload builder:** `openlife-core/src/agent/trace_payloads.rs`
+> **Contract helpers:** `openlife-core/src/agent/tests/contract_helpers.rs`
+> **Contract tests:** `openlife-core/src/agent/event_store.rs`
+
+The contract tests no longer use hand-written `serde_json::json!({...})` payloads.  Instead, they call the same `trace_payloads::build_*()` functions used by the real production emit sites:
+
+| Emit site | Builder used |
+|-----------|-------------|
+| `src-tauri/src/streaming.rs` | `build_agent_spec_selected_payload`, `build_prompt_stack_assembled_payload`, `build_context_governance_applied_payload` (StreamingExecution) |
+| `src-tauri/src/commands/execution.rs` | `build_agent_spec_selected_payload`, `build_prompt_stack_assembled_payload`, `build_context_governance_applied_payload` (StreamingExecution) |
+| `openlife-core/src/agent/agent_loop/orchestrator.rs` | `build_agent_spec_selected_payload`, `build_prompt_stack_assembled_payload`, `build_context_governance_applied_payload` (Orchestrator) |
+| `src-tauri/src/commands/agent.rs` | `build_replay_started_payload`, `build_replay_completed_payload`, `build_replay_failed_payload` |
+| `openlife-core/src/agent/action_executor/tool_executor.rs` | `build_tool_call_blocked_payload` (7 production sites: AgentSpec deny, mcp target block x2, policy block, NetworkPolicy ask, shell.run x7) |
+| `openlife-core/src/agent/agent_loop/tools.rs` | `build_tool_call_blocked_payload` (1 site: budget exceeded) |
+| `openlife-core/src/agent/plan_executor.rs` | `build_tool_call_blocked_payload` (1 site: AgentSpec deny) |
+
+A change to any builder function is **immediately reflected** in both production and test payloads.  Hand-written JSON round-trip tests in `event_store.rs` are no longer the sole contract proof.
+
+### 6.5.1 Coverage Matrix
+
+| Contract Test | Event Types Covered | Production Builder Used |
+|--------------|-------------------|------------------------|
+| `test_agent_spec_selected_payload_contract` | `agent_spec.selected` | `build_agent_spec_selected_payload` |
+| `test_prompt_stack_assembled_payload_contract` | `prompt_stack.assembled` | `build_prompt_stack_assembled_payload` |
+| `test_context_governance_applied_payload_contract` | `context_governance.applied` | `build_context_governance_applied_payload` (both emitter variants) |
+| `test_tool_call_blocked_typed_payload_contract` | `tool.call_blocked` | Pre-existing (validates `status`, `tool_name`, `source`, `block_reason`\|`proposal_reason`) |
+| `test_replay_failed_events_have_typed_reason` | `replay.failed` | Pre-existing (validates `status`, `run_id`, `action_id`, `replay_of_action_id`, valid typed reason) |
+| `test_generic_failure_events_round_trip` | `model.failed`, `model.call_failed`, `tool.call_failed`, `run.failed` | `build_model_failed_payload`, `build_model_call_failed_payload`, `build_tool_call_failed_payload`, `build_run_failed_payload` |
+| `test_tool_call_blocked_rejects_invalid_enum_reason` | `tool.call_blocked` (invalid reason) | `build_tool_call_blocked_payload` with `"not_a_real_enum_variant"` — rejected by `assert_no_typed_reason` |
+| `test_replay_failed_rejects_invalid_enum_reason` | `replay.failed` (invalid reason) | `build_replay_failed_payload` with `"not_a_real_enum_variant"` — rejected by `assert_no_typed_reason` |
+| `test_tool_call_blocked_rejects_null_reasons` | `tool.call_blocked` (null reasons) | `build_tool_call_blocked_payload` with `None` reasons — rejected |
+| `test_replay_failed_rejects_null_reasons` | `replay.failed` (null reasons) | `build_replay_failed_payload` with `None` reasons — rejected |
+| `test_tool_call_blocked_with_valid_block_reason_passes` | `tool.call_blocked` (valid reason) | `build_tool_call_blocked_payload` with `"agent_spec_denied"` — passes `assert_has_typed_reason` |
+| `test_replay_failed_with_valid_reason_passes` | `replay.failed` (valid reason) | `build_replay_failed_payload` with `"replay_spec_missing"` — passes `assert_has_typed_reason` |
+
+### 6.5.2 Typed Reason Enum Validation
+
+The contract helpers (`assert_has_typed_reason`, `assert_no_typed_reason`) now validate against the **production enum variant strings** defined in `trace_payloads.rs`:
+
+| Field | Valid Values |
+|-------|-------------|
+| `block_reason` | `agent_spec_denied`, `agent_spec_missing`, `network_policy_denied`, `domain_blocked`, `tool_permission_denied`, `missing_mcp_client`, `disabled_manifest`, `declarative_only`, `sandbox_denied`, `path_not_safe`, `invalid_arguments`, `replay_spec_missing`, `pii_detected`, `unknown` |
+| `proposal_reason` | `network_policy_ask`, `tool_permission_ask`, `high_risk_action` |
+| `failure_kind` | `tool_runtime_error`, `mcp_client_error`, `missing_mcp_server`, `internal_error`, `serialization_error` |
+
+Values like `"not_a_real_enum_variant"`, empty strings, and `"null"` are **rejected** — matching the frontend `typedContract.ts` parser behaviour.  This prevents desynchronisation between backend and frontend validation.
+
+### 6.5.3 Contract Helpers
+
+**File:** `openlife-core/src/agent/tests/contract_helpers.rs`
+
+| Helper | Signature | Purpose |
+|--------|-----------|---------|
+| `assert_has_string` | `(payload, field)` | Assert non-empty string field present |
+| `assert_has_array` | `(payload, field)` | Assert non-empty array field present |
+| `assert_has_array_allow_empty` | `(payload, field)` | Assert array field present (may be empty) |
+| `assert_array_items_have_field` | `(payload, array_field, item_field)` | Assert each array element has sub-field |
+| `assert_has_typed_reason` | `(payload, candidates)` | Assert at least one valid typed reason **with recognised enum value** |
+| `assert_no_typed_reason` | `(payload, candidates)` | Assert no valid typed reason (for malformed payload verification) |
+| `assert_field_absent` | `(payload, field)` | Assert field does NOT exist in payload |
+
+### 6.5.4 Cross-Layer Alignment
+
+Field names are anchored in **backend Rust snake_case** as the authoritative source:
+
+| Backend Rust | Frontend Fixture | Frontend camelCase Fallback |
+|-------------|-----------------|---------------------------|
+| `agent_spec_id` | `agent_spec_id` | `agentSpecId` (legacy) |
+| `prompt_blocks` | `prompt_blocks` | — |
+| `privacy_policy` | `privacy_policy` | `privacyPolicy` (legacy) |
+| `agent_spec_privacy_policy` | `agent_spec_privacy_policy` | — |
+| `block_reason` | `block_reason` | — |
+| `proposal_reason` | `proposal_reason` | — |
+| `failure_kind` | `failure_kind` | — |
+
+**Anti-patterns prevented:**
+- No `prompt_stack_id` / `promptStackId` field.
+- No inference of typed reasons from `summary` / `human_message` text.
+- Invalid enum variants like `"not_a_real_enum_variant"` are rejected by both backend helper and frontend parser.
+
+---
+
 ## 7. Known Gaps & Risk Assessment
 
 ### 7.1b Gap: ReplayFailed Early Paths Now Typed (FIXED)
@@ -327,6 +413,46 @@ All 11 replay.failed emission paths now carry at least one valid typed reason.
 - `tool_executor.rs` shell.run `record_blocked` closure: now auto-injects `source: "builtin"`, `failure_kind: null`, `proposal_reason: null`, `agent_spec_id` (from ctx). All 7 call sites automatically satisfy the typed contract.
 
 **Remaining:** No known production `ToolCallBlocked` emitters with non-compliant payload shapes.
+
+### 7.1d Gap: ToolCallBlocked Production Builder Convergence (FIXED — this round)
+
+**Status:** ✅ FIXED in Post-Beta Stabilization — 2026-05-18.
+
+**Background:** The `tool.call_blocked` payloads were the last remaining production emission sites that used hand-written `serde_json::json!({...})` instead of delegating to `trace_payloads::build_tool_call_blocked_payload`. While all sites already satisfied the typed contract, the payload construction logic was duplicated across 3 files and 15 call sites. This created risk of desynchronisation between production and contract test shapes.
+
+**Changes in this round:**
+- `trace_payloads::build_tool_call_blocked_payload` signature updated: `agent_spec_id` from `impl Into<String>` → `Option<impl Into<String>>`. When `None`, serialised as `serde_json::Value::Null` — matching the budget-exceeded path where no AgentSpec is in scope.
+- **7 production emit sites in `tool_executor.rs`** migrated to the builder:
+  - AgentSpec deny (Phase 1)
+  - mcp.call_tool target AgentSpec deny
+  - mcp.call_tool target hard block (ToolPermissionDenied, PiiDetected, etc.)
+  - `handle_blocked` general policy block (DeclarativeOnly, DisabledManifest, ToolPermissionDenied, PiiDetected, Unknown)
+  - `network_ask_proposal_ex` NetworkPolicy ask + proposal_id
+  - `execute_shell_run` `record_blocked` closure replaced with `emit_blocked` helper that delegates to builder. All 7 shell.run block sites (missing manifest, disabled, declarative-only, sandbox deny, AgentSpec deny, AgentSpec missing, permission deny/ask) now use the builder.
+- **1 site in `agent_loop/tools.rs`**: budget exceeded now uses builder with `agent_spec_id: None`.
+- **1 site in `plan_executor.rs`**: AgentSpec deny now uses builder with `agent_spec_id: Some(spec.id)`.
+- **0 remaining production emission sites** emit `tool.call_blocked` with hand-written payloads.
+
+**`agent_spec_id` contract semantics:**
+| Value | Serialised As | When Used |
+|-------|-------------|-----------|
+| `Some(id)` | `"agent_spec_id": "<id>"` (string) | Normal governed paths: AgentSpec deny, permission deny, sandbox deny, etc. |
+| `None` | `"agent_spec_id": null` | No AgentSpec in scope: budget exceeded (AgentLoop runtime), may also appear in shell.run AgentSpec-missing gate |
+| Frontend parser | Accepts `string \| null` | `null` treated as absent agent spec; no badge generated |
+
+**`extra` field merge semantics:**
+The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core fields (`status`, `tool_name`, `source`, `agent_spec_id`, `block_reason`, `proposal_reason`, `failure_kind`) are never overwritten. Extra-only fields (`proposal_id`, `reason`, `target_tool_name`, `wrapper_tool_name`, `max_tool_calls`, `needs_confirmation`, `permission_decision`, `bash_enabled`) are safely injected.
+
+**Tests added (9 new):**
+- `builder_tool_call_blocked_none_agent_spec_id_passes_contract` — `agent_spec_id: None` passes contract_helpers
+- `test_tool_call_blocked_none_agent_spec_id_passes` — event_store round-trip with null agent_spec_id
+- `test_tool_call_blocked_some_agent_spec_id_passes` — event_store round-trip with string agent_spec_id
+- `tool_call_blocked_event_payload_has_contract_fields` updated to validate through contract_helpers
+- `network_policy_ask_event_payload_has_contract_fields` updated to validate through contract_helpers
+- `shell_blocked_event_payload_has_contract_fields` updated to validate through contract_helpers
+- `shell_run_manifest_missing_records_typed_tool_call_blocked` updated to validate through contract_helpers
+- Existing `test_allowed_block_reasons_known` / `test_rejects_invalid_enum_variant` / `test_rejects_null_and_empty` remain intact
+- All contract_helpers tests (`valid_typed_reasons_pass` / `invalid_block_reason_fails` / etc.) remain intact
 
 ### 7.2 Gap: shell.blocked / shell.completed Are Frontend-Only Types
 
@@ -371,6 +497,8 @@ All 11 replay.failed emission paths now carry at least one valid typed reason.
 
 | Date | Update |
 |------|--------|
+| 2026-05-18 | **ToolCallBlocked Production Builder Convergence**: Migrated all 15 production `tool.call_blocked` emission sites across `tool_executor.rs` (7 sites + 7 shell.run paths), `agent_loop/tools.rs` (budget exceeded), and `plan_executor.rs` (AgentSpec deny) to `trace_payloads::build_tool_call_blocked_payload`. Changed `agent_spec_id` parameter from `impl Into<String>` to `Option<impl Into<String>>` — `None` serialises to `null` (budget exceeded, missing spec). `extra` merge uses `or_insert` so core fields are never overwritten. Replaced `record_blocked` closure in shell.run with `emit_blocked` helper delegating to builder. Added 9 new tests: `agent_spec_id=None` contract round-trip, `agent_spec_id=Some` contract round-trip, 4 production-helper tests now validated through `contract_helpers::assert_has_typed_reason`. Zero hand-written tool.call_blocked payloads remain in production. |
+| 2026-05-17 | **Production Payload Builder + Enum Validation**: Created `openlife-core/src/agent/trace_payloads.rs` with production payload builder functions. Refactored 7 emit sites across `streaming.rs`, `execution.rs`, `orchestrator.rs`, and `agent.rs` to delegate to the shared builders. Contract tests now call the same builders — hand-written JSON is no longer the sole contract proof. `assert_has_typed_reason` now validates against production enum variant strings (`allowed_block_reasons`, `allowed_proposal_reasons`, `allowed_failure_kinds`). Invalid enum values like `"not_a_real_enum_variant"` are rejected, matching frontend `typedContract.ts`. Added `assert_no_typed_reason` helper for malformed payload verification. Added 4 new contract tests (invalid enum rejection x2, valid enum regression x2). |
 | 2026-05-16 | **Post-Beta Audit Fixes**: ReplayFailed early paths 1-3 now carry typed reasons; tools.rs budget exceeded now compliant; plan_executor.rs `agentspec_id` → `agent_spec_id` fix; shell.run closure auto-injects contract fields. All production ToolCallBlocked/ReplayFailed emitters now satisfy typed payload contract. |
 | 2026-05-16 | **Explainability Layer**: Added `getTypedEventExplanation`, `getTypedRunExplanation`, `TypedRunExplanationViewModel`, `TypedEventExplanationViewModel` to `typedContract.ts`. Added `EventExplanationBlock` and `RunExplanationPanel` components. Integrated into `RunTracePanel`, `AgentRunDetail`, and `RunsPage`. See Section 10. |
 | 2026-05-16 | **Explainability Snake-Case Fix**: Fixed `getTypedRunExplanation` metadata extraction to read real backend snake_case fields (`agent_spec_id`, `privacy_policy`, `agent_spec_privacy_policy`, `prompt_blocks`). Removed fake `promptStackId` field — replaced with `promptBlockCount` / `promptBlockIds` extracted from `prompt_blocks` array (Scheme B). Added snake_case priority with camelCase backward-compat fallback. Updated `TypedRunExplanationViewModel` interface. Updated `RunExplanationPanel` developer display. Added 9 new tests covering real payload contracts. |

@@ -8,6 +8,7 @@ use super::streaming::StreamingCallback;
 use super::types::{preview_text, AgentLoopResult, StepContext};
 use crate::agent::event_store::AgentRunEventStore;
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
+use crate::agent::trace_payloads;
 use crate::agent::types::{
     AgentEventActor, AgentLoopPhase, AgentLoopStatusUpdate, AgentRun, AgentRunError, AgentRunEvent,
     AgentRunEventType, AgentRunStatus, AgentTask, PrivacyPolicy,
@@ -84,7 +85,7 @@ impl AgentLoop {
         run_id: &str,
         agent_spec: &crate::agent::types::AgentSpec,
         runtime_output: &AgentRuntimeOutput,
-        effective_privacy_policy: PrivacyPolicy,
+        _effective_privacy_policy: PrivacyPolicy,
     ) {
         self.try_record_event(
             run_id,
@@ -95,25 +96,31 @@ impl AgentLoop {
                 runtime_output.prompt_block_trace.len(),
                 agent_spec.id
             ),
-            serde_json::json!({
-                "agent_spec_id": agent_spec.id,
-                "prompt_blocks": runtime_output.prompt_block_trace,
-            }),
+            trace_payloads::build_prompt_stack_assembled_payload(
+                &agent_spec.id,
+                serde_json::to_value(&runtime_output.prompt_block_trace).unwrap_or_default(),
+            ),
         );
         self.try_record_event(
             run_id,
             AgentRunEventType::ContextGovernanceApplied,
             AgentEventActor::Runtime,
             format!("Context governance applied by AgentSpec {}", agent_spec.id),
-            serde_json::json!({
-                "agent_spec_id": agent_spec.id,
-                "context_included": runtime_output.governed_context_summary.as_ref()
-                    .map(|g| &g.included).unwrap_or(&vec![]),
-                "context_excluded": runtime_output.governed_context_summary.as_ref()
-                    .map(|g| &g.excluded).unwrap_or(&vec![]),
-                "agent_spec_privacy_policy": agent_spec.privacy_policy.to_string(),
-                "effective_privacy_policy": effective_privacy_policy.to_string(),
-            }),
+            trace_payloads::build_context_governance_applied_payload(
+                &agent_spec.id,
+                runtime_output
+                    .governed_context_summary
+                    .as_ref()
+                    .map(|g| g.included.clone())
+                    .unwrap_or_default(),
+                runtime_output
+                    .governed_context_summary
+                    .as_ref()
+                    .map(|g| g.excluded.clone())
+                    .unwrap_or_default(),
+                agent_spec.privacy_policy.to_string(),
+                trace_payloads::ContextGovernanceEmitter::Orchestrator,
+            ),
         );
     }
 
@@ -170,11 +177,11 @@ impl AgentLoop {
             AgentRunEventType::AgentSpecSelected,
             AgentEventActor::Runtime,
             format!("AgentSpec {} selected for AgentLoop", actx.agent_spec.id),
-            serde_json::json!({
-                "agent_spec_id": actx.agent_spec.id,
-                "role": actx.agent_spec.role.to_string(),
-                "privacy_policy": actx.agent_spec.privacy_policy.to_string(),
-            }),
+            trace_payloads::build_agent_spec_selected_payload(
+                &actx.agent_spec.id,
+                actx.agent_spec.role.to_string(),
+                actx.agent_spec.privacy_policy.to_string(),
+            ),
         );
 
         let mut step_count: u32 = 0;

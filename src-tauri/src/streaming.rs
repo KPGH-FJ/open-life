@@ -5,11 +5,13 @@ use chrono::Utc;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use serde_json::to_value;
 use tauri::Emitter;
 use tauri::State;
 use tokio::time::{timeout, Duration};
 
 use openlife_core::agent::execution_sandbox::ExecutionSandbox;
+use openlife_core::agent::trace_payloads;
 use openlife_core::agent::types::{PrivacyPolicy, RedactionLevel};
 use openlife_core::agent::{
     ActionExecutor, ActionExecutorConfig, AgentEventActor, AgentRun, AgentRunError, AgentRunEvent,
@@ -980,11 +982,11 @@ pub(crate) async fn start_stream_message(
                 "AgentSpec {} selected for governed execution",
                 agent_spec.id
             ),
-            json!({
-                "agent_spec_id": agent_spec.id,
-                "role": agent_spec.role.to_string(),
-                "privacy_policy": agent_spec.privacy_policy.to_string(),
-            }),
+            trace_payloads::build_agent_spec_selected_payload(
+                &agent_spec.id,
+                agent_spec.role.to_string(),
+                agent_spec.privacy_policy.to_string(),
+            ),
         )) {
             log::error!("[AgentRun] Failed to append AgentSpecSelected event: {}", e);
         }
@@ -1044,10 +1046,10 @@ pub(crate) async fn start_stream_message(
                         output.prompt_block_trace.len(),
                         agent_spec.id
                     ),
-                    json!({
-                        "agent_spec_id": agent_spec.id,
-                        "prompt_blocks": output.prompt_block_trace,
-                    }),
+                    trace_payloads::build_prompt_stack_assembled_payload(
+                        &agent_spec.id,
+                        to_value(&output.prompt_block_trace).unwrap_or_default(),
+                    ),
                 )) {
                     log::error!(
                         "[AgentRun] Failed to append PromptStackAssembled event: {}",
@@ -1059,14 +1061,21 @@ pub(crate) async fn start_stream_message(
                     AgentRunEventType::ContextGovernanceApplied,
                     AgentEventActor::Runtime,
                     format!("Context governance applied by AgentSpec {}", agent_spec.id),
-                    json!({
-                        "agent_spec_id": agent_spec.id,
-                        "context_included": output.governed_context_summary.as_ref()
-                            .map(|g| &g.included).unwrap_or(&vec![]),
-                        "context_excluded": output.governed_context_summary.as_ref()
-                            .map(|g| &g.excluded).unwrap_or(&vec![]),
-                        "privacy_policy": agent_spec.privacy_policy.to_string(),
-                    }),
+                    trace_payloads::build_context_governance_applied_payload(
+                        &agent_spec.id,
+                        output
+                            .governed_context_summary
+                            .as_ref()
+                            .map(|g| g.included.clone())
+                            .unwrap_or_default(),
+                        output
+                            .governed_context_summary
+                            .as_ref()
+                            .map(|g| g.excluded.clone())
+                            .unwrap_or_default(),
+                        agent_spec.privacy_policy.to_string(),
+                        trace_payloads::ContextGovernanceEmitter::StreamingExecution,
+                    ),
                 )) {
                     log::error!(
                         "[AgentRun] Failed to append ContextGovernanceApplied event: {}",

@@ -1,5 +1,6 @@
 use crate::errors::AppError;
 use crate::AppState;
+use openlife_core::agent::trace_payloads;
 use openlife_core::agent::{
     AgentAction, AgentObservation, AgentProposal, AgentRun, AgentTaskKind, ProposalSource,
     ProposalType, RiskLevel,
@@ -182,11 +183,11 @@ pub async fn run_skill(
                 "AgentSpec {} selected for skill {}",
                 agent_spec.id, skill_id
             ),
-            serde_json::json!({
-                "agent_spec_id": agent_spec.id,
-                "role": agent_spec.role.to_string(),
-                "privacy_policy": agent_spec.privacy_policy.to_string(),
-            }),
+            trace_payloads::build_agent_spec_selected_payload(
+                &agent_spec.id,
+                agent_spec.role.to_string(),
+                agent_spec.privacy_policy.to_string(),
+            ),
         ));
     }
 
@@ -389,10 +390,10 @@ pub async fn run_skill(
                 agent_spec.id,
                 skill_id
             ),
-            serde_json::json!({
-                "agent_spec_id": agent_spec.id,
-                "prompt_blocks": runtime_output.prompt_block_trace,
-            }),
+            trace_payloads::build_prompt_stack_assembled_payload(
+                &agent_spec.id,
+                serde_json::to_value(&runtime_output.prompt_block_trace).unwrap_or_default(),
+            ),
         ));
         let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
             &run.id,
@@ -402,14 +403,21 @@ pub async fn run_skill(
                 "Context governance applied by AgentSpec {} for skill {}",
                 agent_spec.id, skill_id
             ),
-            serde_json::json!({
-                "agent_spec_id": agent_spec.id,
-                "context_included": runtime_output.governed_context_summary.as_ref()
-                    .map(|g| &g.included).unwrap_or(&vec![]),
-                "context_excluded": runtime_output.governed_context_summary.as_ref()
-                    .map(|g| &g.excluded).unwrap_or(&vec![]),
-                "privacy_policy": agent_spec.privacy_policy.to_string(),
-            }),
+            trace_payloads::build_context_governance_applied_payload(
+                &agent_spec.id,
+                runtime_output
+                    .governed_context_summary
+                    .as_ref()
+                    .map(|g| g.included.clone())
+                    .unwrap_or_default(),
+                runtime_output
+                    .governed_context_summary
+                    .as_ref()
+                    .map(|g| g.excluded.clone())
+                    .unwrap_or_default(),
+                agent_spec.privacy_policy.to_string(),
+                trace_payloads::ContextGovernanceEmitter::StreamingExecution,
+            ),
         ));
     }
 

@@ -22,6 +22,7 @@ pub mod runtime;
 pub mod shell_executor;
 pub mod store;
 pub mod sub_agent;
+pub mod trace_payloads;
 pub mod types;
 
 #[cfg(test)]

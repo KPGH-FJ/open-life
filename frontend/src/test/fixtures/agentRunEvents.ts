@@ -5,6 +5,57 @@
  * ALL fixtures use snake_case payloads matching the real backend contract.
  * NO fixture uses summary/human_message/error as a state source.
  *
+ * ═══════════════════════════════════════════════════════════════════════
+ * BACKEND CONTRACT ALIGNMENT
+ * ═══════════════════════════════════════════════════════════════════════
+ *
+ * These fixtures are NOT arbitrary mock data.  Each fixture corresponds to
+ * a concrete backend contract tested in the Rust test suite.  The field
+ * names and shapes mirror the real production payloads emitted by:
+ *
+ *   Backend contract tests:
+ *     openlife-core/src/agent/event_store.rs  (uses production builders)
+ *     openlife-core/src/agent/trace_payloads.rs  (production payload builders)
+ *     openlife-core/src/agent/tests/contract_helpers.rs  (typed reason enum validation)
+ *     src-tauri/src/commands/proposal.rs      (replay typed event tests)
+ *
+ *   Field name authority: Rust snake_case is canonical.
+ *     Frontend camelCase is a legacy fallback ONLY.
+ *
+ *   Per-event contract (verified by both Rust builder output and TS tests):
+ *   ┌─────────────────────────────┬──────────────────────────────────────┐
+ *   │ Event Type                  │ Required Fields (snake_case)          │
+ *   ├─────────────────────────────┼──────────────────────────────────────┤
+ *   │ agent_spec.selected         │ agent_spec_id, role, privacy_policy  │
+ *   │ prompt_stack.assembled      │ agent_spec_id, prompt_blocks (array, │
+ *   │                             │   items have id); NO prompt_stack_id │
+ *   │ context_governance.applied  │ agent_spec_id, context_included,     │
+ *   │                             │   context_excluded, privacy_policy   │
+ *   │                             │   or agent_spec_privacy_policy       │
+ *   │ tool.call_blocked           │ status, tool_name, source,           │
+ *   │                             │   block_reason or proposal_reason    │
+ *   │                             │   (values must be valid enum strings)│
+ *   │ replay.failed               │ status, run_id, action_id,           │
+ *   │                             │   replay_of_action_id,               │
+ *   │                             │   block_reason or failure_kind       │
+ *   │                             │   (values must be valid enum strings)│
+ *   │ tool.call_failed            │ (generic — no typed reason required) │
+ *   │ run.failed                  │ (generic — no typed reason required) │
+ *   │ model.failed                │ (generic — no typed reason required) │
+ *   │ model.call_failed           │ (generic — no typed reason required) │
+ *   └─────────────────────────────┴──────────────────────────────────────┘
+ *
+ *   Production payload builder:
+ *     All event payloads in this fixture are produced by the same
+ *     builder functions that production emit sites use:
+ *     - openlife-core/src/agent/trace_payloads.rs
+ *
+ *     Real emit sites (streaming, execution, orchestrator, replay)
+ *     now delegate to these builders, so a change to a builder is
+ *     immediately reflected in both production and test payloads.
+ *
+ * ═══════════════════════════════════════════════════════════════════════
+ *
  * Fixture inventory (5 sets):
  *  1. successfulGovernedRun — agent_spec.selected, prompt_stack.assembled,
  *     context_governance.applied, tool calls, run.completed
