@@ -2406,6 +2406,22 @@ fn payload_builder_contract_manifest() -> Vec<PayloadBuilderContractEntry> {
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Cross-module helpers for frontend contract parity
+// ════════════════════════════════════════════════════════════════════
+
+/// Return `(event, builder)` pairs derived from the real
+/// `payload_builder_contract_manifest()`.  This is the **single source
+/// of truth** for which typed payload builders exist — the frontend
+/// contract parity audit consumes it so it can never drift from the
+/// builder manifest.
+pub(super) fn typed_payload_builder_refs() -> Vec<(&'static str, &'static str)> {
+    payload_builder_contract_manifest()
+        .iter()
+        .map(|e| (e.event, e.builder))
+        .collect()
+}
+
+// ════════════════════════════════════════════════════════════════════
 // Source scanner — extract builders from trace_payloads.rs
 // ════════════════════════════════════════════════════════════════════
 
@@ -2415,7 +2431,7 @@ fn payload_builder_contract_manifest() -> Vec<PayloadBuilderContractEntry> {
 /// strings are never matched.
 ///
 /// Returns a deduplicated, sorted list of builder function names.
-fn parse_payload_builders_from_source() -> Vec<String> {
+pub(super) fn parse_payload_builders_from_source() -> Vec<String> {
     let content = read_workspace_file("openlife-core/src/agent/trace_payloads.rs");
     let sanitised = sanitize_source(&content);
 

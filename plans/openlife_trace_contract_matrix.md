@@ -867,10 +867,170 @@ make ci
 
 ---
 
+## 9.7 Backend ↔ Frontend Typed Event Contract Parity
+
+### 9.7.1 Purpose
+
+While the **AuditRule** (Section 9.3) enforces that backend production emit sites use typed builders, and the **event contract manifest** (Section 9.5) classifies every `AgentRunEventType` variant, and the **builder coverage manifest** (Section 9.6) tracks every typed payload builder — **none of these layers verify that the frontend parser (`typedContract.ts`), fixtures (`agentRunEvents.ts`), and tests (`typedContract.test.ts`) stay in sync with the backend typed payload contract**.
+
+The **Backend ↔ Frontend Typed Event Contract Parity** audit closes this gap.
+
+**Why cross-end parity is needed:**
+
+- Backend `trace_payloads::build_*_payload` functions output **snake_case** JSON fields (e.g. `agent_spec_id`, `prompt_blocks`, `block_reason`).
+- Frontend `typedContract.ts` `parseTypedEventPayload()` parses these exact snake_case field names into structurally validated `TypedEventPayload` discriminated unions.
+- Frontend `fixtures/agentRunEvents.ts` must mirror the real backend payload shape so explainability tests are meaningful.
+- Frontend `typedContract.test.ts` must exercise the real field names so a backend field rename or removal causes a test failure.
+
+Without cross-end parity, a developer could:
+
+1. Rename a field in a backend builder (`build_*_payload`) — backend contract tests pass, but frontend silently degrades to `kind: "unknown"`.
+2. Add a new required field to a builder — backend tests pass, but frontend parser doesn't check it.
+3. Remove a fixture field — explainability tests still pass because they don't exercise that field directly, but the fixture no longer represents real payloads.
+4. Add a new typed builder event — backend manifest is updated, but frontend has no corresponding parser/fixture/test coverage.
+
+### 9.7.2 Implementation
+
+**File:** `openlife-core/src/agent/tests/frontend_contract_parity.rs`
+
+**Module:** registered in `openlife-core/src/agent/tests/mod.rs`
+
+**Backend builder source:** The backend builder name list is **not** hand-written in `frontend_contract_parity.rs`. Instead, `trace_contract_audit.rs` exposes `pub(super) fn typed_payload_builder_refs() -> Vec<(&str, &str)>` which is derived from the real `payload_builder_contract_manifest()` — the same manifest used by `payload_builder_contract` tests. This guarantees zero drift between the backend builder manifest and the frontend parity audit.
+
+**Core types:**
+
+- `FrontendTypedEventContractEntry` — each entry defines: `event`, `backend_builder`, `frontend_event_type`, `required_payload_fields`, `optional_payload_fields`, `frontend_parser_tokens`, `fixture_tokens`, `test_tokens`, and `is_generic_failure: bool`. The `is_generic_failure` flag controls validator behavior: governance events (`false`) check required fields against `typedContract.ts` AND fixtures/tests; generic failure events (`true`) check required fields against fixtures/tests only (parser does not structurally parse them).
+
+**Core validator:**
+
+```
+validate_frontend_typed_contract_parity(
+    parity_manifest: &[FrontendTypedEventContractEntry],
+    builder_refs: &[(&str, &str)],    // from typed_payload_builder_refs()
+    typed_contract_source: &str,
+    typed_contract_test_source: &str,
+    fixtures_source: &str,
+) -> Result<(), Vec<String>>
+```
+
+**Checks performed:**
+
+| # | Check | Governance Events | Generic Failure Events |
+|---|-------|-------------------|----------------------|
+| 1 | Every backend builder has a frontend parity entry | ✅ | ✅ |
+| 2 | No frontend parity entry references a non-existent backend builder | ✅ | ✅ |
+| 3 | No duplicate `event` in parity manifest | ✅ | ✅ |
+| 4 | No duplicate `frontend_event_type` in parity manifest | ✅ | ✅ |
+| 5 | `frontend_event_type` string exists in `typedContract.ts` | ✅ | ✅ |
+| 6 | Each `required_payload_fields` exists in `typedContract.ts` | ✅ | ❌ (not checked — parser does not structurally parse these events) |
+| 7 | Each `required_payload_fields` exists in `agentRunEvents.ts` OR `typedContract.test.ts` | ✅ | ✅ (primary required-field check for generic failures) |
+| 8 | Each `frontend_parser_tokens` exists in `typedContract.ts` | ✅ | ✅ |
+| 9 | Each `fixture_tokens` exists in `agentRunEvents.ts` | ✅ | ✅ |
+| 10 | Each `test_tokens` exists in `typedContract.test.ts` | ✅ | ✅ |
+
+### 9.7.3 Covered Events
+
+| Event | Backend Builder | Frontend Event Type | GF? | Required Fields | Fixture/Test Coverage Tokens |
+|-------|----------------|--------------------|-----|----------------|-----------------------------|
+| AgentSpecSelected | `build_agent_spec_selected_payload` | `agent_spec.selected` | — | `agent_spec_id`, `privacy_policy` | fixture: `agent_spec.selected`; test: `AgentRunEvent` |
+| PromptStackAssembled | `build_prompt_stack_assembled_payload` | `prompt_stack.assembled` | — | `agent_spec_id`, `prompt_blocks` | fixture: `prompt_blocks`; test: `prompt_stack.assembled` |
+| ContextGovernanceApplied | `build_context_governance_applied_payload` | `context_governance.applied` | — | `agent_spec_id` | fixture: `privacy_policy`; test: `context_governance.applied` |
+| ToolCallBlocked | `build_tool_call_blocked_payload` | `tool.call_blocked` | — | `status`, `tool_name`, `source`, `agent_spec_id` | fixture: `block_reason`; test: `BlockReason` |
+| ReplayStarted | `build_replay_started_payload` | `replay.started` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | test: `agent_spec_id`, `tool_name`, `source` (no fixture) |
+| ReplayCompleted | `build_replay_completed_payload` | `replay.completed` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | test: `agent_spec_id`, `tool_name`, `source` (no fixture) |
+| ReplayFailed | `build_replay_failed_payload` | `replay.failed` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `human_message` | fixture: `block_reason`; test: `replay.failed` |
+| ModelFailed | `build_model_failed_payload` | `model.failed` | ✅ GF | `agent_spec_id`, `error` | test: `error` (no fixture) |
+| RunFailed | `build_run_failed_payload` | `run.failed` | ✅ GF | `error` | test: `error` (no fixture) |
+| ToolCallFailed | `build_tool_call_failed_payload` | `tool.call_failed` | ✅ GF | `tool`, `error` | test: `error` (no fixture) |
+| ModelCallFailed | `build_model_call_failed_payload` | `model.call_failed` | ✅ GF | `provider`, `model`, `error` | test: `provider`, `model`, `error` (no fixture) |
+
+> **GF = Generic Failure**: Events pass through `parseTypedEventPayload` as `kind: "unknown"`. Required fields are verified against `typedContract.test.ts` (not `typedContract.ts`). The `frontend_event_type` is checked in `typedContract.ts` (used by `getTypedRunExplanation` for generic failure detection).
+
+### 9.7.4 Test Coverage
+
+All tests are prefixed `frontend_typed_contract_` and live in `frontend_contract_parity.rs`.
+
+**Positive tests (call validator on real data):**
+
+| Test | Verifies |
+|------|----------|
+| `frontend_typed_contract_all_backend_builders_have_frontend_entry` | Cross-manifest coverage: every real backend builder (from `typed_payload_builder_refs()`) has a parity entry, no extraneous builders |
+| `frontend_typed_contract_frontend_tokens_exist` | Full validator pass — all checks against real source files |
+| `frontend_typed_contract_required_fields_exist` | Every `required_payload_fields` found in correct location (typedContract.ts for governance, fixtures/tests for generic failures) |
+| `frontend_typed_contract_fixture_tokens_exist` | Every `fixture_tokens` found in `agentRunEvents.ts` |
+| `frontend_typed_contract_test_tokens_exist` | Every `test_tokens` found in `typedContract.test.ts` |
+
+**Negative tests (construct bad input, call validator, assert Err):**
+
+| Test | What it proves |
+|------|---------------|
+| `frontend_typed_contract_missing_frontend_entry_fails` | Backend builder without parity entry → validator fails |
+| `frontend_typed_contract_unknown_builder_fails` | Parity entry referencing non-existent backend builder → validator fails |
+| `frontend_typed_contract_duplicate_event_type_fails` | Two entries with same `frontend_event_type` → validator fails |
+| `frontend_typed_contract_missing_parser_token_fails` | Parser token removed from `typedContract.ts` → validator fails |
+| `frontend_typed_contract_missing_required_field_fails` | Required governance field removed from `typedContract.ts` → validator fails |
+| `frontend_typed_contract_missing_fixture_token_fails` | Fixture token removed from `agentRunEvents.ts` → validator fails |
+| `frontend_typed_contract_missing_test_token_fails` | Test token removed from `typedContract.test.ts` → validator fails |
+| `frontend_typed_contract_backend_builder_source_drift_fails` | New `build_synthetic_new_payload` added to `typed_payload_builder_refs()` but not in parity manifest → validator fails with builder name in error |
+| `frontend_typed_contract_generic_failure_required_field_missing_fails` | Generic failure required field (`provider`) removed from `typedContract.test.ts` → validator fails with field name in error |
+
+### 9.7.5 Verification Commands
+
+```bash
+cargo test -p openlife-core frontend_typed_contract -- --nocapture
+cargo test -p openlife-core payload_builder_contract -- --nocapture
+cargo test -p openlife-core event_contract -- --nocapture
+cargo test -p openlife-core trace_contract_audit -- --nocapture
+cd frontend && corepack pnpm test -- typedContract.test.ts
+make ci
+```
+
+### 9.7.6 How to Add/Modify a Typed Event (Cross-End)
+
+When a new typed event is introduced or an existing typed event payload shape changes:
+
+1. **Backend:** Create or update the `build_*_payload` function in `trace_payloads.rs`.
+2. **Backend manifest:** Update `payload_builder_contract_manifest()` in `trace_contract_audit.rs` (this automatically propagates to `typed_payload_builder_refs()` which the frontend parity audit consumes — no separate hand-written list to update).
+3. **Backend audit:** Add or update `AuditRule` entries in `audit_rules()`.
+4. **Event manifest:** Update `event_contract_manifest()` in `trace_contract_audit.rs`.
+5. **Frontend parity manifest:** Add or update `FrontendTypedEventContractEntry` in `frontend_parity_manifest()` in `frontend_contract_parity.rs`. If this is a governance event, set `is_generic_failure: false`; if it is a generic failure (pass-through as `kind: "unknown"`), set `is_generic_failure: true`. Add correct `required_payload_fields`, `frontend_parser_tokens`, `fixture_tokens`, and `test_tokens`.
+6. **Frontend parser:** Update `parseTypedEventPayload()` in `typedContract.ts` to parse the new/changed fields (governance events only; generic failures pass through as `kind: "unknown"`).
+7. **Frontend fixtures:** Add or update event timelines in `agentRunEvents.ts` with the new/changed fields.
+8. **Frontend tests:** Add or update tests in `typedContract.test.ts`.
+9. **Document:** Update this document (Section 9.7.3 table and Section 10 changelog).
+10. **Verify:**
+    ```bash
+    cargo test -p openlife-core frontend_typed_contract -- --nocapture
+    cd frontend && corepack pnpm test -- typedContract.test.ts
+    make ci
+    ```
+11. All parity checks must pass — both Rust and frontend tests.
+
+### 9.7.7 Boundaries
+
+**Prohibited:**
+- Modifying frontend parser behavior just to make tokens match — tokens are assertions about what already exists.
+- Modifying Rust payload builder output fields just to match parity entries — parity entries describe the actual contract.
+- Introducing TS parser, AST, or external dependencies for token scanning.
+- Using snapshot-based string comparisons — all checks are field/token-level.
+- Weakening existing `payload_builder_contract`, `event_contract`, or `trace_contract_audit` tests.
+- Modifying any UI component.
+- Writing a hard-coded list of backend builder names in `frontend_contract_parity.rs` — the backend builder source must come from `trace_contract_audit`'s `typed_payload_builder_refs()`.
+
+**Allowed:**
+- Adding missing fixture fields if they genuinely reflect backend builder output and were simply absent from fixtures.
+- Adding missing test tokens if the test file was genuinely missing coverage for existing parser behavior.
+- Exposing `pub(super)` helpers from `trace_contract_audit.rs` for reuse by sibling test modules.
+- All changes must be small, justified, and documented in the commit message.
+
+---
+
 ## 10. Update Log
 
 | Date | Update |
 |------|--------|
+| 2026-05-18 | **Frontend Contract Parity Rework** (返工): (1) Removed hand-written `backend_builder_manifest()` from `frontend_contract_parity.rs`. Backend builder names now come from `trace_contract_audit::typed_payload_builder_refs()` which is derived from the real `payload_builder_contract_manifest()`. Added `pub(super)` exposure on `typed_payload_builder_refs()` and `parse_payload_builders_from_source()`. (2) Added `is_generic_failure: bool` flag to `FrontendTypedEventContractEntry`. Validator now applies different rules: governance events check required fields against `typedContract.ts` AND fixtures/tests; generic failures check required fields against fixtures/tests only (parser does not structurally parse them). (3) Generic failure entries now have proper `required_payload_fields` (ModelFailed: `agent_spec_id, error`; RunFailed: `error`; ToolCallFailed: `tool, error`; ModelCallFailed: `provider, model, error`). (4) Added 2 new negative tests: `frontend_typed_contract_backend_builder_source_drift_fails` (new builder without parity entry → fails) and `frontend_typed_contract_generic_failure_required_field_missing_fails` (generic failure field removed from test → fails). Total tests: 14 (5 positive + 9 negative). |
+| 2026-05-18 | **Backend ↔ Frontend Typed Event Contract Parity**: Added `openlife-core/src/agent/tests/frontend_contract_parity.rs` — cross-end contract parity audit with 11-event `FrontendTypedEventContractEntry` manifest. Added `validate_frontend_typed_contract_parity()` validator — 10 consistency checks across backend builder manifest, frontend `typedContract.ts` parser, `agentRunEvents.ts` fixtures, and `typedContract.test.ts` tests. Added 12 tests (5 positive + 7 negative). Negative tests prove that removing a parser token, required field, fixture token, or test token — or adding an unknown builder or duplicate event type — causes validator failure. Registered module in `tests/mod.rs`. Updated document with Section 9.7. |
 | 2026-05-18 | **Typed Payload Builder Contract Coverage**: Added `payload_builder_contract_manifest()` — maps all 11 typed payload builders to events, statuses (ProductionAudited x7, IntentionallyExcludedGenericFailure x4), and required contract tests. Added `parse_payload_builders_from_source()` — scans `trace_payloads.rs` for `pub fn build_*_payload` declarations (comments/strings masked via `sanitize_source`). Added `collect_known_test_function_names()` — scans `event_store.rs` and `trace_payloads.rs` for test function names. Added `validate_payload_builders_against_manifest()` — 10 consistency checks (source↔manifest↔event manifest↔tests). Added 12 tests (7 positive + 5 negative). Scanner unit test verifies comment/string fakes are ignored. All tests pass; `make ci` passes. |
 | 2026-05-18 | **Event Contract Coverage Manifest**: Added `event_contract_manifest()` — a classification of all 44 `AgentRunEventType` variants into 4 tiers (ProductionAudited x7, IntentionallyExcluded x4, LegacyInternalOnly x32, TypeOnlyNoDirectEmission x1). Added `parse_agent_run_event_type_variants()` — extracts enum variants from `types/mod.rs` source. Added 11 coverage enforcement tests. Added validator functions (`validate_manifest_against_enum`, `validate_manifest_against_audit_rules`, `validate_intentionally_excluded_reasons`, `validate_document_against_manifest`). Document now verified against manifest at test time — mismatch fails CI. `make ci` passes. |
 | 2026-05-18 | **Trace Contract Audit Hardening**: Source sanitisation — Rust comments (`//`/`/* */`) and string literals (`"…"`/`r#*"…"#*`) are now masked before scanning, preventing tokens in comments/strings from creating false passes or false-positive emission counts. Added `expected_emissions: Option<usize>` to `AuditRule` — all audit rules now use exact emission counts (previously only `min_emissions`). Default window narrowed from ±1500 to ±900 chars (exceptions documented with measured-distance justification). Added 10 new negative tests covering line comments, block comments, regular strings, raw strings, double-hash raw strings, escaped-quote strings, `#[cfg(test)]` in comments, and adjacent-event non-masking. `make ci` passes. No production code changes. |
