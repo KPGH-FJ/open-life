@@ -6,6 +6,8 @@ Status: Codex-level coverage audit / Skill runtime pre-migration safety net
 
 Scope: code-fact audit plus Skill runtime migration-prep safety net. Chat / StreamChat, Direct Tool, Scheduled, Replay, and Plan wrappers remain as previously migrated. Builder, Calibration, and Skill runtime paths remain unmigrated.
 
+PromptStack-specific coverage is tracked in [`openlife_prompt_stack_coverage_audit.md`](openlife_prompt_stack_coverage_audit.md). That matrix is the source of truth for whether an entrypoint is PromptStack-governed, intentionally legacy/ad hoc, or not applicable because no model prompt is assembled.
+
 ## Current State Summary
 
 - **Chat**: full Tauri ExecutionFacade path. `send_message_with_agent_loop_inner` resolves the required `AgentSpec`, builds `PromptBlockRegistry` and governed `ActionContext`, then calls `run_tauri_agent_task`. Governance errors fail closed; Runtime errors keep the existing fallback branch.
@@ -98,8 +100,11 @@ This phase adds lightweight source-audit tests to lock the completed Chat and St
 
 - `execution_facade_chat_path_uses_facade_entrypoint`
 - `execution_facade_stream_chat_path_uses_facade_entrypoint`
+- `prompt_stack_coverage_audit_doc_lists_all_runtime_entrypoints`
+- `prompt_stack_source_audit_classifies_governed_legacy_and_not_applicable_paths`
+- `execution_facade_stream_chat_unknown_prompt_block_fails_closed`
 
-These tests scan only the relevant production entrypoint bodies and assert that Chat/StreamChat contain `run_tauri_agent_task` while avoiding direct `AgentLoop::run` / `AgentLoop::run_streaming` calls in those entrypoint slices. They complement the existing entrance-level `send_message_with_agent_loop` fail-closed tests and the streaming Governance error event tests.
+These tests scan only the relevant production entrypoint bodies and assert that Chat/StreamChat contain `run_tauri_agent_task` while avoiding direct `AgentLoop::run` / `AgentLoop::run_streaming` calls in those entrypoint slices. The PromptStack audit tests additionally require a documented matrix for Chat, StreamChat, Scheduled, PlanMode / Plan execution, Replay, Skill runtime, Builder, Calibration, Proactive suggestions, and Direct tool execution; they lock Builder / Calibration / Skill-specific prompts as not complete, and Direct Tool / Replay / Plan action execution / Proactive suggestions as no-model or suggestion-only paths that must not emit fake PromptStack traces. They complement the existing entrance-level `send_message_with_agent_loop` fail-closed tests and the streaming Governance error event tests.
 
 Scheduled migration adds scheduler/facade-focused tests whose names include `scheduled`, `scheduler`, or `execution_facade` for targeted filtering:
 

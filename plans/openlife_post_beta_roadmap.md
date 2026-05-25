@@ -15,10 +15,11 @@ Status: active
 3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
 4. [`openlife_codex_level_phase2_execution_facade_prep.md`](openlife_codex_level_phase2_execution_facade_prep.md): Phase 2 执行路径收敛准备文档，定义 Tauri-side ExecutionFacade 的首批开发边界、非目标、测试和 Agent 指令。
 5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat、Direct Tool Execution、Scheduled-specific facade wrapper、Replay-specific facade wrapper、Plan-specific facade wrapper 已完成迁移，Builder / Calibration / Skill runtime 暂不迁移，并给出下一批最小候选。
+6. [`openlife_prompt_stack_coverage_audit.md`](openlife_prompt_stack_coverage_audit.md): PromptStack 全路径审计矩阵，区分 PromptStack-governed、intentionally legacy/ad hoc、not applicable，并记录 trace / privacy 事实。
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Skill Runtime Pre-Migration Audit / Safety Net**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Scheduled / Proactive 事件创建验证已完成并保持：成功和 runtime failure 路径保留 `AgentRun` / `AgentRunEvent` run_id 追踪；scheduler task 成功写 `agent_run_id` + bounded `result_preview`，失败写 readable error + optional `agent_run_id` 且不写 `completed_at` / success preview；missing `AgentSpec` fail closed；NetworkPolicy hard deny/ask 和 Sandbox deny 写 typed `tool.call_blocked`，无 Chat fallback。Skill runtime 本阶段只做迁移前审计和安全网，不进入 ExecutionFacade：真实路径是 SkillRegistry prompt 构造 → 必需 stored `AgentSpec` → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。新增测试锁定 missing AgentSpec fail closed、AgentSpec restricted toolset gating、PromptStack / model failure failed-run observability、metadata-only event payload、frontend response shape，以及 source audit：不调用 `run_tauri_agent_task`、`handle_agent_loop_fallback`、Fallback events、Scheduled / Replay / Plan wrappers。Builder / Calibration / Skill runtime 仍未迁移；Builder / Calibration Proposal-first 安全网继续有效，不代表它们已经迁入 ExecutionFacade。
+2026-05-25 当前阶段为 **PromptStack Full-Path Audit / Safety Net**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 ExecutionFacade：真实路径是 SkillRegistry legacy skill prompt 构造 → 必需 stored `AgentSpec` → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Builder / Calibration Proposal-first 安全网继续有效，但 Builder prompt、Calibration prompt、Skill-specific facade 边界、Proactive suggestion trace、Chat proposal extraction 和 web summarization helper 仍未 PromptStack 完成，详见 `openlife_prompt_stack_coverage_audit.md`。
 
 ---
 
@@ -143,19 +144,22 @@ Status: active
 
 ### 2.3 PromptStack 全路径审计
 
-- [ ] 列出所有 prompt 组装点 (Chat/Builder/Calibration/Scheduled/Proactive/PlanMode)
-- [ ] 逐一核对是否通过 PromptStack
+- [x] 列出所有 prompt 组装点 (Chat / StreamChat / Scheduled / PlanMode / Plan execution / Replay / Skill / Builder / Calibration / Proactive / Direct Tool，以及 Chat proposal extraction、web summarization、LayeredReasoner strategy prompt、legacy scheduler generation)
+- [x] 逐一核对是否通过 PromptStack、intentionally legacy/ad hoc、或 not applicable
 - [x] Scheduled-specific facade wrapper 路径测试锁定：`AgentSpec`、`PromptBlockRegistry`、`NetworkPolicy`、`ExecutionSandbox`、restricted toolset 均由 facade assembly helpers 提供，`scheduler_runner.rs` 不再裸调 `AgentLoop::run`
 - [x] Skill runtime 路径测试锁定：`AgentRuntime::execute_task_with_spec` 负责 PromptStack 组装；未知 PromptBlock fail closed 并持久化 failed Skill `AgentRun`，事件 payload 仅记录错误摘要和 AgentSpec/PromptBlock metadata，不写 raw prompt 或 raw LifeModel
+- [x] 新增 `plans/openlife_prompt_stack_coverage_audit.md` 覆盖矩阵：列出 entrypoint、prompt source、PromptStack-governed、AgentSpec source、event trace emitted、privacy behavior、remaining risk、next required migration
+- [x] 补 source audit：Chat / StreamChat / Scheduled 锁定 PromptStack registry；Skill / Builder / Calibration 明确 intentionally legacy / not complete；Replay / Plan execution / Direct Tool / Proactive suggestion-only 不伪造 PromptStack trace
+- [x] 补行为测试：StreamChat unknown PromptBlock fail closed；既有 Chat / Scheduled / Skill unknown PromptBlock 测试继续覆盖；payload contract 继续锁定 no raw prompt / no raw LifeModel
 - [ ] 接入尚未通过 PromptStack 的路径
 - [ ] PromptBlock 版本记录到 AgentRunEvent
-- [ ] 补充 PromptStack 组装测试
+- [ ] 将 Builder prompt、Calibration prompt（若继续为模型生成）、Skill-specific prompt、Chat proposal extraction、web summarization helper 迁入专用 PromptStack 边界
 
 ### Phase 2 门控
 
 - [ ] lib.rs 降至 ~2000 行
-- [ ] 所有路径产生可追踪 AgentRunEvent
-- [ ] PromptStack 覆盖率 ≥ 90%
+- [ ] 所有会创建 AgentRun 的模型执行路径产生可追踪 AgentRunEvent；Proactive suggestion-only / Direct Tool / Replay / Plan action-only 不伪造 PromptStack trace
+- [ ] PromptStack 覆盖率目标仅适用于模型 prompt entrypoint；legacy/ad hoc exceptions 必须在矩阵中显式列出
 - [ ] 无新增编译警告
 - [ ] `make ci` 通过
 

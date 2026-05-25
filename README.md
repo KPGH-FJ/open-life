@@ -29,7 +29,7 @@ vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta �
 
 - **执行路径收敛**：统一 lib.rs 的 5+ 条执行入口到单一 facade。
 - **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端。
-- **PromptStack 全路径审计**：消除 ad hoc prompt 碎片。
+- **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled 已 PromptStack-governed，Builder / Calibration / Skill-specific prompt 等仍为待迁移 legacy/ad hoc 边界。
 - **生产就绪**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构。
 
 完整计划：[`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)
@@ -40,6 +40,7 @@ vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta �
 - [OpenLife ReAct Beta Roadmap](plans/openlife_react_beta_roadmap.md)
 - [OpenLife vNext Architecture Principles](plans/openlife_vnext_architecture_principles.md)
 - [OpenLife post-Beta Development Plan](plans/openlife_post_beta_roadmap.md) (当前活跃)
+- [OpenLife PromptStack Coverage Audit](plans/openlife_prompt_stack_coverage_audit.md) (当前 PromptStack 事实矩阵)
 
 ## 核心能力
 

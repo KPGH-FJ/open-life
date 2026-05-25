@@ -2131,6 +2131,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_facade_stream_chat_unknown_prompt_block_fails_closed() {
+        let (_state, agent_loop, action_ctx, mut input) = chat_test_parts(
+            1,
+            Some(PromptBlockRegistry::new()),
+            Some(AgentSpec::default_main_spec()),
+        )
+        .await;
+        input.mode = TauriAgentExecutionMode::StreamChat;
+        input.streaming_callback = Some(Arc::new(TestStreamingCallback));
+
+        let err = run_tauri_agent_task(&agent_loop, &action_ctx, input)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Runtime);
+        assert!(
+            err.to_string().contains("prompt stack error")
+                && err.to_string().contains("unknown prompt block"),
+            "unexpected error: {}",
+            err
+        );
+        assert!(
+            err.run_id.is_none(),
+            "Chat/StreamChat runtime errors are caller-owned for fallback decisions"
+        );
+    }
+
+    #[tokio::test]
     async fn execution_facade_chat_runtime_error_kind() {
         let (_state, agent_loop, action_ctx, input) = chat_test_parts(
             1,
@@ -2145,6 +2173,132 @@ mod tests {
 
         assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Runtime);
         assert!(err.to_string().contains("prompt stack error"));
+    }
+
+    #[test]
+    fn prompt_stack_coverage_audit_doc_lists_all_runtime_entrypoints() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plans/openlife_prompt_stack_coverage_audit.md");
+        let doc = std::fs::read_to_string(&doc_path)
+            .unwrap_or_else(|err| panic!("{} must exist: {}", doc_path.display(), err));
+
+        let required_headers = [
+            "| Entrypoint | Prompt source | PromptStack-governed | AgentSpec source | Event trace emitted | Privacy behavior | Remaining risk | Next required migration |",
+            "| Chat |",
+            "| StreamChat |",
+            "| Scheduled |",
+            "| PlanMode / Plan execution |",
+            "| Replay |",
+            "| Skill runtime |",
+            "| Builder |",
+            "| Calibration |",
+            "| Proactive suggestions |",
+            "| Direct tool execution |",
+        ];
+        for required in required_headers {
+            assert!(
+                doc.contains(required),
+                "PromptStack coverage audit missing required row/header: {required}"
+            );
+        }
+
+        let required_facts = [
+            "Builder prompt remains legacy/ad hoc",
+            "Calibration prompt remains legacy/ad hoc",
+            "Skill-specific facade boundary remains unbuilt",
+            "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace",
+            "PromptStack assembled event payload is metadata-only and excludes raw prompt",
+            "Context governance event payload is metadata-only and excludes raw LifeModel",
+        ];
+        for fact in required_facts {
+            assert!(
+                doc.contains(fact),
+                "PromptStack coverage audit missing required fact: {fact}"
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_stack_source_audit_classifies_governed_legacy_and_not_applicable_paths() {
+        let doc_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../plans/openlife_prompt_stack_coverage_audit.md");
+        let doc = std::fs::read_to_string(&doc_path)
+            .unwrap_or_else(|err| panic!("{} must exist: {}", doc_path.display(), err));
+
+        let chat_source = include_str!("lib.rs");
+        let chat_start = chat_source
+            .find("async fn send_message_with_agent_loop_inner")
+            .expect("chat inner entrypoint should exist");
+        let chat_end = chat_source[chat_start..]
+            .find("pub(crate) async fn handle_agent_loop_fallback")
+            .map(|offset| chat_start + offset)
+            .expect("fallback helper should follow chat inner entrypoint");
+        let chat_path = &chat_source[chat_start..chat_end];
+        assert!(chat_path.contains("build_prompt_registry"));
+        assert!(chat_path.contains("run_tauri_agent_task"));
+        assert!(
+            !chat_path.contains("build_system_prompt("),
+            "Chat entrypoint must not assemble a direct system prompt"
+        );
+
+        let stream_source = include_str!("streaming.rs");
+        let stream_start = stream_source
+            .find("async fn start_stream_message_with_agent_loop")
+            .expect("streaming AgentLoop entrypoint should exist");
+        let stream_end = stream_source[stream_start..]
+            .find("fn should_fallback_from_execution_facade_error")
+            .map(|offset| stream_start + offset)
+            .expect("streaming fallback helper should follow entrypoint");
+        let stream_path = &stream_source[stream_start..stream_end];
+        assert!(stream_path.contains("build_prompt_registry"));
+        assert!(stream_path.contains("run_tauri_agent_task"));
+        assert!(
+            !stream_path.contains("build_system_prompt("),
+            "StreamChat entrypoint must not assemble a direct system prompt"
+        );
+
+        let scheduled_source = include_str!("scheduler_runner.rs");
+        let scheduled_start = scheduled_source
+            .find("async fn execute_scheduled_task")
+            .expect("scheduled execution helper should exist");
+        let scheduled_end = scheduled_source[scheduled_start..]
+            .find("// ── Tests")
+            .map(|offset| scheduled_start + offset)
+            .expect("tests section should follow scheduled helper");
+        let scheduled_path = &scheduled_source[scheduled_start..scheduled_end];
+        assert!(scheduled_path.contains("build_prompt_registry"));
+        assert!(scheduled_path.contains("run_tauri_scheduled_execution"));
+        assert!(
+            !scheduled_path.contains("build_system_prompt("),
+            "Scheduled entrypoint must not assemble a direct system prompt"
+        );
+
+        let skill_source = include_str!("commands/execution.rs");
+        let skill_start = skill_source
+            .find("pub(crate) async fn run_skill_with_state")
+            .expect("run_skill_with_state should exist");
+        let skill_end = skill_source
+            .find("pub async fn get_skill_run_status")
+            .expect("get_skill_run_status should follow run_skill");
+        let skill_path = &skill_source[skill_start..skill_end];
+        assert!(skill_path.contains("build_system_prompt"));
+        assert!(skill_path.contains("build_skill_prompt"));
+        assert!(skill_path.contains("execute_task_with_spec"));
+        assert!(doc.contains("Skill runtime | SkillRegistry legacy skill system/user prompt"));
+
+        let builder_source = include_str!("commands/builder.rs");
+        let calibration_source = include_str!("commands/calibration.rs");
+        assert!(!builder_source.contains("PromptBlockRegistry"));
+        assert!(!calibration_source.contains("PromptBlockRegistry"));
+        assert!(doc.contains("Builder prompt remains legacy/ad hoc"));
+        assert!(doc.contains("Calibration prompt remains legacy/ad hoc"));
+
+        let proactive_core = include_str!("../../openlife-core/src/proactive.rs");
+        assert!(proactive_core.contains("ProactiveSuggestion"));
+        assert!(!proactive_core.contains("AgentRunEvent"));
+        assert!(doc.contains(
+            "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace"
+        ));
     }
 
     #[tokio::test]
