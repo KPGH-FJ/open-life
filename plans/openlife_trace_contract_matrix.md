@@ -85,7 +85,7 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 | 40 | `prompt_stack.assembled` | ✅ `orchestrator.rs`, `streaming.rs`, `execution.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row |
 | 41 | `context_governance.applied` | ✅ `orchestrator.rs`, `streaming.rs`, `execution.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row |
 | 42 | `context.assembled` | 📋 Never emitted | ❌ Pass-through | ✅ `RunTracePanel` generic event row |
-| 43 | `proposal.created` | 📋 Never emitted | ❌ Pass-through | ✅ `RunTracePanel` generic event row |
+| 43 | `proposal.created` | ✅ `builder.rs`, `calibration.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row |
 
 ### Scale: Tier 5 Shell Events (frontend-only type labels)
 
@@ -100,7 +100,6 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 
 | # | Event Type | Status |
 |---|-----------|--------|
-| 43 | `proposal.created` | Defined in Rust enum, defined in frontend types.ts, parsed by event_store parser, but **never emitted** by any production or test code |
 | 42 | `context.assembled` | Same — fully defined but never emitted |
 | 24 | `plan.confirmation_resolved` | Same — fully defined but never emitted |
 
@@ -463,13 +462,13 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 
 **Resolution:** No action needed. Documented.
 
-### 7.3 Gap: Three Orphan Event Types
+### 7.3 Gap: Two Orphan Event Types
 
-**Issue:** `proposal.created`, `context.assembled`, `plan.confirmation_resolved` are fully defined but never emitted.
+**Issue:** `context.assembled` and `plan.confirmation_resolved` are fully defined but never emitted. `proposal.created` is no longer orphaned: Builder proposal creation and Calibration Proposal-first creation emit metadata-only events.
 
 **Risk:** None — they round-trip correctly through the event store and frontend as `kind: "unknown"`.
 
-**Resolution:** Future work — implement emission when the corresponding features are activated.
+**Resolution:** Future work — implement emission for the remaining orphan events when the corresponding features are activated.
 
 ### 7.4 Gap: Plan/Tool Events in plan_executor.rs Now Compliant (FIXED)
 
@@ -488,7 +487,7 @@ The builder uses `BTreeMap::entry(k).or_insert(v)` when merging `extra` — core
 | **Network Policy** | `tool.call_blocked` with `network_policy_denied`, `network_policy_ask` | `proposal_reason` badge, proposal_id link |
 | **Tool Permission** | `tool.call_blocked` with `tool_permission_denied`, `tool_permission_ask` | `block_reason`/`proposal_reason` badge, amber badge |
 | **Privacy** | `context_governance.applied`, redaction fields | Redaction badge in RunTracePanel |
-| **Proposal** | `proposal.created` (orphan), NetworkPolicy ask proposals | `proposalId` in view model |
+| **Proposal** | `proposal.created`, NetworkPolicy ask proposals | `proposalId` in view model |
 | **Execution Sandbox** | `tool.call_blocked` with `sandbox_denied`, `shell.blocked` (frontend-only) | Shell-specific block display |
 | **Plan Governance** | `plan.*` events | Generic event rows only |
 

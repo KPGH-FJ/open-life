@@ -792,19 +792,31 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         },
       } as T);
     case "apply_calibration":
+      if (_args?.mode === "direct") {
+        return Promise.resolve({
+          success: true,
+          legacy: true,
+          snapshot_version: "v1-test",
+          applied_count: 2,
+          message: "已应用 legacy 校准",
+        } as T);
+      }
       return Promise.resolve({
-        success: true,
-        snapshot_version: "v1-test",
-        applied_count: 2,
-        message: "已应用校准",
+        created_count: 2,
+        created_ids: ["p1", "p2"],
+        run_id: "run-calibration-proposal",
+        error_count: 0,
+        errors: [],
+        message: "已创建 2 个待审核提案",
       } as T);
     case "calibration_create_proposals":
       return Promise.resolve({
         created_count: 2,
         created_ids: ["p1", "p2"],
+        run_id: "run-calibration-proposal",
         error_count: 0,
         errors: [],
-        message: "已创建 2 个 Proposal",
+        message: "已创建 2 个待审核提案",
       } as T);
     // Milestone D mocks
     case "get_hot_cache":

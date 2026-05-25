@@ -232,6 +232,10 @@ pub struct SystemConfig {
     /// Set to true only for dev/test; production should use builder_create_proposals.
     #[serde(default)]
     pub allow_legacy_builder_direct_apply: bool,
+    /// Allow legacy calibration direct LifeModel writes (default false).
+    /// Set to true only for dev/test; production should use proposal mode.
+    #[serde(default)]
+    pub allow_legacy_calibration_direct_apply: bool,
 }
 
 impl Default for SystemConfig {
@@ -253,6 +257,7 @@ impl Default for SystemConfig {
             execution_sandbox: ExecutionSandboxConfig::default(),
             ollama_base_url: default_ollama_base_url(),
             allow_legacy_builder_direct_apply: false,
+            allow_legacy_calibration_direct_apply: false,
         }
     }
 }
@@ -463,6 +468,8 @@ mod tests {
     #[test]
     fn config_save_and_load_roundtrip() {
         let file = NamedTempFile::new().unwrap();
+        let mut system = SystemConfig::default();
+        system.allow_legacy_calibration_direct_apply = true;
         let config = AppConfig {
             llm: LlmConfig {
                 provider: "custom".into(),
@@ -478,7 +485,7 @@ mod tests {
             experimental_context_assembler: false,
             use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
-            system: SystemConfig::default(),
+            system,
         };
         config.save(file.path()).unwrap();
         let loaded = AppConfig::load(file.path()).unwrap();
@@ -490,6 +497,10 @@ mod tests {
         assert_eq!(loaded.llm.embedding_enabled, config.llm.embedding_enabled);
         assert_eq!(loaded.prefer_local_model, config.prefer_local_model);
         assert_eq!(loaded.local_model, config.local_model);
+        assert_eq!(
+            loaded.system.allow_legacy_calibration_direct_apply,
+            config.system.allow_legacy_calibration_direct_apply
+        );
     }
 
     #[test]
@@ -587,6 +598,15 @@ local_model: ""
         assert!(
             !config.system.allow_legacy_builder_direct_apply,
             "legacy builder_apply_signals must be disabled by default"
+        );
+    }
+
+    #[test]
+    fn allow_legacy_calibration_direct_apply_defaults_false() {
+        let config = AppConfig::default();
+        assert!(
+            !config.system.allow_legacy_calibration_direct_apply,
+            "legacy calibration direct apply must be disabled by default"
         );
     }
 }

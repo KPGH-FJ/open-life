@@ -15,6 +15,7 @@ import {
   getDefaultAgentSpec,
   updateAgentSpec,
   setDefaultAgentSpec,
+  applyCalibration,
   redactSensitiveArgs,
 } from "./tauri";
 
@@ -182,6 +183,33 @@ describe("tauri command argument aliases", () => {
         proposal_id: "proposal-1",
         newAfter: { name: "新值" },
         new_after: { name: "新值" },
+      })
+    );
+  });
+
+  it("defaults calibration apply to proposal mode, never legacy direct", async () => {
+    await applyCalibration([
+      {
+        dimension: "identity.values",
+        target_name: "健康",
+        old_value: 8,
+        new_value: 9,
+        reason: "test",
+        confidence: 0.8,
+        sources: [],
+      },
+    ]);
+
+    expect(invoke).toHaveBeenCalledWith(
+      "apply_calibration",
+      expect.objectContaining({
+        mode: "proposal",
+      })
+    );
+    expect(invoke).not.toHaveBeenCalledWith(
+      "apply_calibration",
+      expect.objectContaining({
+        mode: "direct",
       })
     );
   });

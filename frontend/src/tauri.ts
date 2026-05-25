@@ -626,14 +626,26 @@ export async function generateMicroEvolutionChanges(): Promise<{
 
 export async function applyCalibration(
   changes: EvolutionChange[],
-  mode: "direct" | "proposal" = "direct"
+  mode: "proposal" = "proposal"
 ): Promise<{
+  created_count: number;
+  created_ids: string[];
+  run_id: string;
+  error_count: number;
+  errors: string[];
+  message: string;
+}> {
+  return safeInvoke("apply_calibration", { changes, mode });
+}
+
+export async function applyCalibrationLegacyDirect(changes: EvolutionChange[]): Promise<{
   success: boolean;
+  legacy: boolean;
   snapshot_version: string;
   applied_count: number;
   message: string;
 }> {
-  return safeInvoke("apply_calibration", { changes, mode });
+  return safeInvoke("apply_calibration", { changes, mode: "direct" });
 }
 
 export async function calibrationCreateProposals(changes: EvolutionChange[]): Promise<{

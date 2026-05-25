@@ -275,21 +275,58 @@ pub async fn apply_calibration(
     mode: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    let mode = mode.as_deref().unwrap_or("direct");
+    apply_calibration_with_state(changes, mode, state.inner()).await
+}
 
-    if mode == "proposal" {
-        // 创建 Proposal 而不是直接应用
-        return calibration_create_proposals_with_state(changes, state.inner()).await;
+async fn apply_calibration_with_state(
+    changes: Vec<EvolutionChange>,
+    mode: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    let mode = mode.as_deref().unwrap_or("proposal");
+    match mode {
+        "proposal" => calibration_create_proposals_with_state(changes, state).await,
+        "direct" => {
+            ensure_legacy_calibration_direct_apply_allowed(state).await?;
+            legacy_calibration_direct_apply_with_state(changes, state).await
+        }
+        _ => Err(AppError::Config {
+            message: format!(
+                "Unsupported calibration apply mode '{mode}'. Use 'proposal' for governed Review Center proposals; 'direct' is legacy/debug/test-only and requires system.allow_legacy_calibration_direct_apply=true."
+            ),
+            hint: Some("Set mode='proposal' or omit mode to use the default Proposal-first path.".to_string()),
+        }),
     }
+}
 
-    // direct 模式：直接应用变更
+async fn ensure_legacy_calibration_direct_apply_allowed(
+    state: &Arc<AppState>,
+) -> Result<(), AppError> {
+    let allowed = {
+        let cfg = state.config.lock().await;
+        cfg.system.allow_legacy_calibration_direct_apply
+    };
+    if !allowed {
+        return Err(AppError::permission(
+            "legacy calibration direct apply is disabled in production. \
+             Use mode='proposal' or omit mode so Calibration changes go through Review Center and Proposal acceptance. \
+             Set system.allow_legacy_calibration_direct_apply=true in config.yaml for dev/test only.",
+        ));
+    }
+    Ok(())
+}
+
+async fn legacy_calibration_direct_apply_with_state(
+    changes: Vec<EvolutionChange>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
 
     let manager = state.life_model_manager.lock().await;
     let mut model = manager.load().map_err(AppError::from)?;
     MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
     drop(manager);
-    let model = persist_life_model(&state.inner().clone(), model, false).await?;
+    let model = persist_life_model(state, model, false).await?;
     let vm = state.version_manager.lock().await;
     let snap = vm
         .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")
@@ -312,6 +349,7 @@ pub async fn apply_calibration(
 
     Ok(serde_json::json!({
         "success": true,
+        "legacy": true,
         "snapshot_version": snap.version,
         "applied_count": changes.len(),
         "message": format!("已应用 {} 项校准变更，并创建快照 {}", changes.len(), snap.version),
@@ -750,6 +788,170 @@ mod tests {
             let model = state.life_model_manager.lock().await.load().unwrap();
             assert_eq!(model.identity.values[0].weight, 7);
         }
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_without_mode_defaults_to_proposal_and_does_not_write_life_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+
+        let res = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            None,
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("created_count").and_then(|v| v.as_u64()), Some(1));
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 5);
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_proposal_mode_creates_proposals_and_records_redacted_event() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+
+        let res = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            Some("proposal".to_string()),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("created_count").and_then(|v| v.as_u64()), Some(1));
+        let run_id = res["run_id"].as_str().unwrap();
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(run_id)
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentRunEventType::ProposalCreated);
+        let payload = &events[0].payload;
+        assert_eq!(payload["source"], serde_json::json!("calibration_run"));
+        assert!(payload.get("prompt").is_none());
+        assert!(payload.get("before").is_none());
+        assert!(payload.get("after").is_none());
+        assert!(payload.get("life_model").is_none());
+        assert!(!payload.to_string().contains("持续学习"));
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_direct_mode_is_rejected_by_default_and_does_not_write_life_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+
+        let err = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            Some("direct".to_string()),
+            &state,
+        )
+        .await
+        .expect_err("legacy direct mode should be fail-closed by default");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("legacy calibration direct apply is disabled")
+                && msg.contains("allow_legacy_calibration_direct_apply"),
+            "unexpected error: {msg}"
+        );
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 5);
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_direct_mode_allows_legacy_test_only_when_config_set() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.allow_legacy_calibration_direct_apply = true;
+        }
+
+        let res = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            Some("direct".to_string()),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("success").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(res.get("legacy").and_then(|v| v.as_bool()), Some(true));
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 7);
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_unknown_mode_errors_and_does_not_write_life_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+
+        let err = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            Some("unexpected".to_string()),
+            &state,
+        )
+        .await
+        .expect_err("unknown mode must not fall back to direct");
+
+        assert!(
+            err.to_string()
+                .contains("Unsupported calibration apply mode"),
+            "unexpected error: {err}"
+        );
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 5);
+    }
+
+    #[tokio::test]
+    async fn apply_calibration_empty_mode_errors_and_does_not_write_life_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        {
+            let manager = state.life_model_manager.lock().await;
+            manager.save(&seeded_model()).unwrap();
+        }
+
+        let err = apply_calibration_with_state(
+            vec![change("identity.values", "成长", 5.0, 7.0)],
+            Some("".to_string()),
+            &state,
+        )
+        .await
+        .expect_err("empty mode must not fall back to direct");
+
+        assert!(
+            err.to_string()
+                .contains("Unsupported calibration apply mode"),
+            "unexpected error: {err}"
+        );
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.values[0].weight, 5);
     }
 
     #[test]

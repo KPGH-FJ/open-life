@@ -2,7 +2,7 @@
 
 Date: 2026-05-25
 
-Status: Codex-level coverage audit / Builder-Calibration proposal safety net added
+Status: Codex-level coverage audit / Builder-Calibration proposal-first safety net added
 
 Scope: code-fact audit plus Plan-specific wrapper migration and Builder / Calibration proposal-event safety net. Builder, Calibration, and Skill runtime paths remain unmigrated.
 
@@ -14,7 +14,7 @@ Scope: code-fact audit plus Plan-specific wrapper migration and Builder / Calibr
 - **Replay**: Replay-specific Tauri ExecutionFacade wrapper migrated. `replay_action_internal` still owns run/action lookup, original `AgentSpec` restoration, pre-execution ToolPermission fail-closed checks, `ReplayStarted` / `ReplayCompleted` / `ReplayFailed` events, Proposal-derived continuation semantics, and `AgentRun` updates. The actual action execution now calls `run_tauri_replay_execution`, which verifies the restored `AgentSpec`, `ActionContext`, `NetworkPolicy`, and sandbox-governed context before executing the original action. This is not the Chat facade, does not call `run_tauri_agent_task`, and does not inherit Chat fallback. ExecutionFacade does not write Proposal status; Proposal / replay callers remain the source of truth.
 - **Plan execution**: Plan-specific Tauri ExecutionFacade wrapper migrated. `execute_agent_plan` / `retry_agent_plan` call `run_tauri_plan_execution`, which resolves the plan-bound `AgentSpec` or stored default fail-closed, builds the governed `ActionContext` with `NetworkPolicy`, `ExecutionSandbox`, ToolPermission store, memory/proposal/run/event stores, and executes steps through core `PlanExecutor`. The wrapper preserves plan confirmation, retry reset ordering, review gate, deviation, status, and trace semantics. It is not the Chat facade and does not call Chat fallback.
 - **Direct tool execution**: facade wrapper migrated. `execute_tool_call_inner` now resolves the required `AgentSpec`, builds governed Tauri-side runtime assembly/context, and calls `run_tauri_direct_tool_execution`. The wrapper preserves the existing `ToolCallResult` command shape and uses direct `ActionExecutor` internally without Chat fallback semantics.
-- **Builder / Calibration**: not migrated. This phase added proposal-store/status/event safety tests only. `builder_create_proposals` creates Review Center proposals and `proposal.created` events for accepted/edited review decisions without writing LifeModel. `calibration_create_proposals` creates patchable scalar LifeModel proposals and `proposal.created` events; actual LifeModel mutation is locked to Proposal acceptance status. These events carry proposal metadata only and exclude raw prompts, `before`/`after` values, and full LifeModel content. Legacy/direct apply paths still exist and are documented below.
+- **Builder / Calibration**: not migrated. This phase added proposal-store/status/event safety tests only. `builder_create_proposals` creates Review Center proposals and `proposal.created` events for accepted/edited review decisions without writing LifeModel. `apply_calibration` now defaults to the Proposal-first path, and `calibration_create_proposals` creates patchable scalar LifeModel proposals plus `proposal.created` events; actual LifeModel mutation is locked to Proposal acceptance status. The Calibration frontend formal path now creates Review Center proposals and no longer exposes a default direct-apply button. These events carry proposal metadata only and exclude raw prompts, `before`/`after` values, and full LifeModel content. Legacy/direct apply paths still exist only as explicit, default-disabled compatibility/debug/test paths and are documented below.
 
 ## Execution Entry Inventory
 
@@ -40,7 +40,7 @@ Scope: code-fact audit plus Plan-specific wrapper migration and Builder / Calibr
 - **Builder / Calibration**: these paths mutate or propose LifeModel changes through distinct proposal semantics. They should wait for the PromptStack and LifeModel Evolution end-to-end audit. Current remaining direct paths are:
   - `builder_apply_signals`: legacy direct LifeModel apply path, gated by `system.allow_legacy_builder_direct_apply` at the Tauri command boundary and default-disabled.
   - `builder_step`: existing finalization path can persist an `updated_model` only when the finished session has no pending review signals; finished review sessions with pending signals are kept for Review Center instead of being written as drafts.
-  - `apply_calibration` direct mode: compatibility direct LifeModel apply path, still not config-gated. `mode == "proposal"` uses `calibration_create_proposals`; future work should hide/gate/remove direct mode rather than claim migration.
+  - `apply_calibration` direct mode: legacy compatibility/debug/test-only LifeModel apply path, gated by `system.allow_legacy_calibration_direct_apply` and default-disabled. Missing mode now defaults to `proposal`; empty/unknown modes fail closed instead of falling back to direct. The normal Calibration UI does not expose this path; users must accept the created proposal in Review Center before LifeModel is written.
 - **Proposal accept/replay status**: proposal state is the source of truth. `accept_proposal_with_state` may expose continuation ids for a pending action, but it must not perform a fake replay success or mark replay outcome through ExecutionFacade. Replay now uses a Replay-specific wrapper for execution only; ExecutionFacade does not write Proposal status and these paths must not be folded into a generic Chat degradation path.
 - **Core executors**: `ActionExecutor`, `PlanExecutor`, and `SubAgentRuntime` are core engines, not Tauri user-facing entrypoints. Migration should wrap Tauri entrypoints, not the engines themselves.
 
@@ -82,7 +82,7 @@ Scope: code-fact audit plus Plan-specific wrapper migration and Builder / Calibr
 
 ### Remaining Candidates: Builder / Calibration / Skill Runtime
 
-- **Builder / Calibration**: should wait for PromptStack and LifeModel Evolution audit because they own LifeModel proposal semantics. They now have safety-net tests for ProposalStore routing, ProposalStatus-gated apply, typed `proposal.created` events, redaction, and no Chat fallback/source calls.
+- **Builder / Calibration**: should wait for PromptStack and LifeModel Evolution audit because they own LifeModel proposal semantics. They now have safety-net tests for ProposalStore routing, ProposalStatus-gated apply, typed `proposal.created` events, redaction, default-disabled legacy direct gates, and no Chat fallback/source calls.
 - **Skill runtime**: still not migrated; audit separately because it mixes model generation, parsing, and skill execution semantics. A source-audit test now locks that `run_skill` remains on its existing AgentRuntime path and does not call `run_tauri_agent_task` or Chat fallback.
 
 ## Audit Tests
@@ -156,7 +156,15 @@ Builder / Calibration proposal safety-net tests added after the Plan wrapper pha
 - `builder_command_source_does_not_call_chat_facade_or_fallback`
 - `calibration_create_proposals_preserves_review_metadata_and_records_redacted_events`
 - `calibration_life_model_apply_requires_proposal_acceptance_status`
+- `apply_calibration_without_mode_defaults_to_proposal_and_does_not_write_life_model`
+- `apply_calibration_proposal_mode_creates_proposals_and_records_redacted_event`
+- `apply_calibration_direct_mode_is_rejected_by_default_and_does_not_write_life_model`
+- `apply_calibration_direct_mode_allows_legacy_test_only_when_config_set`
+- `apply_calibration_unknown_mode_errors_and_does_not_write_life_model`
+- `apply_calibration_empty_mode_errors_and_does_not_write_life_model`
+- `CalibrationPage`: creates Review Center proposals from the main action, hides default direct apply copy, and shows pending proposal guidance
+- `tauri.test`: `applyCalibration()` defaults to `mode: "proposal"` and never `mode: "direct"`
 - `calibration_command_source_does_not_call_chat_facade_or_fallback`
 - `execution_facade_skill_runtime_remains_unmigrated_this_phase`
 
-These tests prove that Builder review decisions go to `ProposalStore` instead of direct LifeModel writes, pending/rejected decisions are not silently treated as accepted, Calibration proposals preserve review metadata and become patchable LifeModel proposals, terminal Proposal statuses cannot be accepted again, `proposal.created` payloads are metadata-only, and Builder / Calibration / Skill runtime have not been folded into Chat facade or Chat fallback.
+These tests prove that Builder review decisions go to `ProposalStore` instead of direct LifeModel writes, pending/rejected decisions are not silently treated as accepted, Calibration missing/proposal modes and the frontend formal path create Review Center proposals without writing LifeModel, legacy direct calibration is default-disabled and config-gated, unknown/empty calibration modes fail closed, Calibration proposals preserve review metadata and become patchable LifeModel proposals, terminal Proposal statuses cannot be accepted again, `proposal.created` payloads are metadata-only, and Builder / Calibration / Skill runtime have not been folded into Chat facade or Chat fallback.

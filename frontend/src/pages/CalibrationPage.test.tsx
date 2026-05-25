@@ -37,7 +37,7 @@ describe("CalibrationPage", () => {
     expect(screen.getByText("健康")).toBeInTheDocument();
   });
 
-  it("applies selected calibration changes", async () => {
+  it("creates review proposals for selected calibration changes", async () => {
     render(
       <BrowserRouter>
         <CalibrationPage />
@@ -45,19 +45,57 @@ describe("CalibrationPage", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText("直接应用")).toBeInTheDocument();
+      expect(screen.getByText("创建变更提案")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("checkbox"));
-    fireEvent.click(screen.getByText("直接应用"));
+    fireEvent.click(screen.getByText("创建变更提案"));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
-        "apply_calibration",
+        "calibration_create_proposals",
         expect.objectContaining({
           changes: expect.any(Array),
         })
       );
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "apply_calibration",
+      expect.objectContaining({ mode: "direct" })
+    );
+  });
+
+  it("does not expose direct apply as the default action", async () => {
+    render(
+      <BrowserRouter>
+        <CalibrationPage />
+      </BrowserRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("周期校准")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: "直接应用" })).not.toBeInTheDocument();
+  });
+
+  it("shows Review Center proposal guidance after successful proposal creation", async () => {
+    render(
+      <BrowserRouter>
+        <CalibrationPage />
+      </BrowserRouter>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("创建变更提案")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByText("创建变更提案"));
+
+    await waitFor(() => {
+      expect(screen.getByText(/待审核提案/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Review Center/).length).toBeGreaterThan(0);
     });
   });
 

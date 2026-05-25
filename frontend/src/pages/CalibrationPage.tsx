@@ -13,7 +13,6 @@ import {
 import {
   generateCalibrationReport,
   generateMicroEvolutionChanges,
-  applyCalibration,
   calibrationCreateProposals,
   markCalibrationShown,
   getLifeModel,
@@ -295,30 +294,7 @@ export default function CalibrationPage() {
     });
   };
 
-  const handleApply = async () => {
-    if (!model) return;
-    const toApply = Array.from(selected)
-      .sort((a, b) => a - b)
-      .map(i => data.changes[i]);
-    if (toApply.length === 0) {
-      setPageError("请先选择至少一项变更");
-      return;
-    }
-    setApplyLoading(true);
-    setPageError("");
-    try {
-      const result = await applyCalibration(toApply, "direct");
-      await markCalibrationShown("weekly");
-      setPageError(result.message);
-      setTimeout(() => navigate("/dashboard"), 1200);
-    } catch (e: any) {
-      setPageError(String(e?.message ?? e));
-    } finally {
-      setApplyLoading(false);
-    }
-  };
-
-  const handleSendToReview = async () => {
+  const handleCreateProposals = async () => {
     if (!model) return;
     const toSend = Array.from(selected)
       .sort((a, b) => a - b)
@@ -333,12 +309,13 @@ export default function CalibrationPage() {
       const result = await calibrationCreateProposals(toSend);
       await markCalibrationShown("weekly");
       const runInfo = result.run_id ? `（Run #${result.run_id.slice(0, 8)}）` : "";
+      const baseMessage = `${result.message}。已创建待审核提案，请到 Review Center 确认后再写入 LifeModel`;
       if (result.error_count > 0) {
         setPageError(
-          `${result.message}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`
+          `${baseMessage}${runInfo}（${result.error_count} 个失败：${result.errors.join("；")}）`
         );
       } else {
-        setPageError(`${result.message}${runInfo}`);
+        setPageError(`${baseMessage}${runInfo}`);
       }
       setTimeout(() => navigate("/review"), 1500);
     } catch (e: any) {
@@ -450,7 +427,7 @@ export default function CalibrationPage() {
             <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3">
               <div className="text-[11px] font-medium text-slate-500">最后看回滚</div>
               <div className="mt-1 text-xs leading-5 text-slate-700">
-                应用校准前系统会自动创建快照。如果后面发现方向不对，可以去版本控制里对比差异并执行回滚。
+                接受校准提案后系统会自动创建快照。如果后面发现方向不对，可以去版本控制里对比差异并执行回滚。
               </div>
             </div>
           </div>
@@ -731,22 +708,15 @@ export default function CalibrationPage() {
           </div>
           <div className="flex items-center justify-end gap-3">
             <button
-              onClick={handleSendToReview}
+              onClick={handleCreateProposals}
               disabled={applyLoading || selected.size === 0}
-              className="px-5 py-2 rounded-md text-sm font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 disabled:opacity-50"
-            >
-              {applyLoading ? "发送中…" : "发送到 Review Center"}
-            </button>
-            <button
-              onClick={handleApply}
-              disabled={applyLoading || selected.size === 0 || data.requires_confirmation === false}
               className="px-5 py-2 rounded-md text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50"
             >
-              {applyLoading ? "应用中…" : "直接应用"}
+              {applyLoading ? "创建中…" : "创建变更提案"}
             </button>
           </div>
           <div className="text-xs text-gray-500 text-right">
-            高风险字段建议先发送到 Review Center 审阅，低 risk 字段可直接应用。
+            所有校准变更都会先进入 Review Center，只有你接受提案后才会写入 LifeModel。
           </div>
         </div>
       </div>
