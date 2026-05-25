@@ -18,7 +18,7 @@ Status: active
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Plan-specific Facade Wrapper Migrated**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper。Plan Execution 现已迁移到 Plan-specific wrapper：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`，由 wrapper 解析 plan-bound AgentSpec 或 stored default AgentSpec、构造 governed ActionContext、注入 NetworkPolicy / ExecutionSandbox / ToolPermission / store 依赖，并保留 PlanExecutor 核心确认、review、deviation、retry、status、trace 语义。该路径不是 Chat facade，不调用 `run_tauri_agent_task(Chat/StreamChat)`，不接入 Chat fallback；missing plan-bound AgentSpec、AgentSpec deny、NetworkPolicy deny、ExecutionSandbox deny、ToolPermission deny/ask、retry fail-closed 均有测试锁定。Builder / Calibration / Skill runtime 仍未迁移。
+2026-05-25 当前阶段为 **Builder / Calibration Proposal Safety Net Added**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Builder / Calibration / Skill runtime 仍未迁移。本阶段只增加 Builder / Calibration 迁移前安全网：Builder review decisions 只把 accepted / edited 信号转成 Review Center Proposal，并写 metadata-only `proposal.created` event；Calibration proposal 生成 patchable LifeModel scalar paths，保留 before / after / reason / risk / pending status，并通过 Proposal acceptance 才应用。新增 source audit 锁定 Builder / Calibration / Skill runtime 不调用 `run_tauri_agent_task(Chat/StreamChat)`，不接入 Chat fallback。遗留事实：`builder_apply_signals` 是默认关闭的配置门控 legacy direct apply；`apply_calibration` direct mode 仍是未门控兼容 direct apply，后续阶段需要单独隐藏、门控或移除，不能提前宣称 Calibration 已迁移。
 
 ---
 
@@ -137,7 +137,7 @@ Status: active
 - [x] Replay-specific facade/wrapper 正式迁移：`replay_action_internal` 调用 `run_tauri_replay_execution`；不直接构造 `ActionExecutor`；不使用 Chat facade；不写 Proposal status
 - [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration / Skill runtime 仍未迁移
 - [ ] Scheduled/Proactive 事件创建验证
-- [ ] Builder/Calibration 事件创建验证
+- [x] Builder/Calibration 事件创建验证：`builder_create_proposals` 与 `calibration_create_proposals` 写 metadata-only `proposal.created` events；payload 不包含 raw prompt、`before` / `after`、完整 LifeModel；source audit 证明无 Chat facade / fallback；ProposalStatus-gated apply 已有测试保护
 
 ### 2.3 PromptStack 全路径审计
 

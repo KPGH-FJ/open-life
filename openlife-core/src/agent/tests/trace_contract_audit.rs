@@ -1354,7 +1354,7 @@ fn event_contract_manifest() -> Vec<EventContractEntry> {
         EventContractEntry { event: "ToolCallStarted", status: EventContractStatus::LegacyInternalOnly, reason: "tool execution lifecycle event; carries tool name and parameters", production_rule_tokens: &[] },
         EventContractEntry { event: "ToolCallCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "tool execution lifecycle event; carries observation/result metadata", production_rule_tokens: &[] },
         EventContractEntry { event: "ObservationCreated", status: EventContractStatus::LegacyInternalOnly, reason: "internal ReAct observation trace; carries tool observation, not governance", production_rule_tokens: &[] },
-        EventContractEntry { event: "ProposalCreated", status: EventContractStatus::LegacyInternalOnly, reason: "internal proposal tracking; carries proposal metadata, not governance", production_rule_tokens: &[] },
+        EventContractEntry { event: "ProposalCreated", status: EventContractStatus::IntentionallyExcluded, reason: "proposal lifecycle tracking; typed metadata only, intentionally excluded from governance audit", production_rule_tokens: &[] },
         EventContractEntry { event: "FallbackStarted", status: EventContractStatus::LegacyInternalOnly, reason: "fallback execution trace; carries fallback reason, not typed governance payload", production_rule_tokens: &[] },
         EventContractEntry { event: "FallbackCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "fallback execution trace; no typed governance payload", production_rule_tokens: &[] },
         EventContractEntry { event: "JsonRepairStarted", status: EventContractStatus::LegacyInternalOnly, reason: "JSON self-repair trace; no typed governance payload", production_rule_tokens: &[] },
@@ -2144,8 +2144,8 @@ fn event_contract_document_total_mismatch_fails() {
                 | Tier | Count | Events |\n\
                 |---|---|---|\n\
                 | ProductionAudited | 7 | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |\n\
-                | IntentionallyExcluded | 4 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed |\n\
-                | LegacyInternalOnly | 32 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, ProposalCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |\n\
+                | IntentionallyExcluded | 5 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated |\n\
+                | LegacyInternalOnly | 31 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |\n\
                 | TypeOnlyNoDirectEmission | 1 | Unknown |\n\
                 | **Total** | **99** | |\n";
     let manifest = event_contract_manifest();
@@ -2399,6 +2399,15 @@ fn payload_builder_contract_manifest() -> Vec<PayloadBuilderContractEntry> {
             reason: "generic model call error; carries error info, not governance decisions",
             required_contract_tests: &[
                 "test_generic_failure_events_round_trip",
+                "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "ProposalCreated",
+            builder: "build_proposal_created_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "proposal lifecycle metadata; carries no raw prompt or LifeModel values",
+            required_contract_tests: &[
                 "test_builders_produce_snake_case_fields",
             ],
         },
@@ -3052,6 +3061,7 @@ fn payload_builder_contract_comment_and_string_fake_builders_ignored() {
         "build_model_call_failed_payload",
         "build_model_failed_payload",
         "build_prompt_stack_assembled_payload",
+        "build_proposal_created_payload",
         "build_replay_completed_payload",
         "build_replay_failed_payload",
         "build_replay_started_payload",
@@ -3121,6 +3131,10 @@ fn payload_builder_contract_scanner_finds_real_builders() {
     assert!(
         builders.contains(&"build_prompt_stack_assembled_payload".to_string()),
         "scanner must find build_prompt_stack_assembled_payload",
+    );
+    assert!(
+        builders.contains(&"build_proposal_created_payload".to_string()),
+        "scanner must find build_proposal_created_payload",
     );
     assert!(
         builders.contains(&"build_context_governance_applied_payload".to_string()),

@@ -148,6 +148,28 @@ describe("getTypedRunEventViewModel", () => {
     expect(vm.severity).toBe("info");
   });
 
+  it("keeps proposal.created as metadata-only pass-through", () => {
+    const event = makeEvent({
+      eventType: "proposal.created",
+      payload: {
+        proposal_id: "prop-123",
+        source: "CalibrationRun",
+        proposal_type: "life_model_patch",
+        affected_path: "goals.short_term.0.priority",
+        risk_level: "medium",
+        status: "pending",
+        source_detail: "calibration_session",
+      },
+    });
+
+    const vm = getTypedRunEventViewModel(event);
+    expect(vm.typedKind).toBe("unknown");
+    expect(vm.label).toBe("Proposal 创建");
+    expect(event.payload).not.toHaveProperty("before");
+    expect(event.payload).not.toHaveProperty("after");
+    expect(event.payload).not.toHaveProperty("prompt");
+  });
+
   it("replay.completed with block_reason shows typed outcome", () => {
     const event = makeEvent({
       eventType: "replay.completed",

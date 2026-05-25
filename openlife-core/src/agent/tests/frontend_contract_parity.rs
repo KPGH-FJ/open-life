@@ -58,7 +58,8 @@ use super::trace_contract_audit::typed_payload_builder_refs;
 /// - What tokens MUST exist in `typedContract.ts` (parser tokens)
 /// - What tokens MUST exist in `agentRunEvents.ts` (fixture tokens)
 /// - What tokens MUST exist in `typedContract.test.ts` (test tokens)
-/// - Whether this is a generic failure event (governance vs non-governance)
+/// - Whether this event is parser pass-through (structurally parsed vs
+///   metadata-only/generic pass-through)
 struct FrontendTypedEventContractEntry {
     /// Short event name matching `event_contract_manifest()` entry.
     event: &'static str,
@@ -77,14 +78,14 @@ struct FrontendTypedEventContractEntry {
     fixture_tokens: &'static [&'static str],
     /// Substring tokens that MUST appear in `typedContract.test.ts`.
     test_tokens: &'static [&'static str],
-    /// True for governance events (structurally parsed by frontend).
-    /// False for generic failure events (pass-through as kind: "unknown").
+    /// False for governance events (structurally parsed by frontend).
+    /// True for metadata-only or generic events (pass-through as kind: "unknown").
     ///
     /// Governance events: required fields must appear in typedContract.ts
     /// AND in fixtures/tests.
-    /// Generic failures: required fields must appear in fixtures/tests
+    /// Parser pass-through events: required fields must appear in fixtures/tests
     /// (typedContract.ts only needs the event type token).
-    is_generic_failure: bool,
+    is_parser_pass_through: bool,
 }
 
 impl FrontendTypedEventContractEntry {
@@ -98,7 +99,7 @@ impl FrontendTypedEventContractEntry {
         frontend_parser_tokens: &'static [&'static str],
         fixture_tokens: &'static [&'static str],
         test_tokens: &'static [&'static str],
-        is_generic_failure: bool,
+        is_parser_pass_through: bool,
     ) -> Self {
         Self {
             event,
@@ -109,7 +110,7 @@ impl FrontendTypedEventContractEntry {
             frontend_parser_tokens,
             fixture_tokens,
             test_tokens,
-            is_generic_failure,
+            is_parser_pass_through,
         }
     }
 }
@@ -199,12 +200,23 @@ fn frontend_parity_manifest() -> Vec<FrontendTypedEventContractEntry> {
             &["replay.failed"],
             false,
         ),
-        // ── IntentionallyExcluded (generic failures) ─────────
-        // Generic failures are not structurally parsed by typedContract.ts
-        // (they pass through as kind: "unknown").  Their required fields
+        // ── IntentionallyExcluded (parser pass-through events) ───
+        // These events are not structurally parsed by typedContract.ts
+        // (they pass through as kind: "unknown"). Their required fields
         // are checked against fixtures/tests only (not typedContract.ts).
         // The frontend_event_type must appear in typedContract.ts for
-        // getTypedRunExplanation to detect generic failure patterns.
+        // labels, explanations, or generic failure detection.
+        FrontendTypedEventContractEntry::new(
+            "ProposalCreated",
+            "build_proposal_created_payload",
+            "proposal.created",
+            &["proposal_id", "source", "proposal_type", "affected_path", "risk_level", "status", "source_detail"],
+            &[],
+            &["proposal.created"],
+            &["proposal.created", "proposal_id", "source", "proposal_type", "affected_path", "risk_level", "status", "source_detail"],
+            &["proposal.created", "proposal_id", "source", "proposal_type", "affected_path", "risk_level", "status", "source_detail"],
+            true,
+        ),
         FrontendTypedEventContractEntry::new(
             "ModelFailed",
             "build_model_failed_payload",
@@ -373,10 +385,10 @@ fn validate_frontend_typed_contract_parity(
             ));
         }
 
-        if entry.is_generic_failure {
-            // Generic failure: required fields must appear in fixtures OR
-            // test file (the typedContract.ts parser does not structurally
-            // parse these events).
+        if entry.is_parser_pass_through {
+            // Parser pass-through: required fields must appear in fixtures OR
+            // test file (the typedContract.ts parser does not structurally parse
+            // these events).
             for field in entry.required_payload_fields {
                 let in_fixtures = fixtures_source.contains(field);
                 let in_tests = typed_contract_test_source.contains(field);
@@ -512,7 +524,7 @@ fn frontend_typed_contract_required_fields_exist() {
 
     let mut errors = Vec::new();
     for entry in &parity {
-        if entry.is_generic_failure {
+        if entry.is_parser_pass_through {
             for field in entry.required_payload_fields {
                 if !fix_source.contains(field) && !test_source.contains(field) {
                     errors.push(format!(

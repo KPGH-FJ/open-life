@@ -64,7 +64,8 @@
  *  3. needsConfirmationRun — tool.call_blocked(needs_confirmation + network_policy_ask
  *     + proposal_id), run.completed
  *  4. replayFailedRun — replay.failed(block_reason), run.completed
- *  5. malformedAndUnknownRun — malformed tool.call_blocked + malformed replay.failed
+ *  5. proposalCreatedMetadataRun — proposal.created metadata-only trace event
+ *  6. malformedAndUnknownRun — malformed tool.call_blocked + malformed replay.failed
  *     + unknown eventType, run.completed
  */
 
@@ -234,7 +235,25 @@ export const replayFailedRun: AgentRunEvent[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────
-// FIXTURE 5: malformedAndUnknownRun
+// FIXTURE 5: proposalCreatedMetadataRun
+// Proposal creation event uses metadata-only payload fields.
+// ─────────────────────────────────────────────────────────────────────
+
+export const proposalCreatedMetadataRun: AgentRunEvent[] = [
+  ev("proposal.created", {
+    proposal_id: "proposal-fixture-001",
+    source: "BuilderReview",
+    proposal_type: "life_model_patch",
+    affected_path: "identity.values.0.weight",
+    risk_level: "low",
+    status: "pending",
+    source_detail: "builder_review_signal",
+  }),
+  ev("run.completed", { stop_reason: "proposal_created" }),
+];
+
+// ─────────────────────────────────────────────────────────────────────
+// FIXTURE 6: malformedAndUnknownRun
 // Contains malformed typed events and an entirely unknown event type.
 // Validates that UI soft-fails without crashing.
 // ─────────────────────────────────────────────────────────────────────

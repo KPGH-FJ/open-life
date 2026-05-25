@@ -1559,6 +1559,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn execution_facade_skill_runtime_remains_unmigrated_this_phase() {
+        let source = include_str!("commands/execution.rs");
+        let start = source
+            .find("pub async fn run_skill")
+            .expect("run_skill should exist");
+        let end = source
+            .find("pub async fn get_skill_run_status")
+            .expect("get_skill_run_status should follow run_skill");
+        let skill_path = &source[start..end];
+
+        assert!(
+            skill_path.contains("execute_task_with_spec"),
+            "skill runtime should still use its existing AgentRuntime path"
+        );
+        assert!(
+            !skill_path.contains("run_tauri_agent_task"),
+            "Skill runtime must not be migrated through Chat/StreamChat facade in this phase"
+        );
+        assert!(
+            !skill_path.contains("handle_agent_loop_fallback")
+                && !skill_path.contains("FallbackStarted")
+                && !skill_path.contains("FallbackCompleted"),
+            "Skill runtime must not inherit Chat fallback"
+        );
+    }
+
     #[tokio::test]
     async fn scheduled_facade_requires_agent_spec() {
         let input = scheduled_test_input(

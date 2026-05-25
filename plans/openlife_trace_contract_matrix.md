@@ -661,8 +661,8 @@ The **event contract coverage manifest** (`event_contract_manifest()` in `trace_
 | Tier | Count | Events |
 |------|-------|--------|
 | ProductionAudited | 7 | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |
-| IntentionallyExcluded | 4 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed |
-| LegacyInternalOnly | 32 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, ProposalCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |
+| IntentionallyExcluded | 5 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated |
+| LegacyInternalOnly | 31 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |
 | TypeOnlyNoDirectEmission | 1 | Unknown |
 | **Total** | **44** | |
 
@@ -789,6 +789,7 @@ Without builder coverage, a developer could:
 | RunFailed | `build_run_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
 | ToolCallFailed | `build_tool_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
 | ModelCallFailed | `build_model_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
+| ProposalCreated | `build_proposal_created_payload` | IntentionallyExcludedGenericFailure | `test_builders_produce_snake_case_fields` |
 
 ### 9.6.4 Enforcement Checks
 

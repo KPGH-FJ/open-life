@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use crate::{persist_life_model, AppState};
 use openlife_core::agent::{
-    AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
+    AgentEventActor, AgentProposal, AgentRunEvent, AgentRunEventType, ProposalSource, ProposalType,
+    RiskLevel as ProposalRiskLevel,
 };
 use openlife_core::builder::{
     BuilderDimension, BuilderEngine, BuilderMode, BuilderSession, BuilderSummary, SignalUserStatus,
@@ -22,6 +23,31 @@ fn proposal_risk_level(signal_risk: &openlife_core::builder::RiskLevel) -> Propo
         openlife_core::builder::RiskLevel::Low => ProposalRiskLevel::Low,
         openlife_core::builder::RiskLevel::Medium => ProposalRiskLevel::Medium,
         openlife_core::builder::RiskLevel::High => ProposalRiskLevel::High,
+    }
+}
+
+fn proposal_created_payload(proposal: &AgentProposal) -> serde_json::Value {
+    openlife_core::agent::trace_payloads::build_proposal_created_payload(
+        proposal.id.clone(),
+        proposal.source.to_string(),
+        proposal.proposal_type.to_string(),
+        proposal.affected_path.clone(),
+        proposal.risk_level.to_string(),
+        proposal.status.to_string(),
+        proposal.source_detail.clone(),
+    )
+}
+
+fn record_proposal_created_event(state: &Arc<AppState>, run_id: &str, proposal: &AgentProposal) {
+    if let Some(ref event_store) = state.agent_run_event_store {
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::ProposalCreated,
+            AgentEventActor::System,
+            format!("builder proposal created for {}", proposal.affected_path),
+            proposal_created_payload(proposal),
+        );
+        let _ = event_store.append_event(&event);
     }
 }
 
@@ -620,13 +646,16 @@ async fn builder_create_proposals_with_state(
             rejected_count += 1;
             continue;
         }
-        let after = if decision.status == "edited" {
-            decision
+        let after = match decision.status.as_str() {
+            "accepted" => signal.proposed_value.clone(),
+            "edited" => decision
                 .proposed_value
                 .clone()
-                .ok_or_else(|| format!("编辑后的信号缺少 proposed_value：{}", signal.id))?
-        } else {
-            signal.proposed_value.clone()
+                .ok_or_else(|| format!("编辑后的信号缺少 proposed_value：{}", signal.id))?,
+            _ => {
+                rejected_count += 1;
+                continue;
+            }
         };
         let mut proposal = AgentProposal::new(
             ProposalType::GoalUpdate,
@@ -659,6 +688,9 @@ async fn builder_create_proposals_with_state(
         for proposal in &proposals {
             store.create_proposal(proposal).map_err(AppError::from)?;
         }
+    }
+    for proposal in &proposals {
+        record_proposal_created_event(state, &run_id, proposal);
     }
 
     // Update AgentRun with generated proposal IDs and mark as completed
@@ -823,8 +855,12 @@ mod tests {
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(McpAuditStore::new(
                 temp_dir.path().join("mcp_audit.db"),
             ))),
-            agent_run_store: None,
-            agent_run_event_store: None,
+            agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+            ))),
+            agent_run_event_store: Some(Arc::new(
+                openlife_core::agent::event_store::AgentRunEventStore::new_in_memory().unwrap(),
+            )),
             plan_store: None,
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
@@ -1123,6 +1159,149 @@ mod tests {
             .get_session("proposal-session")
             .unwrap();
         assert!(persisted.is_none());
+    }
+
+    #[tokio::test]
+    async fn builder_create_proposals_only_accepts_accepted_or_edited_decisions_and_records_redacted_events(
+    ) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut session = BuilderSession::new("proposal-status-session", BuilderMode::Quick);
+        session.finished = true;
+        session.pending_signals = vec![
+            BuilderSignal {
+                id: "sig_name".into(),
+                source_step: 1,
+                source_question_id: "name".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.name".into(),
+                proposed_value: serde_json::Value::String("accepted-name".into()),
+                confidence: 0.95,
+                reason: "用户提供称呼".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Pending,
+            },
+            BuilderSignal {
+                id: "sig_pending".into(),
+                source_step: 2,
+                source_question_id: "values".into(),
+                dimension: BuilderDimension::Identity,
+                affected_path: "identity.life_philosophy".into(),
+                proposed_value: serde_json::Value::String("must not become proposal".into()),
+                confidence: 0.7,
+                reason: "pending decision must not apply".into(),
+                risk_level: RiskLevel::High,
+                user_status: SignalUserStatus::Pending,
+            },
+            BuilderSignal {
+                id: "sig_focus".into(),
+                source_step: 6,
+                source_question_id: "state".into(),
+                dimension: BuilderDimension::State,
+                affected_path: "state.current_focus".into(),
+                proposed_value: serde_json::Value::String("raw draft focus".into()),
+                confidence: 0.8,
+                reason: "用户编辑当前重心".into(),
+                risk_level: RiskLevel::Low,
+                user_status: SignalUserStatus::Pending,
+            },
+        ];
+        state
+            .builder_session_store
+            .lock()
+            .await
+            .save_session(&session)
+            .unwrap();
+
+        let decisions = vec![
+            BuilderSignalDecision {
+                id: "sig_name".into(),
+                status: "accepted".into(),
+                proposed_value: None,
+            },
+            BuilderSignalDecision {
+                id: "sig_pending".into(),
+                status: "pending".into(),
+                proposed_value: None,
+            },
+            BuilderSignalDecision {
+                id: "sig_focus".into(),
+                status: "edited".into(),
+                proposed_value: Some(serde_json::json!("edited focus")),
+            },
+        ];
+
+        let res = builder_create_proposals_with_state(
+            "proposal-status-session".into(),
+            decisions,
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.get("created_count").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(res.get("rejected_count").and_then(|v| v.as_u64()), Some(1));
+
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(proposals.len(), 2);
+        assert!(proposals
+            .iter()
+            .all(|p| p.status == openlife_core::agent::ProposalStatus::Pending));
+        assert!(!proposals
+            .iter()
+            .any(|p| p.affected_path == "identity.life_philosophy"));
+        assert!(proposals
+            .iter()
+            .any(|p| p.affected_path == "state.current_focus"
+                && p.after == serde_json::json!("edited focus")));
+
+        let run_id = res
+            .get("run_id")
+            .and_then(|v| v.as_str())
+            .expect("run id should be returned");
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(run_id)
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        assert!(events
+            .iter()
+            .all(|e| e.event_type == openlife_core::agent::AgentRunEventType::ProposalCreated));
+        assert!(events.iter().all(|e| {
+            let text = e.payload.to_string();
+            e.payload["source"] == serde_json::json!("builder_review")
+                && e.payload["status"] == serde_json::json!("pending")
+                && e.payload.get("prompt").is_none()
+                && e.payload.get("before").is_none()
+                && e.payload.get("after").is_none()
+                && e.payload.get("life_model").is_none()
+                && !text.contains("must not become proposal")
+        }));
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert!(model.is_effectively_empty());
+    }
+
+    #[test]
+    fn builder_command_source_does_not_call_chat_facade_or_fallback() {
+        let source = include_str!("builder.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("builder production source should exist");
+        assert!(!production.contains("run_tauri_agent_task"));
+        assert!(!production.contains("handle_agent_loop_fallback"));
+        assert!(!production.contains("FallbackStarted"));
+        assert!(!production.contains("FallbackCompleted"));
     }
 
     #[tokio::test]

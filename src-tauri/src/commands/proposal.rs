@@ -189,6 +189,23 @@ fn patch_result_with_blocked_action(
     }
 }
 
+fn patch_source_for_proposal(
+    proposal: &AgentProposal,
+) -> openlife_core::life_model::patch::PatchSource {
+    match proposal.source {
+        openlife_core::agent::ProposalSource::CalibrationRun => {
+            openlife_core::life_model::patch::PatchSource::Calibration
+        }
+        openlife_core::agent::ProposalSource::FeedbackEvolution => {
+            openlife_core::life_model::patch::PatchSource::Evolution
+        }
+        openlife_core::agent::ProposalSource::Manual => {
+            openlife_core::life_model::patch::PatchSource::Manual
+        }
+        _ => openlife_core::life_model::patch::PatchSource::BuilderReview,
+    }
+}
+
 /// Check if any component of the path is a symlink.
 /// This includes the final target and any parent directory.
 /// Returns true if any symlink is found.
@@ -691,7 +708,7 @@ async fn apply_life_model_patch(
         &proposal.reason,
         proposal.confidence,
         proposal.risk_level,
-        openlife_core::life_model::patch::PatchSource::BuilderReview,
+        patch_source_for_proposal(proposal),
     );
     let result = model.apply_patch(&patch).map_err(|e| e.to_string())?;
     if !result.success {

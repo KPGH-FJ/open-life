@@ -251,6 +251,30 @@ pub fn build_replay_completed_payload(
     })
 }
 
+/// Build a `proposal.created` payload.
+///
+/// Contract: proposal metadata only. This intentionally excludes raw prompt,
+/// `before`, `after`, and full LifeModel content.
+pub fn build_proposal_created_payload(
+    proposal_id: impl Into<String>,
+    source: impl Into<String>,
+    proposal_type: impl Into<String>,
+    affected_path: impl Into<String>,
+    risk_level: impl Into<String>,
+    status: impl Into<String>,
+    source_detail: Option<impl Into<String>>,
+) -> Value {
+    json!({
+        "proposal_id": proposal_id.into(),
+        "source": source.into(),
+        "proposal_type": proposal_type.into(),
+        "affected_path": affected_path.into(),
+        "risk_level": risk_level.into(),
+        "status": status.into(),
+        "source_detail": source_detail.map(|s| Value::String(s.into())),
+    })
+}
+
 // ── Generic-failure events ──────────────────────────────────────────
 
 /// Build a generic `model.failed` payload.
@@ -500,5 +524,27 @@ mod tests {
         );
         assert_eq!(p["status"].as_str(), Some("failed"));
         assert_eq!(p["block_reason"].as_str(), Some("replay_spec_missing"));
+
+        // proposal.created
+        let p = build_proposal_created_payload(
+            "proposal-1",
+            "builder_review",
+            "goal_update",
+            "identity.name",
+            "low",
+            "pending",
+            Some("session-1:sig-1"),
+        );
+        assert_eq!(p["proposal_id"].as_str(), Some("proposal-1"));
+        assert_eq!(p["source"].as_str(), Some("builder_review"));
+        assert_eq!(p["proposal_type"].as_str(), Some("goal_update"));
+        assert_eq!(p["affected_path"].as_str(), Some("identity.name"));
+        assert_eq!(p["risk_level"].as_str(), Some("low"));
+        assert_eq!(p["status"].as_str(), Some("pending"));
+        assert_eq!(p["source_detail"].as_str(), Some("session-1:sig-1"));
+        assert!(p.get("prompt").is_none());
+        assert!(p.get("life_model").is_none());
+        assert!(p.get("before").is_none());
+        assert!(p.get("after").is_none());
     }
 }
