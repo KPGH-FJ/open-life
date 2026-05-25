@@ -6,13 +6,16 @@
 //! calibration callers still use assembly helpers only; chat and stream chat
 //! run through the facade outcome protocol.
 
+use crate::types::{ToolCallResult, ToolCallStatus};
 use crate::{execution_deps, AppState};
-use openlife_core::agent::action_executor::ActionContext;
+use openlife_core::agent::action_executor::{ActionContext, ActionExecutionResult};
 use openlife_core::agent::agent_loop::{AgentLoopConfig, AgentRole, StreamingCallback};
 use openlife_core::agent::execution_sandbox::ExecutionSandbox;
 use openlife_core::agent::prompt_stack::PromptBlockRegistry;
 use openlife_core::agent::types::{AgentLoopStatusUpdate, AgentRunStatus, AgentSpec};
-use openlife_core::agent::{AgentLoop, AgentLoopResult, AgentRun, AgentTask};
+use openlife_core::agent::{
+    ActionExecutionStatus, AgentActionRequest, AgentLoop, AgentLoopResult, AgentRun, AgentTask,
+};
 use openlife_core::config::{AppConfig, NetworkPolicy};
 use openlife_core::life_model::LifeModel;
 use openlife_core::privacy::PrivacyEngine;
@@ -65,6 +68,7 @@ pub enum TauriExecutionFacadeErrorKind {
 pub struct TauriExecutionFacadeError {
     pub kind: TauriExecutionFacadeErrorKind,
     pub message: String,
+    pub run_id: Option<String>,
 }
 
 impl TauriExecutionFacadeError {
@@ -72,6 +76,7 @@ impl TauriExecutionFacadeError {
         Self {
             kind: TauriExecutionFacadeErrorKind::Governance,
             message: message.into(),
+            run_id: None,
         }
     }
 
@@ -79,6 +84,15 @@ impl TauriExecutionFacadeError {
         Self {
             kind: TauriExecutionFacadeErrorKind::Runtime,
             message: message.into(),
+            run_id: None,
+        }
+    }
+
+    pub fn runtime_with_run_id(message: impl Into<String>, run_id: impl Into<String>) -> Self {
+        Self {
+            kind: TauriExecutionFacadeErrorKind::Runtime,
+            message: message.into(),
+            run_id: Some(run_id.into()),
         }
     }
 
@@ -102,6 +116,40 @@ pub struct TauriAgentExecutionOutcome {
     pub fallback_used: bool,
     pub fallback_reason: Option<String>,
     pub warnings: Vec<String>,
+    pub status_updates: Vec<AgentLoopStatusUpdate>,
+}
+
+pub struct TauriDirectToolExecutionInput {
+    pub name: String,
+    pub arguments: serde_json::Value,
+    pub action_ctx: ActionContext,
+    pub agent_spec: AgentSpec,
+    pub network_policy: NetworkPolicy,
+}
+
+pub struct TauriDirectToolExecutionOutcome {
+    pub tool_result: ToolCallResult,
+    pub run_id: String,
+}
+
+pub struct TauriScheduledExecutionInput {
+    pub task: AgentTask,
+    pub app_state: Arc<AppState>,
+    pub config: AppConfig,
+    pub life_model: LifeModel,
+    pub scheduler: InferenceScheduler,
+    pub privacy_engine: PrivacyEngine,
+    pub agent_spec: Option<AgentSpec>,
+    pub network_policy: Option<NetworkPolicy>,
+    pub prompt_registry: Option<PromptBlockRegistry>,
+}
+
+#[derive(Debug)]
+pub struct TauriScheduledExecutionOutcome {
+    pub run_id: String,
+    pub output: String,
+    pub result_preview: String,
+    pub run: AgentRun,
     pub status_updates: Vec<AgentLoopStatusUpdate>,
 }
 
@@ -245,6 +293,222 @@ pub async fn run_tauri_agent_task(
     }
 }
 
+pub async fn run_tauri_direct_tool_execution(
+    input: TauriDirectToolExecutionInput,
+) -> Result<TauriDirectToolExecutionOutcome, TauriExecutionFacadeError> {
+    validate_direct_tool_execution(&input)?;
+
+    let mut run = AgentRun::new_tool_execution_run(&input.name);
+    let run_id = run.id.clone();
+    let executor = openlife_core::agent::ActionExecutor::new(
+        openlife_core::agent::ActionExecutorConfig::default(),
+    );
+    let request = AgentActionRequest {
+        action_type: "mcp_tool".to_string(),
+        target: input.name.clone(),
+        input: serde_json::json!({ "arguments": input.arguments.clone() }),
+        source_run_id: Some(run_id.clone()),
+        step_index: 0,
+    };
+
+    let result = executor
+        .execute(request, &input.action_ctx)
+        .await
+        .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?;
+
+    run.actions.push(result.action.clone());
+    run.observations.push(result.observation.clone());
+    run.status = match result.status {
+        ActionExecutionStatus::Succeeded => AgentRunStatus::Completed,
+        _ => AgentRunStatus::Failed,
+    };
+    run.finished_at = Some(chrono::Utc::now());
+
+    if let Some(ref store_arc) = input.action_ctx.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(e) = store.create_run(&run) {
+            log::error!("[AgentRun] 创建运行记录失败: {}", e);
+        }
+    }
+
+    let tool_result =
+        direct_tool_result_from_action_result(input.name, input.arguments, result, run_id.clone());
+
+    Ok(TauriDirectToolExecutionOutcome {
+        tool_result,
+        run_id,
+    })
+}
+
+pub async fn run_tauri_scheduled_execution(
+    input: TauriScheduledExecutionInput,
+) -> Result<TauriScheduledExecutionOutcome, TauriExecutionFacadeError> {
+    let agent_spec = input.agent_spec.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance("AgentSpec is required for Scheduled execution")
+    })?;
+    let prompt_registry = input.prompt_registry.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance(
+            "PromptBlockRegistry is required for Scheduled execution",
+        )
+    })?;
+    let network_policy = input.network_policy.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance("NetworkPolicy is required for Scheduled execution")
+    })?;
+
+    let assembly = build_runtime_assembly_config(
+        &input.config,
+        TauriAgentExecutionMode::Scheduled,
+        input.app_state.shutdown_notify.clone(),
+    );
+    if !network_policies_match(&assembly.network_policy, network_policy) {
+        return Err(TauriExecutionFacadeError::governance(
+            "NetworkPolicy mismatch for Scheduled execution",
+        ));
+    }
+
+    let agent_loop = build_governed_agent_loop(
+        input.life_model.clone(),
+        input.scheduler.clone(),
+        &input.config,
+        &assembly,
+        &input.app_state.agent_run_event_store,
+    );
+    let action_ctx = build_governed_action_context(
+        &input.app_state,
+        &assembly,
+        Some(input.life_model.clone()),
+        Some(input.app_state.memory_store.clone()),
+        agent_spec.clone(),
+    );
+
+    let action_agent_spec = action_ctx.agent_spec.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance(
+            "ActionContext AgentSpec is required for Scheduled execution",
+        )
+    })?;
+    if action_agent_spec.id != agent_spec.id {
+        return Err(TauriExecutionFacadeError::governance(format!(
+            "AgentSpec mismatch: input={} action_context={}",
+            agent_spec.id, action_agent_spec.id
+        )));
+    }
+    if action_ctx.network_policy.is_none() {
+        return Err(TauriExecutionFacadeError::governance(
+            "NetworkPolicy is required for Scheduled execution",
+        ));
+    }
+
+    let result = agent_loop
+        .run(
+            &input.task,
+            &input.life_model,
+            "",
+            None,
+            input.privacy_engine.clone(),
+            agent_spec.privacy_policy,
+            agent_spec,
+            prompt_registry,
+            &action_ctx,
+        )
+        .await
+        .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?;
+
+    persist_scheduled_agent_run(&input.app_state, &result.run).await;
+    let result = scheduled_outcome_from_agent_loop_result(result)?;
+
+    Ok(result)
+}
+
+async fn persist_scheduled_agent_run(state: &Arc<AppState>, run: &AgentRun) {
+    if let Some(ref store_arc) = state.agent_run_store {
+        let store = store_arc.lock().await;
+        if let Err(e) = store.create_run(run) {
+            log::error!(
+                "[ExecutionFacade] Failed to persist scheduled AgentRun {}: {}",
+                run.id,
+                e
+            );
+        }
+    }
+}
+
+fn validate_direct_tool_execution(
+    input: &TauriDirectToolExecutionInput,
+) -> Result<(), TauriExecutionFacadeError> {
+    let action_agent_spec = input.action_ctx.agent_spec.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance(
+            "ActionContext AgentSpec is required for Direct Tool execution",
+        )
+    })?;
+    if input.agent_spec.id != action_agent_spec.id {
+        return Err(TauriExecutionFacadeError::governance(format!(
+            "AgentSpec mismatch: input={} action_context={}",
+            input.agent_spec.id, action_agent_spec.id
+        )));
+    }
+    let action_network_policy = input.action_ctx.network_policy.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance("NetworkPolicy is required for Direct Tool execution")
+    })?;
+    if action_network_policy.enabled != input.network_policy.enabled
+        || action_network_policy.default_decision != input.network_policy.default_decision
+        || action_network_policy.domain_allowlist != input.network_policy.domain_allowlist
+        || action_network_policy.domain_denylist != input.network_policy.domain_denylist
+        || action_network_policy.tool_overrides != input.network_policy.tool_overrides
+    {
+        return Err(TauriExecutionFacadeError::governance(
+            "NetworkPolicy mismatch for Direct Tool execution",
+        ));
+    }
+
+    Ok(())
+}
+
+fn network_policies_match(left: &NetworkPolicy, right: &NetworkPolicy) -> bool {
+    left.enabled == right.enabled
+        && left.default_decision == right.default_decision
+        && left.domain_allowlist == right.domain_allowlist
+        && left.domain_denylist == right.domain_denylist
+        && left.tool_overrides == right.tool_overrides
+}
+
+fn direct_tool_result_from_action_result(
+    name: String,
+    arguments: serde_json::Value,
+    result: ActionExecutionResult,
+    run_id: String,
+) -> ToolCallResult {
+    ToolCallResult {
+        name,
+        arguments: arguments.clone(),
+        sanitized_arguments: Some(arguments),
+        success: result.status == ActionExecutionStatus::Succeeded,
+        output: result
+            .action
+            .output
+            .as_ref()
+            .and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
+        error: result.action.error.clone(),
+        permission_level: result
+            .action
+            .tool_scope
+            .as_ref()
+            .map(|s| s.risk_level.clone())
+            .unwrap_or_else(|| "medium".into()),
+        status: match result.status {
+            ActionExecutionStatus::Succeeded => ToolCallStatus::Success,
+            ActionExecutionStatus::Failed => ToolCallStatus::Error,
+            ActionExecutionStatus::Blocked => ToolCallStatus::Blocked,
+            ActionExecutionStatus::NeedsConfirmation => ToolCallStatus::NeedsConfirmation,
+        },
+        requires_confirmation: result.status == ActionExecutionStatus::NeedsConfirmation,
+        pii_found: false,
+        privacy_warnings: Vec::new(),
+        action_id: Some(result.action.id),
+        run_id: Some(run_id),
+        permission_decision: result.action.permission_decision,
+    }
+}
+
 async fn run_chat_mode(
     agent_loop: &AgentLoop,
     action_ctx: &ActionContext,
@@ -362,6 +626,39 @@ fn outcome_from_agent_loop_result(
     Ok(TauriAgentExecutionOutcome::from_agent_loop_result(result))
 }
 
+fn scheduled_outcome_from_agent_loop_result(
+    result: AgentLoopResult,
+) -> Result<TauriScheduledExecutionOutcome, TauriExecutionFacadeError> {
+    if result.run.status == AgentRunStatus::Failed {
+        let run_id = result.run.id.clone();
+        let message = result
+            .run
+            .error
+            .as_ref()
+            .map(|e| e.message.clone())
+            .unwrap_or_else(|| "Scheduled AgentLoop execution failed".to_string());
+        return Err(TauriExecutionFacadeError::runtime_with_run_id(
+            message, run_id,
+        ));
+    }
+
+    let run_id = result.run.id.clone();
+    let output = result.final_response;
+    let result_preview = result
+        .run
+        .output_preview
+        .clone()
+        .unwrap_or_else(|| output.chars().take(500).collect());
+
+    Ok(TauriScheduledExecutionOutcome {
+        run_id,
+        output,
+        result_preview,
+        run: result.run,
+        status_updates: result.status_updates,
+    })
+}
+
 fn scheduled_loop_config(shutdown_notify: Arc<tokio::sync::Notify>) -> AgentLoopConfig {
     AgentLoopConfig {
         max_steps: 2,
@@ -386,10 +683,13 @@ fn scheduled_loop_config(shutdown_notify: Arc<tokio::sync::Notify>) -> AgentLoop
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use openlife_core::agent::types::AgentRunEventType;
     use openlife_core::agent::types::AgentSpec;
     use openlife_core::agent::AgentTaskKind;
+    use openlife_core::config::NetworkPolicy;
     use openlife_core::layer_router::Layer;
     use openlife_core::llm::ChatMessage;
+    use openlife_core::tool_permissions::ToolPermissionPolicy;
 
     struct TestStreamingCallback;
 
@@ -461,6 +761,54 @@ mod tests {
         };
 
         (state, agent_loop, action_ctx, input)
+    }
+
+    async fn scheduled_test_input(
+        prompt_registry: Option<PromptBlockRegistry>,
+        agent_spec: Option<AgentSpec>,
+        network_policy: Option<NetworkPolicy>,
+    ) -> TauriScheduledExecutionInput {
+        scheduled_test_parts(prompt_registry, agent_spec, network_policy)
+            .await
+            .1
+    }
+
+    async fn scheduled_test_parts(
+        prompt_registry: Option<PromptBlockRegistry>,
+        agent_spec: Option<AgentSpec>,
+        network_policy: Option<NetworkPolicy>,
+    ) -> (Arc<AppState>, TauriScheduledExecutionInput) {
+        let state = crate::test_utils::test_app_state();
+        let mut cfg = state.config.lock().await.clone();
+        if let Some(policy) = network_policy.clone() {
+            cfg.system.network_policy = policy;
+        }
+        let life_model = LifeModel::default();
+        let scheduler = state.scheduler.lock().await.clone();
+        let task = execution_deps::build_agent_task(
+            AgentTaskKind::Proactive,
+            "scheduled-facade-session".into(),
+            "scheduled prompt".into(),
+            vec![ChatMessage {
+                role: "user".into(),
+                content: "scheduled prompt".into(),
+            }],
+            Layer::L2,
+        );
+
+        let input = TauriScheduledExecutionInput {
+            task,
+            app_state: state.clone(),
+            config: cfg,
+            life_model,
+            scheduler,
+            privacy_engine: PrivacyEngine::new(),
+            agent_spec,
+            network_policy,
+            prompt_registry,
+        };
+
+        (state, input)
     }
 
     #[tokio::test]
@@ -579,7 +927,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_facade_scheduled_mode_uses_restricted_toolset() {
+    async fn scheduled_facade_preserves_restricted_toolset() {
         let state = crate::test_utils::test_app_state();
         let cfg = state.config.lock().await.clone();
         let assembly = build_runtime_assembly_config(
@@ -601,6 +949,266 @@ mod tests {
                 "memory.search",
                 "proposal.create",
             ]
+        );
+    }
+
+    #[test]
+    fn execution_facade_scheduled_path_uses_scheduled_wrapper() {
+        let source = include_str!("scheduler_runner.rs");
+        let start = source
+            .find("async fn execute_scheduled_task")
+            .expect("scheduled execution helper should exist");
+        let end = source[start..]
+            .find("// ── Tests")
+            .map(|offset| start + offset)
+            .expect("tests section should follow scheduled helper");
+        let scheduled_path = &source[start..end];
+        let direct_run_call = [".", "run("].concat();
+
+        assert!(scheduled_path.contains("run_tauri_scheduled_execution"));
+        assert!(!scheduled_path.contains(&direct_run_call));
+        assert!(!scheduled_path.contains("run_tauri_agent_task"));
+        assert!(!scheduled_path.contains("handle_agent_loop_fallback"));
+    }
+
+    #[tokio::test]
+    async fn execution_facade_scheduled_assembly_carries_network_policy_and_sandbox() {
+        let state = crate::test_utils::test_app_state();
+        let mut cfg = state.config.lock().await.clone();
+        cfg.system.network_policy = NetworkPolicy {
+            enabled: true,
+            default_decision: "deny".into(),
+            domain_allowlist: vec!["example.com".into()],
+            domain_denylist: vec!["blocked.example".into()],
+            tool_overrides: std::collections::HashMap::new(),
+        };
+        cfg.system.safe_paths = vec!["/system-safe".into()];
+        cfg.system.execution_sandbox.safe_paths = vec!["/sandbox-safe".into()];
+        cfg.system.execution_sandbox.bash_enabled = false;
+        cfg.system.execution_sandbox.command_allowlist = vec!["pwd".into()];
+
+        let assembly = build_runtime_assembly_config(
+            &cfg,
+            TauriAgentExecutionMode::Scheduled,
+            state.shutdown_notify.clone(),
+        );
+        let ctx = build_governed_action_context(
+            &state,
+            &assembly,
+            None,
+            None,
+            AgentSpec::default_main_spec(),
+        );
+
+        assert_eq!(assembly.network_policy.default_decision, "deny");
+        assert_eq!(
+            ctx.network_policy
+                .as_ref()
+                .map(|policy| policy.default_decision.as_str()),
+            Some("deny")
+        );
+        assert_eq!(
+            ctx.network_policy
+                .as_ref()
+                .map(|policy| policy.domain_allowlist.as_slice()),
+            Some(&["example.com".to_string()][..])
+        );
+        assert_eq!(ctx.execution_sandbox.safe_paths, vec!["/sandbox-safe"]);
+        assert!(!ctx.execution_sandbox.bash_enabled);
+        assert_eq!(ctx.execution_sandbox.command_allowlist, vec!["pwd"]);
+    }
+
+    #[tokio::test]
+    async fn execution_facade_scheduled_mode_is_not_migrated_to_chat_task_entrypoint() {
+        let (_state, agent_loop, action_ctx, mut input) = chat_test_parts(
+            0,
+            Some(build_prompt_registry()),
+            Some(AgentSpec::default_main_spec()),
+        )
+        .await;
+        input.mode = TauriAgentExecutionMode::Scheduled;
+
+        let err = run_tauri_agent_task(&agent_loop, &action_ctx, input)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(
+            err.to_string()
+                .contains("Scheduled is not migrated to run_tauri_agent_task yet"),
+            "Scheduled must remain assembly-only in this phase: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn execution_facade_replay_path_is_not_migrated_to_chat_task_entrypoint() {
+        let source = include_str!("commands/agent.rs");
+        let start = source
+            .find("pub(crate) async fn replay_action_internal")
+            .expect("replay internal entrypoint should exist");
+        let end = source[start..]
+            .find("#[tauri::command]\npub async fn list_agent_run_events")
+            .map(|offset| start + offset)
+            .expect("event listing command should follow replay command");
+        let replay_path = &source[start..end];
+
+        assert!(
+            replay_path.contains("ActionExecutor::new"),
+            "Replay remains on the direct ActionExecutor path during hardening preparation"
+        );
+        assert!(
+            !replay_path.contains("run_tauri_agent_task"),
+            "Replay must not use the Chat/StreamChat facade entrypoint"
+        );
+        assert!(
+            !replay_path.contains("handle_agent_loop_fallback")
+                && !replay_path.contains("FallbackStarted")
+                && !replay_path.contains("FallbackCompleted"),
+            "Replay must not inherit Chat fallback behavior"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_requires_agent_spec() {
+        let input = scheduled_test_input(
+            Some(build_prompt_registry()),
+            None,
+            Some(NetworkPolicy::default()),
+        )
+        .await;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("AgentSpec is required"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_requires_network_policy() {
+        let input = scheduled_test_input(
+            Some(build_prompt_registry()),
+            Some(AgentSpec::default_main_spec()),
+            None,
+        )
+        .await;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("NetworkPolicy is required"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_governance_error_kind() {
+        let mut mismatch = NetworkPolicy::default();
+        mismatch.default_decision = "deny".into();
+        let mut input = scheduled_test_input(
+            Some(build_prompt_registry()),
+            Some(AgentSpec::default_main_spec()),
+            Some(NetworkPolicy::default()),
+        )
+        .await;
+        input.config.system.network_policy = mismatch;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("NetworkPolicy mismatch"));
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_runtime_error_kind() {
+        let input = scheduled_test_input(
+            Some(PromptBlockRegistry::new()),
+            Some(AgentSpec::default_main_spec()),
+            Some(NetworkPolicy::default()),
+        )
+        .await;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Runtime);
+        assert!(err.to_string().contains("prompt stack error"));
+        assert!(err.run_id.is_some());
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_failed_run_persistence_on_runtime_failure() {
+        let (state, input) = scheduled_test_parts(
+            Some(PromptBlockRegistry::new()),
+            Some(AgentSpec::default_main_spec()),
+            Some(NetworkPolicy::default()),
+        )
+        .await;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Runtime);
+        assert!(err.to_string().contains("prompt stack error"));
+        let run_id = err
+            .run_id
+            .as_ref()
+            .expect("Scheduled runtime failure should carry failed run id");
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        let run = runs
+            .iter()
+            .find(|run| &run.id == run_id)
+            .expect("failed scheduled run should be persisted");
+        assert_eq!(run.status, AgentRunStatus::Failed);
+        assert!(
+            run.error
+                .as_ref()
+                .map(|err| err.message.contains("prompt stack error"))
+                .unwrap_or(false),
+            "failed run should keep readable error: {:?}",
+            run.error
+        );
+
+        let event_store = state.agent_run_event_store.as_ref().unwrap();
+        assert_eq!(
+            event_store
+                .count_events_by_type(AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            event_store
+                .count_events_by_type(AgentRunEventType::FallbackCompleted)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_facade_prompt_stack_runtime_error_does_not_fallback() {
+        let (state, input) = scheduled_test_parts(
+            Some(PromptBlockRegistry::new()),
+            Some(AgentSpec::default_main_spec()),
+            Some(NetworkPolicy::default()),
+        )
+        .await;
+
+        let err = run_tauri_scheduled_execution(input).await.unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Runtime);
+        assert!(err.to_string().contains("prompt stack error"));
+        let event_store = state.agent_run_event_store.as_ref().unwrap();
+        assert_eq!(
+            event_store
+                .count_events_by_type(AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            event_store
+                .count_events_by_type(AgentRunEventType::FallbackCompleted)
+                .unwrap(),
+            0
         );
     }
 
@@ -875,5 +1483,213 @@ mod tests {
                 "proposal.create",
             ]
         );
+    }
+
+    async fn direct_tool_test_context(
+        state: &Arc<AppState>,
+        network_policy: NetworkPolicy,
+        spec: AgentSpec,
+        life_model: Option<LifeModel>,
+    ) -> ActionContext {
+        let mut cfg = state.config.lock().await.clone();
+        cfg.system.network_policy = network_policy;
+        let assembly = build_runtime_assembly_config(
+            &cfg,
+            TauriAgentExecutionMode::ToolExecution,
+            state.shutdown_notify.clone(),
+        );
+        build_governed_action_context(
+            state,
+            &assembly,
+            life_model,
+            Some(state.memory_store.clone()),
+            spec,
+        )
+    }
+
+    #[tokio::test]
+    async fn direct_tool_facade_preserves_tool_result_shape() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "goal.read",
+                    "builtin",
+                    "low",
+                    "read",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let spec = AgentSpec::default_main_spec();
+        let network_policy = NetworkPolicy::default();
+        let action_ctx = direct_tool_test_context(
+            &state,
+            network_policy.clone(),
+            spec.clone(),
+            Some(LifeModel::default()),
+        )
+        .await;
+
+        let outcome = run_tauri_direct_tool_execution(TauriDirectToolExecutionInput {
+            name: "goal.read".into(),
+            arguments: serde_json::json!({}),
+            action_ctx,
+            agent_spec: spec,
+            network_policy,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.tool_result.name, "goal.read");
+        assert_eq!(outcome.tool_result.arguments, serde_json::json!({}));
+        assert_eq!(
+            outcome.tool_result.sanitized_arguments,
+            Some(serde_json::json!({}))
+        );
+        assert!(outcome.tool_result.success);
+        assert!(outcome.tool_result.output.is_some());
+        assert!(outcome.tool_result.error.is_none());
+        assert_eq!(outcome.tool_result.permission_level, "low");
+        assert!(!outcome.tool_result.requires_confirmation);
+        assert!(!outcome.tool_result.pii_found);
+        assert!(outcome.tool_result.privacy_warnings.is_empty());
+        assert!(outcome.tool_result.action_id.is_some());
+        assert_eq!(outcome.tool_result.run_id, Some(outcome.run_id));
+        assert!(outcome.tool_result.permission_decision.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_tool_facade_sandbox_denial_does_not_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        let spec = AgentSpec::default_main_spec();
+        let network_policy = NetworkPolicy::default();
+        let action_ctx =
+            direct_tool_test_context(&state, network_policy.clone(), spec.clone(), None).await;
+
+        let outcome = run_tauri_direct_tool_execution(TauriDirectToolExecutionInput {
+            name: "shell.run".into(),
+            arguments: serde_json::json!({"command": "echo hi"}),
+            action_ctx,
+            agent_spec: spec,
+            network_policy,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.tool_result.success);
+        assert!(matches!(
+            outcome.tool_result.status,
+            crate::types::ToolCallStatus::Blocked
+        ));
+        assert!(
+            outcome
+                .tool_result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("sandbox.bash_enabled = false"),
+            "unexpected error: {:?}",
+            outcome.tool_result.error
+        );
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        let run = runs
+            .iter()
+            .find(|run| run.id == outcome.run_id)
+            .expect("direct tool run should be persisted");
+        assert!(
+            !run.warnings
+                .iter()
+                .any(|warning| warning.to_lowercase().contains("fallback")),
+            "direct tool execution must not add fallback warnings: {:?}",
+            run.warnings
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&outcome.run_id)
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn direct_tool_facade_network_policy_denial_does_not_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let policy = NetworkPolicy {
+            default_decision: "deny".into(),
+            ..NetworkPolicy::default()
+        };
+        let spec = AgentSpec::default_main_spec();
+        let action_ctx = direct_tool_test_context(&state, policy.clone(), spec.clone(), None).await;
+
+        let outcome = run_tauri_direct_tool_execution(TauriDirectToolExecutionInput {
+            name: "web.search".into(),
+            arguments: serde_json::json!({"query": "openlife"}),
+            action_ctx,
+            agent_spec: spec,
+            network_policy: policy,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.tool_result.success);
+        assert!(matches!(
+            outcome.tool_result.status,
+            crate::types::ToolCallStatus::Blocked
+        ));
+        assert!(
+            outcome
+                .tool_result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("default_decision=deny"),
+            "unexpected error: {:?}",
+            outcome.tool_result.error
+        );
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        let run = runs
+            .iter()
+            .find(|run| run.id == outcome.run_id)
+            .expect("direct tool run should be persisted");
+        assert!(
+            !run.warnings
+                .iter()
+                .any(|warning| warning.to_lowercase().contains("fallback")),
+            "direct tool execution must not add fallback warnings: {:?}",
+            run.warnings
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&outcome.run_id)
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
     }
 }

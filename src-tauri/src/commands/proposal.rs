@@ -3016,7 +3016,14 @@ mod tests {
         Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
             openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
         )));
+        let events_db = temp_dir.path().join("events_missing_spec_hardening.db");
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new(&events_db).unwrap();
+        Arc::get_mut(&mut state).unwrap().agent_run_event_store =
+            Some(Arc::new(event_store.clone()));
 
+        let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let call_count_for_tool = call_count.clone();
         {
             let mut reg = state.mcp_registry.lock().await;
             reg.register_builtin(
@@ -3036,7 +3043,10 @@ mod tests {
                     action_type: "read".to_string(),
                     tags: vec!["test".to_string()],
                 },
-                std::sync::Arc::new(|_args| Ok("test-read-only-ok".to_string())),
+                std::sync::Arc::new(move |_args| {
+                    call_count_for_tool.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok("test-read-only-ok".to_string())
+                }),
             );
         }
 
@@ -3122,6 +3132,45 @@ mod tests {
             err.contains("AgentSpec") || err.contains("governance"),
             "error must mention missing AgentSpec governance: {}",
             err
+        );
+
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "missing AgentSpec replay must fail before executing the action"
+        );
+        let stored_run = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.get_run(&run_id).unwrap().unwrap()
+        };
+        assert_eq!(
+            stored_run.actions[0].status, "needs_confirmation",
+            "missing AgentSpec replay must not mark the original action successful"
+        );
+        let stored_proposal = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.get_proposal(&proposal_id).unwrap().unwrap()
+        };
+        assert_eq!(
+            stored_proposal.status,
+            ProposalStatus::Accepted,
+            "accepting ToolPermission remains the Proposal source of truth; replay failure must not invent a success status"
+        );
+        let events = event_store.list_events_by_run(&run_id).unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::ReplayFailed
+            )),
+            "missing AgentSpec replay must record ReplayFailed"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::FallbackStarted
+                    | openlife_core::agent::AgentRunEventType::FallbackCompleted
+            )),
+            "Replay must not emit Chat fallback events"
         );
     }
 
@@ -4328,6 +4377,389 @@ mod tests {
             failed.payload["block_reason"],
             openlife_core::agent::action_executor::ExecutionBlockReason::ToolPermissionDenied
                 .to_string()
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::FallbackStarted
+                    | openlife_core::agent::AgentRunEventType::FallbackCompleted
+            )),
+            "ToolPermission denied replay must not emit Chat fallback events"
+        );
+        let stored_run = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.get_run(&run_id).unwrap().unwrap()
+        };
+        assert_eq!(
+            stored_run.actions[0].status, "needs_confirmation",
+            "ToolPermission denied replay must not execute or rewrite the action"
+        );
+    }
+
+    /// Replay typed payloads must keep a stable contract without raw prompt text.
+    #[tokio::test]
+    async fn replay_typed_event_payload_contract_is_stable_and_redacted() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+        let events_db = temp_dir.path().join("events_payload_contract.db");
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new(&events_db).unwrap();
+        Arc::get_mut(&mut state).unwrap().agent_run_event_store =
+            Some(Arc::new(event_store.clone()));
+
+        let spec_id = "replay-payload-contract-spec".to_string();
+        {
+            let spec_store = state.agent_spec_store.lock().await;
+            let spec = openlife_core::agent::types::AgentSpec::default_main_spec()
+                .with_id(spec_id.clone());
+            spec_store.create_spec(&spec).unwrap();
+        }
+        {
+            let mut reg = state.mcp_registry.lock().await;
+            reg.register_builtin(
+                openlife_core::tool_manifest::ToolManifest {
+                    name: "test.payload_contract".to_string(),
+                    id: "test.payload_contract".to_string(),
+                    description: "payload contract tool".to_string(),
+                    parameters: serde_json::json!({}),
+                    permission_level: "low".to_string(),
+                    risk_level: "low".to_string(),
+                    version: "1.0.0".to_string(),
+                    source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                    capabilities: vec!["read".to_string()],
+                    requires_confirmation: false,
+                    enabled: true,
+                    declarative_only: false,
+                    action_type: "read".to_string(),
+                    tags: vec![],
+                },
+                std::sync::Arc::new(|_args| Ok("payload-ok".to_string())),
+            );
+        }
+
+        let run_id = "run-replay-payload-contract".to_string();
+        let action_id = "action-replay-payload-contract".to_string();
+        let secret_prompt = "RAW_SECRET_PROMPT_SHOULD_NOT_LEAK";
+        let mut run =
+            openlife_core::agent::AgentRun::new_tool_execution_run("test.payload_contract")
+                .with_agent_spec_id(&spec_id);
+        run.id = run_id.clone();
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(openlife_core::agent::AgentAction {
+            id: action_id.clone(),
+            action_type: "builtin_tool".to_string(),
+            target: Some("test.payload_contract".to_string()),
+            input: serde_json::json!({"prompt": secret_prompt}),
+            output: None,
+            status: "needs_confirmation".to_string(),
+            permission_decision: Some("proposal_required".to_string()),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            timestamp: chrono::Utc::now(),
+            tool_scope: Some(openlife_core::agent::ToolActionScope {
+                tool_id: "test.payload_contract".to_string(),
+                tool_name: "test.payload_contract".to_string(),
+                source: "builtin".to_string(),
+                risk_level: "low".to_string(),
+                capabilities: vec!["read".to_string()],
+                action_type: "read".to_string(),
+                requires_confirmation: true,
+                allowed: false,
+            }),
+        });
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+        {
+            let perm = state.tool_permission_store.lock().await;
+            perm.grant(
+                "test.payload_contract",
+                "builtin",
+                "low",
+                "read",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        crate::commands::agent::replay_action_internal(&run_id, &action_id, &state)
+            .await
+            .unwrap();
+
+        let events = event_store.list_events_by_run(&run_id).unwrap();
+        for event in events.iter().filter(|event| {
+            matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::ReplayStarted
+                    | openlife_core::agent::AgentRunEventType::ReplayCompleted
+                    | openlife_core::agent::AgentRunEventType::ReplayFailed
+            )
+        }) {
+            assert_eq!(event.payload["run_id"], run_id);
+            assert_eq!(event.payload["original_run_id"], run_id);
+            assert_eq!(event.payload["action_id"], action_id);
+            assert_eq!(event.payload["replay_of_action_id"], action_id);
+            assert!(event.payload.get("proposal_id").is_some());
+            assert!(
+                event.payload["agent_spec_id"].is_string()
+                    || event.payload["agent_spec_id"].is_null()
+            );
+            let serialized = serde_json::to_string(&event.payload).unwrap();
+            assert!(
+                !serialized.contains(secret_prompt),
+                "Replay payload must not leak raw prompt/context: {}",
+                serialized
+            );
+        }
+    }
+
+    /// NetworkPolicy hard deny must fail closed during replay without Chat fallback.
+    #[tokio::test]
+    async fn replay_network_policy_denied_fails_closed_without_fallback() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+        let events_db = temp_dir.path().join("events_network_denied_replay.db");
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new(&events_db).unwrap();
+        Arc::get_mut(&mut state).unwrap().agent_run_event_store =
+            Some(Arc::new(event_store.clone()));
+        {
+            let mut config = state.config.lock().await;
+            config.system.network_policy = openlife_core::config::NetworkPolicy {
+                enabled: false,
+                default_decision: "allow".to_string(),
+                domain_allowlist: vec![],
+                domain_denylist: vec![],
+                tool_overrides: std::collections::HashMap::new(),
+            };
+        }
+        let spec_id = "replay-network-denied-spec".to_string();
+        {
+            let spec_store = state.agent_spec_store.lock().await;
+            spec_store
+                .create_spec(
+                    &openlife_core::agent::types::AgentSpec::default_main_spec()
+                        .with_id(spec_id.clone()),
+                )
+                .unwrap();
+        }
+
+        let run_id = "run-replay-network-denied".to_string();
+        let action_id = "action-replay-network-denied".to_string();
+        let mut run = openlife_core::agent::AgentRun::new_tool_execution_run("web.fetch")
+            .with_agent_spec_id(&spec_id);
+        run.id = run_id.clone();
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(openlife_core::agent::AgentAction {
+            id: action_id.clone(),
+            action_type: "builtin_tool".to_string(),
+            target: Some("web.fetch".to_string()),
+            input: serde_json::json!({"url": "https://example.com/private"}),
+            output: None,
+            status: "needs_confirmation".to_string(),
+            permission_decision: Some("proposal_required".to_string()),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            timestamp: chrono::Utc::now(),
+            tool_scope: Some(openlife_core::agent::ToolActionScope {
+                tool_id: "web.fetch".to_string(),
+                tool_name: "web.fetch".to_string(),
+                source: "builtin".to_string(),
+                risk_level: "medium".to_string(),
+                capabilities: vec!["network".to_string(), "read".to_string()],
+                action_type: "read".to_string(),
+                requires_confirmation: true,
+                allowed: false,
+            }),
+        });
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+        {
+            let perm = state.tool_permission_store.lock().await;
+            perm.grant(
+                "web.fetch",
+                "builtin",
+                "medium",
+                "read",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        let replayed = crate::commands::agent::replay_action_internal(&run_id, &action_id, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(replayed.status, "blocked");
+        assert!(replayed.error.is_some());
+        let events = event_store.list_events_by_run(&run_id).unwrap();
+        let completed = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.event_type,
+                    openlife_core::agent::AgentRunEventType::ReplayCompleted
+                )
+            })
+            .expect("ReplayCompleted blocked outcome must be recorded");
+        assert_eq!(completed.payload["status"], "blocked");
+        assert_eq!(
+            completed.payload["block_reason"],
+            openlife_core::agent::action_executor::ExecutionBlockReason::NetworkPolicyDenied
+                .to_string()
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::FallbackStarted
+                    | openlife_core::agent::AgentRunEventType::FallbackCompleted
+            )),
+            "NetworkPolicy denied replay must not fallback to Chat"
+        );
+    }
+
+    /// ExecutionSandbox hard deny must fail closed during replay without success outcome.
+    #[tokio::test]
+    async fn replay_execution_sandbox_denied_fails_closed_without_success_outcome() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state).unwrap().agent_run_store = Some(Arc::new(Mutex::new(
+            openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
+        )));
+        let events_db = temp_dir.path().join("events_sandbox_denied_replay.db");
+        let event_store =
+            openlife_core::agent::event_store::AgentRunEventStore::new(&events_db).unwrap();
+        Arc::get_mut(&mut state).unwrap().agent_run_event_store =
+            Some(Arc::new(event_store.clone()));
+        {
+            let mut config = state.config.lock().await;
+            config.system.execution_sandbox.bash_enabled = false;
+        }
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.register_builtin(
+                openlife_core::tool_manifest::ToolManifest {
+                    name: "shell.run".to_string(),
+                    id: "shell.run".to_string(),
+                    description: "Shell execution test manifest".to_string(),
+                    parameters: serde_json::json!({}),
+                    permission_level: "high".to_string(),
+                    risk_level: "high".to_string(),
+                    version: "1.0.0".to_string(),
+                    source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                    capabilities: vec!["shell".to_string(), "filesystem".to_string()],
+                    requires_confirmation: true,
+                    enabled: true,
+                    declarative_only: false,
+                    action_type: "external_side_effect".to_string(),
+                    tags: vec!["execution".to_string()],
+                },
+                std::sync::Arc::new(|_args| Ok("shell-should-not-execute".to_string())),
+            );
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        let spec_id = "replay-sandbox-denied-spec".to_string();
+        {
+            let spec_store = state.agent_spec_store.lock().await;
+            spec_store
+                .create_spec(
+                    &openlife_core::agent::types::AgentSpec::default_main_spec()
+                        .with_id(spec_id.clone()),
+                )
+                .unwrap();
+        }
+
+        let run_id = "run-replay-sandbox-denied".to_string();
+        let action_id = "action-replay-sandbox-denied".to_string();
+        let mut run = openlife_core::agent::AgentRun::new_tool_execution_run("shell.run")
+            .with_agent_spec_id(&spec_id);
+        run.id = run_id.clone();
+        run.status = openlife_core::agent::AgentRunStatus::WaitingPermission;
+        run.actions.push(openlife_core::agent::AgentAction {
+            id: action_id.clone(),
+            action_type: "builtin_tool".to_string(),
+            target: Some("shell.run".to_string()),
+            input: serde_json::json!({"command": "pwd"}),
+            output: None,
+            status: "needs_confirmation".to_string(),
+            permission_decision: Some("proposal_required".to_string()),
+            started_at: None,
+            finished_at: None,
+            error: None,
+            timestamp: chrono::Utc::now(),
+            tool_scope: Some(openlife_core::agent::ToolActionScope {
+                tool_id: "shell.run".to_string(),
+                tool_name: "shell.run".to_string(),
+                source: "builtin".to_string(),
+                risk_level: "high".to_string(),
+                capabilities: vec!["shell".to_string(), "filesystem".to_string()],
+                action_type: "external_side_effect".to_string(),
+                requires_confirmation: true,
+                allowed: false,
+            }),
+        });
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+        {
+            let perm = state.tool_permission_store.lock().await;
+            perm.grant(
+                "shell.run",
+                "builtin",
+                "high",
+                "external_side_effect",
+                openlife_core::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
+                None,
+            )
+            .unwrap();
+        }
+
+        let replayed = crate::commands::agent::replay_action_internal(&run_id, &action_id, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(replayed.status, "blocked");
+        assert!(replayed.error.is_some());
+        let events = event_store.list_events_by_run(&run_id).unwrap();
+        let completed = events
+            .iter()
+            .find(|event| {
+                matches!(
+                    event.event_type,
+                    openlife_core::agent::AgentRunEventType::ReplayCompleted
+                )
+            })
+            .expect("ReplayCompleted blocked outcome must be recorded");
+        assert_eq!(completed.payload["status"], "blocked");
+        assert_eq!(
+            completed.payload["block_reason"],
+            openlife_core::agent::action_executor::ExecutionBlockReason::SandboxDenied.to_string()
+        );
+        assert_ne!(
+            completed.payload["status"], "completed",
+            "sandbox-denied replay must not write a successful outcome"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event.event_type,
+                openlife_core::agent::AgentRunEventType::FallbackStarted
+                    | openlife_core::agent::AgentRunEventType::FallbackCompleted
+            )),
+            "ExecutionSandbox denied replay must not fallback to Chat"
         );
     }
 

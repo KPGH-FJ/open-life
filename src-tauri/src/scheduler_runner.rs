@@ -114,26 +114,78 @@ struct TaskOutcome {
     status: String,
     completed_at: Option<String>,
     result_preview: Option<String>,
+    agent_run_id: Option<String>,
     error: Option<String>,
 }
 
 impl TaskOutcome {
-    fn completed(response: String) -> Self {
+    fn completed(result: ScheduledTaskExecutionResult) -> Self {
         Self {
             status: "completed".to_string(),
             completed_at: Some(chrono::Utc::now().to_rfc3339()),
-            result_preview: Some(response.chars().take(500).collect()),
+            result_preview: Some(result.result_preview),
+            agent_run_id: Some(result.run_id),
             error: None,
         }
     }
 
-    fn failed(err: String) -> Self {
+    fn failed(err: impl Into<ScheduledTaskExecutionError>) -> Self {
+        let err = err.into();
         Self {
             status: "failed".to_string(),
             completed_at: None,
             result_preview: None,
-            error: Some(err),
+            agent_run_id: err.agent_run_id,
+            error: Some(err.message),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ScheduledTaskExecutionError {
+    message: String,
+    agent_run_id: Option<String>,
+}
+
+impl ScheduledTaskExecutionError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            agent_run_id: None,
+        }
+    }
+
+    fn from_facade_error(error: crate::execution_facade::TauriExecutionFacadeError) -> Self {
+        let prefix = match error.kind {
+            crate::execution_facade::TauriExecutionFacadeErrorKind::Governance => {
+                "Scheduled governance failure"
+            }
+            crate::execution_facade::TauriExecutionFacadeErrorKind::Runtime => {
+                "Scheduled runtime failure"
+            }
+        };
+        Self {
+            message: format!("{}: {}", prefix, error),
+            agent_run_id: error.run_id,
+        }
+    }
+}
+
+impl From<String> for ScheduledTaskExecutionError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ScheduledTaskExecutionError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+impl std::fmt::Display for ScheduledTaskExecutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
     }
 }
 
@@ -307,6 +359,9 @@ async fn merge_scheduled_task_outcome_by_id(
                 if let Some(preview) = outcome.result_preview {
                     obj.insert("result_preview".to_string(), Value::String(preview));
                 }
+                if let Some(run_id) = outcome.agent_run_id {
+                    obj.insert("agent_run_id".to_string(), Value::String(run_id));
+                }
                 if let Some(err) = outcome.error {
                     obj.insert("error".to_string(), Value::String(err));
                 }
@@ -326,36 +381,28 @@ async fn merge_scheduled_task_outcome_by_id(
     save_tasks_to_path(path, &tasks)
 }
 
-// ── Task execution (unchanged, no lock held) ─────────────────────
+// ── Task execution (unchanged file-state ownership, no lock held) ─
+
+#[derive(Debug)]
+struct ScheduledTaskExecutionResult {
+    result_preview: String,
+    run_id: String,
+}
 
 async fn execute_scheduled_task(
     state: &Arc<AppState>,
     _title: &str,
     prompt: &str,
-) -> Result<String, String> {
-    let cfg = state.config.lock().await;
+) -> Result<ScheduledTaskExecutionResult, ScheduledTaskExecutionError> {
+    let cfg = state.config.lock().await.clone();
     let life_model = {
         let manager = state.life_model_manager.lock().await;
-        manager
-            .load()
-            .map_err(|e| format!("LifeModel load failed: {}", e))?
+        manager.load().map_err(|e| {
+            ScheduledTaskExecutionError::new(format!("LifeModel load failed: {}", e))
+        })?
     };
     let scheduler = state.scheduler.lock().await.clone();
     let privacy_engine = state.privacy_engine.lock().await.clone();
-    let runtime_assembly = crate::execution_facade::build_runtime_assembly_config(
-        &cfg,
-        crate::execution_facade::TauriAgentExecutionMode::Scheduled,
-        state.shutdown_notify.clone(),
-    );
-    let agent_loop = crate::execution_facade::build_governed_agent_loop(
-        life_model.clone(),
-        scheduler.clone(),
-        &cfg,
-        &runtime_assembly,
-        &state.agent_run_event_store,
-    );
-    drop(cfg);
-
     let task = AgentTask {
         kind: AgentTaskKind::Proactive,
         session_id: format!("scheduled-{}", uuid::Uuid::new_v4()),
@@ -367,8 +414,6 @@ async fn execute_scheduled_task(
         layer: Layer::L2,
         ..Default::default()
     };
-
-    let tools_prompt = String::new();
 
     let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
         &state.agent_spec_store,
@@ -382,52 +427,35 @@ async fn execute_scheduled_task(
                 "[scheduler_runner] AgentSpec resolution failed: {}. Scheduled task execution aborted (fail-closed).",
                 e
             );
-            return Err(format!(
+            return Err(ScheduledTaskExecutionError::new(format!(
                 "AgentSpec resolution failed: {}. Scheduled execution requires a valid active main AgentSpec.",
                 e
-            ));
+            )));
         }
     };
     let prompt_registry = crate::execution_facade::build_prompt_registry();
+    let network_policy = cfg.system.network_policy.clone();
 
-    let loop_result = {
-        let action_ctx = crate::execution_facade::build_governed_action_context(
-            state,
-            &runtime_assembly,
-            Some(life_model.clone()),
-            Some(state.memory_store.clone()),
-            agent_spec.clone(),
-        );
+    let outcome = crate::execution_facade::run_tauri_scheduled_execution(
+        crate::execution_facade::TauriScheduledExecutionInput {
+            task,
+            app_state: state.clone(),
+            config: cfg,
+            life_model,
+            scheduler,
+            privacy_engine,
+            agent_spec: Some(agent_spec),
+            network_policy: Some(network_policy),
+            prompt_registry: Some(prompt_registry),
+        },
+    )
+    .await
+    .map_err(ScheduledTaskExecutionError::from_facade_error)?;
 
-        agent_loop
-            .run(
-                &task,
-                &life_model,
-                &tools_prompt,
-                None,
-                privacy_engine.clone(),
-                agent_spec.privacy_policy,
-                &agent_spec,
-                &prompt_registry,
-                &action_ctx,
-            )
-            .await
-            .map_err(|e| format!("AgentLoop execution failed: {}", e))
-    }?;
-
-    if let Some(ref store) = state.agent_run_store {
-        let store = store.lock().await;
-        let run = loop_result.run;
-        if let Err(e) = store.create_run(&run) {
-            log::error!(
-                "[scheduler_runner] Failed to persist scheduled AgentRun {}: {}",
-                run.id,
-                e
-            );
-        }
-    }
-
-    Ok(loop_result.final_response)
+    Ok(ScheduledTaskExecutionResult {
+        result_preview: outcome.result_preview,
+        run_id: outcome.run_id,
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -456,6 +484,13 @@ mod tests {
         }
         let content = std::fs::read_to_string(path).unwrap();
         serde_json::from_str(&content).unwrap()
+    }
+
+    fn completed_result(preview: &str) -> ScheduledTaskExecutionResult {
+        ScheduledTaskExecutionResult {
+            result_preview: preview.to_string(),
+            run_id: format!("run-{}", preview.replace(' ', "-")),
+        }
     }
 
     fn now_dt() -> chrono::DateTime<chrono::Utc> {
@@ -529,7 +564,7 @@ mod tests {
             &mutex,
             &path,
             "task-A",
-            TaskOutcome::completed("done A".into()),
+            TaskOutcome::completed(completed_result("done A")),
         )
         .await
         .unwrap();
@@ -550,6 +585,69 @@ mod tests {
         assert!(
             tasks_final.iter().any(|t| t["id"] == "task-B"),
             "task B must be preserved, not overwritten by old snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_lease_is_short_and_complete_merges_interleaved_pending_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "long-model-task",
+                "title": "Long Model Task",
+                "prompt": "run the model",
+                "scheduled_at": past_str(),
+                "status": "pending"
+            })],
+        );
+
+        let now = now_dt();
+        let claimed = claim_due_scheduled_tasks(&mutex, &path, &now)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0]["id"], "long-model-task");
+
+        {
+            let _guard = mutex.lock().await;
+            let mut latest = load_tasks_from_path(&path).unwrap();
+            latest.push(json!({
+                "id": "interleaved-task",
+                "title": "Interleaved Task",
+                "prompt": "arrived while model was running",
+                "scheduled_at": past_str(),
+                "status": "pending"
+            }));
+            save_tasks_to_path(&path, &latest).unwrap();
+        }
+
+        merge_scheduled_task_outcome_by_id(
+            &mutex,
+            &path,
+            "long-model-task",
+            TaskOutcome::completed(completed_result("model completed")),
+        )
+        .await
+        .unwrap();
+
+        let final_tasks = read_tasks_json(&path);
+        let completed = final_tasks
+            .iter()
+            .find(|t| t["id"] == "long-model-task")
+            .unwrap();
+        let interleaved = final_tasks
+            .iter()
+            .find(|t| t["id"] == "interleaved-task")
+            .unwrap();
+
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(
+            interleaved["status"], "pending",
+            "a task appended during execution must survive outcome merge"
         );
     }
 
@@ -583,7 +681,7 @@ mod tests {
             &mutex,
             &path,
             "task-A",
-            TaskOutcome::completed("A result".into()),
+            TaskOutcome::completed(completed_result("A result")),
         )
         .await
         .unwrap();
@@ -595,9 +693,51 @@ mod tests {
         assert_eq!(a["status"], "completed");
         assert!(a.get("completed_at").is_some());
         assert_eq!(a["result_preview"], "A result");
+        assert_eq!(a["agent_run_id"], "run-A-result");
 
         let b = result.iter().find(|t| t["id"] == "task-B").unwrap();
         assert_eq!(b["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn scheduled_successful_outcome_records_facade_preview_and_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "successful-scheduled-task",
+                "title": "Successful Scheduled Task",
+                "prompt": "summarize",
+                "scheduled_at": past_str(),
+                "status": "running"
+            })],
+        );
+
+        merge_scheduled_task_outcome_by_id(
+            &mutex,
+            &path,
+            "successful-scheduled-task",
+            TaskOutcome::completed(ScheduledTaskExecutionResult {
+                result_preview: "facade preview".into(),
+                run_id: "scheduled-run-123".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let tasks = read_tasks_json(&path);
+        let task = tasks
+            .iter()
+            .find(|t| t["id"] == "successful-scheduled-task")
+            .unwrap();
+        assert_eq!(task["status"], "completed");
+        assert_eq!(task["result_preview"], "facade preview");
+        assert_eq!(task["agent_run_id"], "scheduled-run-123");
+        assert!(task.get("completed_at").is_some());
+        assert!(task.get("error").is_none());
     }
 
     #[tokio::test]
@@ -628,7 +768,7 @@ mod tests {
             &mutex,
             &path,
             "task-X",
-            TaskOutcome::failed("exec error".into()),
+            TaskOutcome::failed("exec error"),
         )
         .await
         .unwrap();
@@ -642,6 +782,52 @@ mod tests {
 
         let y = result.iter().find(|t| t["id"] == "task-Y").unwrap();
         assert_eq!(y["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn scheduled_failure_observability_records_readable_error_without_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "observable-failure",
+                "title": "Observable Failure",
+                "prompt": "fail clearly",
+                "scheduled_at": past_str(),
+                "status": "running"
+            })],
+        );
+
+        merge_scheduled_task_outcome_by_id(
+            &mutex,
+            &path,
+            "observable-failure",
+            TaskOutcome::failed("AgentSpec resolution failed: no active main AgentSpec found"),
+        )
+        .await
+        .unwrap();
+
+        let result = read_tasks_json(&path);
+        let failed = result
+            .iter()
+            .find(|t| t["id"] == "observable-failure")
+            .unwrap();
+        assert_eq!(failed["status"], "failed");
+        assert!(failed["error"]
+            .as_str()
+            .unwrap()
+            .contains("AgentSpec resolution failed"));
+        assert!(
+            failed.get("completed_at").is_none(),
+            "failed scheduled tasks must not be marked completed"
+        );
+        assert!(
+            failed.get("result_preview").is_none(),
+            "failed scheduled tasks must not receive success output"
+        );
     }
 
     #[tokio::test]
@@ -691,7 +877,7 @@ mod tests {
             &mutex,
             &path,
             "safe-task",
-            TaskOutcome::completed("safe done".into()),
+            TaskOutcome::completed(completed_result("safe done")),
         )
         .await
         .unwrap();
@@ -775,6 +961,48 @@ mod tests {
 
         let failed = after.iter().find(|t| t["id"] == "already-failed").unwrap();
         assert_eq!(failed["status"], "failed");
+    }
+
+    #[tokio::test]
+    async fn scheduler_completed_and_failed_tasks_are_not_reclaimed_even_if_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+        let old_started_at = seconds_ago_str(RUNNING_TASK_STALE_AFTER_SECONDS + 600);
+
+        let tasks = vec![
+            json!({
+                "id": "old-completed",
+                "title": "Old Completed Task",
+                "prompt": "done",
+                "scheduled_at": past_str(),
+                "status": "completed",
+                "running_started_at": old_started_at,
+                "completed_at": past_str()
+            }),
+            json!({
+                "id": "old-failed",
+                "title": "Old Failed Task",
+                "prompt": "failed",
+                "scheduled_at": past_str(),
+                "status": "failed",
+                "running_started_at": seconds_ago_str(RUNNING_TASK_STALE_AFTER_SECONDS + 600),
+                "error": "previous failure"
+            }),
+        ];
+        write_tasks_json(&path, &tasks);
+
+        let before = std::fs::read_to_string(&path).unwrap();
+        let now = now_dt();
+        let claimed = claim_due_scheduled_tasks(&mutex, &path, &now)
+            .await
+            .unwrap();
+
+        assert!(
+            claimed.is_empty(),
+            "terminal scheduled tasks must never be reclaimed"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[tokio::test]
@@ -924,7 +1152,7 @@ mod tests {
             &mutex,
             &path,
             "nonexistent-id",
-            TaskOutcome::completed("ghost".into()),
+            TaskOutcome::completed(completed_result("ghost")),
         )
         .await;
         assert!(result.is_ok(), "noop should not error");
@@ -984,7 +1212,7 @@ mod tests {
             &mutex,
             &path,
             "task-A",
-            TaskOutcome::completed("done".into()),
+            TaskOutcome::completed(completed_result("done")),
         )
         .await
         .unwrap();
@@ -1017,5 +1245,210 @@ mod tests {
             .await
             .unwrap();
         assert!(claimed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scheduled_missing_agentspec_fails_closed_without_chat_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.set_active("main.default", false).unwrap();
+        }
+
+        let err = execute_scheduled_task(&state, "Missing AgentSpec", "scheduled prompt")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.message.contains("AgentSpec resolution failed"),
+            "scheduled governance failure must be explicit: {}",
+            err
+        );
+        assert!(
+            !err.message.to_lowercase().contains("fallback"),
+            "Scheduled must not surface Chat fallback warnings: {}",
+            err
+        );
+        assert!(
+            err.agent_run_id.is_none(),
+            "governance failure before run creation must not carry agent_run_id"
+        );
+
+        let run_count = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .run_count()
+            .unwrap();
+        assert_eq!(
+            run_count, 0,
+            "missing AgentSpec must fail before creating scheduled or fallback AgentRuns"
+        );
+
+        let event_store = state.agent_run_event_store.as_ref().unwrap();
+        assert_eq!(
+            event_store
+                .count_events_by_type(openlife_core::agent::AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0,
+            "Scheduled missing AgentSpec must not record FallbackStarted"
+        );
+        assert_eq!(
+            event_store
+                .count_events_by_type(openlife_core::agent::AgentRunEventType::FallbackCompleted)
+                .unwrap(),
+            0,
+            "Scheduled missing AgentSpec must not record FallbackCompleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_missing_agentspec_records_scheduler_task_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let state = crate::test_utils::test_app_state();
+
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.set_active("main.default", false).unwrap();
+        }
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "missing-spec-task",
+                "title": "Missing Spec Task",
+                "prompt": "scheduled prompt",
+                "scheduled_at": past_str(),
+                "status": "pending"
+            })],
+        );
+
+        let now = now_dt();
+        let claimed = claim_due_scheduled_tasks(&state.scheduled_task_mutex, &path, &now)
+            .await
+            .unwrap();
+        assert_eq!(claimed.len(), 1);
+
+        let err = execute_scheduled_task(&state, "Missing Spec Task", "scheduled prompt")
+            .await
+            .unwrap_err();
+        merge_scheduled_task_outcome_by_id(
+            &state.scheduled_task_mutex,
+            &path,
+            "missing-spec-task",
+            TaskOutcome::failed(err),
+        )
+        .await
+        .unwrap();
+
+        let tasks = read_tasks_json(&path);
+        let task = tasks
+            .iter()
+            .find(|t| t["id"] == "missing-spec-task")
+            .unwrap();
+        assert_eq!(task["status"], "failed");
+        assert!(task["error"]
+            .as_str()
+            .unwrap()
+            .contains("AgentSpec resolution failed"));
+        assert!(
+            task.get("completed_at").is_none(),
+            "governance failure must keep scheduler task failure semantics"
+        );
+        assert!(
+            task.get("agent_run_id").is_none(),
+            "missing AgentSpec fails before run creation and must not write agent_run_id"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduled_runtime_failure_records_scheduler_task_failure_with_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "runtime-failed-task",
+                "title": "Runtime Failed Task",
+                "prompt": "runtime failure",
+                "scheduled_at": past_str(),
+                "status": "running"
+            })],
+        );
+
+        merge_scheduled_task_outcome_by_id(
+            &mutex,
+            &path,
+            "runtime-failed-task",
+            TaskOutcome::failed(ScheduledTaskExecutionError {
+                message: "Scheduled runtime failure: prompt stack error: unknown prompt block"
+                    .into(),
+                agent_run_id: Some("failed-run-123".into()),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let tasks = read_tasks_json(&path);
+        let task = tasks
+            .iter()
+            .find(|t| t["id"] == "runtime-failed-task")
+            .unwrap();
+        assert_eq!(task["status"], "failed");
+        assert!(task["error"]
+            .as_str()
+            .unwrap()
+            .contains("Scheduled runtime failure"));
+        assert_eq!(task["agent_run_id"], "failed-run-123");
+        assert!(
+            task.get("completed_at").is_none(),
+            "failed runtime task must not be marked completed"
+        );
+        assert!(
+            task.get("result_preview").is_none(),
+            "failed runtime task must not receive success output"
+        );
+    }
+
+    #[test]
+    fn scheduled_execution_uses_scheduled_facade_wrapper_without_chat_fallback() {
+        let source = include_str!("scheduler_runner.rs");
+        let start = source
+            .find("async fn execute_scheduled_task")
+            .expect("scheduled execution helper should exist");
+        let end = source[start..]
+            .find("// ── Tests")
+            .map(|offset| start + offset)
+            .expect("tests section should follow scheduled helper");
+        let scheduled_path = &source[start..end];
+        let direct_run_call = [".", "run("].concat();
+
+        assert!(
+            scheduled_path.contains("run_tauri_scheduled_execution"),
+            "Scheduled must call its dedicated Tauri ExecutionFacade wrapper"
+        );
+        assert!(
+            scheduled_path.contains("build_prompt_registry"),
+            "Scheduled must require PromptBlockRegistry assembly"
+        );
+        assert!(
+            !scheduled_path.contains(&direct_run_call),
+            "execute_scheduled_task must not call AgentLoop::run directly"
+        );
+        assert!(
+            !scheduled_path.contains("run_tauri_agent_task"),
+            "Scheduled must not be migrated to the Chat/StreamChat task entrypoint"
+        );
+        assert!(
+            !scheduled_path.contains("handle_agent_loop_fallback")
+                && !scheduled_path.contains("FallbackStarted")
+                && !scheduled_path.contains("FallbackCompleted"),
+            "Scheduled must not inherit Chat fallback"
+        );
     }
 }

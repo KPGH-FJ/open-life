@@ -14,11 +14,11 @@ Status: active
 2. [`openlife_codex_level_acceptance_matrix.md`](openlife_codex_level_acceptance_matrix.md): 行为验收矩阵，`make ci` 之外的发布门槛。
 3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
 4. [`openlife_codex_level_phase2_execution_facade_prep.md`](openlife_codex_level_phase2_execution_facade_prep.md): Phase 2 执行路径收敛准备文档，定义 Tauri-side ExecutionFacade 的首批开发边界、非目标、测试和 Agent 指令。
-5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat 已完成 full ExecutionFacade 收敛，Scheduled 为 assembly-only，Replay / Plan / Builder / Calibration 暂不迁移，并给出下一批最小候选。
+5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat、Direct Tool Execution、Scheduled-specific facade wrapper 已完成迁移，Replay / Plan / Builder / Calibration 暂不迁移，并给出下一批最小候选。
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **ExecutionFacade coverage audit / migration boundary**：先锁定真实执行版图和迁移边界。Chat / StreamChat 已完成 ExecutionFacade 路径收敛；下一阶段只从明确候选中选择最小迁移目标，不把 Scheduled / Replay / Plan / Builder / Calibration 记录为已迁移。
+2026-05-25 当前阶段为 **Proposal Replay / Replay Hardening Preparation**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Scheduled failed-run observability 已完成，runtime failure 若已有 `AgentLoopResult` 会先持久化 failed `AgentRun`，再返回带 `run_id` 的 Runtime error，scheduler failed task 会在有 run id 时写入 `agent_run_id`，Governance-before-run failure 仍 fail-closed 且不创建 fake run。本阶段只补 Proposal Replay / Replay safety net，不正式迁移 Replay facade wrapper。Replay 仍由 `replay_action_internal` 直接使用 `ActionExecutor`，但测试已锁定 missing AgentSpec fail-closed、original AgentSpec restoration、no tool escalation、ToolPermission/NetworkPolicy/ExecutionSandbox deny、Proposal status source of truth、typed replay event payload 和 no Chat fallback。Plan / Builder / Calibration / Skill runtime 仍未迁移；下一阶段若继续推进，只能进入 Replay-specific facade/wrapper 正式迁移，不能使用 Chat facade。
 
 ---
 
@@ -131,13 +131,18 @@ Status: active
 
 - [ ] Chat 双路径 (send/stream) 事件完整性测试
 - [ ] Fallback 事件保留测试
+- [x] Scheduled/Proactive 迁移前安全网：lease 短锁、stale running recovery、missing AgentSpec fail-closed、无 Chat fallback、失败写回 task error 字段
+- [x] Scheduled/Proactive facade wrapper 验证：Scheduled-specific wrapper 已迁移；failed-run observability 已修复；保持 scheduler task failure 语义，不继承 Chat fallback
+- [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试；未迁移 Replay wrapper
 - [ ] Scheduled/Proactive 事件创建验证
+- [ ] Replay-specific facade/wrapper 正式迁移（仅在 review 后启动；不得使用 Chat facade）
 - [ ] Builder/Calibration 事件创建验证
 
 ### 2.3 PromptStack 全路径审计
 
 - [ ] 列出所有 prompt 组装点 (Chat/Builder/Calibration/Scheduled/Proactive/PlanMode)
 - [ ] 逐一核对是否通过 PromptStack
+- [x] Scheduled-specific facade wrapper 路径测试锁定：`AgentSpec`、`PromptBlockRegistry`、`NetworkPolicy`、`ExecutionSandbox`、restricted toolset 均由 facade assembly helpers 提供，`scheduler_runner.rs` 不再裸调 `AgentLoop::run`
 - [ ] 接入尚未通过 PromptStack 的路径
 - [ ] PromptBlock 版本记录到 AgentRunEvent
 - [ ] 补充 PromptStack 组装测试

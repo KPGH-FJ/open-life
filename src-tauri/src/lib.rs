@@ -653,118 +653,38 @@ async fn execute_tool_call_inner(
     arguments: serde_json::Value,
     state: &Arc<AppState>,
 ) -> Result<ToolCallResult, String> {
-    let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
-        &cfg.system.execution_sandbox,
-        &safe_paths,
+    let cfg = state.config.lock().await.clone();
+    let runtime_assembly = execution_facade::build_runtime_assembly_config(
+        &cfg,
+        execution_facade::TauriAgentExecutionMode::ToolExecution,
+        state.shutdown_notify.clone(),
     );
-    drop(cfg);
+    let network_policy = runtime_assembly.network_policy.clone();
 
-    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
-        &state.agent_spec_store,
+    let agent_spec =
+        execution_facade::resolve_default_agent_spec_fail_closed(&state.agent_spec_store).await?;
+    let mut action_ctx = execution_facade::build_governed_action_context(
+        state,
+        &runtime_assembly,
         None,
+        None,
+        agent_spec.clone(),
+    );
+    action_ctx.proposal_store = None;
+    action_ctx.calendar_ics_paths = Vec::new();
+    let outcome = execution_facade::run_tauri_direct_tool_execution(
+        execution_facade::TauriDirectToolExecutionInput {
+            name,
+            arguments,
+            action_ctx,
+            agent_spec,
+            network_policy,
+        },
     )
     .await
-    {
-        Ok(spec) => spec,
-        Err(e) => return Err(format!("AgentSpec resolution failed: {}", e)),
-    };
+    .map_err(|e| e.to_string())?;
 
-    // Create an AgentRun for direct tool execution audit trail
-    let mut run = openlife_core::agent::AgentRun::new_tool_execution_run(&name);
-    let run_id = run.id.clone();
-
-    let executor = openlife_core::agent::ActionExecutor::new(
-        openlife_core::agent::ActionExecutorConfig::default(),
-    );
-    let ctx = openlife_core::agent::ActionContext {
-        registry: state.mcp_registry.clone(),
-        permission_store: state.tool_permission_store.clone(),
-        audit_store: state.mcp_audit_store.clone(),
-        privacy_engine: state.privacy_engine.clone(),
-        safe_paths,
-        life_model: None,
-        memory_store: None,
-        proposal_store: None,
-        agent_run_store: state.agent_run_store.clone(),
-        event_store: state
-            .agent_run_event_store
-            .as_ref()
-            .map(|es| (**es).clone()),
-        network_policy: Some(network_policy),
-        calendar_ics_paths: Vec::new(),
-        execution_sandbox,
-        agent_spec: Some(agent_spec),
-    };
-
-    let request = openlife_core::agent::AgentActionRequest {
-        action_type: "mcp_tool".to_string(),
-        target: name.clone(),
-        input: serde_json::json!({ "arguments": arguments }),
-        source_run_id: Some(run_id.clone()),
-        step_index: 0,
-    };
-
-    let result = executor
-        .execute(request, &ctx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Persist the AgentRun
-    run.actions.push(result.action.clone());
-    run.observations.push(result.observation.clone());
-    run.status = match result.status {
-        openlife_core::agent::ActionExecutionStatus::Succeeded => {
-            openlife_core::agent::AgentRunStatus::Completed
-        }
-        _ => openlife_core::agent::AgentRunStatus::Failed,
-    };
-    run.finished_at = Some(chrono::Utc::now());
-
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        if let Err(e) = store.create_run(&run) {
-            log::error!("[AgentRun] 创建运行记录失败: {}", e);
-        }
-    }
-
-    let tool_result = ToolCallResult {
-        name: name.clone(),
-        arguments: arguments.clone(),
-        sanitized_arguments: Some(arguments),
-        success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
-        output: result
-            .action
-            .output
-            .as_ref()
-            .and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
-        error: result.action.error.clone(),
-        permission_level: result
-            .action
-            .tool_scope
-            .as_ref()
-            .map(|s| s.risk_level.clone())
-            .unwrap_or_else(|| "medium".into()),
-        status: match result.status {
-            openlife_core::agent::ActionExecutionStatus::Succeeded => ToolCallStatus::Success,
-            openlife_core::agent::ActionExecutionStatus::Failed => ToolCallStatus::Error,
-            openlife_core::agent::ActionExecutionStatus::Blocked => ToolCallStatus::Blocked,
-            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
-                ToolCallStatus::NeedsConfirmation
-            }
-        },
-        requires_confirmation: result.status
-            == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
-        pii_found: false,
-        privacy_warnings: vec![],
-        action_id: Some(result.action.id),
-        run_id: Some(run_id),
-        permission_decision: result.action.permission_decision,
-    };
-
-    Ok(tool_result)
+    Ok(outcome.tool_result)
 }
 #[tauri::command]
 async fn inspect_mcp_call(
@@ -1312,6 +1232,33 @@ mod tests {
         assert!(
             runs.is_empty(),
             "tool execution must not create an AgentRun when AgentSpec resolution fails"
+        );
+    }
+
+    #[test]
+    fn execute_tool_call_uses_direct_tool_facade() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("async fn execute_tool_call_inner")
+            .expect("direct tool command helper should exist");
+        let end = source[start..]
+            .find("#[tauri::command]\nasync fn inspect_mcp_call")
+            .map(|offset| start + offset)
+            .expect("inspect_mcp_call should follow execute_tool_call_inner");
+        let direct_tool_path = &source[start..end];
+        let direct_execute_call = [".", "execute("].concat();
+
+        assert!(
+            direct_tool_path.contains("run_tauri_direct_tool_execution"),
+            "execute_tool_call_inner must call the Tauri direct tool facade wrapper"
+        );
+        assert!(
+            !direct_tool_path.contains("ActionExecutor::new"),
+            "execute_tool_call_inner must not construct ActionExecutor directly"
+        );
+        assert!(
+            !direct_tool_path.contains(&direct_execute_call),
+            "execute_tool_call_inner must not call ActionExecutor::execute directly"
         );
     }
 }

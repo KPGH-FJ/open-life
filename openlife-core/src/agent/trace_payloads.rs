@@ -158,14 +158,25 @@ pub fn build_replay_failed_payload(
     failure_kind: Option<impl Into<String>>,
     extra: Option<Value>,
 ) -> Value {
+    let run_id = run_id.into();
+    let block_reason = block_reason.map(|s| s.into());
+    let failure_kind = failure_kind.map(|s| s.into());
+    let reason = block_reason
+        .clone()
+        .or_else(|| failure_kind.clone())
+        .unwrap_or_else(|| "unknown".to_string());
     let mut payload = json!({
         "status": "failed",
-        "run_id": run_id.into(),
+        "run_id": run_id,
+        "original_run_id": run_id,
         "action_id": action_id.into(),
         "replay_of_action_id": replay_of_action_id.into(),
+        "proposal_id": null,
+        "agent_spec_id": null,
+        "reason": reason,
         "human_message": human_message.into(),
-        "block_reason": block_reason.map(|s| Value::String(s.into())),
-        "failure_kind": failure_kind.map(|s| Value::String(s.into())),
+        "block_reason": block_reason.map(Value::String),
+        "failure_kind": failure_kind.map(Value::String),
     });
     if let Some(extra_map) = extra.and_then(|v| v.as_object().cloned()) {
         if let Some(obj) = payload.as_object_mut() {
@@ -186,11 +197,14 @@ pub fn build_replay_started_payload(
     tool_name: impl Into<String>,
     source: impl Into<String>,
 ) -> Value {
+    let run_id = run_id.into();
     json!({
         "status": "started",
-        "run_id": run_id.into(),
+        "run_id": run_id,
+        "original_run_id": run_id,
         "action_id": action_id.into(),
         "replay_of_action_id": replay_of_action_id.into(),
+        "proposal_id": null,
         "agent_spec_id": agent_spec_id.into(),
         "tool_name": tool_name.into(),
         "source": source.into(),
@@ -211,17 +225,29 @@ pub fn build_replay_completed_payload(
     proposal_reason: Option<impl Into<String>>,
     failure_kind: Option<impl Into<String>>,
 ) -> Value {
+    let run_id = run_id.into();
+    let block_reason = block_reason.map(|s| s.into());
+    let proposal_reason = proposal_reason.map(|s| s.into());
+    let failure_kind = failure_kind.map(|s| s.into());
+    let reason = block_reason
+        .clone()
+        .or_else(|| proposal_reason.clone())
+        .or_else(|| failure_kind.clone())
+        .unwrap_or_else(|| "completed".to_string());
     json!({
         "status": outcome_status.into(),
-        "run_id": run_id.into(),
+        "run_id": run_id,
+        "original_run_id": run_id,
         "action_id": action_id.into(),
         "replay_of_action_id": replay_of_action_id.into(),
+        "proposal_id": null,
         "agent_spec_id": agent_spec_id.into(),
         "tool_name": tool_name.into(),
         "source": source.into(),
-        "block_reason": block_reason.map(|s| Value::String(s.into())),
-        "proposal_reason": proposal_reason.map(|s| Value::String(s.into())),
-        "failure_kind": failure_kind.map(|s| Value::String(s.into())),
+        "reason": reason,
+        "block_reason": block_reason.map(Value::String),
+        "proposal_reason": proposal_reason.map(Value::String),
+        "failure_kind": failure_kind.map(Value::String),
     })
 }
 
