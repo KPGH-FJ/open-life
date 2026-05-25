@@ -1607,7 +1607,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_runtime_remains_unmigrated_no_chat_fallback_source_audit() {
+    fn skill_runtime_stays_outside_chat_facade_no_fallback_source_audit() {
         let source = include_str!("commands/execution.rs");
         let start = source
             .find("pub(crate) async fn run_skill_with_state")
@@ -2205,7 +2205,7 @@ mod tests {
         let required_facts = [
             "Builder prompt remains legacy/ad hoc",
             "Calibration prompt remains legacy/ad hoc",
-            "Skill-specific facade boundary remains unbuilt",
+            "Skill runtime remains outside Chat ExecutionFacade",
             "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace",
             "PromptStack assembled event payload is metadata-only and excludes raw prompt",
             "Context governance event payload is metadata-only and excludes raw LifeModel",
@@ -2281,10 +2281,20 @@ mod tests {
             .find("pub async fn get_skill_run_status")
             .expect("get_skill_run_status should follow run_skill");
         let skill_path = &skill_source[skill_start..skill_end];
-        assert!(skill_path.contains("build_system_prompt"));
-        assert!(skill_path.contains("build_skill_prompt"));
+        assert!(
+            !skill_path.contains("build_system_prompt"),
+            "Skill runtime formal prompt path must not call legacy system prompt builder"
+        );
+        assert!(
+            !skill_path.contains("build_skill_prompt"),
+            "Skill runtime formal prompt path must not call legacy user prompt builder"
+        );
+        assert!(skill_path.contains("with_skill_prompt_blocks"));
+        assert!(skill_path.contains("skill_runtime_block_ids"));
         assert!(skill_path.contains("execute_task_with_spec"));
-        assert!(doc.contains("Skill runtime | SkillRegistry legacy skill system/user prompt"));
+        assert!(doc.contains(
+            "Skill runtime | Skill-specific PromptStack contract blocks derived from SkillManifest"
+        ));
 
         let builder_source = include_str!("commands/builder.rs");
         let calibration_source = include_str!("commands/calibration.rs");

@@ -299,6 +299,88 @@ impl PromptBlock {
         .with_cloud_allowed(true)
     }
 
+    pub fn skill_identity(manifest: &crate::skills::SkillManifest) -> Self {
+        Self::new(
+            format!("skill.{}.identity", manifest.id),
+            "1.0.0",
+            PromptPurpose::Custom("skill_identity".into()),
+            format!(
+                "【Skill Runtime】\nskill_id: {}\nskill_name: {}\nskill_purpose: {}\nrequired_context: {}",
+                manifest.id,
+                manifest.name,
+                manifest.description,
+                render_string_list(&manifest.required_context)
+            ),
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(400)
+        .with_applies_to(vec!["SkillRuntime".into(), manifest.id.clone()])
+    }
+
+    pub fn skill_tool_contract(manifest: &crate::skills::SkillManifest) -> Self {
+        let allowed_tools = if manifest.allowed_tools.is_empty() {
+            "[] (no skill-requested model-callable tools)".to_string()
+        } else {
+            render_string_list(&manifest.allowed_tools)
+        };
+        Self::new(
+            format!("skill.{}.tool_contract", manifest.id),
+            "1.0.0",
+            PromptPurpose::Tool,
+            format!(
+                "【Skill Tool Contract】\nSkillManifest allowed_tools: {}\nOnly use tools that are also allowed by the selected AgentSpec and runtime governance.",
+                allowed_tools
+            ),
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(300)
+        .with_applies_to(vec!["SkillRuntime".into(), manifest.id.clone()])
+    }
+
+    pub fn skill_io_contract(manifest: &crate::skills::SkillManifest) -> Self {
+        Self::new(
+            format!("skill.{}.io_contract", manifest.id),
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            format!(
+                "【Skill IO Contract】\nInput schema:\n{}\n\nOutput schema:\n{}\n\nRequired JSON envelope:\n{{\n  \"summary\": \"...\",\n  \"structured_output\": {{}},\n  \"proposal_candidates\": [],\n  \"warnings\": []\n}}\n\nYou must output one pure JSON envelope. Do not include markdown fences. proposal_candidates may be an empty array. confidence must be between 0.0 and 1.0. proposal_policy: {}",
+                serde_json::to_string_pretty(&manifest.input_schema).unwrap_or_default(),
+                serde_json::to_string_pretty(&manifest.output_schema).unwrap_or_default(),
+                manifest.proposal_policy
+            ),
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(900)
+        .with_applies_to(vec!["SkillRuntime".into(), manifest.id.clone()])
+    }
+
+    pub fn skill_user_input(
+        manifest: &crate::skills::SkillManifest,
+        input: &serde_json::Value,
+        context: &crate::skills::SkillContext,
+    ) -> Self {
+        let id = format!("skill.{}.user_input", manifest.id);
+        let context_labels = skill_context_labels(context);
+        Self::new(
+            id,
+            "1.0.0",
+            PromptPurpose::Task,
+            format!(
+                "【Skill Task Input】\nskill_id: {}\nuser_input_json:\n{}\n\navailable_context_categories: {}\nUse the governed context already provided by AgentRuntime; do not assume unavailable context values.",
+                manifest.id,
+                serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".to_string()),
+                render_string_list(&context_labels)
+            ),
+        )
+        .with_privacy(PromptPrivacyLevel::StrictlyLocal)
+        .with_cloud_allowed(false)
+        .with_token_budget(600)
+        .with_applies_to(vec!["SkillRuntime".into(), manifest.id.clone()])
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -308,6 +390,27 @@ impl PromptBlock {
     pub fn is_cloud_safe(&self) -> bool {
         self.cloud_allowed && !matches!(self.privacy_level, PromptPrivacyLevel::StrictlyLocal)
     }
+}
+
+fn render_string_list(values: &[String]) -> String {
+    serde_json::to_string(values).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn skill_context_labels(context: &crate::skills::SkillContext) -> Vec<String> {
+    let mut labels = Vec::new();
+    if context.life_model_json.is_some() {
+        labels.push("life_model".to_string());
+    }
+    if context.recent_runs_json.is_some() {
+        labels.push("recent_runs".to_string());
+    }
+    if context.recent_memory_json.is_some() {
+        labels.push("recent_memory".to_string());
+    }
+    if context.chat_history_json.is_some() {
+        labels.push("chat_history".to_string());
+    }
+    labels
 }
 
 /// Planning prompt content: planner role, allowed/disallowed tools, output contract.
@@ -571,6 +674,25 @@ impl PromptStack {
         stack
     }
 
+    pub fn skill_runtime_stack(
+        manifest: &crate::skills::SkillManifest,
+        _input: &serde_json::Value,
+        _context: &crate::skills::SkillContext,
+    ) -> Self {
+        Self::new()
+            .with_block(PromptBlock::skill_identity(manifest))
+            .with_block(PromptBlock::skill_tool_contract(manifest))
+            .with_block(PromptBlock::skill_io_contract(manifest))
+            .with_output_schema(manifest.output_schema.clone())
+    }
+
+    pub fn skill_runtime_block_ids(skill_id: &str) -> Vec<String> {
+        ["identity", "tool_contract", "io_contract"]
+            .iter()
+            .map(|suffix| format!("skill.{}.{}", skill_id, suffix))
+            .collect()
+    }
+
     /// Push a block onto the stack.
     pub fn push(&mut self, block: PromptBlock) {
         self.blocks.push(block);
@@ -708,6 +830,19 @@ impl PromptBlockRegistry {
 
     pub fn get(&self, id: &str) -> Option<&PromptBlock> {
         self.blocks.get(id)
+    }
+
+    pub fn with_skill_prompt_blocks(
+        mut self,
+        manifest: &crate::skills::SkillManifest,
+        input: &serde_json::Value,
+        context: &crate::skills::SkillContext,
+    ) -> Self {
+        let stack = PromptStack::skill_runtime_stack(manifest, input, context);
+        for block in stack.blocks {
+            self.blocks.insert(block.id.clone(), block);
+        }
+        self
     }
 
     /// Build a registry with all built-in blocks.
@@ -1154,6 +1289,60 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("unknown prompt block"));
         assert!(err.contains("nonexistent_block"));
+    }
+
+    #[test]
+    fn skill_specific_prompt_stack_contains_manifest_contract_and_metadata() {
+        let manifest = crate::skills::SkillManifest {
+            id: "goal_breakdown".into(),
+            name: "Goal Breakdown".into(),
+            description: "Break long-term goals into milestones.".into(),
+            required_context: vec!["life_model.goals".into(), "state".into()],
+            allowed_tools: vec!["goal.read".into(), "memory.search".into()],
+            execution_budget: Default::default(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"text": {"type": "string"}}
+            }),
+            output_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"summary": {"type": "string"}}
+            }),
+            proposal_policy: "review_required".into(),
+        };
+        let context = crate::skills::SkillContext {
+            life_model_json: Some("{\"raw\":\"must not be in metadata\"}".into()),
+            recent_runs_json: Some("[]".into()),
+            recent_memory_json: None,
+            chat_history_json: None,
+        };
+        let input = serde_json::json!({"text": "make a plan"});
+
+        let mut stack = PromptStack::skill_runtime_stack(&manifest, &input, &context);
+        let assembled = stack.assemble();
+        assert!(assembled.contains("goal_breakdown"));
+        assert!(assembled.contains("Break long-term goals into milestones."));
+        assert!(assembled.contains("goal.read"));
+        assert!(assembled.contains("memory.search"));
+        assert!(assembled.contains("\"text\""));
+        assert!(assembled.contains("\"summary\""));
+        assert!(assembled.contains("\"proposal_candidates\""));
+
+        let trace = stack.block_trace();
+        assert!(trace
+            .iter()
+            .any(|entry| entry.id == "skill.goal_breakdown.identity"));
+        assert!(trace
+            .iter()
+            .any(|entry| entry.id == "skill.goal_breakdown.io_contract"));
+        assert!(!trace
+            .iter()
+            .any(|entry| entry.id == "skill.goal_breakdown.user_input"));
+        assert!(trace.iter().all(|entry| entry.estimated_tokens > 0));
+        let metadata = serde_json::to_string(&trace).unwrap();
+        assert!(!metadata.contains("make a plan"));
+        assert!(!metadata.contains("raw"));
+        assert!(!metadata.contains("Break long-term goals into milestones."));
     }
 
     // ── Post-Beta: PromptBlock factory tests ──────────────────────────

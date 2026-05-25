@@ -201,19 +201,13 @@ pub(crate) async fn run_skill_with_state(
         (lm, ctx)
     };
 
-    // 2. Get manifest and build prompts
-    let (manifest, system_prompt, skill_prompt) = {
+    // 2. Get manifest. Formal Skill instructions are assembled below through
+    // Skill-specific PromptBlocks, not through legacy string prompt builders.
+    let manifest = {
         let registry = state.skill_registry.lock().await;
-        let manifest = registry
+        registry
             .get(&skill_id)
-            .ok_or_else(|| format!("未知技能: {}", skill_id))?;
-        let system = registry
-            .build_system_prompt(&skill_id)
-            .map_err(AppError::from)?;
-        let prompt = registry
-            .build_skill_prompt(&skill_id, &input, &skill_context)
-            .map_err(AppError::from)?;
-        (manifest, system, prompt)
+            .ok_or_else(|| format!("未知技能: {}", skill_id))?
     };
 
     let scheduler = state.scheduler.lock().await.clone();
@@ -223,11 +217,16 @@ pub(crate) async fn run_skill_with_state(
     drop(cfg);
 
     // Resolve stored default AgentSpec for governed execution — fail closed, no fallback.
-    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
     let agent_spec =
         crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)
             .await?;
     validate_skill_agent_spec_tool_policy(&manifest, &agent_spec)?;
+    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in()
+        .with_skill_prompt_blocks(&manifest, &input, &skill_context);
+    let mut skill_agent_spec = agent_spec.clone();
+    skill_agent_spec.prompt_block_ids.extend(
+        openlife_core::agent::prompt_stack::PromptStack::skill_runtime_block_ids(&manifest.id),
+    );
 
     // Create AgentRun before governed execution so events can reference the run_id.
     let mut run = build_skill_agent_run(&skill_id, &input, &agent_spec.id);
@@ -250,21 +249,24 @@ pub(crate) async fn run_skill_with_state(
         ));
     }
 
-    // 3. Create skill task with system prompt (skill prompt as user message)
+    // 3. Create skill task. Skill-specific instructions and user input are
+    // carried by PromptStack blocks registered above.
     let task = openlife_core::agent::AgentTask {
         kind: openlife_core::agent::AgentTaskKind::Skill,
         session_id: format!("skill-{}", skill_id),
-        user_text: skill_prompt.clone(),
-        messages: vec![
-            openlife_core::llm::ChatMessage {
-                role: "system".into(),
-                content: system_prompt,
-            },
-            openlife_core::llm::ChatMessage {
-                role: "user".into(),
-                content: skill_prompt,
-            },
-        ],
+        user_text: input
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        messages: vec![openlife_core::llm::ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "Execute SkillRuntime PromptStack for skill_id: {}.\n\nskill_input_json:\n{}",
+                manifest.id,
+                serde_json::to_string_pretty(&input).unwrap_or_else(|_| "{}".to_string())
+            ),
+        }],
         layer: openlife_core::layer_router::Layer::L2,
         agent_spec_id: Some(agent_spec.id.clone()),
         ..Default::default()
@@ -279,7 +281,7 @@ pub(crate) async fn run_skill_with_state(
             None,
             vec![],
             openlife_core::privacy::PrivacyEngine::default(),
-            &agent_spec,
+            &skill_agent_spec,
             &prompt_registry,
         )
         .await
@@ -884,6 +886,30 @@ mod tests {
             "tool governance error should be readable, got: {}",
             err.message()
         );
+    }
+
+    #[test]
+    fn skill_runtime_source_audit_uses_skill_prompt_blocks_not_legacy_builders() {
+        let source = include_str!("execution.rs");
+        let start = source
+            .find("pub(crate) async fn run_skill_with_state")
+            .expect("run_skill_with_state should exist");
+        let end = source
+            .find("#[tauri::command]\npub async fn get_skill_run_status")
+            .expect("get_skill_run_status should follow run_skill_with_state");
+        let skill_path = &source[start..end];
+
+        assert!(
+            !skill_path.contains(concat!("build_", "system_prompt")),
+            "formal Skill runtime prompt path must not call legacy system prompt builder"
+        );
+        assert!(
+            !skill_path.contains(concat!("build_", "skill_prompt")),
+            "formal Skill runtime prompt path must not call legacy user prompt builder"
+        );
+        assert!(skill_path.contains("with_skill_prompt_blocks"));
+        assert!(skill_path.contains("skill_runtime_block_ids"));
+        assert!(skill_path.contains("execute_task_with_spec"));
     }
 
     #[test]

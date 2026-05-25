@@ -19,7 +19,7 @@ Status: active
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **PromptStack Full-Path Audit / Safety Net**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 ExecutionFacade：真实路径是 SkillRegistry legacy skill prompt 构造 → 必需 stored `AgentSpec` → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Builder / Calibration Proposal-first 安全网继续有效，但 Builder prompt、Calibration prompt、Skill-specific facade 边界、Proactive suggestion trace、Chat proposal extraction 和 web summarization helper 仍未 PromptStack 完成，详见 `openlife_prompt_stack_coverage_audit.md`。
+2026-05-25 当前阶段为 **Skill-specific PromptStack Boundary Migration**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 Chat ExecutionFacade：真实路径是 SkillManifest 派生 Skill-specific PromptBlocks → 必需 stored `AgentSpec` → 追加 Skill PromptBlock IDs 的有效 AgentSpec → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Builder / Calibration Proposal-first 安全网继续有效，但 Builder prompt、Calibration prompt、Chat proposal extraction、web summarization helper、LayeredReasoner internal prompts 和 legacy scheduler generation 仍未 PromptStack 完成，详见 `openlife_prompt_stack_coverage_audit.md`。
 
 ---
 
@@ -137,10 +137,11 @@ Status: active
 - [x] Scheduled/Proactive 事件创建验证：成功 / runtime failure 有 run_id 和 AgentRunEvent 追踪；missing AgentSpec 只记录 scheduler task failure/status；NetworkPolicy hard deny/ask 与 Sandbox deny 写 typed `tool.call_blocked`；scheduler failure 不标 completed；late completion 不覆盖并发 terminal state；Proactive suggestions 保持 suggestion-only 且无 Chat fallback
 - [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试
 - [x] Replay-specific facade/wrapper 正式迁移：`replay_action_internal` 调用 `run_tauri_replay_execution`；不直接构造 `ActionExecutor`；不使用 Chat facade；不写 Proposal status
-- [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration / Skill runtime 仍未迁移
+- [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration 仍未迁移；Skill runtime 仍未迁入 ExecutionFacade
 - [x] Scheduled/Proactive 事件创建验证
 - [x] Builder/Calibration 事件创建验证：`builder_create_proposals` 与 Calibration Proposal-first 路径写 metadata-only `proposal.created` events；payload 不包含 raw prompt、`before` / `after`、完整 LifeModel；source audit 证明无 Chat facade / fallback；ProposalStatus-gated apply 已有测试保护；`apply_calibration` 缺省 mode 和前端正式按钮默认创建 proposals，legacy `direct` 默认关闭并由 `system.allow_legacy_calibration_direct_apply` 门控，普通 UI 不暴露
-- [x] Skill runtime 迁移前审计与安全网：确认 `run_skill` 仍是模型生成 + skill envelope/proposal 执行的混合路径，不是 Chat facade；补 missing AgentSpec fail-closed、AgentSpec restricted toolset、PromptStack/model failure observability、payload 脱敏、success response shape、no Chat fallback / no wrapper masquerade source audit 测试；Skill runtime 仍未迁移
+- [x] Skill runtime 迁移前审计与安全网：确认 `run_skill` 仍是模型生成 + skill envelope/proposal 执行的混合路径，不是 Chat facade；补 missing AgentSpec fail-closed、AgentSpec restricted toolset、PromptStack/model failure observability、payload 脱敏、success response shape、no Chat fallback / no wrapper masquerade source audit 测试；该项为 Skill-specific PromptStack 迁移前安全网，ExecutionFacade 迁移仍未进行
+- [x] Skill-specific PromptStack boundary migration：`run_skill_with_state` 不再把 `SkillRegistry::build_system_prompt` / `build_skill_prompt` 作为正式 prompt path；SkillManifest / skill_id 生成 Skill contract PromptBlocks，并追加到有效 AgentSpec 后继续通过 `AgentRuntime::execute_task_with_spec`；raw user input 改由 user message 承载，不参与 Skill system block 边界；SummaryOnly 云端路径保留非敏感 Skill contract / JSON envelope / proposal policy，同时过滤 raw user input、raw LifeModel、raw memory、recent runs、chat history，并有 marker injection 测试保护；保持 missing AgentSpec fail-closed、restricted toolset、failed Skill AgentRun、metadata-only events 和前端 response shape
 
 ### 2.3 PromptStack 全路径审计
 
@@ -153,7 +154,7 @@ Status: active
 - [x] 补行为测试：StreamChat unknown PromptBlock fail closed；既有 Chat / Scheduled / Skill unknown PromptBlock 测试继续覆盖；payload contract 继续锁定 no raw prompt / no raw LifeModel
 - [ ] 接入尚未通过 PromptStack 的路径
 - [ ] PromptBlock 版本记录到 AgentRunEvent
-- [ ] 将 Builder prompt、Calibration prompt（若继续为模型生成）、Skill-specific prompt、Chat proposal extraction、web summarization helper 迁入专用 PromptStack 边界
+- [ ] 将 Builder prompt、Calibration prompt（若继续为模型生成）、Chat proposal extraction、web summarization helper、LayeredReasoner internal prompts、legacy scheduler generation 迁入或明确保留为专用 legacy 边界
 
 ### Phase 2 门控
 
