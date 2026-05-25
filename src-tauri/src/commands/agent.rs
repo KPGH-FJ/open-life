@@ -311,44 +311,25 @@ pub(crate) async fn replay_action_internal(
         let _ = event_store.append_event(&event);
     }
 
-    let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
+    let cfg = state.config.lock().await.clone();
     let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
-        &cfg.system.execution_sandbox,
-        &safe_paths,
+    let assembly = crate::execution_facade::build_runtime_assembly_config(
+        &cfg,
+        crate::execution_facade::TauriAgentExecutionMode::Replay,
+        state.shutdown_notify.clone(),
     );
-    drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
 
-    let executor =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
-            consume_allow_once: true,
-            ..Default::default()
-        });
-    let ctx = openlife_core::agent::ActionContext {
-        registry: state.mcp_registry.clone(),
-        permission_store: state.tool_permission_store.clone(),
-        audit_store: state.mcp_audit_store.clone(),
-        privacy_engine: state.privacy_engine.clone(),
-        safe_paths,
-        life_model: Some(life_model.clone()),
-        memory_store: Some(state.memory_store.clone()),
-        proposal_store: state.proposal_store.clone(),
-        agent_run_store: state.agent_run_store.clone(),
-        event_store: state
-            .agent_run_event_store
-            .as_ref()
-            .map(|es| (**es).clone()),
-        network_policy: Some(network_policy),
-        calendar_ics_paths,
-        execution_sandbox,
-        agent_spec: Some(agent_spec.clone()),
-    };
+    let ctx = crate::execution_facade::build_governed_action_context(
+        state,
+        &assembly,
+        Some(life_model.clone()),
+        Some(state.memory_store.clone()),
+        agent_spec.clone(),
+    );
 
     let request = openlife_core::agent::AgentActionRequest {
         action_type: action.action_type.clone(),
@@ -358,7 +339,16 @@ pub(crate) async fn replay_action_internal(
         step_index: action_idx as u32,
     };
 
-    let exec_result = match executor.execute(request, &ctx).await {
+    let replay_outcome = match crate::execution_facade::run_tauri_replay_execution(
+        crate::execution_facade::TauriReplayExecutionInput {
+            request,
+            action_ctx: ctx,
+            agent_spec: agent_spec.clone(),
+            network_policy,
+        },
+    )
+    .await
+    {
         Ok(r) => r,
         Err(e) => {
             record_replay_failed(
@@ -369,12 +359,19 @@ pub(crate) async fn replay_action_internal(
                 Some(&replay_source),
                 Some(&agent_spec_id),
             );
-            return Err(AppError::from(e));
+            return Err(match e.kind {
+                crate::execution_facade::TauriExecutionFacadeErrorKind::Governance => {
+                    AppError::permission(e.message)
+                }
+                crate::execution_facade::TauriExecutionFacadeErrorKind::Runtime => {
+                    AppError::internal(e.message)
+                }
+            });
         }
     };
 
-    let mut new_action = exec_result.action;
-    let mut new_observation = exec_result.observation;
+    let mut new_action = replay_outcome.action.clone();
+    let mut new_observation = replay_outcome.observation.clone();
     new_action.id = action_id.to_string();
     new_observation.action_id = Some(action_id.to_string());
 
@@ -420,13 +417,13 @@ pub(crate) async fn replay_action_internal(
     }
 
     // ── Record replay outcome event with typed result ─────────────────
-    let outcome_status = match exec_result.status {
+    let outcome_status = match replay_outcome.status {
         ActionExecutionStatus::Succeeded => "completed",
         ActionExecutionStatus::Blocked => "blocked",
         ActionExecutionStatus::NeedsConfirmation => "needs_confirmation",
         ActionExecutionStatus::Failed => "failed",
     };
-    let event_type = if exec_result.status == ActionExecutionStatus::Failed {
+    let event_type = if replay_outcome.status == ActionExecutionStatus::Failed {
         AgentRunEventType::ReplayFailed
     } else {
         AgentRunEventType::ReplayCompleted
@@ -434,10 +431,10 @@ pub(crate) async fn replay_action_internal(
     let human_msg = format!("Replay {} for action {}", outcome_status, action_id);
 
     if let Some(ref event_store) = state.agent_run_event_store {
-        let payload = if exec_result.status == ActionExecutionStatus::Failed {
+        let payload = if replay_outcome.status == ActionExecutionStatus::Failed {
             let (block_reason, failure_kind) = match (
-                exec_result.block_reason.as_ref(),
-                exec_result.failure_kind.as_ref(),
+                replay_outcome.block_reason.as_ref(),
+                replay_outcome.failure_kind.as_ref(),
             ) {
                 (Some(br), _) => (Some(br.to_string()), None),
                 (None, Some(fk)) => (None, Some(fk.to_string())),
@@ -466,9 +463,9 @@ pub(crate) async fn replay_action_internal(
                 &agent_spec_id,
                 &replay_tool_name,
                 &replay_source,
-                exec_result.block_reason.map(|r| r.to_string()),
-                exec_result.proposal_reason.map(|r| r.to_string()),
-                exec_result.failure_kind.map(|r| r.to_string()),
+                replay_outcome.block_reason.map(|r| r.to_string()),
+                replay_outcome.proposal_reason.map(|r| r.to_string()),
+                replay_outcome.failure_kind.map(|r| r.to_string()),
             )
         };
         let event = AgentRunEvent::new(

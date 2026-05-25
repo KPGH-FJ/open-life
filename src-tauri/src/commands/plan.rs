@@ -1,6 +1,6 @@
 use crate::errors::AppError;
 use crate::AppState;
-use openlife_core::agent::{AgentPlan, PlanExecutionError, PlanExecutor, PlanOperationResult};
+use openlife_core::agent::{AgentPlan, PlanOperationResult};
 use std::sync::Arc;
 use tauri::{Emitter, State};
 
@@ -174,107 +174,18 @@ pub async fn execute_agent_plan(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<PlanOperationResult, AppError> {
-    let plan_store_arc = state
-        .plan_store
-        .as_ref()
-        .ok_or_else(|| AppError::internal("PlanStore not available"))?
-        .clone();
-
-    let plan = {
-        let store = plan_store_arc.lock().await;
-        store
-            .get_plan(&plan_id)
-            .map_err(AppError::from)?
-            .ok_or_else(|| AppError::not_found("Plan not found"))?
-    };
-
-    let run_id = plan.run_id.clone().unwrap_or_else(|| plan.id.clone());
-
-    // Reject unconfirmed high-risk plans early.
-    if plan.requires_confirmation
-        && !matches!(plan.status, openlife_core::agent::PlanStatus::Confirmed)
-    {
-        return Ok(PlanOperationResult {
+    let outcome = crate::execution_facade::run_tauri_plan_execution(
+        crate::execution_facade::TauriPlanExecutionInput {
             plan_id,
-            run_id: plan.run_id,
-            operation: "execute".to_string(),
-            success: false,
-            status: plan.status,
-            steps_completed: None,
-            steps_failed: None,
-            deviations: vec![],
-            review_verdict: None,
-            message: Some("plan requires confirmation before execution".to_string()),
-        });
-    }
-
-    let event_store = state
-        .agent_run_event_store
-        .as_ref()
-        .map(|es| (**es).clone());
-
-    let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
-    let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
-        &cfg.system.execution_sandbox,
-        &safe_paths,
-    );
-    drop(cfg);
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
-
-    let ctx = crate::execution_deps::assemble_action_context(
-        state.mcp_registry.clone(),
-        state.tool_permission_store.clone(),
-        state.mcp_audit_store.clone(),
-        state.privacy_engine.clone(),
-        safe_paths.clone(),
-        Some(life_model.clone()),
-        Some(state.memory_store.clone()),
-        calendar_ics_paths.clone(),
-        network_policy.clone(),
-        execution_sandbox,
-        openlife_core::agent::types::AgentSpec::default_main_spec(),
-        state.proposal_store.clone(),
-        state.agent_run_store.clone(),
-        event_store.clone(),
-    );
-
-    // Resolve stored AgentSpec: plan-bound spec first, then stored default.
-    let agent_spec = state
-        .agent_spec_store
-        .lock()
-        .await
-        .resolve_spec(plan.agent_spec_id.as_deref())
-        .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
-            openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
-                AppError::not_found(e.to_string())
-            }
-            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => {
-                AppError::permission(e.to_string())
-            }
-            _ => AppError::internal(e.to_string()),
-        })?;
-
-    let plan_is_confirmed = matches!(plan.status, openlife_core::agent::PlanStatus::Confirmed);
-    let result = run_plan_execution(
-        &plan_id,
-        &run_id,
-        plan_store_arc,
-        event_store,
-        ctx,
-        &app_handle,
-        &openlife_core::agent::DefaultPlanReviewGate,
-        agent_spec,
-        plan_is_confirmed,
+            app_state: state.inner().clone(),
+            operation: crate::execution_facade::TauriPlanExecutionOperation::Execute,
+        },
     )
-    .await;
+    .await
+    .map_err(plan_facade_error_to_app_error)?;
 
-    Ok(result)
+    emit_plan_execution_done(&app_handle, &outcome.result, outcome.emit_done);
+    Ok(outcome.result)
 }
 
 #[tauri::command]
@@ -283,138 +194,58 @@ pub async fn retry_agent_plan(
     app_handle: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<PlanOperationResult, AppError> {
-    let plan_store_arc = state
-        .plan_store
-        .as_ref()
-        .ok_or_else(|| AppError::internal("PlanStore not available"))?
-        .clone();
+    let outcome = crate::execution_facade::run_tauri_plan_execution(
+        crate::execution_facade::TauriPlanExecutionInput {
+            plan_id,
+            app_state: state.inner().clone(),
+            operation: crate::execution_facade::TauriPlanExecutionOperation::Retry,
+        },
+    )
+    .await
+    .map_err(plan_facade_error_to_app_error)?;
 
-    let mut plan = {
-        let store = plan_store_arc.lock().await;
-        store
-            .get_plan(&plan_id)
-            .map_err(AppError::from)?
-            .ok_or_else(|| AppError::not_found("Plan not found"))?
-    };
+    emit_plan_execution_done(&app_handle, &outcome.result, outcome.emit_done);
+    Ok(outcome.result)
+}
 
-    // Only Failed and FailedReview plans are retryable.
-    match plan.status {
-        openlife_core::agent::PlanStatus::Failed
-        | openlife_core::agent::PlanStatus::FailedReview => {}
-        _ => {
-            return Ok(PlanOperationResult {
-                plan_id,
-                run_id: plan.run_id,
-                operation: "retry".to_string(),
-                success: false,
-                status: plan.status,
-                steps_completed: None,
-                steps_failed: None,
-                deviations: vec![],
-                review_verdict: None,
-                message: Some(format!("cannot retry plan in status {:?}", plan.status)),
-            });
+fn plan_facade_error_to_app_error(
+    error: crate::execution_facade::TauriExecutionFacadeError,
+) -> AppError {
+    match error.kind {
+        crate::execution_facade::TauriExecutionFacadeErrorKind::Governance => {
+            if error.message.contains("not found") {
+                AppError::not_found(error.message)
+            } else {
+                AppError::permission(error.message)
+            }
+        }
+        crate::execution_facade::TauriExecutionFacadeErrorKind::Runtime => {
+            if error.message == "Plan not found" {
+                AppError::not_found(error.message)
+            } else {
+                AppError::internal(error.message)
+            }
         }
     }
+}
 
-    let run_id = plan.run_id.clone().unwrap_or_else(|| plan.id.clone());
-
-    // Record retry requested — always, even if setup later fails.
-    if let Some(ref es) = state.agent_run_event_store {
-        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
-            &run_id,
-            openlife_core::agent::AgentRunEventType::PlanRetryRequested,
-            openlife_core::agent::AgentEventActor::User,
-            format!("plan {} retry requested", plan_id),
-            serde_json::json!({"plan_id": plan_id}),
-        ));
+fn emit_plan_execution_done(
+    app_handle: &tauri::AppHandle,
+    result: &PlanOperationResult,
+    emit_done: bool,
+) {
+    if !emit_done {
+        return;
     }
-
-    // Build execution context BEFORE mutating plan status.
-    // If context setup fails, the plan stays in its terminal state.
-    let event_store = state
-        .agent_run_event_store
-        .as_ref()
-        .map(|es| (**es).clone());
-
-    let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
-    let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
-        &cfg.system.execution_sandbox,
-        &safe_paths,
+    let _ = app_handle.emit(
+        "plan-execution-done",
+        serde_json::json!({
+            "run_id": result.run_id,
+            "plan_id": result.plan_id,
+            "success": result.success,
+            "status": result.status.to_string(),
+        }),
     );
-    drop(cfg);
-    let life_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
-
-    let ctx = crate::execution_deps::assemble_action_context(
-        state.mcp_registry.clone(),
-        state.tool_permission_store.clone(),
-        state.mcp_audit_store.clone(),
-        state.privacy_engine.clone(),
-        safe_paths.clone(),
-        Some(life_model.clone()),
-        Some(state.memory_store.clone()),
-        calendar_ics_paths.clone(),
-        network_policy.clone(),
-        execution_sandbox,
-        openlife_core::agent::types::AgentSpec::default_main_spec(),
-        state.proposal_store.clone(),
-        state.agent_run_store.clone(),
-        event_store.clone(),
-    );
-
-    // Resolve AgentSpec BEFORE mutating plan state.
-    let agent_spec = state
-        .agent_spec_store
-        .lock()
-        .await
-        .resolve_spec(plan.agent_spec_id.as_deref())
-        .map_err(|e: openlife_core::agent::AgentSpecStoreError| match &e {
-            openlife_core::agent::AgentSpecStoreError::NotFound(_) => {
-                AppError::not_found(e.to_string())
-            }
-            openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => {
-                AppError::permission(e.to_string())
-            }
-            _ => AppError::internal(e.to_string()),
-        })?;
-
-    // Spec resolved, context built — now atomically reset plan for retry.
-    plan.retry();
-    {
-        let store = plan_store_arc.lock().await;
-        store.update_plan(&plan).map_err(AppError::from)?;
-    }
-    if let Some(ref es) = state.agent_run_event_store {
-        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
-            &run_id,
-            openlife_core::agent::AgentRunEventType::PlanRetryStarted,
-            openlife_core::agent::AgentEventActor::Runtime,
-            format!("plan {} retry started", plan_id),
-            serde_json::json!({"plan_id": plan_id}),
-        ));
-    }
-
-    let mut result = run_plan_execution(
-        &plan_id,
-        &run_id,
-        plan_store_arc,
-        event_store,
-        ctx,
-        &app_handle,
-        &openlife_core::agent::DefaultPlanReviewGate,
-        agent_spec,
-        true, // plan.retry() sets status to Confirmed
-    )
-    .await;
-    result.operation = "retry".to_string();
-
-    Ok(result)
 }
 
 #[tauri::command]
@@ -493,184 +324,6 @@ pub async fn cancel_agent_plan(
         review_verdict: None,
         message: Some("plan cancelled".to_string()),
     })
-}
-
-/// Run the plan execution core: execute steps through PlanExecutor,
-/// build PlanOperationResult, and emit plan-execution-done.
-///
-/// Both `execute_agent_plan` and `retry_agent_plan` route through this
-/// after their respective pre-checks are complete.
-#[allow(clippy::too_many_arguments)]
-async fn run_plan_execution(
-    plan_id: &str,
-    run_id: &str,
-    plan_store_arc: Arc<tokio::sync::Mutex<openlife_core::agent::PlanStore>>,
-    event_store: Option<openlife_core::agent::event_store::AgentRunEventStore>,
-    ctx: openlife_core::agent::ActionContext,
-    app_handle: &tauri::AppHandle,
-    review_gate: &impl openlife_core::agent::PlanReviewGate,
-    agent_spec: openlife_core::agent::AgentSpec,
-    allow_writes: bool,
-) -> PlanOperationResult {
-    let executor_config = openlife_core::agent::ActionExecutorConfig {
-        allow_writes,
-        ..Default::default()
-    };
-    let action_executor = openlife_core::agent::ActionExecutor::new(executor_config);
-    let plan_executor =
-        PlanExecutor::new(plan_store_arc.clone(), event_store).with_agent_spec(agent_spec);
-
-    let execution_result = plan_executor
-        .execute_with_review(
-            plan_id,
-            run_id,
-            {
-                let action_executor = action_executor.clone();
-                let ctx = ctx.clone();
-                let plan_id_owned = plan_id.to_string();
-                let run_id_owned = run_id.to_string();
-                move |step, intent| {
-                    let tool_name = intent
-                        .map(|i| i.tool_name.clone())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let step_index = step.index;
-                    let step_description = step.description.clone();
-                    let tool_intent_name = intent.map(|i| i.tool_name.clone());
-
-                    let request = openlife_core::agent::AgentActionRequest {
-                        action_type: "builtin_tool".to_string(),
-                        target: tool_name.clone(),
-                        input: serde_json::json!({
-                            "plan_step": step_index,
-                            "description": step_description,
-                            "plan_id": plan_id_owned,
-                        }),
-                        source_run_id: Some(run_id_owned.clone()),
-                        step_index,
-                    };
-
-                    let executor = action_executor.clone();
-                    let ctx = ctx.clone();
-                    async move {
-                        match executor.execute(request, &ctx).await {
-                            Ok(result) => {
-                                let success = matches!(
-                                    result.status,
-                                    openlife_core::agent::ActionExecutionStatus::Succeeded
-                                );
-                                let deviation = if result
-                                    .action
-                                    .tool_scope
-                                    .as_ref()
-                                    .map(|s| &s.tool_name)
-                                    != tool_intent_name.as_ref()
-                                {
-                                    Some("executed tool scope differs from plan intent".to_string())
-                                } else {
-                                    None
-                                };
-                                openlife_core::agent::PlanStepExecutionResult {
-                                    step_index,
-                                    tool_name,
-                                    success,
-                                    output: Some(result.observation.content),
-                                    error: if success { None } else { result.stop_reason },
-                                    duration_ms: 0,
-                                    deviation,
-                                }
-                            }
-                            Err(e) => openlife_core::agent::PlanStepExecutionResult {
-                                step_index,
-                                tool_name,
-                                success: false,
-                                output: None,
-                                error: Some(e.to_string()),
-                                duration_ms: 0,
-                                deviation: None,
-                            },
-                        }
-                    }
-                }
-            },
-            review_gate,
-        )
-        .await;
-
-    let mut result = match execution_result {
-        Ok(outcome) => {
-            let (status, review_verdict) = if outcome.success {
-                (
-                    openlife_core::agent::PlanStatus::Completed,
-                    Some("approved".to_string()),
-                )
-            } else {
-                (openlife_core::agent::PlanStatus::Failed, None)
-            };
-            PlanOperationResult {
-                plan_id: plan_id.to_string(),
-                run_id: Some(run_id.to_string()),
-                operation: "execute".to_string(),
-                success: outcome.success,
-                status,
-                steps_completed: Some(outcome.steps_completed),
-                steps_failed: Some(outcome.steps_failed),
-                deviations: outcome.deviations,
-                review_verdict,
-                message: if outcome.success {
-                    Some("plan executed successfully".to_string())
-                } else {
-                    Some("plan execution failed".to_string())
-                },
-            }
-        }
-        Err(PlanExecutionError::ReviewFailed(msg)) => PlanOperationResult {
-            plan_id: plan_id.to_string(),
-            run_id: Some(run_id.to_string()),
-            operation: "execute".to_string(),
-            success: false,
-            status: openlife_core::agent::PlanStatus::FailedReview,
-            steps_completed: None,
-            steps_failed: None,
-            deviations: vec![],
-            review_verdict: Some("rejected".to_string()),
-            message: Some(msg),
-        },
-        Err(e) => PlanOperationResult {
-            plan_id: plan_id.to_string(),
-            run_id: Some(run_id.to_string()),
-            operation: "execute".to_string(),
-            success: false,
-            status: openlife_core::agent::PlanStatus::Failed,
-            steps_completed: None,
-            steps_failed: None,
-            deviations: vec![],
-            review_verdict: None,
-            message: Some(format!("plan execution error: {}", e)),
-        },
-    };
-
-    // Re-read persisted plan to capture final status (e.g. Cancelled mid-execution).
-    let guard = plan_store_arc.lock().await;
-    if let Ok(Some(persisted)) = guard.get_plan(plan_id) {
-        result.status = persisted.status;
-        result.success =
-            result.success && persisted.status == openlife_core::agent::PlanStatus::Completed;
-        if persisted.status == openlife_core::agent::PlanStatus::Cancelled {
-            result.message = Some("plan was cancelled".to_string());
-        }
-    }
-
-    let _ = app_handle.emit(
-        "plan-execution-done",
-        serde_json::json!({
-            "run_id": run_id,
-            "plan_id": plan_id,
-            "success": result.success,
-            "status": result.status.to_string(),
-        }),
-    );
-
-    result
 }
 
 #[tauri::command]
@@ -957,6 +610,7 @@ pub async fn edit_agent_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlife_core::agent::{PlanExecutionError, PlanExecutor};
 
     #[tokio::test]
     async fn test_confirm_agent_plan_changes_status_to_confirmed() {

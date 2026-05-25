@@ -15,6 +15,7 @@ use openlife_core::agent::prompt_stack::PromptBlockRegistry;
 use openlife_core::agent::types::{AgentLoopStatusUpdate, AgentRunStatus, AgentSpec};
 use openlife_core::agent::{
     ActionExecutionStatus, AgentActionRequest, AgentLoop, AgentLoopResult, AgentRun, AgentTask,
+    PlanExecutionError, PlanOperationResult,
 };
 use openlife_core::config::{AppConfig, NetworkPolicy};
 use openlife_core::life_model::LifeModel;
@@ -34,6 +35,8 @@ pub enum TauriAgentExecutionMode {
     ToolExecution,
     /// Replay of a previously blocked action.
     Replay,
+    /// Plan step execution with plan confirmation/review/deviation semantics.
+    PlanExecution,
     /// Interactive LifeModel builder path; not migrated in Batch B.
     Builder,
     /// LifeModel calibration path; not migrated in Batch B.
@@ -151,6 +154,41 @@ pub struct TauriScheduledExecutionOutcome {
     pub result_preview: String,
     pub run: AgentRun,
     pub status_updates: Vec<AgentLoopStatusUpdate>,
+}
+
+pub struct TauriReplayExecutionInput {
+    pub request: AgentActionRequest,
+    pub action_ctx: ActionContext,
+    pub agent_spec: AgentSpec,
+    pub network_policy: NetworkPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TauriPlanExecutionOperation {
+    Execute,
+    Retry,
+}
+
+pub struct TauriPlanExecutionInput {
+    pub plan_id: String,
+    pub app_state: Arc<AppState>,
+    pub operation: TauriPlanExecutionOperation,
+}
+
+#[derive(Debug)]
+pub struct TauriReplayExecutionOutcome {
+    pub action: openlife_core::agent::AgentAction,
+    pub observation: openlife_core::agent::AgentObservation,
+    pub status: ActionExecutionStatus,
+    pub block_reason: Option<openlife_core::agent::action_executor::ExecutionBlockReason>,
+    pub proposal_reason: Option<openlife_core::agent::action_executor::ExecutionProposalReason>,
+    pub failure_kind: Option<openlife_core::agent::action_executor::ExecutionFailureKind>,
+}
+
+#[derive(Debug)]
+pub struct TauriPlanExecutionOutcome {
+    pub result: PlanOperationResult,
+    pub emit_done: bool,
 }
 
 impl TauriAgentExecutionOutcome {
@@ -419,6 +457,371 @@ pub async fn run_tauri_scheduled_execution(
     Ok(result)
 }
 
+pub async fn run_tauri_replay_execution(
+    input: TauriReplayExecutionInput,
+) -> Result<TauriReplayExecutionOutcome, TauriExecutionFacadeError> {
+    validate_replay_execution(&input)?;
+
+    let executor =
+        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
+            consume_allow_once: true,
+            ..Default::default()
+        });
+    let result = executor
+        .execute(input.request, &input.action_ctx)
+        .await
+        .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?;
+
+    Ok(TauriReplayExecutionOutcome {
+        action: result.action,
+        observation: result.observation,
+        status: result.status,
+        block_reason: result.block_reason,
+        proposal_reason: result.proposal_reason,
+        failure_kind: result.failure_kind,
+    })
+}
+
+pub async fn run_tauri_plan_execution(
+    input: TauriPlanExecutionInput,
+) -> Result<TauriPlanExecutionOutcome, TauriExecutionFacadeError> {
+    let plan_store_arc = input
+        .app_state
+        .plan_store
+        .as_ref()
+        .ok_or_else(|| TauriExecutionFacadeError::governance("PlanStore not available"))?
+        .clone();
+
+    let mut plan = {
+        let store = plan_store_arc.lock().await;
+        store
+            .get_plan(&input.plan_id)
+            .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?
+            .ok_or_else(|| TauriExecutionFacadeError::runtime("Plan not found"))?
+    };
+    let run_id = plan.run_id.clone().unwrap_or_else(|| plan.id.clone());
+
+    match input.operation {
+        TauriPlanExecutionOperation::Execute => {
+            if plan.requires_confirmation
+                && !matches!(plan.status, openlife_core::agent::PlanStatus::Confirmed)
+            {
+                return Ok(TauriPlanExecutionOutcome {
+                    result: PlanOperationResult {
+                        plan_id: input.plan_id,
+                        run_id: plan.run_id,
+                        operation: "execute".to_string(),
+                        success: false,
+                        status: plan.status,
+                        steps_completed: None,
+                        steps_failed: None,
+                        deviations: vec![],
+                        review_verdict: None,
+                        message: Some("plan requires confirmation before execution".to_string()),
+                    },
+                    emit_done: false,
+                });
+            }
+        }
+        TauriPlanExecutionOperation::Retry => match plan.status {
+            openlife_core::agent::PlanStatus::Failed
+            | openlife_core::agent::PlanStatus::FailedReview => {
+                record_plan_retry_event(
+                    &input.app_state,
+                    &run_id,
+                    &input.plan_id,
+                    openlife_core::agent::AgentRunEventType::PlanRetryRequested,
+                    openlife_core::agent::AgentEventActor::User,
+                    "retry requested",
+                );
+            }
+            _ => {
+                return Ok(TauriPlanExecutionOutcome {
+                    result: PlanOperationResult {
+                        plan_id: input.plan_id,
+                        run_id: plan.run_id,
+                        operation: "retry".to_string(),
+                        success: false,
+                        status: plan.status,
+                        steps_completed: None,
+                        steps_failed: None,
+                        deviations: vec![],
+                        review_verdict: None,
+                        message: Some(format!("cannot retry plan in status {:?}", plan.status)),
+                    },
+                    emit_done: false,
+                });
+            }
+        },
+    }
+
+    let cfg = input.app_state.config.lock().await.clone();
+    let assembly = build_runtime_assembly_config(
+        &cfg,
+        TauriAgentExecutionMode::PlanExecution,
+        input.app_state.shutdown_notify.clone(),
+    );
+    let life_model = {
+        let manager = input.app_state.life_model_manager.lock().await;
+        manager
+            .load()
+            .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?
+    };
+    let agent_spec = resolve_plan_agent_spec_fail_closed(&input.app_state, &plan).await?;
+    let action_ctx = build_governed_action_context(
+        &input.app_state,
+        &assembly,
+        Some(life_model),
+        Some(input.app_state.memory_store.clone()),
+        agent_spec.clone(),
+    );
+    validate_plan_execution(&action_ctx, &agent_spec, &assembly.network_policy)?;
+
+    if matches!(input.operation, TauriPlanExecutionOperation::Retry) {
+        plan.retry();
+        {
+            let store = plan_store_arc.lock().await;
+            store
+                .update_plan(&plan)
+                .map_err(|e| TauriExecutionFacadeError::runtime(e.to_string()))?;
+        }
+        record_plan_retry_event(
+            &input.app_state,
+            &run_id,
+            &input.plan_id,
+            openlife_core::agent::AgentRunEventType::PlanRetryStarted,
+            openlife_core::agent::AgentEventActor::Runtime,
+            "retry started",
+        );
+    }
+
+    let allow_writes = matches!(
+        plan.status,
+        openlife_core::agent::PlanStatus::Confirmed | openlife_core::agent::PlanStatus::Executing
+    );
+    let event_store = input
+        .app_state
+        .agent_run_event_store
+        .as_ref()
+        .map(|es| (**es).clone());
+    let mut result = run_plan_execution_core(
+        &input.plan_id,
+        &run_id,
+        plan_store_arc,
+        event_store,
+        action_ctx,
+        &openlife_core::agent::DefaultPlanReviewGate,
+        agent_spec,
+        allow_writes,
+    )
+    .await;
+    if matches!(input.operation, TauriPlanExecutionOperation::Retry) {
+        result.operation = "retry".to_string();
+    }
+
+    Ok(TauriPlanExecutionOutcome {
+        result,
+        emit_done: true,
+    })
+}
+
+async fn resolve_plan_agent_spec_fail_closed(
+    state: &Arc<AppState>,
+    plan: &openlife_core::agent::AgentPlan,
+) -> Result<AgentSpec, TauriExecutionFacadeError> {
+    state
+        .agent_spec_store
+        .lock()
+        .await
+        .resolve_spec(plan.agent_spec_id.as_deref())
+        .map_err(|e| match e {
+            openlife_core::agent::AgentSpecStoreError::NotFound(_)
+            | openlife_core::agent::AgentSpecStoreError::InvalidRole { .. } => {
+                TauriExecutionFacadeError::governance(e.to_string())
+            }
+            _ => TauriExecutionFacadeError::runtime(e.to_string()),
+        })
+}
+
+fn record_plan_retry_event(
+    state: &Arc<AppState>,
+    run_id: &str,
+    plan_id: &str,
+    event_type: openlife_core::agent::AgentRunEventType,
+    actor: openlife_core::agent::AgentEventActor,
+    label: &str,
+) {
+    if let Some(ref es) = state.agent_run_event_store {
+        let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            run_id,
+            event_type,
+            actor,
+            format!("plan {} {}", plan_id, label),
+            serde_json::json!({"plan_id": plan_id}),
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_plan_execution_core(
+    plan_id: &str,
+    run_id: &str,
+    plan_store_arc: Arc<tokio::sync::Mutex<openlife_core::agent::PlanStore>>,
+    event_store: Option<openlife_core::agent::event_store::AgentRunEventStore>,
+    ctx: ActionContext,
+    review_gate: &impl openlife_core::agent::PlanReviewGate,
+    agent_spec: AgentSpec,
+    allow_writes: bool,
+) -> PlanOperationResult {
+    let executor_config = openlife_core::agent::ActionExecutorConfig {
+        allow_writes,
+        ..Default::default()
+    };
+    let action_executor = openlife_core::agent::ActionExecutor::new(executor_config);
+    let plan_executor =
+        openlife_core::agent::PlanExecutor::new(plan_store_arc.clone(), event_store)
+            .with_agent_spec(agent_spec);
+
+    let execution_result = plan_executor
+        .execute_with_review(
+            plan_id,
+            run_id,
+            {
+                let action_executor = action_executor.clone();
+                let ctx = ctx.clone();
+                let plan_id_owned = plan_id.to_string();
+                let run_id_owned = run_id.to_string();
+                move |step, intent| {
+                    let tool_name = intent
+                        .map(|i| i.tool_name.clone())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let step_index = step.index;
+                    let step_description = step.description.clone();
+                    let tool_intent_name = intent.map(|i| i.tool_name.clone());
+
+                    let request = AgentActionRequest {
+                        action_type: "builtin_tool".to_string(),
+                        target: tool_name.clone(),
+                        input: serde_json::json!({
+                            "plan_step": step_index,
+                            "description": step_description,
+                            "plan_id": plan_id_owned,
+                        }),
+                        source_run_id: Some(run_id_owned.clone()),
+                        step_index,
+                    };
+
+                    let executor = action_executor.clone();
+                    let ctx = ctx.clone();
+                    async move {
+                        match executor.execute(request, &ctx).await {
+                            Ok(result) => {
+                                let success =
+                                    matches!(result.status, ActionExecutionStatus::Succeeded);
+                                let deviation = if result
+                                    .action
+                                    .tool_scope
+                                    .as_ref()
+                                    .map(|s| &s.tool_name)
+                                    != tool_intent_name.as_ref()
+                                {
+                                    Some("executed tool scope differs from plan intent".to_string())
+                                } else {
+                                    None
+                                };
+                                openlife_core::agent::PlanStepExecutionResult {
+                                    step_index,
+                                    tool_name,
+                                    success,
+                                    output: Some(result.observation.content),
+                                    error: if success { None } else { result.stop_reason },
+                                    duration_ms: 0,
+                                    deviation,
+                                }
+                            }
+                            Err(e) => openlife_core::agent::PlanStepExecutionResult {
+                                step_index,
+                                tool_name,
+                                success: false,
+                                output: None,
+                                error: Some(e.to_string()),
+                                duration_ms: 0,
+                                deviation: None,
+                            },
+                        }
+                    }
+                }
+            },
+            review_gate,
+        )
+        .await;
+
+    let mut result = match execution_result {
+        Ok(outcome) => {
+            let (status, review_verdict) = if outcome.success {
+                (
+                    openlife_core::agent::PlanStatus::Completed,
+                    Some("approved".to_string()),
+                )
+            } else {
+                (openlife_core::agent::PlanStatus::Failed, None)
+            };
+            PlanOperationResult {
+                plan_id: plan_id.to_string(),
+                run_id: Some(run_id.to_string()),
+                operation: "execute".to_string(),
+                success: outcome.success,
+                status,
+                steps_completed: Some(outcome.steps_completed),
+                steps_failed: Some(outcome.steps_failed),
+                deviations: outcome.deviations,
+                review_verdict,
+                message: if outcome.success {
+                    Some("plan executed successfully".to_string())
+                } else {
+                    Some("plan execution failed".to_string())
+                },
+            }
+        }
+        Err(PlanExecutionError::ReviewFailed(msg)) => PlanOperationResult {
+            plan_id: plan_id.to_string(),
+            run_id: Some(run_id.to_string()),
+            operation: "execute".to_string(),
+            success: false,
+            status: openlife_core::agent::PlanStatus::FailedReview,
+            steps_completed: None,
+            steps_failed: None,
+            deviations: vec![],
+            review_verdict: Some("rejected".to_string()),
+            message: Some(msg),
+        },
+        Err(e) => PlanOperationResult {
+            plan_id: plan_id.to_string(),
+            run_id: Some(run_id.to_string()),
+            operation: "execute".to_string(),
+            success: false,
+            status: openlife_core::agent::PlanStatus::Failed,
+            steps_completed: None,
+            steps_failed: None,
+            deviations: vec![],
+            review_verdict: None,
+            message: Some(format!("plan execution error: {}", e)),
+        },
+    };
+
+    let guard = plan_store_arc.lock().await;
+    if let Ok(Some(persisted)) = guard.get_plan(plan_id) {
+        result.status = persisted.status;
+        result.success =
+            result.success && persisted.status == openlife_core::agent::PlanStatus::Completed;
+        if persisted.status == openlife_core::agent::PlanStatus::Cancelled {
+            result.message = Some("plan was cancelled".to_string());
+        }
+    }
+
+    result
+}
+
 async fn persist_scheduled_agent_run(state: &Arc<AppState>, run: &AgentRun) {
     if let Some(ref store_arc) = state.agent_run_store {
         let store = store_arc.lock().await;
@@ -457,6 +860,60 @@ fn validate_direct_tool_execution(
     {
         return Err(TauriExecutionFacadeError::governance(
             "NetworkPolicy mismatch for Direct Tool execution",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_replay_execution(
+    input: &TauriReplayExecutionInput,
+) -> Result<(), TauriExecutionFacadeError> {
+    let action_agent_spec = input.action_ctx.agent_spec.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance(
+            "ActionContext AgentSpec is required for Replay execution",
+        )
+    })?;
+    if input.agent_spec.id != action_agent_spec.id {
+        return Err(TauriExecutionFacadeError::governance(format!(
+            "AgentSpec mismatch: input={} action_context={}",
+            input.agent_spec.id, action_agent_spec.id
+        )));
+    }
+    let action_network_policy = input.action_ctx.network_policy.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance("NetworkPolicy is required for Replay execution")
+    })?;
+    if !network_policies_match(action_network_policy, &input.network_policy) {
+        return Err(TauriExecutionFacadeError::governance(
+            "NetworkPolicy mismatch for Replay execution",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_plan_execution(
+    action_ctx: &ActionContext,
+    agent_spec: &AgentSpec,
+    network_policy: &NetworkPolicy,
+) -> Result<(), TauriExecutionFacadeError> {
+    let action_agent_spec = action_ctx.agent_spec.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance(
+            "ActionContext AgentSpec is required for Plan execution",
+        )
+    })?;
+    if agent_spec.id != action_agent_spec.id {
+        return Err(TauriExecutionFacadeError::governance(format!(
+            "AgentSpec mismatch: input={} action_context={}",
+            agent_spec.id, action_agent_spec.id
+        )));
+    }
+    let action_network_policy = action_ctx.network_policy.as_ref().ok_or_else(|| {
+        TauriExecutionFacadeError::governance("NetworkPolicy is required for Plan execution")
+    })?;
+    if !network_policies_match(action_network_policy, network_policy) {
+        return Err(TauriExecutionFacadeError::governance(
+            "NetworkPolicy mismatch for Plan execution",
         ));
     }
 
@@ -1042,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_facade_replay_path_is_not_migrated_to_chat_task_entrypoint() {
+    fn execution_facade_replay_path_uses_replay_wrapper() {
         let source = include_str!("commands/agent.rs");
         let start = source
             .find("pub(crate) async fn replay_action_internal")
@@ -1054,8 +1511,12 @@ mod tests {
         let replay_path = &source[start..end];
 
         assert!(
-            replay_path.contains("ActionExecutor::new"),
-            "Replay remains on the direct ActionExecutor path during hardening preparation"
+            replay_path.contains("run_tauri_replay_execution"),
+            "Replay must call the Replay-specific Tauri ExecutionFacade wrapper"
+        );
+        assert!(
+            !replay_path.contains("ActionExecutor::new"),
+            "replay_action_internal must not construct ActionExecutor directly"
         );
         assert!(
             !replay_path.contains("run_tauri_agent_task"),
@@ -1066,6 +1527,35 @@ mod tests {
                 && !replay_path.contains("FallbackStarted")
                 && !replay_path.contains("FallbackCompleted"),
             "Replay must not inherit Chat fallback behavior"
+        );
+    }
+
+    #[test]
+    fn execution_facade_plan_path_uses_plan_wrapper_not_chat_or_direct_executor() {
+        let source = include_str!("commands/plan.rs");
+        let start = source
+            .find("pub async fn execute_agent_plan")
+            .expect("execute_agent_plan should exist");
+        let end = source
+            .find("pub async fn cancel_agent_plan")
+            .expect("cancel_agent_plan should exist");
+        let plan_entrypoints = &source[start..end];
+
+        assert!(
+            plan_entrypoints.contains("run_tauri_plan_execution"),
+            "Plan execution entrypoints must call the Plan-specific Tauri ExecutionFacade wrapper"
+        );
+        assert!(
+            !plan_entrypoints.contains("ActionExecutor::new"),
+            "Plan command entrypoints must not construct ActionExecutor directly"
+        );
+        assert!(
+            !plan_entrypoints.contains("run_tauri_agent_task"),
+            "Plan execution must not use the Chat/StreamChat facade"
+        );
+        assert!(
+            !plan_entrypoints.contains("handle_agent_loop_fallback"),
+            "Plan execution must not use Chat fallback"
         );
     }
 
@@ -1684,6 +2174,719 @@ mod tests {
             .as_ref()
             .unwrap()
             .list_events_by_run(&outcome.run_id)
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    async fn replay_test_context(
+        state: &Arc<AppState>,
+        network_policy: NetworkPolicy,
+        spec: AgentSpec,
+        life_model: Option<LifeModel>,
+    ) -> ActionContext {
+        let mut cfg = state.config.lock().await.clone();
+        cfg.system.network_policy = network_policy;
+        let assembly = build_runtime_assembly_config(
+            &cfg,
+            TauriAgentExecutionMode::Replay,
+            state.shutdown_notify.clone(),
+        );
+        build_governed_action_context(
+            state,
+            &assembly,
+            life_model,
+            Some(state.memory_store.clone()),
+            spec,
+        )
+    }
+
+    fn plan_with_single_step(
+        goal: &str,
+        risk: openlife_core::agent::RiskLevel,
+        tool_name: &str,
+    ) -> openlife_core::agent::AgentPlan {
+        let mut plan = openlife_core::agent::AgentPlan::new(goal, risk);
+        plan.steps = vec![openlife_core::agent::PlanStep {
+            index: 0,
+            description: format!("Run {}", tool_name),
+            tool_intent: Some(tool_name.to_string()),
+            expected_output: None,
+            depends_on: vec![],
+        }];
+        plan.tool_intents = vec![openlife_core::agent::ToolIntent {
+            tool_name: tool_name.to_string(),
+            purpose: "test governance".into(),
+            risk_level: risk,
+            is_write: matches!(
+                risk,
+                openlife_core::agent::RiskLevel::High | openlife_core::agent::RiskLevel::Critical
+            ),
+            parameters_summary: None,
+        }];
+        plan.run_id = Some(format!("run-{}", plan.id));
+        plan.publish();
+        plan.confirm();
+        plan
+    }
+
+    async fn create_plan_for_facade(state: &Arc<AppState>, plan: &openlife_core::agent::AgentPlan) {
+        state
+            .plan_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_plan(plan)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn plan_facade_uses_plan_bound_agent_spec_to_block_tool_before_execution() {
+        let state = crate::test_utils::test_app_state();
+        let deny_spec = AgentSpec::default_main_spec()
+            .with_id("main.plan-deny-goal-read".to_string())
+            .with_denied_tools(vec!["goal.read".to_string()]);
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.create_spec(&deny_spec).unwrap();
+        }
+
+        let mut plan = plan_with_single_step(
+            "plan-bound spec deny",
+            openlife_core::agent::RiskLevel::Low,
+            "goal.read",
+        );
+        plan.agent_spec_id = Some(deny_spec.id.clone());
+        let run_id = plan.run_id.clone().unwrap();
+        create_plan_for_facade(&state, &plan).await;
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Failed
+        );
+        assert_eq!(outcome.result.steps_completed, Some(0));
+        assert_eq!(outcome.result.steps_failed, Some(1));
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        let started = events
+            .iter()
+            .find(|event| event.event_type == AgentRunEventType::PlanExecutionStarted)
+            .expect("PlanExecutionStarted should be recorded");
+        assert_eq!(
+            started
+                .payload
+                .get("agent_spec_id")
+                .and_then(|v| v.as_str()),
+            Some(deny_spec.id.as_str())
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentRunEventType::ToolCallBlocked),
+            "AgentSpec deny should block before tool execution"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_facade_missing_plan_bound_agent_spec_fails_closed_without_status_change() {
+        let state = crate::test_utils::test_app_state();
+        let mut plan = plan_with_single_step(
+            "missing plan spec",
+            openlife_core::agent::RiskLevel::Low,
+            "goal.read",
+        );
+        plan.agent_spec_id = Some("missing.plan.spec".to_string());
+        let plan_id = plan.id.clone();
+        let run_id = plan.run_id.clone().unwrap();
+        create_plan_for_facade(&state, &plan).await;
+
+        let err = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan_id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("missing.plan.spec"));
+        let persisted = state
+            .plan_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_plan(&plan_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.status,
+            openlife_core::agent::PlanStatus::Confirmed
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|event| event.event_type != AgentRunEventType::PlanExecutionStarted),
+            "missing AgentSpec must fail before plan execution starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_facade_unbound_plan_uses_stored_default_agent_spec() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "goal.read",
+                    "builtin",
+                    "low",
+                    "read",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let plan = plan_with_single_step(
+            "default plan spec",
+            openlife_core::agent::RiskLevel::Low,
+            "goal.read",
+        );
+        let run_id = plan.run_id.clone().unwrap();
+        create_plan_for_facade(&state, &plan).await;
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Completed
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        let started = events
+            .iter()
+            .find(|event| event.event_type == AgentRunEventType::PlanExecutionStarted)
+            .expect("PlanExecutionStarted should be recorded");
+        assert_eq!(
+            started
+                .payload
+                .get("agent_spec_id")
+                .and_then(|v| v.as_str()),
+            Some("main.default")
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_facade_network_policy_denial_blocks_web_step_without_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.network_policy.default_decision = "deny".into();
+        }
+        let plan = plan_with_single_step(
+            "network denied plan step",
+            openlife_core::agent::RiskLevel::Low,
+            "web.search",
+        );
+        let run_id = plan.run_id.clone().unwrap();
+        create_plan_for_facade(&state, &plan).await;
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Failed
+        );
+        assert!(outcome
+            .result
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("failed"));
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    async fn setup_shell_plan_permission_case(
+        state: &Arc<AppState>,
+        policy: ToolPermissionPolicy,
+    ) -> openlife_core::agent::AgentPlan {
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "shell.run",
+                    "builtin",
+                    "high",
+                    "external_side_effect",
+                    policy,
+                    None,
+                )
+                .unwrap();
+        }
+        let shell_spec = AgentSpec::default_main_spec()
+            .with_id(format!("main.plan-shell-{}", policy))
+            .with_denied_tools(vec![]);
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.create_spec(&shell_spec).unwrap();
+        }
+        let mut plan = plan_with_single_step(
+            "tool permission governed plan step",
+            openlife_core::agent::RiskLevel::High,
+            "shell.run",
+        );
+        plan.agent_spec_id = Some(shell_spec.id);
+        create_plan_for_facade(state, &plan).await;
+        plan
+    }
+
+    #[tokio::test]
+    async fn plan_facade_tool_permission_deny_blocks_step_without_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let plan = setup_shell_plan_permission_case(&state, ToolPermissionPolicy::Deny).await;
+        let run_id = plan.run_id.clone().unwrap();
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Failed
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentRunEventType::PlanStepFailed),
+            "ToolPermission deny must surface as a failed plan step"
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn plan_facade_tool_permission_ask_preserves_blocked_plan_semantics() {
+        let state = crate::test_utils::test_app_state();
+        let plan =
+            setup_shell_plan_permission_case(&state, ToolPermissionPolicy::AskEveryTime).await;
+        let run_id = plan.run_id.clone().unwrap();
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Failed
+        );
+        assert_eq!(outcome.result.steps_failed, Some(1));
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentRunEventType::PlanStepFailed),
+            "ToolPermission ask must not be turned into fake success"
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn plan_facade_execution_sandbox_denial_blocks_shell_step_without_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "shell.run",
+                    "builtin",
+                    "high",
+                    "external_side_effect",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let shell_spec = AgentSpec::default_main_spec()
+            .with_id("main.plan-shell".to_string())
+            .with_denied_tools(vec![]);
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.create_spec(&shell_spec).unwrap();
+        }
+        let mut plan = plan_with_single_step(
+            "sandbox denied plan step",
+            openlife_core::agent::RiskLevel::High,
+            "shell.run",
+        );
+        plan.agent_spec_id = Some(shell_spec.id.clone());
+        let run_id = plan.run_id.clone().unwrap();
+        create_plan_for_facade(&state, &plan).await;
+
+        let outcome = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan.id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Execute,
+        })
+        .await
+        .unwrap();
+
+        assert!(!outcome.result.success);
+        assert_eq!(
+            outcome.result.status,
+            openlife_core::agent::PlanStatus::Failed
+        );
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run_id)
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn plan_facade_retry_resolves_agent_spec_before_resetting_failed_plan() {
+        let state = crate::test_utils::test_app_state();
+        let mut plan = plan_with_single_step(
+            "retry missing spec",
+            openlife_core::agent::RiskLevel::Low,
+            "goal.read",
+        );
+        plan.status = openlife_core::agent::PlanStatus::Failed;
+        plan.agent_spec_id = Some("missing.retry.spec".to_string());
+        let plan_id = plan.id.clone();
+        create_plan_for_facade(&state, &plan).await;
+
+        let err = run_tauri_plan_execution(TauriPlanExecutionInput {
+            plan_id: plan_id.clone(),
+            app_state: state.clone(),
+            operation: TauriPlanExecutionOperation::Retry,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("missing.retry.spec"));
+        let persisted = state
+            .plan_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_plan(&plan_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, openlife_core::agent::PlanStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn replay_facade_preserves_action_result_shape() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "goal.read",
+                    "builtin",
+                    "low",
+                    "read",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let spec = AgentSpec::default_main_spec();
+        let network_policy = NetworkPolicy::default();
+        let action_ctx = replay_test_context(
+            &state,
+            network_policy.clone(),
+            spec.clone(),
+            Some(LifeModel::default()),
+        )
+        .await;
+
+        let outcome = run_tauri_replay_execution(TauriReplayExecutionInput {
+            request: AgentActionRequest {
+                action_type: "builtin_tool".into(),
+                target: "goal.read".into(),
+                input: serde_json::json!({}),
+                source_run_id: Some("run-replay-shape".into()),
+                step_index: 0,
+            },
+            action_ctx,
+            agent_spec: spec,
+            network_policy,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, ActionExecutionStatus::Succeeded);
+        assert_eq!(outcome.action.status, "succeeded");
+        assert_eq!(outcome.action.target.as_deref(), Some("goal.read"));
+        assert!(outcome.action.output.is_some());
+        assert_eq!(
+            outcome.observation.action_id.as_deref(),
+            Some(outcome.action.id.as_str())
+        );
+        assert!(outcome.block_reason.is_none());
+        assert!(outcome.proposal_reason.is_none());
+        assert!(outcome.failure_kind.is_none());
+    }
+
+    #[tokio::test]
+    async fn replay_facade_rejects_agent_spec_mismatch() {
+        let state = crate::test_utils::test_app_state();
+        let network_policy = NetworkPolicy::default();
+        let action_ctx = replay_test_context(
+            &state,
+            network_policy.clone(),
+            AgentSpec::default_main_spec().with_id("ctx-spec".to_string()),
+            Some(LifeModel::default()),
+        )
+        .await;
+
+        let err = run_tauri_replay_execution(TauriReplayExecutionInput {
+            request: AgentActionRequest {
+                action_type: "builtin_tool".into(),
+                target: "goal.read".into(),
+                input: serde_json::json!({}),
+                source_run_id: Some("run-replay-mismatch".into()),
+                step_index: 0,
+            },
+            action_ctx,
+            agent_spec: AgentSpec::default_main_spec().with_id("input-spec".to_string()),
+            network_policy,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("AgentSpec mismatch"));
+    }
+
+    #[tokio::test]
+    async fn replay_facade_requires_network_policy() {
+        let state = crate::test_utils::test_app_state();
+        let spec = AgentSpec::default_main_spec();
+        let network_policy = NetworkPolicy::default();
+        let mut action_ctx =
+            replay_test_context(&state, network_policy.clone(), spec.clone(), None).await;
+        action_ctx.network_policy = None;
+
+        let err = run_tauri_replay_execution(TauriReplayExecutionInput {
+            request: AgentActionRequest {
+                action_type: "builtin_tool".into(),
+                target: "goal.read".into(),
+                input: serde_json::json!({}),
+                source_run_id: Some("run-replay-policy-required".into()),
+                step_index: 0,
+            },
+            action_ctx,
+            agent_spec: spec,
+            network_policy,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.kind, TauriExecutionFacadeErrorKind::Governance);
+        assert!(err.to_string().contains("NetworkPolicy is required"));
+    }
+
+    #[tokio::test]
+    async fn replay_facade_sandbox_denial_does_not_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "shell.run",
+                    "builtin",
+                    "high",
+                    "external_side_effect",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let spec = AgentSpec::default_main_spec();
+        let network_policy = NetworkPolicy::default();
+        let action_ctx =
+            replay_test_context(&state, network_policy.clone(), spec.clone(), None).await;
+
+        let outcome = run_tauri_replay_execution(TauriReplayExecutionInput {
+            request: AgentActionRequest {
+                action_type: "builtin_tool".into(),
+                target: "shell.run".into(),
+                input: serde_json::json!({"command": "echo hi"}),
+                source_run_id: Some("run-replay-sandbox".into()),
+                step_index: 0,
+            },
+            action_ctx,
+            agent_spec: spec,
+            network_policy,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, ActionExecutionStatus::Blocked);
+        assert!(outcome
+            .action
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sandbox.bash_enabled = false"));
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run("run-replay-sandbox")
+            .unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn replay_facade_network_denial_does_not_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let policy = NetworkPolicy {
+            default_decision: "deny".into(),
+            ..NetworkPolicy::default()
+        };
+        let spec = AgentSpec::default_main_spec();
+        let action_ctx = replay_test_context(&state, policy.clone(), spec.clone(), None).await;
+
+        let outcome = run_tauri_replay_execution(TauriReplayExecutionInput {
+            request: AgentActionRequest {
+                action_type: "builtin_tool".into(),
+                target: "web.search".into(),
+                input: serde_json::json!({"query": "openlife"}),
+                source_run_id: Some("run-replay-network".into()),
+                step_index: 0,
+            },
+            action_ctx,
+            agent_spec: spec,
+            network_policy: policy,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, ActionExecutionStatus::Blocked);
+        assert!(outcome
+            .action
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("default_decision=deny"));
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run("run-replay-network")
             .unwrap();
         assert!(!events.iter().any(|event| {
             matches!(

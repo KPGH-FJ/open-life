@@ -14,11 +14,11 @@ Status: active
 2. [`openlife_codex_level_acceptance_matrix.md`](openlife_codex_level_acceptance_matrix.md): 行为验收矩阵，`make ci` 之外的发布门槛。
 3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
 4. [`openlife_codex_level_phase2_execution_facade_prep.md`](openlife_codex_level_phase2_execution_facade_prep.md): Phase 2 执行路径收敛准备文档，定义 Tauri-side ExecutionFacade 的首批开发边界、非目标、测试和 Agent 指令。
-5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat、Direct Tool Execution、Scheduled-specific facade wrapper 已完成迁移，Replay / Plan / Builder / Calibration 暂不迁移，并给出下一批最小候选。
+5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat、Direct Tool Execution、Scheduled-specific facade wrapper、Replay-specific facade wrapper、Plan-specific facade wrapper 已完成迁移，Builder / Calibration / Skill runtime 暂不迁移，并给出下一批最小候选。
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Proposal Replay / Replay Hardening Preparation**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Scheduled failed-run observability 已完成，runtime failure 若已有 `AgentLoopResult` 会先持久化 failed `AgentRun`，再返回带 `run_id` 的 Runtime error，scheduler failed task 会在有 run id 时写入 `agent_run_id`，Governance-before-run failure 仍 fail-closed 且不创建 fake run。本阶段只补 Proposal Replay / Replay safety net，不正式迁移 Replay facade wrapper。Replay 仍由 `replay_action_internal` 直接使用 `ActionExecutor`，但测试已锁定 missing AgentSpec fail-closed、original AgentSpec restoration、no tool escalation、ToolPermission/NetworkPolicy/ExecutionSandbox deny、Proposal status source of truth、typed replay event payload 和 no Chat fallback。Plan / Builder / Calibration / Skill runtime 仍未迁移；下一阶段若继续推进，只能进入 Replay-specific facade/wrapper 正式迁移，不能使用 Chat facade。
+2026-05-25 当前阶段为 **Plan-specific Facade Wrapper Migrated**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper。Plan Execution 现已迁移到 Plan-specific wrapper：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`，由 wrapper 解析 plan-bound AgentSpec 或 stored default AgentSpec、构造 governed ActionContext、注入 NetworkPolicy / ExecutionSandbox / ToolPermission / store 依赖，并保留 PlanExecutor 核心确认、review、deviation、retry、status、trace 语义。该路径不是 Chat facade，不调用 `run_tauri_agent_task(Chat/StreamChat)`，不接入 Chat fallback；missing plan-bound AgentSpec、AgentSpec deny、NetworkPolicy deny、ExecutionSandbox deny、ToolPermission deny/ask、retry fail-closed 均有测试锁定。Builder / Calibration / Skill runtime 仍未迁移。
 
 ---
 
@@ -133,9 +133,10 @@ Status: active
 - [ ] Fallback 事件保留测试
 - [x] Scheduled/Proactive 迁移前安全网：lease 短锁、stale running recovery、missing AgentSpec fail-closed、无 Chat fallback、失败写回 task error 字段
 - [x] Scheduled/Proactive facade wrapper 验证：Scheduled-specific wrapper 已迁移；failed-run observability 已修复；保持 scheduler task failure 语义，不继承 Chat fallback
-- [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试；未迁移 Replay wrapper
+- [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试
+- [x] Replay-specific facade/wrapper 正式迁移：`replay_action_internal` 调用 `run_tauri_replay_execution`；不直接构造 `ActionExecutor`；不使用 Chat facade；不写 Proposal status
+- [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration / Skill runtime 仍未迁移
 - [ ] Scheduled/Proactive 事件创建验证
-- [ ] Replay-specific facade/wrapper 正式迁移（仅在 review 后启动；不得使用 Chat facade）
 - [ ] Builder/Calibration 事件创建验证
 
 ### 2.3 PromptStack 全路径审计
