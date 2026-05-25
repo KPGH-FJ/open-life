@@ -381,6 +381,102 @@ impl PromptBlock {
         .with_applies_to(vec!["SkillRuntime".into(), manifest.id.clone()])
     }
 
+    pub fn proposal_extraction_role() -> Self {
+        Self::new(
+            "proposal_extraction.role",
+            "1.0.0",
+            PromptPurpose::Proposal,
+            "You are OpenLife's proposal signal extractor. Extract only user-stated signals that can become reviewable AgentProposal candidates. Do not invent facts, do not apply changes, and return an empty array for unsupported or ambiguous signals.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(220)
+        .with_applies_to(vec!["ProposalExtraction".into(), "ChatProposal".into()])
+    }
+
+    pub fn proposal_extraction_output_contract() -> Self {
+        Self::new(
+            "proposal_extraction.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Return ONLY valid JSON with this contract:\n\
+             {\n\
+               \"explicit_memories\": [\"memory text\"],\n\
+               \"goal_signals\": [{\"text\": \"...\", \"type\": \"short_term|medium_term|long_term\", \"priority\": \"low|medium|high\"}],\n\
+               \"capability_signals\": [{\"name\": \"skill\", \"proficiency\": 1}],\n\
+               \"state_signals\": [{\"field\": \"emotional_state|health_status|current_focus\", \"value\": \"...\"}]\n\
+             }\n\
+             Supported proposal types: goal_update, state_update, capability_update, memory_write. Do not include markdown fences or explanatory text.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(420)
+        .with_applies_to(vec!["ProposalExtraction".into(), "ChatProposal".into()])
+    }
+
+    pub fn proposal_extraction_privacy_rules() -> Self {
+        Self::new(
+            "proposal_extraction.privacy_rules",
+            "1.0.0",
+            PromptPurpose::Privacy,
+            "Privacy and failure rules: never include raw prompt text, raw LifeModel, or full model output in audit metadata. SummaryOnly inputs contain only a contract and non-identifying counts or hints. LocalOnly must use a local model or explicit heuristic fallback; it must not route to cloud. If the model response is invalid JSON, report model_json_parse_failed and allow explicit heuristic fallback.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(260)
+        .with_applies_to(vec!["ProposalExtraction".into(), "ChatProposal".into()])
+    }
+
+    pub fn proposal_extraction_task_input(
+        message: &str,
+        life_model: &crate::life_model::LifeModel,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let content = match privacy_policy {
+            crate::agent::types::PrivacyPolicy::SummaryOnly => {
+                let contract = proposal_extraction_summary_contract(message, life_model);
+                format!(
+                    "[SummaryOnly] Proposal extraction task input. Raw user text and raw LifeModel are omitted.\n{}",
+                    contract
+                )
+            }
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                format!(
+                    "[LocalOnly] Proposal extraction task input. Keep this data on the local model only.\nUser message:\n{}\n\nLifeModel local contract:\n{}",
+                    message,
+                    proposal_extraction_local_lifemodel_contract(life_model)
+                )
+            }
+            crate::agent::types::PrivacyPolicy::CloudAllowed => {
+                format!(
+                    "[CloudAllowed] Proposal extraction task input.\nUser message:\n{}\n\nLifeModel contract:\n{}",
+                    message,
+                    proposal_extraction_local_lifemodel_contract(life_model)
+                )
+            }
+        };
+        let block = Self::new(
+            "proposal_extraction.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_token_budget(700)
+        .with_applies_to(vec!["ProposalExtraction".into(), "ChatProposal".into()]);
+
+        match privacy_policy {
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                block.with_privacy(PromptPrivacyLevel::StrictlyLocal)
+            }
+            crate::agent::types::PrivacyPolicy::SummaryOnly => block
+                .with_privacy(PromptPrivacyLevel::Internal)
+                .with_cloud_allowed(true),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => block
+                .with_privacy(PromptPrivacyLevel::Sensitive)
+                .with_cloud_allowed(true),
+        }
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -411,6 +507,53 @@ fn skill_context_labels(context: &crate::skills::SkillContext) -> Vec<String> {
         labels.push("chat_history".to_string());
     }
     labels
+}
+
+fn proposal_extraction_summary_contract(
+    message: &str,
+    life_model: &crate::life_model::LifeModel,
+) -> String {
+    let state = &life_model.state;
+    serde_json::json!({
+        "message_character_count": message.chars().count(),
+        "message_signal_hints": {
+            "has_goal_keyword": contains_any(message, &["我想", "我要", "计划", "目标", "want to", "plan to", "goal"]),
+            "has_memory_keyword": contains_any(message, &["记住", "remember this", "save this", "偏好", "preference"]),
+            "has_state_keyword": contains_any(message, &["累", "压力", "开心", "tired", "stress", "happy"]),
+            "has_capability_keyword": contains_any(message, &["会", "擅长", "掌握", "can", "skilled", "proficient"])
+        },
+        "life_model_contract": {
+            "short_term_goal_count": life_model.goals.short_term.len(),
+            "medium_term_goal_count": life_model.goals.medium_term.len(),
+            "long_term_goal_count": life_model.goals.long_term.len(),
+            "skill_count": life_model.capabilities.skills.len(),
+            "has_current_focus": !state.current_focus.trim().is_empty(),
+            "has_mood": !state.emotional_state.current_mood.trim().is_empty()
+        }
+    })
+    .to_string()
+}
+
+fn proposal_extraction_local_lifemodel_contract(
+    life_model: &crate::life_model::LifeModel,
+) -> String {
+    serde_json::json!({
+        "value_count": life_model.identity.values.len(),
+        "short_term_goal_count": life_model.goals.short_term.len(),
+        "medium_term_goal_count": life_model.goals.medium_term.len(),
+        "long_term_goal_count": life_model.goals.long_term.len(),
+        "skill_count": life_model.capabilities.skills.len(),
+        "has_current_focus": !life_model.state.current_focus.trim().is_empty(),
+        "has_mood": !life_model.state.emotional_state.current_mood.trim().is_empty(),
+    })
+    .to_string()
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    let lower = text.to_lowercase();
+    needles
+        .iter()
+        .any(|needle| lower.contains(&needle.to_lowercase()))
 }
 
 /// Planning prompt content: planner role, allowed/disallowed tools, output contract.
@@ -568,9 +711,64 @@ const AGENT_PLAN_OUTPUT_SCHEMA: &str = r#"{
   }
 }"#;
 
+const PROPOSAL_EXTRACTION_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "description": "Proposal extraction JSON contract for chat-derived AgentProposal candidates",
+  "required": ["explicit_memories", "goal_signals", "capability_signals", "state_signals"],
+  "properties": {
+    "explicit_memories": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "goal_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {"type": "string"},
+          "type": {"type": "string", "enum": ["short_term", "medium_term", "long_term"]},
+          "priority": {"type": "string", "enum": ["low", "medium", "high"]}
+        }
+      }
+    },
+    "capability_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {"type": "string"},
+          "proficiency": {"type": "integer", "minimum": 1, "maximum": 10}
+        }
+      }
+    },
+    "state_signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["field", "value"],
+        "properties": {
+          "field": {"type": "string", "enum": ["emotional_state", "health_status", "current_focus"]},
+          "value": {"type": "string"}
+        }
+      }
+    },
+    "supported_proposal_types": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["goal_update", "state_update", "capability_update", "memory_write"]}
+    }
+  }
+}"#;
+
 /// Return the AgentPlan output JSON Schema as a serde_json::Value.
 pub fn agent_plan_output_schema() -> serde_json::Value {
     serde_json::from_str(AGENT_PLAN_OUTPUT_SCHEMA).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+pub fn proposal_extraction_output_schema() -> serde_json::Value {
+    serde_json::from_str(PROPOSAL_EXTRACTION_OUTPUT_SCHEMA)
+        .unwrap_or_else(|_| serde_json::json!({}))
 }
 
 /// A stack of prompt blocks assembled for a single agent execution.
@@ -691,6 +889,31 @@ impl PromptStack {
             .iter()
             .map(|suffix| format!("skill.{}.{}", skill_id, suffix))
             .collect()
+    }
+
+    pub fn proposal_extraction_block_ids() -> Vec<String> {
+        vec![
+            "proposal_extraction.role".to_string(),
+            "proposal_extraction.output_contract".to_string(),
+            "proposal_extraction.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn proposal_extraction_task_stack(
+        message: &str,
+        life_model: &crate::life_model::LifeModel,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack =
+            Self::try_from_agentspec(&Self::proposal_extraction_block_ids(), &registry)?;
+        stack.push(PromptBlock::proposal_extraction_task_input(
+            message,
+            life_model,
+            privacy_policy,
+        ));
+        stack.output_schema = Some(proposal_extraction_output_schema());
+        Ok(stack)
     }
 
     /// Push a block onto the stack.
@@ -874,6 +1097,18 @@ impl PromptBlockRegistry {
                     "Do not expose sensitive user data to cloud models.",
                 )
                 .with_privacy(PromptPrivacyLevel::Internal),
+            )
+            .with_block(
+                "proposal_extraction.role",
+                PromptBlock::proposal_extraction_role(),
+            )
+            .with_block(
+                "proposal_extraction.output_contract",
+                PromptBlock::proposal_extraction_output_contract(),
+            )
+            .with_block(
+                "proposal_extraction.privacy_rules",
+                PromptBlock::proposal_extraction_privacy_rules(),
             )
     }
 }
@@ -1289,6 +1524,65 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("unknown prompt block"));
         assert!(err.contains("nonexistent_block"));
+    }
+
+    #[test]
+    fn proposal_extraction_prompt_stack_has_stable_contract_blocks() {
+        let registry = PromptBlockRegistry::built_in();
+        let ids = PromptStack::proposal_extraction_block_ids();
+        let stack = PromptStack::try_from_agentspec(&ids, &registry).unwrap();
+
+        let trace = stack.block_trace();
+        assert!(trace.iter().any(|entry| {
+            entry.id == "proposal_extraction.role"
+                && entry.version == "1.0.0"
+                && entry.purpose == "proposal"
+        }));
+        assert!(trace.iter().any(|entry| {
+            entry.id == "proposal_extraction.output_contract"
+                && entry.version == "1.0.0"
+                && entry.purpose == "output_format"
+        }));
+        assert!(trace.iter().any(|entry| {
+            entry.id == "proposal_extraction.privacy_rules"
+                && entry.version == "1.0.0"
+                && entry.purpose == "privacy"
+        }));
+
+        let mut stack = stack;
+        let assembled = stack.assemble();
+        assert!(assembled.contains("goal_update"));
+        assert!(assembled.contains("state_update"));
+        assert!(assembled.contains("capability_update"));
+        assert!(assembled.contains("memory_write"));
+        assert!(assembled.contains("\"explicit_memories\""));
+        assert!(assembled.contains("\"goal_signals\""));
+        assert!(assembled.contains("\"capability_signals\""));
+        assert!(assembled.contains("\"state_signals\""));
+    }
+
+    #[test]
+    fn proposal_extraction_summary_only_prompt_excludes_raw_sentinels() {
+        let mut lm = crate::life_model::LifeModel::default();
+        lm.identity.values = vec![crate::life_model::ValueItem {
+            name: "RAW_LIFEMODEL_SENTINEL".to_string(),
+            weight: 10,
+            description: "must not leave summary-only boundary".to_string(),
+        }];
+
+        let mut stack = PromptStack::proposal_extraction_task_stack(
+            "RAW_USER_SENTINEL wants a goal",
+            &lm,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        )
+        .unwrap();
+        let assembled = stack.assemble();
+
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(!assembled.contains("RAW_USER_SENTINEL"));
+        assert!(!assembled.contains("RAW_LIFEMODEL_SENTINEL"));
+        assert!(assembled.contains("message_character_count"));
+        assert!(assembled.contains("life_model_contract"));
     }
 
     #[test]

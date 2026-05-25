@@ -19,7 +19,7 @@ Status: active
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Skill-specific PromptStack Boundary Migration**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 Chat ExecutionFacade：真实路径是 SkillManifest 派生 Skill-specific PromptBlocks → 必需 stored `AgentSpec` → 追加 Skill PromptBlock IDs 的有效 AgentSpec → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Builder / Calibration Proposal-first 安全网继续有效，但 Builder prompt、Calibration prompt、Chat proposal extraction、web summarization helper、LayeredReasoner internal prompts 和 legacy scheduler generation 仍未 PromptStack 完成，详见 `openlife_prompt_stack_coverage_audit.md`。
+2026-05-25 当前阶段为 **Chat Proposal Extraction PromptStack Boundary Migration**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 Chat ExecutionFacade：真实路径是 SkillManifest 派生 Skill-specific PromptBlocks → 必需 stored `AgentSpec` → 追加 Skill PromptBlock IDs 的有效 AgentSpec → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Chat proposal extraction 已从 ad hoc prompt 迁入 Proposal-specific PromptStack helper，具备稳定 block id/version、JSON contract、SummaryOnly/LocalOnly/CloudAllowed 隐私边界和结构化 audit metadata；该层暂不伪造 AgentRunEvent，事件接入留待后续。Builder / Calibration Proposal-first 安全网继续有效，但 Builder prompt、Calibration prompt、web summarization helper、LayeredReasoner internal prompts 和 legacy scheduler generation 仍未 PromptStack 完成，详见 `openlife_prompt_stack_coverage_audit.md`。
 
 ---
 
@@ -152,9 +152,10 @@ Status: active
 - [x] 新增 `plans/openlife_prompt_stack_coverage_audit.md` 覆盖矩阵：列出 entrypoint、prompt source、PromptStack-governed、AgentSpec source、event trace emitted、privacy behavior、remaining risk、next required migration
 - [x] 补 source audit：Chat / StreamChat / Scheduled 锁定 PromptStack registry；Skill / Builder / Calibration 明确 intentionally legacy / not complete；Replay / Plan execution / Direct Tool / Proactive suggestion-only 不伪造 PromptStack trace
 - [x] 补行为测试：StreamChat unknown PromptBlock fail closed；既有 Chat / Scheduled / Skill unknown PromptBlock 测试继续覆盖；payload contract 继续锁定 no raw prompt / no raw LifeModel
+- [x] Chat proposal extraction PromptStack boundary migration：`try_llm_extract` 不再拼 ad hoc extraction prompt，也不再通过 `chat_with_ollama` 注入完整 LifeModel；改为 Proposal-specific PromptBlocks + privacy-scoped task block + local `chat_with_ollama_raw`；unknown PromptBlock / PromptStack validation / local model unavailable / model JSON parse failure 均返回结构化 failure reason 并进入显式 heuristic fallback；audit metadata 只记录 prompt block trace、privacy、route、failure/fallback reason，不写 raw prompt、raw user message、raw LifeModel 或完整模型输出；SummaryOnly 只包含摘要 contract，LocalOnly 不偷偷走云端；该层无 AgentRunEvent store，事件接入待后续阶段
 - [ ] 接入尚未通过 PromptStack 的路径
 - [ ] PromptBlock 版本记录到 AgentRunEvent
-- [ ] 将 Builder prompt、Calibration prompt（若继续为模型生成）、Chat proposal extraction、web summarization helper、LayeredReasoner internal prompts、legacy scheduler generation 迁入或明确保留为专用 legacy 边界
+- [ ] 将 Builder prompt、Calibration prompt（若继续为模型生成）、web summarization helper、LayeredReasoner internal prompts、legacy scheduler generation 迁入或明确保留为专用 legacy 边界
 
 ### Phase 2 门控
 

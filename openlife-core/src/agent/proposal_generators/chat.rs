@@ -1,6 +1,57 @@
-use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::prompt_stack::{BlockTraceEntry, PromptBlock, PromptBlockRegistry, PromptStack};
+use crate::agent::types::{AgentProposal, PrivacyPolicy, ProposalSource, ProposalType, RiskLevel};
 use crate::life_model::LifeModel;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+
+const PROPOSAL_EXTRACTION_MODEL: &str = "llama3.2:latest";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatProposalGenerationResult {
+    pub proposals: Vec<AgentProposal>,
+    pub audit: ProposalExtractionAudit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalExtractionAudit {
+    pub prompt_blocks: Vec<BlockTraceEntry>,
+    pub privacy_policy: String,
+    pub model_route: Option<String>,
+    pub model_provider: Option<String>,
+    pub model_attempted: bool,
+    pub cloud_attempted: bool,
+    pub model_failure_reason: Option<String>,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
+    pub extraction_source: String,
+    pub output_contract_id: Option<String>,
+}
+
+impl ProposalExtractionAudit {
+    fn new(privacy_policy: PrivacyPolicy) -> Self {
+        Self {
+            prompt_blocks: Vec::new(),
+            privacy_policy: privacy_policy.to_string(),
+            model_route: None,
+            model_provider: None,
+            model_attempted: false,
+            cloud_attempted: false,
+            model_failure_reason: None,
+            fallback_used: false,
+            fallback_reason: None,
+            extraction_source: "not_started".to_string(),
+            output_contract_id: None,
+        }
+    }
+}
+
+enum ProposalExtractionModelSource {
+    LocalOllama,
+    #[cfg(test)]
+    ProvidedReply(String),
+    #[cfg(test)]
+    Unavailable,
+}
 
 /// Generates proposals from chat messages using keyword-based signal extraction.
 pub struct ChatProposalGenerator {
@@ -64,32 +115,120 @@ impl ChatProposalGenerator {
         message: &str,
         life_model: &LifeModel,
     ) -> Result<Vec<AgentProposal>> {
+        let result = self.generate_proposals_with_audit(
+            session_id,
+            message,
+            life_model,
+            PrivacyPolicy::LocalOnly,
+        )?;
+        if result.audit.fallback_used {
+            log::warn!(
+                "chat proposal extraction used heuristic fallback: reason={:?}, privacy_policy={}, prompt_block_count={}",
+                result.audit.fallback_reason,
+                result.audit.privacy_policy,
+                result.audit.prompt_blocks.len()
+            );
+        }
+        Ok(result.proposals)
+    }
+
+    pub fn generate_proposals_with_audit(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+    ) -> Result<ChatProposalGenerationResult> {
+        self.generate_proposals_with_audit_internal(
+            session_id,
+            message,
+            life_model,
+            privacy_policy,
+            PromptStack::proposal_extraction_block_ids(),
+            ProposalExtractionModelSource::LocalOllama,
+        )
+    }
+
+    fn generate_proposals_with_audit_internal(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+        prompt_block_ids: Vec<String>,
+        model_source: ProposalExtractionModelSource,
+    ) -> Result<ChatProposalGenerationResult> {
+        let mut audit = ProposalExtractionAudit::new(privacy_policy);
+
         // Check cooldown
         if let Some(last_time) = self.get_last_extraction(session_id) {
             let elapsed = chrono::Utc::now().signed_duration_since(last_time);
             if elapsed.num_seconds() < self.cooldown_seconds {
-                return Ok(Vec::new());
+                audit.extraction_source = "skipped_cooldown".to_string();
+                return Ok(ChatProposalGenerationResult {
+                    proposals: Vec::new(),
+                    audit,
+                });
             }
         }
 
         // Check minimum length
         if message.len() < self.min_message_length {
-            return Ok(Vec::new());
+            audit.extraction_source = "skipped_min_length".to_string();
+            return Ok(ChatProposalGenerationResult {
+                proposals: Vec::new(),
+                audit,
+            });
         }
 
-        // Try LLM-based extraction first (Ollama), then fall back to keyword
-        if let Some(llm_proposals) = self.try_llm_extract(session_id, message, life_model) {
-            if !llm_proposals.is_empty() {
+        match self.try_llm_extract(
+            message,
+            life_model,
+            privacy_policy,
+            &prompt_block_ids,
+            model_source,
+            &mut audit,
+        ) {
+            Ok(llm_proposals) if !llm_proposals.is_empty() => {
                 self.update_last_extraction(session_id);
-                return Ok(llm_proposals);
+                audit.extraction_source = "model".to_string();
+                return Ok(ChatProposalGenerationResult {
+                    proposals: llm_proposals,
+                    audit,
+                });
+            }
+            Ok(_) => {
+                audit.model_failure_reason = Some("model_returned_no_proposals".to_string());
+                audit.fallback_reason = Some("model_returned_no_proposals".to_string());
+            }
+            Err(reason) => {
+                audit.model_failure_reason = Some(reason.clone());
+                audit.fallback_reason = Some(reason);
             }
         }
 
-        // Fallback: keyword-based extraction
+        let proposals =
+            self.generate_heuristic_proposals(session_id, message, life_model, &audit)?;
+        if !proposals.is_empty() {
+            self.update_last_extraction(session_id);
+        }
+        audit.fallback_used = true;
+        audit.extraction_source = "heuristic".to_string();
+        Ok(ChatProposalGenerationResult { proposals, audit })
+    }
+
+    fn generate_heuristic_proposals(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        audit: &ProposalExtractionAudit,
+    ) -> Result<Vec<AgentProposal>> {
         let mut proposals = Vec::new();
 
         let has_emphasis = Self::has_emphasis_markers(message);
         let text_len = message.len();
+        let source_detail = Self::heuristic_source_detail(session_id, audit);
 
         // Extract goals
         if let Some(goals) = Self::extract_goals(message) {
@@ -110,7 +249,7 @@ impl ChatProposalGenerator {
                         RiskLevel::Low,
                         ProposalSource::FeedbackEvolution,
                     );
-                    proposal.source_detail = Some(format!("session:{}", session_id));
+                    proposal.source_detail = Some(source_detail.clone());
                     proposals.push(proposal);
                 }
             }
@@ -132,7 +271,7 @@ impl ChatProposalGenerator {
                     ProposalSource::FeedbackEvolution,
                 );
                 proposal.before = Some(serde_json::to_value(&life_model.state)?);
-                proposal.source_detail = Some(format!("session:{}", session_id));
+                proposal.source_detail = Some(source_detail.clone());
                 proposals.push(proposal);
             }
         }
@@ -151,7 +290,7 @@ impl ChatProposalGenerator {
                     RiskLevel::Low,
                     ProposalSource::FeedbackEvolution,
                 );
-                proposal.source_detail = Some(format!("session:{}", session_id));
+                proposal.source_detail = Some(source_detail.clone());
                 proposals.push(proposal);
             }
         }
@@ -175,7 +314,7 @@ impl ChatProposalGenerator {
                 RiskLevel::Medium,
                 ProposalSource::FeedbackEvolution,
             );
-            proposal.source_detail = Some(format!("session:{}", session_id));
+            proposal.source_detail = Some(source_detail.clone());
             proposals.push(proposal);
         } else if let Some(memory_content) = Self::extract_implicit_memory(message) {
             // Implicit memory: high threshold, evidence required
@@ -199,14 +338,9 @@ impl ChatProposalGenerator {
                     RiskLevel::Low,
                     ProposalSource::FeedbackEvolution,
                 );
-                proposal.source_detail = Some(format!("session:{}", session_id));
+                proposal.source_detail = Some(source_detail);
                 proposals.push(proposal);
             }
-        }
-
-        // Update last extraction time
-        if !proposals.is_empty() {
-            self.update_last_extraction(session_id);
         }
 
         Ok(proposals)
@@ -220,85 +354,130 @@ impl ChatProposalGenerator {
         map.get(session_id).copied()
     }
 
-    /// Attempt LLM-based signal extraction via Ollama.
-    /// Returns None if Ollama is unavailable or extraction fails (silent fallback).
+    fn heuristic_source_detail(session_id: &str, audit: &ProposalExtractionAudit) -> String {
+        match audit.fallback_reason.as_deref() {
+            Some(reason) => format!(
+                "session:{}; extraction:heuristic; fallback_reason:{}",
+                session_id, reason
+            ),
+            None => format!("session:{}; extraction:heuristic", session_id),
+        }
+    }
+
+    /// Attempt PromptStack-governed LLM signal extraction.
+    /// Returns a structured failure reason so fallback is explicit and auditable.
     fn try_llm_extract(
         &self,
-        _session_id: &str,
         message: &str,
         life_model: &LifeModel,
-    ) -> Option<Vec<AgentProposal>> {
-        let prompt = format!(
-            "You are OpenLife's signal extractor. Analyze the user message and extract structured intent.\n\
-             Return ONLY valid JSON (no markdown, no explanation):\n\
-             {{\n\
-               \"explicit_memories\": [\"user: remembered fact\", ...],\n\
-               \"goal_signals\": [{{\"text\": \"...\", \"type\": \"short_term|medium_term|long_term\", \"priority\": \"low|medium|high\"}}, ...],\n\
-               \"capability_signals\": [{{\"name\": \"skill\", \"proficiency\": 1-10}}, ...],\n\
-               \"state_signals\": [{{\"field\": \"emotional_state|health_status|current_focus\", \"value\": \"...\"}}, ...]\n\
-             }}\n\
-             User message: {message}\n\
-             Current LifeModel summary: values={values:?}, goals_count={goal_count}, capabilities_count={cap_count}",
-            message = message,
-            values = &life_model.identity.values,
-            goal_count = life_model.goals.short_term.len()
-                + life_model.goals.medium_term.len()
-                + life_model.goals.long_term.len(),
-            cap_count = life_model.capabilities.skills.len(),
-        );
+        privacy_policy: PrivacyPolicy,
+        prompt_block_ids: &[String],
+        model_source: ProposalExtractionModelSource,
+        audit: &mut ProposalExtractionAudit,
+    ) -> std::result::Result<Vec<AgentProposal>, String> {
+        let mut stack = Self::build_proposal_extraction_stack(
+            prompt_block_ids,
+            message,
+            life_model,
+            privacy_policy,
+        )?;
+        let warnings = stack
+            .validate()
+            .map_err(|_| "prompt_stack_validation_failed".to_string())?;
+        if !warnings.is_empty() {
+            return Err("prompt_stack_validation_failed".to_string());
+        }
 
-        let life_model_clone = life_model.clone();
+        audit.prompt_blocks = stack.block_trace();
+        audit.output_contract_id = Some("proposal_extraction.output_contract@1.0.0".to_string());
+        audit.model_route = Some("local".to_string());
+        audit.model_provider = Some("ollama".to_string());
+        audit.cloud_attempted = false;
+        audit.model_attempted = true;
+
+        let prompt = stack.assemble();
         let message_owned = message.to_string();
-
-        let reply = std::thread::spawn(move || -> Result<String, String> {
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-            rt.block_on(async {
-                tokio::time::timeout(
-                    std::time::Duration::from_secs(8),
-                    crate::ollama::chat_with_ollama(
-                        "llama3.2:latest",
-                        vec![crate::llm::ChatMessage {
-                            role: "user".to_string(),
-                            content: prompt,
-                        }],
-                        &life_model_clone,
-                    ),
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("Ollama chat extraction timed out"))
-                .and_then(|r| r)
-            })
-            .map_err(|e| e.to_string())
-        })
-        .join()
-        .ok()
-        .unwrap_or_else(|| Err("Ollama extraction thread panicked".to_string()));
-
-        let reply = match reply {
-            Ok(r) => r,
-            Err(_) => return None,
+        let reply = match model_source {
+            #[cfg(test)]
+            ProposalExtractionModelSource::ProvidedReply(reply) => reply.to_string(),
+            #[cfg(test)]
+            ProposalExtractionModelSource::Unavailable => {
+                return Err("local_model_unavailable".to_string());
+            }
+            ProposalExtractionModelSource::LocalOllama => Self::run_local_extraction_model(prompt)?,
         };
 
         // Parse JSON from reply
-        let json: serde_json::Value = match serde_json::from_str(&reply) {
-            Ok(v) => v,
-            Err(_) => {
-                // Try extracting JSON from markdown code fences
-                let extracted = crate::json_utils::extract_first_json_object(&reply);
-                match extracted {
-                    Some(v) => match serde_json::from_str::<serde_json::Value>(v) {
-                        Ok(val) => val,
-                        Err(_) => return None,
-                    },
-                    None => return None,
-                }
-            }
-        };
+        let json = Self::parse_model_json(&reply)?;
+        Ok(self.proposals_from_llm_json(json, &message_owned))
+    }
 
+    fn build_proposal_extraction_stack(
+        prompt_block_ids: &[String],
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+    ) -> std::result::Result<PromptStack, String> {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack = PromptStack::try_from_agentspec(prompt_block_ids, &registry)
+            .map_err(|_| "prompt_stack_assembly_failed".to_string())?;
+        stack.push(PromptBlock::proposal_extraction_task_input(
+            message,
+            life_model,
+            privacy_policy,
+        ));
+        stack.output_schema = Some(crate::agent::prompt_stack::proposal_extraction_output_schema());
+        Ok(stack)
+    }
+
+    fn run_local_extraction_model(prompt: String) -> std::result::Result<String, String> {
+        std::thread::spawn(move || -> std::result::Result<String, String> {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|_| "local_runtime_unavailable".to_string())?;
+            rt.block_on(async {
+                if !crate::ollama::is_ollama_available(PROPOSAL_EXTRACTION_MODEL).await {
+                    return Err("local_model_unavailable".to_string());
+                }
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(8),
+                    crate::ollama::chat_with_ollama_raw(
+                        PROPOSAL_EXTRACTION_MODEL,
+                        vec![crate::llm::ChatMessage {
+                            role: "user".to_string(),
+                            content: "Extract proposal signals from the governed task input and return the required JSON contract.".to_string(),
+                        }],
+                        Some(&prompt),
+                    ),
+                )
+                .await
+                .map_err(|_| "local_model_timeout".to_string())?
+                .map_err(|_| "local_model_call_failed".to_string())
+            })
+        })
+        .join()
+        .ok()
+        .unwrap_or_else(|| Err("local_model_thread_panicked".to_string()))
+    }
+
+    fn parse_model_json(reply: &str) -> std::result::Result<serde_json::Value, String> {
+        serde_json::from_str(reply).or_else(|_| {
+            crate::json_utils::extract_first_json_object(reply)
+                .ok_or_else(|| "model_json_parse_failed".to_string())
+                .and_then(|json| {
+                    serde_json::from_str::<serde_json::Value>(json)
+                        .map_err(|_| "model_json_parse_failed".to_string())
+                })
+        })
+    }
+
+    fn proposals_from_llm_json(
+        &self,
+        json: serde_json::Value,
+        message_owned: &str,
+    ) -> Vec<AgentProposal> {
         let mut proposals = Vec::new();
         let msg_len = message_owned.len();
-        let has_emphasis = Self::has_emphasis_markers(&message_owned);
+        let has_emphasis = Self::has_emphasis_markers(message_owned);
 
         // Extract explicit memories
         if let Some(memories) = json.get("explicit_memories").and_then(|v| v.as_array()) {
@@ -372,7 +551,66 @@ impl ChatProposalGenerator {
             }
         }
 
-        Some(proposals)
+        proposals
+    }
+
+    #[cfg(test)]
+    fn generate_proposals_with_model_reply_for_test(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+        model_reply: &str,
+    ) -> ChatProposalGenerationResult {
+        self.generate_proposals_with_audit_internal(
+            session_id,
+            message,
+            life_model,
+            privacy_policy,
+            PromptStack::proposal_extraction_block_ids(),
+            ProposalExtractionModelSource::ProvidedReply(model_reply.to_string()),
+        )
+        .unwrap()
+    }
+
+    #[cfg(test)]
+    fn generate_proposals_with_prompt_block_ids_for_test(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+        prompt_block_ids: Vec<String>,
+    ) -> ChatProposalGenerationResult {
+        self.generate_proposals_with_audit_internal(
+            session_id,
+            message,
+            life_model,
+            privacy_policy,
+            prompt_block_ids,
+            ProposalExtractionModelSource::Unavailable,
+        )
+        .unwrap()
+    }
+
+    #[cfg(test)]
+    fn generate_proposals_with_unavailable_model_for_test(
+        &self,
+        session_id: &str,
+        message: &str,
+        life_model: &LifeModel,
+        privacy_policy: PrivacyPolicy,
+    ) -> ChatProposalGenerationResult {
+        self.generate_proposals_with_audit_internal(
+            session_id,
+            message,
+            life_model,
+            privacy_policy,
+            PromptStack::proposal_extraction_block_ids(),
+            ProposalExtractionModelSource::Unavailable,
+        )
+        .unwrap()
     }
 
     fn update_last_extraction(&self, session_id: &str) {
@@ -882,5 +1120,103 @@ mod tests {
             .find(|p| p.proposal_type == ProposalType::MemoryWrite)
             .unwrap();
         assert!(memory_proposal.confidence >= 0.9); // Explicit memory should have high confidence
+    }
+
+    #[test]
+    fn test_model_json_parse_failure_has_explicit_heuristic_fallback_reason() {
+        let generator = create_test_generator();
+        let model = LifeModel::default();
+        let result = generator.generate_proposals_with_model_reply_for_test(
+            "session-parse",
+            "我想学习 Rust 编程",
+            &model,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            "not json and not a fenced object",
+        );
+
+        assert!(!result.proposals.is_empty());
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("model_json_parse_failed")
+        );
+        assert_eq!(
+            result.audit.model_failure_reason.as_deref(),
+            Some("model_json_parse_failed")
+        );
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(!metadata.contains("not json"));
+        assert!(!metadata.contains("我想学习 Rust"));
+    }
+
+    #[test]
+    fn test_unknown_proposal_prompt_block_falls_back_with_audit_metadata() {
+        let generator = create_test_generator();
+        let model = LifeModel::default();
+        let result = generator.generate_proposals_with_prompt_block_ids_for_test(
+            "session-missing-block",
+            "我想学习 Rust 编程",
+            &model,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            vec!["proposal_extraction.missing".to_string()],
+        );
+
+        assert!(!result.proposals.is_empty());
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("prompt_stack_assembly_failed")
+        );
+        assert_eq!(
+            result.audit.model_failure_reason.as_deref(),
+            Some("prompt_stack_assembly_failed")
+        );
+        assert!(result.audit.prompt_blocks.is_empty());
+    }
+
+    #[test]
+    fn test_summary_only_audit_metadata_excludes_raw_prompt_model_output_and_sentinels() {
+        let generator = create_test_generator();
+        let mut model = LifeModel::default();
+        model.identity.values = vec![crate::life_model::ValueItem {
+            name: "RAW_LIFEMODEL_SENTINEL".to_string(),
+            weight: 9,
+            description: "hidden".to_string(),
+        }];
+
+        let result = generator.generate_proposals_with_model_reply_for_test(
+            "session-summary",
+            "RAW_USER_SENTINEL 我想学习 Rust 编程",
+            &model,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+            "RAW_MODEL_OUTPUT_SENTINEL",
+        );
+
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(metadata.contains("summary_only"));
+        assert!(!metadata.contains("RAW_USER_SENTINEL"));
+        assert!(!metadata.contains("RAW_LIFEMODEL_SENTINEL"));
+        assert!(!metadata.contains("RAW_MODEL_OUTPUT_SENTINEL"));
+        assert!(!metadata.contains("Raw user text"));
+        assert!(!metadata.contains("model_output"));
+    }
+
+    #[test]
+    fn test_local_only_unavailable_model_does_not_use_cloud() {
+        let generator = create_test_generator();
+        let model = LifeModel::default();
+        let result = generator.generate_proposals_with_unavailable_model_for_test(
+            "session-local",
+            "我想学习 Rust 编程",
+            &model,
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+
+        assert!(!result.proposals.is_empty());
+        assert_eq!(result.audit.privacy_policy, "local_only");
+        assert_eq!(result.audit.model_route.as_deref(), Some("local"));
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("local_model_unavailable")
+        );
+        assert!(!result.audit.cloud_attempted);
     }
 }
