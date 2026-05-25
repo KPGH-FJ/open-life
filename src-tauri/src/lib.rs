@@ -20,6 +20,7 @@ pub mod commands;
 pub(crate) mod conversation_signals;
 pub mod errors;
 pub mod execution_deps;
+pub mod execution_facade;
 pub(crate) mod memory_utils;
 pub mod scheduler_runner;
 pub mod state;
@@ -85,8 +86,8 @@ pub use openlife_core::privacy::PrivacyEngine;
 // Hermes module removed: replaced by AgentRuntime
 use auto_checkin::run_auto_checkin_and_stream_signals;
 use chat_persistence::{
-    finalize_chat_agent_run, persist_chat_message_if_needed, persist_life_model,
-    persist_vector_memory_for_message,
+    finalize_chat_agent_run, finalize_chat_agent_run_inner, persist_chat_message_if_needed,
+    persist_life_model, persist_vector_memory_for_message,
 };
 use chat_preprocess::{preprocess_chat_input, preprocess_chat_input_v2};
 use commands::life_model::{get_life_model, save_life_model};
@@ -291,26 +292,55 @@ async fn send_message_with_agent_loop(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
+    send_message_with_agent_loop_inner(
+        session_id,
+        user_msg,
+        life_model,
+        tools_prompt,
+        privacy_engine,
+        privacy_map,
+        desensitized_messages,
+        embed_err,
+        auto_checkin_msg,
+        layer,
+        state.inner(),
+        Some(&app_handle),
+    )
+    .await
+}
+
+/// Inner AgentLoop-based chat execution path, kept AppHandle-optional so tests can
+/// exercise production control flow without constructing a Tauri runtime.
+#[allow(clippy::too_many_arguments)]
+async fn send_message_with_agent_loop_inner(
+    session_id: String,
+    user_msg: Option<ChatMessage>,
+    life_model: LifeModel,
+    tools_prompt: String,
+    privacy_engine: PrivacyEngine,
+    privacy_map: HashMap<String, String>,
+    desensitized_messages: Vec<ChatMessage>,
+    embed_err: Option<String>,
+    auto_checkin_msg: Option<String>,
+    layer: Layer,
+    state: &Arc<AppState>,
+    app_handle: Option<&tauri::AppHandle>,
+) -> Result<SendMessageResult, String> {
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
-
-    let agent_runtime =
-        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
-    let action_executor = openlife_core::agent::ActionExecutor::new(
-        openlife_core::agent::ActionExecutorConfig::default(),
+    let runtime_assembly = execution_facade::build_runtime_assembly_config(
+        &cfg,
+        execution_facade::TauriAgentExecutionMode::Chat,
+        state.shutdown_notify.clone(),
     );
-
-    let loop_config =
-        execution_deps::build_loop_config(&cfg, state.inner().shutdown_notify.clone());
-    let agent_loop = execution_deps::build_agent_loop(
-        agent_runtime,
-        action_executor,
-        &scheduler,
-        loop_config,
+    let agent_loop = execution_facade::build_governed_agent_loop(
+        life_model.clone(),
+        scheduler.clone(),
+        &cfg,
+        &runtime_assembly,
         &state.agent_run_event_store,
     );
+    drop(cfg);
 
     let task = execution_deps::build_agent_task(
         openlife_core::agent::AgentTaskKind::Conversation,
@@ -336,93 +366,90 @@ async fn send_message_with_agent_loop(
             return Err(format!("AgentSpec resolution failed: {}", e));
         }
     };
-    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
-    let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
-        &cfg.system.execution_sandbox,
-        &safe_paths,
+    let prompt_registry = execution_facade::build_prompt_registry();
+
+    let action_ctx = execution_facade::build_governed_action_context(
+        state,
+        &runtime_assembly,
+        Some(life_model.clone()),
+        Some(state.memory_store.clone()),
+        agent_spec.clone(),
     );
 
-    let loop_result = {
-        let action_ctx = execution_deps::assemble_action_context(
-            state.mcp_registry.clone(),
-            state.tool_permission_store.clone(),
-            state.mcp_audit_store.clone(),
-            state.privacy_engine.clone(),
-            safe_paths.clone(),
-            Some(life_model.clone()),
-            Some(state.memory_store.clone()),
-            calendar_ics_paths.clone(),
-            network_policy.clone(),
-            execution_sandbox.clone(),
-            agent_spec.clone(),
-            state.proposal_store.clone(),
-            state.agent_run_store.clone(),
-            state
-                .agent_run_event_store
-                .as_ref()
-                .map(|es| (**es).clone()),
-        );
-
-        agent_loop
-            .run(
-                &task,
-                &life_model,
-                &tools_prompt,
-                None,
-                privacy_engine.clone(),
-                agent_spec.privacy_policy,
-                &agent_spec,
-                &prompt_registry,
-                &action_ctx,
-            )
-            .await
+    let execution_input = execution_facade::TauriAgentExecutionInput {
+        mode: execution_facade::TauriAgentExecutionMode::Chat,
+        task,
+        life_model: life_model.clone(),
+        tools_prompt: tools_prompt.clone(),
+        privacy_engine: privacy_engine.clone(),
+        agent_spec: Some(agent_spec.clone()),
+        prompt_registry: Some(prompt_registry),
+        streaming_callback: None,
     };
 
-    let (mut reply, mut agent_run, _status_updates) = match loop_result {
-        Ok(result) => {
+    let execution_outcome =
+        execution_facade::run_tauri_agent_task(&agent_loop, &action_ctx, execution_input).await;
+
+    let (mut reply, mut agent_run, _status_updates) = match execution_outcome {
+        Ok(outcome) => {
             // Emit AgentLoop status updates as Tauri events
-            for update in &result.status_updates {
-                emit_agent_status_update(
-                    &app_handle,
-                    &session_id,
-                    &result.run.id,
-                    &update.phase.to_string(),
-                    &update.message,
-                    update.step_index,
-                    update.tool_call_index,
-                );
+            for update in &outcome.status_updates {
+                if let Some(app_handle) = app_handle {
+                    emit_agent_status_update(
+                        app_handle,
+                        &session_id,
+                        &outcome.run.id,
+                        &update.phase.to_string(),
+                        &update.message,
+                        update.step_index,
+                        update.tool_call_index,
+                    );
+                }
             }
-            (result.final_response, result.run, result.status_updates)
+            (outcome.reply, outcome.run, outcome.status_updates)
         }
         Err(e) => {
-            eprintln!(
-                "[warn] AgentLoop failed in send_message, falling back to legacy: {}",
-                e
-            );
             let user_input_text = user_msg
                 .as_ref()
                 .map(|m| m.content.clone())
                 .unwrap_or_default();
-            let (fallback_reply, agent_run) = handle_agent_loop_fallback(
-                &scheduler,
-                desensitized_messages.clone(),
-                &life_model,
-                &tools_prompt,
-                &session_id,
-                &user_input_text,
-                state.agent_run_store.as_ref(),
-                state.agent_run_event_store.as_ref(),
-                &e.to_string(),
-                agent_spec.privacy_policy,
-            )
+            let fallback_outcome = handle_execution_facade_chat_error_branch(&e, |decision| {
+                let scheduler = &scheduler;
+                let desensitized_messages = desensitized_messages.clone();
+                let life_model = &life_model;
+                let tools_prompt = &tools_prompt;
+                let session_id = &session_id;
+                let user_input_text = &user_input_text;
+                let agent_run_store = state.agent_run_store.as_ref();
+                let agent_run_event_store = state.agent_run_event_store.as_ref();
+                let original_error = e.to_string();
+                let privacy_policy = agent_spec.privacy_policy;
+                async move {
+                    if let Some(warning) = decision.warning_message.as_deref() {
+                        eprintln!("[warn] {}", warning);
+                    }
+                    handle_agent_loop_fallback(
+                        scheduler,
+                        desensitized_messages,
+                        life_model,
+                        tools_prompt,
+                        session_id,
+                        user_input_text,
+                        agent_run_store,
+                        agent_run_event_store,
+                        &original_error,
+                        privacy_policy,
+                    )
+                    .await
+                }
+            })
             .await?;
 
             return Ok(SendMessageResult {
-                reply: fallback_reply,
+                reply: fallback_outcome.reply,
                 reasoning_trace: ReasoningTrace::default(),
                 tool_calls: Vec::new(),
-                run_id: Some(agent_run.id),
+                run_id: Some(fallback_outcome.agent_run.id),
             });
         }
     };
@@ -451,14 +478,14 @@ async fn send_message_with_agent_loop(
         reasoning_trace.errors.push(err);
     }
 
-    finalize_chat_agent_run(
+    finalize_chat_agent_run_inner(
         &session_id,
         &assistant_message,
         &reply,
         &mut reasoning_trace,
         &mut agent_run,
         &life_model,
-        &state,
+        state,
     )
     .await?;
 
@@ -525,7 +552,7 @@ pub(crate) async fn handle_agent_loop_fallback(
     agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
     agent_run
         .warnings
-        .push(format!("fallback: agent_loop_error: {}", original_error));
+        .push(agent_loop_fallback_warning(original_error));
     agent_run.finished_at = Some(chrono::Utc::now());
 
     if let Some(store_arc) = agent_run_store {
@@ -551,16 +578,99 @@ pub(crate) async fn handle_agent_loop_fallback(
     Ok((fallback_reply, agent_run))
 }
 
+fn should_fallback_from_execution_facade_error(
+    error: &execution_facade::TauriExecutionFacadeError,
+) -> bool {
+    error.is_runtime()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatExecutionFacadeErrorDecision {
+    should_fallback: bool,
+    error_message: Option<String>,
+    warning_message: Option<String>,
+}
+
+#[derive(Debug)]
+struct ChatExecutionFacadeFallbackOutcome {
+    reply: String,
+    agent_run: openlife_core::agent::AgentRun,
+}
+
+fn agent_loop_fallback_warning(original_error: &str) -> String {
+    format!("fallback: agent_loop_error: {}", original_error)
+}
+
+fn chat_execution_facade_error_decision(
+    error: &execution_facade::TauriExecutionFacadeError,
+) -> ChatExecutionFacadeErrorDecision {
+    if should_fallback_from_execution_facade_error(error) {
+        ChatExecutionFacadeErrorDecision {
+            should_fallback: true,
+            error_message: None,
+            warning_message: Some(format!(
+                "AgentLoop failed in send_message, falling back to legacy: {}",
+                error
+            )),
+        }
+    } else {
+        ChatExecutionFacadeErrorDecision {
+            should_fallback: false,
+            error_message: Some(error.to_string()),
+            warning_message: None,
+        }
+    }
+}
+
+async fn handle_execution_facade_chat_error_branch<F, Fut>(
+    error: &execution_facade::TauriExecutionFacadeError,
+    fallback: F,
+) -> Result<ChatExecutionFacadeFallbackOutcome, String>
+where
+    F: FnOnce(ChatExecutionFacadeErrorDecision) -> Fut,
+    Fut: std::future::Future<Output = Result<(String, openlife_core::agent::AgentRun), String>>,
+{
+    let decision = chat_execution_facade_error_decision(error);
+    if !decision.should_fallback {
+        return Err(decision.error_message.unwrap_or_else(|| error.to_string()));
+    }
+
+    let (reply, agent_run) = fallback(decision).await?;
+    Ok(ChatExecutionFacadeFallbackOutcome { reply, agent_run })
+}
+
 #[tauri::command]
 async fn execute_tool_call(
     name: String,
     arguments: serde_json::Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ToolCallResult, String> {
+    execute_tool_call_inner(name, arguments, state.inner()).await
+}
+
+async fn execute_tool_call_inner(
+    name: String,
+    arguments: serde_json::Value,
+    state: &Arc<AppState>,
+) -> Result<ToolCallResult, String> {
     let cfg = state.config.lock().await;
     let safe_paths = cfg.system.safe_paths.clone();
     let network_policy = cfg.system.network_policy.clone();
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &safe_paths,
+    );
     drop(cfg);
+
+    let agent_spec = match crate::commands::agent_spec::resolve_required_agent_spec(
+        &state.agent_spec_store,
+        None,
+    )
+    .await
+    {
+        Ok(spec) => spec,
+        Err(e) => return Err(format!("AgentSpec resolution failed: {}", e)),
+    };
 
     // Create an AgentRun for direct tool execution audit trail
     let mut run = openlife_core::agent::AgentRun::new_tool_execution_run(&name);
@@ -585,8 +695,8 @@ async fn execute_tool_call(
             .map(|es| (**es).clone()),
         network_policy: Some(network_policy),
         calendar_ics_paths: Vec::new(),
-        execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
-        agent_spec: None,
+        execution_sandbox,
+        agent_spec: Some(agent_spec),
     };
 
     let request = openlife_core::agent::AgentActionRequest {
@@ -1002,5 +1112,206 @@ mod tests {
         } else {
             assert!(!sections.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn send_message_with_agent_loop_missing_agentspec_fails_closed_without_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.set_active("main.default", false).unwrap();
+        }
+
+        let user_msg = ChatMessage {
+            role: "user".to_string(),
+            content: "hello".to_string(),
+        };
+
+        let result = send_message_with_agent_loop_inner(
+            "session-1".to_string(),
+            Some(user_msg.clone()),
+            LifeModel::default(),
+            String::new(),
+            PrivacyEngine::new(),
+            HashMap::new(),
+            vec![user_msg],
+            None,
+            None,
+            Layer::L2,
+            &state,
+            None,
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("missing AgentSpec must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("AgentSpec resolution failed"),
+            "unexpected error: {err}"
+        );
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        assert!(
+            runs.is_empty(),
+            "missing AgentSpec must not create fallback runs: {runs:?}"
+        );
+        assert!(
+            runs.iter().all(|run| !run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("fallback"))),
+            "missing AgentSpec must not write fallback warnings: {runs:?}"
+        );
+
+        let event_store = state.agent_run_event_store.as_ref().unwrap();
+        assert_eq!(
+            event_store
+                .count_events_by_type(openlife_core::agent::AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0,
+            "missing AgentSpec must not record FallbackStarted"
+        );
+        assert_eq!(
+            event_store
+                .count_events_by_type(openlife_core::agent::AgentRunEventType::FallbackCompleted)
+                .unwrap(),
+            0,
+            "missing AgentSpec must not record FallbackCompleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stream_chat_governance_error_returns_without_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let governance =
+            crate::execution_facade::TauriExecutionFacadeError::governance("AgentSpec mismatch");
+
+        let fallback_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let err = handle_execution_facade_chat_error_branch(&governance, {
+            let fallback_calls = fallback_calls.clone();
+            let run_store = state.agent_run_store.as_ref().unwrap().clone();
+            move |_decision| async move {
+                fallback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut run = openlife_core::agent::AgentRun::new_chat_run("session-1", "hello");
+                run.warnings
+                    .push(agent_loop_fallback_warning("should not be called"));
+                {
+                    let store = run_store.lock().await;
+                    store.create_run(&run).unwrap();
+                }
+                Ok(("fallback reply".to_string(), run))
+            }
+        })
+        .await
+        .expect_err("Governance errors must fail closed");
+        assert!(
+            err.contains("AgentSpec mismatch"),
+            "Governance error should preserve original message: {err}"
+        );
+        assert_eq!(
+            fallback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Governance errors must not call the fallback branch"
+        );
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        assert!(
+            runs.is_empty(),
+            "Governance errors must not create fallback AgentRuns: {runs:?}"
+        );
+        assert!(
+            runs.iter().all(|run| !run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("fallback"))),
+            "Governance errors must not persist fallback warnings: {runs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stream_chat_runtime_error_still_falls_back() {
+        let runtime = crate::execution_facade::TauriExecutionFacadeError::runtime("model failed");
+
+        let decision = chat_execution_facade_error_decision(&runtime);
+        assert!(decision.should_fallback);
+        assert!(decision.error_message.is_none());
+        assert!(
+            decision
+                .warning_message
+                .as_deref()
+                .is_some_and(|warning| warning.contains("model failed")
+                    && warning.contains("falling back to legacy")),
+            "Runtime fallback warning should preserve the original error: {decision:?}"
+        );
+
+        let fallback_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let outcome = handle_execution_facade_chat_error_branch(&runtime, {
+            let fallback_calls = fallback_calls.clone();
+            move |_decision| async move {
+                fallback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut run = openlife_core::agent::AgentRun::new_chat_run("session-1", "hello");
+                run.warnings.push(agent_loop_fallback_warning(
+                    "ExecutionFacade Runtime error: model failed",
+                ));
+                Ok(("fallback reply".to_string(), run))
+            }
+        })
+        .await
+        .expect("Runtime errors should call fallback");
+
+        assert_eq!(
+            fallback_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "Runtime errors must still call the fallback branch"
+        );
+        assert_eq!(outcome.reply, "fallback reply");
+        assert!(
+            outcome
+                .agent_run
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("fallback: agent_loop_error")
+                    && warning.contains("model failed")),
+            "Runtime fallback should preserve fallback warning semantics: {:?}",
+            outcome.agent_run.warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_tool_call_requires_agent_spec() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.set_active("main.default", false).unwrap();
+        }
+
+        let result =
+            execute_tool_call_inner("goal.read".into(), serde_json::json!({}), &state).await;
+
+        let err = match result {
+            Ok(_) => panic!("direct tool execution must fail closed"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("AgentSpec resolution failed"),
+            "unexpected error: {}",
+            err
+        );
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(10, 0).unwrap()
+        };
+        assert!(
+            runs.is_empty(),
+            "tool execution must not create an AgentRun when AgentSpec resolution fails"
+        );
     }
 }

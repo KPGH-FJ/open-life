@@ -315,6 +315,10 @@ pub(crate) async fn replay_action_internal(
     let safe_paths = cfg.system.safe_paths.clone();
     let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
     let network_policy = cfg.system.network_policy.clone();
+    let execution_sandbox = openlife_core::agent::execution_sandbox::ExecutionSandbox::from_config(
+        &cfg.system.execution_sandbox,
+        &safe_paths,
+    );
     drop(cfg);
     let life_model = {
         let manager = state.life_model_manager.lock().await;
@@ -323,7 +327,7 @@ pub(crate) async fn replay_action_internal(
 
     let executor =
         openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
-            consume_allow_once: false,
+            consume_allow_once: true,
             ..Default::default()
         });
     let ctx = openlife_core::agent::ActionContext {
@@ -342,7 +346,7 @@ pub(crate) async fn replay_action_internal(
             .map(|es| (**es).clone()),
         network_policy: Some(network_policy),
         calendar_ics_paths,
-        execution_sandbox: openlife_core::agent::execution_sandbox::ExecutionSandbox::default(),
+        execution_sandbox,
         agent_spec: Some(agent_spec.clone()),
     };
 

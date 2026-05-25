@@ -279,7 +279,43 @@ Make behavior observable enough for release decisions.
 - A reviewer can reconstruct a permission/replay flow from events.
 - Release gate references evidence for P0/P1 rows.
 
-## 10. Agent Prompt Template
+## 10. Phase 2: Execution Path Convergence
+
+After the P0/P1 governance batches, the next Codex-level phase is Tauri-side execution
+path convergence.
+
+Read before assigning implementation:
+
+- `plans/openlife_vnext_execution_entrypoints.md`
+- `plans/openlife_codex_level_phase2_execution_facade_prep.md`
+
+First implementation batch:
+
+- Add `src-tauri/src/execution_facade.rs`.
+- Add typed facade mode/input/outcome structures.
+- Centralize AgentLoop and ActionContext assembly helpers.
+- Keep behavior unchanged while preparing migration.
+- Do not migrate Builder, Calibration, Replay, or frontend UX in the first batch.
+
+Required targeted tests:
+
+- `execution_facade_builds_action_context_with_agent_spec`
+- `execution_facade_builds_action_context_with_sandbox_from_config`
+- `execution_facade_non_stream_chat_matches_existing_agentloop_config`
+- `execution_facade_scheduled_mode_uses_restricted_toolset`
+
+Validation:
+
+```bash
+cargo fmt --check
+cargo clippy -p openlife-tauri -- -D warnings
+cargo test -p openlife-tauri execution_facade -- --nocapture
+cargo test -p openlife-tauri scheduler -- --nocapture
+cargo test -p openlife-tauri replay -- --nocapture
+make ci
+```
+
+## 11. Agent Prompt Template
 
 Use this template for each batch.
 
@@ -316,7 +352,7 @@ Final report must include:
 - Residual risks
 ```
 
-## 11. Reviewer Checklist
+## 12. Reviewer Checklist
 
 Before accepting any batch:
 
@@ -328,4 +364,3 @@ Before accepting any batch:
 - Are errors explicit rather than silently converted to success?
 - Are traces/audit sufficient to explain the behavior?
 - Does `make ci` pass?
-

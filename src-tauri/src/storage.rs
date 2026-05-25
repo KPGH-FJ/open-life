@@ -3,6 +3,15 @@ use openlife_core::mcp_audit::AuditKeyConfig;
 use openlife_core::privacy::PrivacyPolicy;
 
 pub(crate) fn app_data_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    {
+        let dir =
+            std::env::temp_dir().join(format!("ai.openlife.desktop-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+
+    #[cfg(not(test))]
     dirs::data_dir()
         .map(|d| d.join("ai.openlife.desktop"))
         .or_else(dirs::home_dir)

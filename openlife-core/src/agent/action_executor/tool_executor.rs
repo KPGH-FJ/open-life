@@ -229,7 +229,12 @@ impl super::ActionExecutor {
 
         // -- Phase 5: safe-paths check (static data) --
         if let Some(ref m) = manifest {
-            if m.capabilities.contains(&"filesystem".to_string()) {
+            let has_fs_capability = m.capabilities.iter().any(|c| {
+                let cl = c.to_lowercase();
+                cl == "filesystem" || cl == "fs" || cl == "file_write" || cl == "file_read"
+            });
+            let is_known_fs_tool = tool_name.starts_with("file.") || tool_name == "shell.run";
+            if has_fs_capability || is_known_fs_tool {
                 let path = args
                     .get("path")
                     .and_then(|v: &Value| v.as_str())

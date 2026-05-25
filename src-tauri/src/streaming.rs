@@ -10,13 +10,11 @@ use tauri::Emitter;
 use tauri::State;
 use tokio::time::{timeout, Duration};
 
-use openlife_core::agent::execution_sandbox::ExecutionSandbox;
 use openlife_core::agent::trace_payloads;
 use openlife_core::agent::types::{PrivacyPolicy, RedactionLevel};
 use openlife_core::agent::{
-    ActionExecutor, ActionExecutorConfig, AgentEventActor, AgentRun, AgentRunError, AgentRunEvent,
-    AgentRunEventType, AgentRunStore, AgentTask, AgentTaskKind, ContextSummary, ModelRouteTrace,
-    ReasoningTrace, StreamingCallback,
+    AgentEventActor, AgentRun, AgentRunError, AgentRunEvent, AgentRunEventType, AgentRunStore,
+    AgentTask, AgentTaskKind, ContextSummary, ModelRouteTrace, ReasoningTrace, StreamingCallback,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
@@ -624,25 +622,23 @@ async fn start_stream_message_with_agent_loop(
         }
     };
     let agent_spec_id = agent_spec.id.clone();
-    let prompt_registry = openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in();
+    let prompt_registry = crate::execution_facade::build_prompt_registry();
 
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
-    let safe_paths = cfg.system.safe_paths.clone();
-    let calendar_ics_paths = cfg.system.calendar_ics_paths.clone();
-    let agent_runtime =
-        openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg);
-    let action_executor = ActionExecutor::new(ActionExecutorConfig::default());
-
-    let loop_config =
-        execution_deps::build_loop_config(&cfg, state.inner().shutdown_notify.clone());
-    let agent_loop = execution_deps::build_agent_loop(
-        agent_runtime,
-        action_executor,
-        &scheduler,
-        loop_config,
+    let runtime_assembly = crate::execution_facade::build_runtime_assembly_config(
+        &cfg,
+        crate::execution_facade::TauriAgentExecutionMode::StreamChat,
+        state.inner().shutdown_notify.clone(),
+    );
+    let agent_loop = crate::execution_facade::build_governed_agent_loop(
+        life_model.clone(),
+        scheduler.clone(),
+        &cfg,
+        &runtime_assembly,
         &state.agent_run_event_store,
     );
+    drop(cfg);
 
     let task = execution_deps::build_agent_task(
         AgentTaskKind::Conversation,
@@ -654,10 +650,6 @@ async fn start_stream_message_with_agent_loop(
         desensitized_messages.clone(),
         _layer,
     );
-
-    let network_policy = cfg.system.network_policy.clone();
-    let execution_sandbox =
-        ExecutionSandbox::from_config(&cfg.system.execution_sandbox, &safe_paths);
 
     let callback = Arc::new(TauriStreamingCallback {
         app_handle: app_handle.clone(),
@@ -676,48 +668,44 @@ async fn start_stream_message_with_agent_loop(
         }),
     );
 
-    let loop_result = {
-        let action_ctx = execution_deps::assemble_action_context(
-            state.mcp_registry.clone(),
-            state.tool_permission_store.clone(),
-            state.mcp_audit_store.clone(),
-            state.privacy_engine.clone(),
-            safe_paths.clone(),
-            Some(life_model.clone()),
-            Some(state.memory_store.clone()),
-            calendar_ics_paths.clone(),
-            network_policy.clone(),
-            execution_sandbox.clone(),
-            agent_spec.clone(),
-            state.proposal_store.clone(),
-            state.agent_run_store.clone(),
-            state
-                .agent_run_event_store
-                .as_ref()
-                .map(|es| (**es).clone()),
-        );
-
-        agent_loop
-            .run_streaming(
-                &task,
-                &life_model,
-                &tools_prompt,
-                None,
-                privacy_engine.clone(),
-                agent_spec.privacy_policy,
-                &agent_spec,
-                &prompt_registry,
-                &action_ctx,
-                callback,
-            )
-            .await
+    let action_ctx = crate::execution_facade::build_governed_action_context(
+        state.inner(),
+        &runtime_assembly,
+        Some(life_model.clone()),
+        Some(state.memory_store.clone()),
+        agent_spec.clone(),
+    );
+    let execution_input = crate::execution_facade::TauriAgentExecutionInput {
+        mode: crate::execution_facade::TauriAgentExecutionMode::StreamChat,
+        task,
+        life_model: life_model.clone(),
+        tools_prompt: tools_prompt.clone(),
+        privacy_engine: privacy_engine.clone(),
+        agent_spec: Some(agent_spec.clone()),
+        prompt_registry: Some(prompt_registry),
+        streaming_callback: Some(callback),
     };
 
-    let (mut reply, mut agent_run) = match loop_result {
-        Ok(result) => (result.final_response, result.run),
+    let execution_outcome =
+        crate::execution_facade::run_tauri_agent_task(&agent_loop, &action_ctx, execution_input)
+            .await;
+
+    let (mut reply, mut agent_run) = match execution_outcome {
+        Ok(outcome) => (outcome.reply, outcome.run),
         Err(e) => {
+            let error_decision =
+                handle_execution_facade_stream_error(&e, &session_id, &placeholder_run_id);
+            for (event, payload) in &error_decision.emitted_events {
+                let _ = app_handle.emit(event, payload.clone());
+            }
+            if !error_decision.should_fallback {
+                let error_msg = error_decision
+                    .error_message
+                    .unwrap_or_else(|| e.to_string());
+                return Err(error_msg);
+            }
             eprintln!(
-                "[warn] AgentLoop streaming failed, falling back to legacy: {}",
+                "[warn] ExecutionFacade streaming failed, falling back to legacy: {}",
                 e
             );
             let user_input_txt = user_msg
@@ -820,6 +808,47 @@ async fn start_stream_message_with_agent_loop(
             );
             Ok(())
         }
+    }
+}
+
+fn should_fallback_from_execution_facade_error(
+    error: &crate::execution_facade::TauriExecutionFacadeError,
+) -> bool {
+    error.is_runtime()
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionFacadeStreamErrorDecision {
+    should_fallback: bool,
+    emitted_events: Vec<(&'static str, serde_json::Value)>,
+    error_message: Option<String>,
+}
+
+fn handle_execution_facade_stream_error(
+    error: &crate::execution_facade::TauriExecutionFacadeError,
+    session_id: &str,
+    run_id: &str,
+) -> ExecutionFacadeStreamErrorDecision {
+    if should_fallback_from_execution_facade_error(error) {
+        return ExecutionFacadeStreamErrorDecision {
+            should_fallback: true,
+            emitted_events: Vec::new(),
+            error_message: None,
+        };
+    }
+
+    let error_msg = error.to_string();
+    ExecutionFacadeStreamErrorDecision {
+        should_fallback: false,
+        emitted_events: vec![(
+            "stream-message-error",
+            json!({
+                "session_id": session_id,
+                "run_id": run_id,
+                "error": error_msg.clone(),
+            }),
+        )],
+        error_message: Some(error_msg),
     }
 }
 
@@ -1250,4 +1279,62 @@ pub(crate) async fn start_stream_message(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn streaming_path_uses_execution_facade() {
+        let source = include_str!("streaming.rs");
+        let direct_streaming_call = [".run_", "streaming("].concat();
+
+        assert!(
+            !source.contains(&direct_streaming_call),
+            "streaming.rs must route AgentLoop streaming through ExecutionFacade"
+        );
+        assert!(
+            source.contains("run_tauri_agent_task"),
+            "streaming.rs should call the Tauri ExecutionFacade entrypoint"
+        );
+    }
+
+    #[test]
+    fn stream_chat_governance_error_emits_error_without_fallback_events() {
+        let governance =
+            crate::execution_facade::TauriExecutionFacadeError::governance("AgentSpec mismatch");
+        let runtime = crate::execution_facade::TauriExecutionFacadeError::runtime("model failed");
+
+        assert!(!super::should_fallback_from_execution_facade_error(
+            &governance
+        ));
+        assert!(super::should_fallback_from_execution_facade_error(&runtime));
+
+        let decision =
+            super::handle_execution_facade_stream_error(&governance, "session-1", "run-1");
+        assert!(!decision.should_fallback);
+        assert_eq!(decision.emitted_events.len(), 1);
+        assert_eq!(decision.emitted_events[0].0, "stream-message-error");
+        let payload = &decision.emitted_events[0].1;
+        assert_eq!(payload["session_id"], "session-1");
+        assert_eq!(payload["run_id"], "run-1");
+        assert!(
+            payload["error"]
+                .as_str()
+                .is_some_and(|error: &str| error.contains("AgentSpec mismatch")),
+            "error payload should preserve Governance message: {payload:?}"
+        );
+        assert!(
+            decision
+                .emitted_events
+                .iter()
+                .all(|(event, _)| *event != "stream-message-chunk"
+                    && *event != "stream-message-done"),
+            "Governance errors must only emit stream-message-error"
+        );
+
+        let runtime_decision =
+            super::handle_execution_facade_stream_error(&runtime, "session-1", "run-1");
+        assert!(runtime_decision.should_fallback);
+        assert!(runtime_decision.emitted_events.is_empty());
+    }
 }

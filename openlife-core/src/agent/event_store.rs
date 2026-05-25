@@ -164,6 +164,21 @@ impl AgentRunEventStore {
         )?;
         Ok(count)
     }
+
+    /// Count events by type.
+    pub fn count_events_by_type(&self, event_type: AgentRunEventType) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let event_type = event_type.to_string();
+        let count: usize = conn.query_row(
+            "SELECT COUNT(*) FROM agent_run_events WHERE event_type = ?1",
+            [event_type],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
 }
 
 fn parse_event_type(s: &str) -> AgentRunEventType {

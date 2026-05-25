@@ -112,6 +112,14 @@ pub(crate) async fn persist_chat_message_if_needed(
     msg: &ChatMessage,
     state: &State<'_, Arc<AppState>>,
 ) -> Result<bool, String> {
+    persist_chat_message_if_needed_inner(session_id, msg, state.inner()).await
+}
+
+pub(crate) async fn persist_chat_message_if_needed_inner(
+    session_id: &str,
+    msg: &ChatMessage,
+    state: &Arc<AppState>,
+) -> Result<bool, String> {
     let store = state.memory_store.lock().await;
     let should_skip = store
         .load_recent_messages(session_id, 1)
@@ -134,6 +142,14 @@ pub(crate) async fn persist_vector_memory_for_message(
     session_id: &str,
     msg: &ChatMessage,
     state: &State<'_, Arc<AppState>>,
+) {
+    persist_vector_memory_for_message_inner(session_id, msg, state.inner()).await;
+}
+
+pub(crate) async fn persist_vector_memory_for_message_inner(
+    session_id: &str,
+    msg: &ChatMessage,
+    state: &Arc<AppState>,
 ) {
     let content = msg.content.trim();
     if content.is_empty() {
@@ -197,7 +213,29 @@ pub(crate) async fn finalize_chat_agent_run(
     life_model: &LifeModel,
     state: &State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let inserted = persist_chat_message_if_needed(session_id, assistant_message, state).await?;
+    finalize_chat_agent_run_inner(
+        session_id,
+        assistant_message,
+        reply,
+        reasoning_trace,
+        agent_run,
+        life_model,
+        state.inner(),
+    )
+    .await
+}
+
+pub(crate) async fn finalize_chat_agent_run_inner(
+    session_id: &str,
+    assistant_message: &ChatMessage,
+    reply: &str,
+    reasoning_trace: &mut ReasoningTrace,
+    agent_run: &mut openlife_core::agent::AgentRun,
+    life_model: &LifeModel,
+    state: &Arc<AppState>,
+) -> Result<(), String> {
+    let inserted =
+        persist_chat_message_if_needed_inner(session_id, assistant_message, state).await?;
 
     reasoning_trace.generation_result = Some(serde_json::json!({ "text": reply }));
     agent_run.output_preview = Some(preview_text(reply, 200));
@@ -232,7 +270,7 @@ pub(crate) async fn finalize_chat_agent_run(
     if inserted
         && timeout(
             Duration::from_secs(CHAT_VECTOR_PERSIST_TIMEOUT_SECS),
-            persist_vector_memory_for_message(session_id, assistant_message, state),
+            persist_vector_memory_for_message_inner(session_id, assistant_message, state),
         )
         .await
         .is_err()
@@ -245,7 +283,7 @@ pub(crate) async fn finalize_chat_agent_run(
 
     if timeout(
         Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
-        generate_and_persist_chat_proposals(state.inner(), agent_run, reply, life_model),
+        generate_and_persist_chat_proposals(state, agent_run, reply, life_model),
     )
     .await
     .is_err()

@@ -6,13 +6,6 @@ use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use std::sync::Arc;
 
-pub struct ExecutionEnvironment {
-    pub agent_spec: openlife_core::agent::types::AgentSpec,
-    pub prompt_registry: openlife_core::agent::prompt_stack::PromptBlockRegistry,
-    pub execution_sandbox: ExecutionSandbox,
-    pub network_policy: openlife_core::config::NetworkPolicy,
-}
-
 pub fn build_loop_config(
     cfg: &AppConfig,
     shutdown_notify: Arc<tokio::sync::Notify>,
@@ -45,18 +38,6 @@ pub fn build_agent_loop(
         al = al.with_event_store((**es).clone());
     }
     al
-}
-
-pub fn resolve_execution_env(cfg: &AppConfig) -> ExecutionEnvironment {
-    ExecutionEnvironment {
-        agent_spec: openlife_core::agent::types::AgentSpec::default_main_spec(),
-        prompt_registry: openlife_core::agent::prompt_stack::PromptBlockRegistry::built_in(),
-        execution_sandbox: ExecutionSandbox::from_config(
-            &cfg.system.execution_sandbox,
-            &cfg.system.safe_paths,
-        ),
-        network_policy: cfg.system.network_policy.clone(),
-    }
 }
 
 pub fn build_agent_task(
@@ -152,13 +133,5 @@ mod tests {
         assert!(config.allow_writes);
         assert!(config.allow_cloud);
         assert!(config.shutdown_notify.is_some());
-    }
-
-    #[test]
-    fn test_resolve_execution_env_populates_all_fields() {
-        let cfg = AppConfig::default();
-        let env = resolve_execution_env(&cfg);
-        assert!(!env.agent_spec.id.is_empty());
-        assert!(env.prompt_registry.get("base_system").is_some());
     }
 }

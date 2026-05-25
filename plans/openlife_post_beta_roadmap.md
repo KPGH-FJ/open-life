@@ -13,8 +13,12 @@ Status: active
 1. [`openlife_codex_level_upgrade_plan.md`](openlife_codex_level_upgrade_plan.md): 总体升级目标、硬约束、P0/P1 阻断项和批次策略。
 2. [`openlife_codex_level_acceptance_matrix.md`](openlife_codex_level_acceptance_matrix.md): 行为验收矩阵，`make ci` 之外的发布门槛。
 3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
+4. [`openlife_codex_level_phase2_execution_facade_prep.md`](openlife_codex_level_phase2_execution_facade_prep.md): Phase 2 执行路径收敛准备文档，定义 Tauri-side ExecutionFacade 的首批开发边界、非目标、测试和 Agent 指令。
+5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat 已完成 full ExecutionFacade 收敛，Scheduled 为 assembly-only，Replay / Plan / Builder / Calibration 暂不迁移，并给出下一批最小候选。
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
+
+2026-05-25 当前阶段为 **ExecutionFacade coverage audit / migration boundary**：先锁定真实执行版图和迁移边界。Chat / StreamChat 已完成 ExecutionFacade 路径收敛；下一阶段只从明确候选中选择最小迁移目标，不把 Scheduled / Replay / Plan / Builder / Calibration 记录为已迁移。
 
 ---
 
