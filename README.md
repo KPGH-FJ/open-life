@@ -29,7 +29,7 @@ vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta �
 
 - **执行路径收敛**：统一 lib.rs 的 5+ 条执行入口到单一 facade。
 - **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端。
-- **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled / Skill-specific prompt 已 PromptStack-governed；Chat proposal extraction 已迁入 Proposal-specific PromptStack helper 并返回 metadata-only audit；Builder / Calibration、web summarization helper、LayeredReasoner internal prompts、legacy scheduler generation 仍为未迁移 legacy/ad hoc 边界。
+- **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled / Skill-specific prompt 已 PromptStack-governed；Chat proposal extraction 已迁入 Proposal-specific PromptStack helper，web content summarization helper 已迁入 Web Summarization PromptStack helper，二者均返回 metadata-only audit 且不伪造 AgentRunEvent；web summarization 的用户可见输出也使用 sanitized source display；Builder / Calibration、LayeredReasoner internal prompts、legacy scheduler generation 仍为未迁移 legacy/ad hoc 边界。
 - **生产就绪**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构。
 
 完整计划：[`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)

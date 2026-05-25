@@ -3,6 +3,7 @@ use crate::mcp::McpRegistry;
 use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::net::ToSocketAddrs;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -994,63 +995,331 @@ pub fn call_a2a_agent_blocking(
     })
 }
 
-/// Summarize fetched web content via Ollama on a blocking thread.
+const WEB_SUMMARIZATION_MODEL: &str = "llama3.2:latest";
+const WEB_SUMMARIZATION_MAX_INPUT_CHARS: usize = 8_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSummarizationAudit {
+    pub prompt_blocks: Vec<crate::agent::prompt_stack::BlockTraceEntry>,
+    pub privacy_policy: String,
+    pub model_route: Option<String>,
+    pub model_provider: Option<String>,
+    pub model_attempted: bool,
+    pub cloud_attempted: bool,
+    pub failure_reason: Option<String>,
+    pub fallback_reason: Option<String>,
+    pub output_contract_id: Option<String>,
+    pub source_type: String,
+    pub content_character_count: usize,
+    pub input_character_count: usize,
+}
+
+impl WebSummarizationAudit {
+    fn new(
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+        content: &str,
+        source_url: &str,
+    ) -> Self {
+        let source_type =
+            crate::agent::prompt_stack::classify_web_summarization_source(source_url).to_string();
+        Self {
+            prompt_blocks: Vec::new(),
+            privacy_policy: privacy_policy.to_string(),
+            model_route: None,
+            model_provider: None,
+            model_attempted: false,
+            cloud_attempted: false,
+            failure_reason: None,
+            fallback_reason: None,
+            output_contract_id: None,
+            source_type,
+            content_character_count: content.chars().count(),
+            input_character_count: content
+                .chars()
+                .take(WEB_SUMMARIZATION_MAX_INPUT_CHARS)
+                .count(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSummarizationResult {
+    pub success: bool,
+    pub output: String,
+    pub audit: WebSummarizationAudit,
+}
+
+enum WebSummarizationModelSource {
+    LocalOllama,
+    #[cfg(test)]
+    ProvidedReply(String),
+    #[cfg(test)]
+    Unavailable,
+}
+
+/// Summarize fetched web content via a PromptStack-governed local Ollama helper.
 pub fn summarize_content_blocking(content: &str, source_url: &str) -> Result<String> {
-    let max_input = 8000;
-    let text: String = content.chars().take(max_input).collect();
-    let source_url = source_url.to_string();
-    let content_len = content.len();
+    let result = summarize_content_with_policy_and_blocks(
+        content,
+        source_url,
+        crate::agent::types::PrivacyPolicy::LocalOnly,
+        crate::agent::prompt_stack::PromptStack::web_summarization_block_ids(),
+        WebSummarizationModelSource::LocalOllama,
+    );
+    if result.success {
+        Ok(result.output)
+    } else {
+        log::warn!(
+            "web summarization fallback: reason={:?}, privacy_policy={}, source_type={}, prompt_block_count={}",
+            result.audit.fallback_reason,
+            result.audit.privacy_policy,
+            result.audit.source_type,
+            result.audit.prompt_blocks.len()
+        );
+        Ok(result.output)
+    }
+}
 
-    let fallback_url = source_url.clone();
-    let fallback_text = content.chars().take(500).collect::<String>();
+fn summarize_content_with_policy_and_blocks(
+    content: &str,
+    source_url: &str,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+    prompt_block_ids: Vec<String>,
+    model_source: WebSummarizationModelSource,
+) -> WebSummarizationResult {
+    let input_text: String = content
+        .chars()
+        .take(WEB_SUMMARIZATION_MAX_INPUT_CHARS)
+        .collect();
+    let mut audit = WebSummarizationAudit::new(privacy_policy, content, source_url);
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| anyhow::anyhow!("Failed to create tokio runtime: {}", e))?;
+    let registry = crate::agent::prompt_stack::PromptBlockRegistry::built_in();
+    let mut stack =
+        match crate::agent::prompt_stack::PromptStack::web_summarization_task_stack_with_registry(
+            &input_text,
+            source_url,
+            privacy_policy,
+            &registry,
+            &prompt_block_ids,
+        ) {
+            Ok(stack) => stack,
+            Err(err) => {
+                audit.failure_reason = Some(if err.contains("unknown prompt block") {
+                    "unknown_prompt_block".to_string()
+                } else {
+                    "prompt_stack_assembly_failed".to_string()
+                });
+                audit.fallback_reason = Some("prompt_stack_assembly_failed".to_string());
+                return web_summarization_failure_output(audit);
+            }
+        };
+
+    let warnings = match stack.validate() {
+        Ok(warnings) => warnings,
+        Err(_) => {
+            audit.failure_reason = Some("prompt_stack_validation_failed".to_string());
+            audit.fallback_reason = Some("prompt_stack_validation_failed".to_string());
+            return web_summarization_failure_output(audit);
+        }
+    };
+    if !warnings.is_empty() {
+        audit.failure_reason = Some("prompt_stack_validation_failed".to_string());
+        audit.fallback_reason = Some("prompt_stack_validation_failed".to_string());
+        return web_summarization_failure_output(audit);
+    }
+
+    audit.prompt_blocks = stack.block_trace();
+    audit.output_contract_id = Some("web_summarization.output_contract@1.0.0".to_string());
+
+    if privacy_policy == crate::agent::types::PrivacyPolicy::SummaryOnly {
+        audit.failure_reason = Some("summary_only_raw_content_omitted".to_string());
+        audit.fallback_reason = Some("summary_only_raw_content_omitted".to_string());
+        return web_summarization_failure_output(audit);
+    }
+
+    audit.model_route = Some("local".to_string());
+    audit.model_provider = Some("ollama".to_string());
+    audit.model_attempted = true;
+    audit.cloud_attempted = false;
+
+    let prompt = stack.assemble();
+    let reply = match model_source {
+        #[cfg(test)]
+        WebSummarizationModelSource::ProvidedReply(reply) => Ok(reply),
+        #[cfg(test)]
+        WebSummarizationModelSource::Unavailable => Err("local_model_unavailable".to_string()),
+        WebSummarizationModelSource::LocalOllama => run_local_web_summarization_model(prompt),
+    };
+
+    match reply.and_then(|reply| format_web_summarization_output(&reply, source_url, &audit)) {
+        Ok(output) => WebSummarizationResult {
+            success: true,
+            output,
+            audit,
+        },
+        Err(reason) => {
+            audit.failure_reason = Some(reason.clone());
+            audit.fallback_reason = Some(reason);
+            web_summarization_failure_output(audit)
+        }
+    }
+}
+
+fn web_summarization_failure_output(audit: WebSummarizationAudit) -> WebSummarizationResult {
+    let reason = audit
+        .fallback_reason
+        .as_deref()
+        .or(audit.failure_reason.as_deref())
+        .unwrap_or("web_summarization_failed");
+    // Deliberately excludes raw source URL and raw content; this string can enter tool observations.
+    let output = format!(
+        "Web summarization unavailable (reason: {}). Source type: {}; content length: {} chars; model route: {}. Raw content omitted from fallback.",
+        reason,
+        audit.source_type,
+        audit.content_character_count,
+        audit.model_route.as_deref().unwrap_or("not_attempted")
+    );
+    WebSummarizationResult {
+        success: false,
+        output,
+        audit,
+    }
+}
+
+fn run_local_web_summarization_model(prompt: String) -> std::result::Result<String, String> {
+    std::thread::spawn(move || -> std::result::Result<String, String> {
+        let rt = tokio::runtime::Runtime::new().map_err(|_| "local_runtime_unavailable".to_string())?;
         rt.block_on(async {
-            let system_prompt = format!(
-                "You are a web content summarizer. Summarize the following web page content in 3-5 bullet points in Chinese. Source URL: {}",
-                source_url
-            );
-            let messages = vec![
-                crate::llm::ChatMessage {
-                    role: "system".to_string(),
-                    content: system_prompt,
-                },
-                crate::llm::ChatMessage {
-                    role: "user".to_string(),
-                    content: format!("Summarize:\n\n{}", text),
-                },
-            ];
-
-            match crate::ollama::chat_with_ollama_raw(
-                "llama3.2:latest",
-                messages,
-                None,
+            if !crate::ollama::is_ollama_available(WEB_SUMMARIZATION_MODEL).await {
+                return Err("local_model_unavailable".to_string());
+            }
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                crate::ollama::chat_with_ollama_raw(
+                    WEB_SUMMARIZATION_MODEL,
+                    vec![crate::llm::ChatMessage {
+                        role: "user".to_string(),
+                        content: "Summarize the governed web task input and return the required JSON contract.".to_string(),
+                    }],
+                    Some(&prompt),
+                ),
             )
             .await
-            {
-                Ok(summary) => Ok(format!(
-                    "Summary of {} ({} chars):\n{}",
-                    source_url, content_len, summary
-                )),
-                Err(_) => Ok(format!(
-                    "[Content from {} ({} chars total, {} shown)]\n\n{}...",
-                    source_url,
-                    content_len,
-                    max_input.min(content_len),
-                    text.chars().take(500).collect::<String>(),
-                )),
-            }
+            .map_err(|_| "local_model_timeout".to_string())?
+            .map_err(|_| "local_model_call_failed".to_string())
         })
     })
     .join()
-    .unwrap_or_else(move |_| {
-        Ok(format!(
-            "[Content from {} - summarization failed]\n\n{}...",
-            fallback_url, fallback_text
-        ))
-    })
+    .ok()
+    .unwrap_or_else(|| Err("local_model_thread_panicked".to_string()))
+}
+
+fn sanitize_source_url_for_output(source_url: &str) -> String {
+    let Ok(mut parsed) = reqwest::Url::parse(source_url) else {
+        return "redacted_source".to_string();
+    };
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return "redacted_source".to_string(),
+    }
+
+    if parsed.host_str().is_none() {
+        return "redacted_source".to_string();
+    }
+
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    let _ = parsed.set_port(None);
+    parsed.to_string()
+}
+
+fn format_web_summarization_output(
+    reply: &str,
+    source_url: &str,
+    audit: &WebSummarizationAudit,
+) -> std::result::Result<String, String> {
+    let json = serde_json::from_str::<serde_json::Value>(reply).or_else(|_| {
+        crate::json_utils::extract_first_json_object(reply)
+            .ok_or_else(|| "model_output_invalid".to_string())
+            .and_then(|json| {
+                serde_json::from_str::<serde_json::Value>(json)
+                    .map_err(|_| "model_output_invalid".to_string())
+            })
+    })?;
+    let bullets = json
+        .get("summary_bullets")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| "model_output_invalid".to_string())?;
+    let bullet_text: Vec<String> = bullets
+        .iter()
+        .filter_map(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if bullet_text.is_empty() {
+        return Err("model_output_invalid".to_string());
+    }
+
+    let source_display = sanitize_source_url_for_output(source_url);
+    let mut lines = vec![format!(
+        "Summary of {} ({} chars, source_type={}):",
+        source_display, audit.content_character_count, audit.source_type
+    )];
+    for bullet in bullet_text {
+        lines.push(format!("- {}", bullet));
+    }
+    Ok(lines.join("\n"))
+}
+
+#[cfg(test)]
+fn summarize_content_with_model_reply_for_test(
+    content: &str,
+    source_url: &str,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+    model_reply: &str,
+) -> WebSummarizationResult {
+    summarize_content_with_policy_and_blocks(
+        content,
+        source_url,
+        privacy_policy,
+        crate::agent::prompt_stack::PromptStack::web_summarization_block_ids(),
+        WebSummarizationModelSource::ProvidedReply(model_reply.to_string()),
+    )
+}
+
+#[cfg(test)]
+fn summarize_content_with_unavailable_model_for_test(
+    content: &str,
+    source_url: &str,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+) -> WebSummarizationResult {
+    summarize_content_with_policy_and_blocks(
+        content,
+        source_url,
+        privacy_policy,
+        crate::agent::prompt_stack::PromptStack::web_summarization_block_ids(),
+        WebSummarizationModelSource::Unavailable,
+    )
+}
+
+#[cfg(test)]
+fn summarize_content_with_prompt_block_ids_for_test(
+    content: &str,
+    source_url: &str,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+    prompt_block_ids: Vec<String>,
+) -> WebSummarizationResult {
+    summarize_content_with_policy_and_blocks(
+        content,
+        source_url,
+        privacy_policy,
+        prompt_block_ids,
+        WebSummarizationModelSource::Unavailable,
+    )
 }
 
 #[cfg(test)]
@@ -1080,6 +1349,136 @@ mod tests {
             Some("localhost".to_string())
         );
         assert_eq!(extract_host_from_url("not-a-url"), None);
+    }
+
+    #[test]
+    fn test_summary_only_web_summarization_audit_metadata_excludes_raw_content() {
+        let result = summarize_content_with_model_reply_for_test(
+            "RAW_WEB_CONTENT_SENTINEL private fetched body",
+            "https://example.com/private?token=RAW_URL_SENTINEL",
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+            r#"{"summary_bullets":["Only metadata was available."],"source_type":"web_page","limitations":["raw content omitted by SummaryOnly"]}"#,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.audit.privacy_policy, "summary_only");
+        assert_eq!(
+            result.audit.failure_reason.as_deref(),
+            Some("summary_only_raw_content_omitted")
+        );
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(!metadata.contains("RAW_WEB_CONTENT_SENTINEL"));
+        assert!(!metadata.contains("RAW_URL_SENTINEL"));
+        assert!(!metadata.contains("raw_prompt"));
+        assert!(!metadata.contains("full_model_output"));
+    }
+
+    #[test]
+    fn test_local_only_web_summarization_unavailable_does_not_use_cloud() {
+        let result = summarize_content_with_unavailable_model_for_test(
+            "RAW_WEB_CONTENT_SENTINEL private fetched body",
+            "https://example.com/article",
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+        );
+
+        assert!(!result.success);
+        assert_eq!(result.audit.privacy_policy, "local_only");
+        assert_eq!(result.audit.model_route.as_deref(), Some("local"));
+        assert_eq!(result.audit.model_provider.as_deref(), Some("ollama"));
+        assert_eq!(
+            result.audit.failure_reason.as_deref(),
+            Some("local_model_unavailable")
+        );
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("local_model_unavailable")
+        );
+        assert!(!result.audit.cloud_attempted);
+        assert!(!result.output.contains("RAW_WEB_CONTENT_SENTINEL"));
+    }
+
+    #[test]
+    fn test_successful_web_summarization_sanitizes_source_url_output() {
+        let result = summarize_content_with_model_reply_for_test(
+            "safe article body",
+            "https://example.com/private/path?token=RAW_URL_SENTINEL&session=abc#frag",
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            r#"{"summary_bullets":["摘要内容"],"source_type":"web_page","limitations":[]}"#,
+        );
+
+        assert!(result.success);
+        assert!(result.output.contains("https://example.com/private/path"));
+        assert!(!result.output.contains("RAW_URL_SENTINEL"));
+        assert!(!result.output.contains("?token="));
+        assert!(!result.output.contains("session=abc"));
+        assert!(!result.output.contains("#frag"));
+
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(!metadata.contains("RAW_URL_SENTINEL"));
+    }
+
+    #[test]
+    fn test_successful_web_summarization_redacts_invalid_source_url_output() {
+        let result = summarize_content_with_model_reply_for_test(
+            "safe article body",
+            "RAW_URL_SENTINEL not a url",
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            r#"{"summary_bullets":["摘要内容"],"source_type":"plain_text","limitations":[]}"#,
+        );
+
+        assert!(result.success);
+        assert!(result.output.contains("redacted_source"));
+        assert!(!result.output.contains("RAW_URL_SENTINEL"));
+
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(!metadata.contains("RAW_URL_SENTINEL"));
+    }
+
+    #[test]
+    fn test_unknown_web_summarization_prompt_block_fails_closed() {
+        let result = summarize_content_with_prompt_block_ids_for_test(
+            "RAW_WEB_CONTENT_SENTINEL private fetched body",
+            "https://example.com/article",
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            vec!["web_summarization.missing".to_string()],
+        );
+
+        assert!(!result.success);
+        assert_eq!(
+            result.audit.failure_reason.as_deref(),
+            Some("unknown_prompt_block")
+        );
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("prompt_stack_assembly_failed")
+        );
+        assert!(result.audit.prompt_blocks.is_empty());
+        assert!(!result.output.contains("RAW_WEB_CONTENT_SENTINEL"));
+    }
+
+    #[test]
+    fn test_invalid_web_summarization_model_output_has_stable_failure_reason() {
+        let result = summarize_content_with_model_reply_for_test(
+            "RAW_WEB_CONTENT_SENTINEL private fetched body",
+            "https://example.com/article",
+            crate::agent::types::PrivacyPolicy::LocalOnly,
+            "RAW_MODEL_OUTPUT_SENTINEL not json",
+        );
+
+        assert!(!result.success);
+        assert_eq!(
+            result.audit.failure_reason.as_deref(),
+            Some("model_output_invalid")
+        );
+        assert_eq!(
+            result.audit.fallback_reason.as_deref(),
+            Some("model_output_invalid")
+        );
+        let metadata = serde_json::to_string(&result.audit).unwrap();
+        assert!(!metadata.contains("RAW_WEB_CONTENT_SENTINEL"));
+        assert!(!metadata.contains("RAW_MODEL_OUTPUT_SENTINEL"));
+        assert!(!result.output.contains("RAW_WEB_CONTENT_SENTINEL"));
+        assert!(!result.output.contains("RAW_MODEL_OUTPUT_SENTINEL"));
     }
 
     #[test]

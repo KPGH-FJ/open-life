@@ -477,6 +477,115 @@ impl PromptBlock {
         }
     }
 
+    pub fn web_summarization_role() -> Self {
+        Self::new(
+            "web_summarization.role",
+            "1.0.0",
+            PromptPurpose::Custom("web_summarization_role".into()),
+            "You are OpenLife's web content summarization helper. Summarize only the provided fetched web content, do not invent facts, and make uncertainty explicit when content is missing or incomplete.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(220)
+        .with_applies_to(vec!["WebSummarization".into(), "ActionExecutor".into()])
+    }
+
+    pub fn web_summarization_output_contract() -> Self {
+        Self::new(
+            "web_summarization.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Return ONLY valid JSON with this contract:\n\
+             {\n\
+               \"summary_bullets\": [\"3-5 concise Chinese bullet summaries\"],\n\
+               \"source_type\": \"web_page|search_result|plain_text|unknown\",\n\
+               \"limitations\": [\"short limitation notes, if any\"]\n\
+             }\n\
+             summary_bullets must be non-empty. Do not include markdown fences or explanatory text outside JSON.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(360)
+        .with_applies_to(vec!["WebSummarization".into(), "ActionExecutor".into()])
+    }
+
+    pub fn web_summarization_privacy_rules() -> Self {
+        Self::new(
+            "web_summarization.privacy_rules",
+            "1.0.0",
+            PromptPurpose::Privacy,
+            "Privacy and failure rules: never write raw web content, raw prompt, full model output, raw URL query values, or raw LifeModel into audit metadata. SummaryOnly task input must contain only content length, source type, summarization contract, and non-sensitive statistics. LocalOnly must use a local model or return an explicit fallback/error; it must not route to cloud. CloudAllowed may be enabled later, but audit remains metadata-only. Stable failure reasons include unknown_prompt_block, prompt_stack_assembly_failed, prompt_stack_validation_failed, local_model_unavailable, local_model_timeout, and model_output_invalid.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(420)
+        .with_applies_to(vec!["WebSummarization".into(), "ActionExecutor".into()])
+    }
+
+    pub fn web_summarization_task_input_template() -> Self {
+        Self::new(
+            "web_summarization.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            "[WebSummarization task input template] Runtime replaces this metadata-only template with a privacy-scoped task input before model execution.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(120)
+        .with_applies_to(vec!["WebSummarization".into(), "ActionExecutor".into()])
+    }
+
+    pub fn web_summarization_task_input(
+        content: &str,
+        source_url: &str,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let source_type = classify_web_summarization_source(source_url);
+        let stats = web_summarization_content_stats(content, source_type);
+        let content = match privacy_policy {
+            crate::agent::types::PrivacyPolicy::SummaryOnly => {
+                format!(
+                    "[SummaryOnly] Web summarization task input. Raw web content and raw source URL are omitted.\n{}",
+                    stats
+                )
+            }
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                format!(
+                    "[LocalOnly] Web summarization task input. Keep this fetched content on the local model only.\n{}\n\nFetched content:\n{}",
+                    stats,
+                    content
+                )
+            }
+            crate::agent::types::PrivacyPolicy::CloudAllowed => {
+                format!(
+                    "[CloudAllowed] Web summarization task input. Audit metadata must remain metadata-only.\n{}\n\nFetched content:\n{}",
+                    stats,
+                    content
+                )
+            }
+        };
+        let block = Self::new(
+            "web_summarization.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_token_budget(2_400)
+        .with_applies_to(vec!["WebSummarization".into(), "ActionExecutor".into()]);
+
+        match privacy_policy {
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                block.with_privacy(PromptPrivacyLevel::StrictlyLocal)
+            }
+            crate::agent::types::PrivacyPolicy::SummaryOnly => block
+                .with_privacy(PromptPrivacyLevel::Internal)
+                .with_cloud_allowed(true),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => block
+                .with_privacy(PromptPrivacyLevel::Sensitive)
+                .with_cloud_allowed(true),
+        }
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -545,6 +654,38 @@ fn proposal_extraction_local_lifemodel_contract(
         "skill_count": life_model.capabilities.skills.len(),
         "has_current_focus": !life_model.state.current_focus.trim().is_empty(),
         "has_mood": !life_model.state.emotional_state.current_mood.trim().is_empty(),
+    })
+    .to_string()
+}
+
+pub fn classify_web_summarization_source(source_url: &str) -> &'static str {
+    if source_url.trim().is_empty() {
+        return "unknown";
+    }
+    let lower = source_url.to_lowercase();
+    if lower.contains("duckduckgo.com")
+        || lower.contains("search.brave.com")
+        || lower.contains("/search")
+    {
+        "search_result"
+    } else if lower.starts_with("http://") || lower.starts_with("https://") {
+        "web_page"
+    } else {
+        "plain_text"
+    }
+}
+
+fn web_summarization_content_stats(content: &str, source_type: &str) -> String {
+    serde_json::json!({
+        "content_character_count": content.chars().count(),
+        "content_line_count": content.lines().count(),
+        "source_type": source_type,
+        "summary_contract": {
+            "language": "zh-CN",
+            "summary_bullet_count": "3-5",
+            "output_format": "json",
+            "required_fields": ["summary_bullets", "source_type", "limitations"]
+        }
     })
     .to_string()
 }
@@ -771,6 +912,31 @@ pub fn proposal_extraction_output_schema() -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::json!({}))
 }
 
+const WEB_SUMMARIZATION_OUTPUT_SCHEMA: &str = r#"{
+  "type": "object",
+  "description": "Metadata-governed web content summarization JSON contract",
+  "required": ["summary_bullets", "source_type"],
+  "properties": {
+    "summary_bullets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "source_type": {
+      "type": "string",
+      "enum": ["web_page", "search_result", "plain_text", "unknown"]
+    },
+    "limitations": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  }
+}"#;
+
+pub fn web_summarization_output_schema() -> serde_json::Value {
+    serde_json::from_str(WEB_SUMMARIZATION_OUTPUT_SCHEMA).unwrap_or_else(|_| serde_json::json!({}))
+}
+
 /// A stack of prompt blocks assembled for a single agent execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptStack {
@@ -913,6 +1079,53 @@ impl PromptStack {
             privacy_policy,
         ));
         stack.output_schema = Some(proposal_extraction_output_schema());
+        Ok(stack)
+    }
+
+    pub fn web_summarization_block_ids() -> Vec<String> {
+        vec![
+            "web_summarization.role".to_string(),
+            "web_summarization.output_contract".to_string(),
+            "web_summarization.privacy_rules".to_string(),
+            "web_summarization.task_input".to_string(),
+        ]
+    }
+
+    pub fn web_summarization_task_stack(
+        content: &str,
+        source_url: &str,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        Self::web_summarization_task_stack_with_registry(
+            content,
+            source_url,
+            privacy_policy,
+            &registry,
+            &Self::web_summarization_block_ids(),
+        )
+    }
+
+    pub fn web_summarization_task_stack_with_registry(
+        content: &str,
+        source_url: &str,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+        registry: &PromptBlockRegistry,
+        block_ids: &[String],
+    ) -> std::result::Result<Self, String> {
+        let mut stack = Self::try_from_agentspec(block_ids, registry)?;
+        let task_input =
+            PromptBlock::web_summarization_task_input(content, source_url, privacy_policy);
+        if let Some(block) = stack
+            .blocks
+            .iter_mut()
+            .find(|block| block.id == "web_summarization.task_input")
+        {
+            *block = task_input;
+        } else {
+            stack.push(task_input);
+        }
+        stack.output_schema = Some(web_summarization_output_schema());
         Ok(stack)
     }
 
@@ -1109,6 +1322,22 @@ impl PromptBlockRegistry {
             .with_block(
                 "proposal_extraction.privacy_rules",
                 PromptBlock::proposal_extraction_privacy_rules(),
+            )
+            .with_block(
+                "web_summarization.role",
+                PromptBlock::web_summarization_role(),
+            )
+            .with_block(
+                "web_summarization.output_contract",
+                PromptBlock::web_summarization_output_contract(),
+            )
+            .with_block(
+                "web_summarization.privacy_rules",
+                PromptBlock::web_summarization_privacy_rules(),
+            )
+            .with_block(
+                "web_summarization.task_input",
+                PromptBlock::web_summarization_task_input_template(),
             )
     }
 }
@@ -1583,6 +1812,58 @@ mod tests {
         assert!(!assembled.contains("RAW_LIFEMODEL_SENTINEL"));
         assert!(assembled.contains("message_character_count"));
         assert!(assembled.contains("life_model_contract"));
+    }
+
+    #[test]
+    fn web_summarization_prompt_stack_has_stable_contract_blocks() {
+        let registry = PromptBlockRegistry::built_in();
+        let ids = PromptStack::web_summarization_block_ids();
+        let stack = PromptStack::try_from_agentspec(&ids, &registry).unwrap();
+
+        let trace = stack.block_trace();
+        assert!(trace.iter().any(|entry| {
+            entry.id == "web_summarization.role"
+                && entry.version == "1.0.0"
+                && entry.purpose == "web_summarization_role"
+        }));
+        assert!(trace.iter().any(|entry| {
+            entry.id == "web_summarization.output_contract"
+                && entry.version == "1.0.0"
+                && entry.purpose == "output_format"
+        }));
+        assert!(trace.iter().any(|entry| {
+            entry.id == "web_summarization.privacy_rules"
+                && entry.version == "1.0.0"
+                && entry.purpose == "privacy"
+        }));
+
+        let mut stack = stack;
+        let assembled = stack.assemble();
+        assert!(assembled.contains("\"summary_bullets\""));
+        assert!(assembled.contains("\"source_type\""));
+        assert!(assembled.contains("LocalOnly"));
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(assembled.contains("model_output_invalid"));
+    }
+
+    #[test]
+    fn web_summarization_summary_only_prompt_excludes_raw_sentinels() {
+        let mut stack = PromptStack::web_summarization_task_stack(
+            "RAW_WEB_CONTENT_SENTINEL: private fetched web content",
+            "https://example.com/private?token=RAW_URL_SENTINEL",
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        )
+        .unwrap();
+        let assembled = stack.assemble();
+        let metadata = serde_json::to_string(&stack.block_trace()).unwrap();
+
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(assembled.contains("content_character_count"));
+        assert!(assembled.contains("source_type"));
+        assert!(!assembled.contains("RAW_WEB_CONTENT_SENTINEL"));
+        assert!(!assembled.contains("RAW_URL_SENTINEL"));
+        assert!(!metadata.contains("RAW_WEB_CONTENT_SENTINEL"));
+        assert!(!metadata.contains("RAW_URL_SENTINEL"));
     }
 
     #[test]
