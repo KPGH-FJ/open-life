@@ -26,7 +26,7 @@ These events carry governance payloads (`block_reason`, `proposal_reason`, `fail
 
 | # | Event Type | Backend Emission | Frontend Parser | Frontend Display | Typed Payload Required | Fallback Behavior |
 |---|-----------|-----------------|-----------------|------------------|----------------------|-------------------|
-| 1 | `tool.call_blocked` | ✅ `tool_executor.rs` (5 sites), `tools.rs`, `plan_executor.rs` | ✅ `parseTypedEventPayload` → `tool_call_blocked` | ✅ `RunTracePanel` via `TypedEventDetailViewModel` | `status`, `tool_name`, `source`, `block_reason`\|`proposal_reason` | Malformed → `kind: "unknown"`, no typed badge |
+| 1 | `tool.call_blocked` | ✅ `tool_executor.rs` (hard NetworkPolicy, ask, sandbox, AgentSpec, mcp target, policy sites), `tools.rs`, `plan_executor.rs` | ✅ `parseTypedEventPayload` → `tool_call_blocked` | ✅ `RunTracePanel` via `TypedEventDetailViewModel` | `status`, `tool_name`, `source`, `block_reason`\|`proposal_reason` | Malformed → `kind: "unknown"`, no typed badge |
 | 2 | `replay.started` | ✅ `commands/agent.rs` | ✅ `parseTypedEventPayload` → `replay_started` | ✅ `RunTracePanel` via `TypedEventDetailViewModel` | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | Malformed → `kind: "unknown"` |
 | 3 | `replay.completed` | ✅ `commands/agent.rs` | ✅ `parseTypedEventPayload` → `replay_completed` | ✅ `RunTracePanel` via `TypedEventDetailViewModel` | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source`, optional `block_reason`\|`proposal_reason`\|`failure_kind` | Malformed → `kind: "unknown"` |
 | 4 | `replay.failed` | ✅ `commands/agent.rs` (7 paths) | ✅ `parseTypedEventPayload` → `replay_failed` | ✅ `RunTracePanel` via `TypedEventDetailViewModel` | At least one of `block_reason`\|`failure_kind`; `run_id`, `action_id`, `replay_of_action_id` required | No valid reason → `kind: "unknown"` |
@@ -116,6 +116,7 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 | File | Site | Has `status` | Has `tool_name` | Has `source` | Has `block_reason` | Has `proposal_reason` | Has `agent_spec_id` | Extra fields |
 |------|------|-------------|-----------------|-------------|--------------------|------------------------|---------------------|-------------|
 | `tool_executor.rs` | AgentSpec deny (Phase 1) | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ Some(spec.id) | `reason` (text) |
+| `tool_executor.rs` | hard NetworkPolicy block (deny / disabled / override / domain block) | ✅ blocked | ✅ | ✅ | ✅ | ❌ null | ✅ Some | `reason` (text) |
 | `tool_executor.rs` | mcp.call_tool target AgentSpec deny | ✅ blocked | ✅ | ✅ (`"builtin"`) | ✅ | ❌ null | ✅ Some | `target_tool_name`, `target_source`, `wrapper_tool_name` |
 | `tool_executor.rs` | mcp.call_tool target hard block | ✅ blocked | ✅ | ✅ (`"builtin"`) | ✅ | ❌ null | ✅ Some | `target_tool_name`, `target_source`, `wrapper_tool_name` |
 | `tool_executor.rs` | handle_blocked (policy) | ✅ blocked/needs_confirmation | ✅ | ✅ | ✅ | ✅\|null | ✅ Some | `reason` (text) |
@@ -126,7 +127,7 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 
 **All sites use `trace_payloads::build_tool_call_blocked_payload` — zero hand-written tool_call_blocked payloads remain in production.
 
-**Risk:** None — all production `ToolCallBlocked` emitters now use `trace_payloads::build_tool_call_blocked_payload`. Zero hand-written payloads remain. The builder enforces the standard contract shape across all 15 call sites. Contract tests and production share the same builder, eliminating desynchronisation risk.
+**Risk:** None — all production `ToolCallBlocked` emitters now use `trace_payloads::build_tool_call_blocked_payload`. Zero hand-written payloads remain. Hard NetworkPolicy denials now emit the same typed event as ask/sandbox/permission blocks, so Scheduled / Proactive governed tool paths can prove denial without falling back to Chat. Contract tests and production share the same builder, eliminating desynchronisation risk.
 
 ### 2.2 `replay.started` — Tier 1 Governance
 

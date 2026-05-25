@@ -327,12 +327,36 @@ impl super::ActionExecutor {
                             allowed: false,
                             requires_confirmation: false,
                             decision: "blocked".into(),
-                            reason,
+                            reason: reason.clone(),
                             policy_id: None,
                         },
                         manifest.as_ref(),
                         &request,
                     );
+                    if let (Some(event_store), Some(run_id)) =
+                        (ac.event_store.as_ref(), &request.source_run_id)
+                    {
+                        let event = AgentRunEvent::new(
+                            run_id,
+                            AgentRunEventType::ToolCallBlocked,
+                            AgentEventActor::Tool(tool_name.to_string()),
+                            format!("Tool '{}' blocked by NetworkPolicy", tool_name),
+                            trace_payloads::build_tool_call_blocked_payload(
+                                "blocked",
+                                &tool_name,
+                                manifest
+                                    .as_ref()
+                                    .map(canonical_tool_source)
+                                    .unwrap_or_else(|| "builtin".to_string()),
+                                ac.agent_spec.as_ref().map(|s| s.id.clone()),
+                                blocked.block_reason.as_ref().map(|r| r.to_string()),
+                                None::<&str>,
+                                None::<&str>,
+                                Some(serde_json::json!({"reason": reason})),
+                            ),
+                        );
+                        let _ = event_store.append_event(&event);
+                    }
                     return Ok(ActionExecutionResult {
                         action,
                         observation,

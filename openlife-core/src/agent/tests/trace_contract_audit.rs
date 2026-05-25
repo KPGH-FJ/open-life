@@ -117,14 +117,15 @@ impl AuditRule {
 fn audit_rules() -> Vec<AuditRule> {
     vec![
         // ── ToolCallBlocked ──
-        // tool_executor.rs: 6 production emissions (verified 2026-05-18)
-        //   Lines: 166, 427, 474, 802, 1011, 1623 — all before #[cfg(test)] at L2210.
+        // tool_executor.rs: 7 production emissions (verified 2026-05-25)
+        //   Includes AgentSpec deny, hard NetworkPolicy block, mcp target blocks,
+        //   generic policy blocks, NetworkPolicy ask, and shell.run blocks.
         AuditRule::new(
             "openlife-core/src/agent/action_executor/tool_executor.rs",
             "AgentRunEventType::ToolCallBlocked",
             &["build_tool_call_blocked_payload"],
-            Some(6),
-            5,
+            Some(7),
+            7,
             1200, // larger window: deep closures, ~5.4k-line file
         ),
         // tools.rs: 1 production emission (verified 2026-05-18)

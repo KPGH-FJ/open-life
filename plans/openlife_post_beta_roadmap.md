@@ -18,7 +18,7 @@ Status: active
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Builder / Calibration Proposal-First Safety Net Added**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled Proactive Execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Builder / Calibration / Skill runtime 仍未迁移。本阶段只增加 Builder / Calibration 迁移前安全网：Builder review decisions 只把 accepted / edited 信号转成 Review Center Proposal，并写 metadata-only `proposal.created` event；Calibration 默认正式路径已收敛到 Proposal-first，`apply_calibration` 缺省 mode 和前端正式 UI 都生成 patchable LifeModel scalar path proposals，并通过 Review Center Proposal acceptance 才应用。`proposal.created` payload 只含 metadata，不包含 raw prompt、before/after 大对象或完整 LifeModel。新增 source audit 锁定 Builder / Calibration / Skill runtime 不调用 `run_tauri_agent_task(Chat/StreamChat)`，不接入 Chat fallback。遗留事实：`builder_apply_signals` 与 `apply_calibration(mode="direct")` 都是默认关闭的配置门控 legacy direct apply，仅兼容/调试/测试用途，普通 Calibration UI 不暴露 direct apply；后续仍未完成的是 Builder/Calibration 是否迁移到 ExecutionFacade 的正式评估，而不是混入 Chat fallback。
+2026-05-25 当前阶段为 **Scheduled / Proactive Event Validation Hardened**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Scheduled / Proactive 本阶段完成事件创建验证与审计加固：成功和 runtime failure 路径保留 `AgentRun` / `AgentRunEvent` run_id 追踪；scheduler task 成功写 `agent_run_id` + bounded `result_preview`，失败写 readable error + optional `agent_run_id` 且不写 `completed_at` / success preview；missing `AgentSpec` fail closed 且只留下 scheduler task failure/status；NetworkPolicy hard deny/ask 和 Sandbox deny 到达工具治理时写 typed `tool.call_blocked`，无 Chat fallback。scheduler outcome merge 现在只更新仍为 `running` 的任务，避免 late completion 覆盖并发写入的 terminal 状态。Proactive command/core engine 仍是 suggestion-only，不创建 AgentRun/AgentRunEvent；被接受为 scheduled task 后才进入 Scheduled wrapper。所有新增 payload 断言保持 metadata-only，不包含 raw prompt、raw LifeModel、完整敏感上下文或原始工具输出。Builder / Calibration / Skill runtime 仍未迁移；上一阶段的 Builder / Calibration Proposal-first 安全网继续有效，不代表它们已经迁入 ExecutionFacade。
 
 ---
 
@@ -133,10 +133,11 @@ Status: active
 - [ ] Fallback 事件保留测试
 - [x] Scheduled/Proactive 迁移前安全网：lease 短锁、stale running recovery、missing AgentSpec fail-closed、无 Chat fallback、失败写回 task error 字段
 - [x] Scheduled/Proactive facade wrapper 验证：Scheduled-specific wrapper 已迁移；failed-run observability 已修复；保持 scheduler task failure 语义，不继承 Chat fallback
+- [x] Scheduled/Proactive 事件创建验证：成功 / runtime failure 有 run_id 和 AgentRunEvent 追踪；missing AgentSpec 只记录 scheduler task failure/status；NetworkPolicy hard deny/ask 与 Sandbox deny 写 typed `tool.call_blocked`；scheduler failure 不标 completed；late completion 不覆盖并发 terminal state；Proactive suggestions 保持 suggestion-only 且无 Chat fallback
 - [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试
 - [x] Replay-specific facade/wrapper 正式迁移：`replay_action_internal` 调用 `run_tauri_replay_execution`；不直接构造 `ActionExecutor`；不使用 Chat facade；不写 Proposal status
 - [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration / Skill runtime 仍未迁移
-- [ ] Scheduled/Proactive 事件创建验证
+- [x] Scheduled/Proactive 事件创建验证
 - [x] Builder/Calibration 事件创建验证：`builder_create_proposals` 与 Calibration Proposal-first 路径写 metadata-only `proposal.created` events；payload 不包含 raw prompt、`before` / `after`、完整 LifeModel；source audit 证明无 Chat facade / fallback；ProposalStatus-gated apply 已有测试保护；`apply_calibration` 缺省 mode 和前端正式按钮默认创建 proposals，legacy `direct` 默认关闭并由 `system.allow_legacy_calibration_direct_apply` 门控，普通 UI 不暴露
 
 ### 2.3 PromptStack 全路径审计

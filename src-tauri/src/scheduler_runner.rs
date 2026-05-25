@@ -351,6 +351,16 @@ async fn merge_scheduled_task_outcome_by_id(
     for task in &mut tasks {
         let id = task.get("id").and_then(Value::as_str).unwrap_or("");
         if id == task_id {
+            let current_status = task.get("status").and_then(Value::as_str).unwrap_or("");
+            if current_status != "running" {
+                log::info!(
+                    "[scheduler_runner] Task id '{}' is no longer running (status='{}'); skipping late outcome merge.",
+                    task_id,
+                    current_status
+                );
+                found = true;
+                break;
+            }
             if let Some(obj) = task.as_object_mut() {
                 obj.insert("status".to_string(), Value::String(outcome.status));
                 if let Some(at) = outcome.completed_at {
@@ -697,6 +707,62 @@ mod tests {
 
         let b = result.iter().find(|t| t["id"] == "task-B").unwrap();
         assert_eq!(b["status"], "pending");
+    }
+
+    #[tokio::test]
+    async fn scheduled_completion_must_not_overwrite_newer_terminal_task_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_tasks_path(dir.path());
+        let mutex = Mutex::new(());
+
+        write_tasks_json(
+            &path,
+            &[json!({
+                "id": "cancelled-during-run",
+                "title": "Cancelled During Run",
+                "prompt": "do work",
+                "scheduled_at": past_str(),
+                "status": "running"
+            })],
+        );
+
+        {
+            let _guard = mutex.lock().await;
+            let mut latest = load_tasks_from_path(&path).unwrap();
+            latest[0]["status"] = Value::String("cancelled".into());
+            latest[0]["completed_at"] = Value::String("external-cancel-time".into());
+            latest[0]["error"] = Value::String("cancelled by user".into());
+            save_tasks_to_path(&path, &latest).unwrap();
+        }
+
+        merge_scheduled_task_outcome_by_id(
+            &mutex,
+            &path,
+            "cancelled-during-run",
+            TaskOutcome::completed(ScheduledTaskExecutionResult {
+                result_preview: "late facade preview".into(),
+                run_id: "late-run-id".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let tasks = read_tasks_json(&path);
+        let task = tasks
+            .iter()
+            .find(|t| t["id"] == "cancelled-during-run")
+            .unwrap();
+        assert_eq!(task["status"], "cancelled");
+        assert_eq!(task["completed_at"], "external-cancel-time");
+        assert_eq!(task["error"], "cancelled by user");
+        assert!(
+            task.get("result_preview").is_none(),
+            "late scheduled success must not overwrite a newer terminal state"
+        );
+        assert!(
+            task.get("agent_run_id").is_none(),
+            "late scheduled run_id must not overwrite a newer terminal state"
+        );
     }
 
     #[tokio::test]

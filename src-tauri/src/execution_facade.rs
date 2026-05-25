@@ -1268,6 +1268,27 @@ mod tests {
         (state, input)
     }
 
+    async fn scheduled_action_context_for_test(
+        state: &Arc<AppState>,
+        network_policy: NetworkPolicy,
+        spec: AgentSpec,
+    ) -> ActionContext {
+        let mut cfg = state.config.lock().await.clone();
+        cfg.system.network_policy = network_policy;
+        let assembly = build_runtime_assembly_config(
+            &cfg,
+            TauriAgentExecutionMode::Scheduled,
+            state.shutdown_notify.clone(),
+        );
+        build_governed_action_context(
+            state,
+            &assembly,
+            Some(LifeModel::default()),
+            Some(state.memory_store.clone()),
+            spec,
+        )
+    }
+
     #[tokio::test]
     async fn execution_facade_builds_action_context_with_agent_spec() {
         let state = crate::test_utils::test_app_state();
@@ -1426,6 +1447,32 @@ mod tests {
         assert!(!scheduled_path.contains(&direct_run_call));
         assert!(!scheduled_path.contains("run_tauri_agent_task"));
         assert!(!scheduled_path.contains("handle_agent_loop_fallback"));
+    }
+
+    #[test]
+    fn execution_facade_proactive_suggestions_do_not_execute_via_chat_fallback() {
+        let proactive_command = include_str!("commands/proactive.rs");
+        let proactive_core = include_str!("../../openlife-core/src/proactive.rs");
+        let combined = format!("{}\n{}", proactive_command, proactive_core);
+
+        assert!(
+            combined.contains("generate_suggestions"),
+            "Proactive path should remain a suggestion generator in this phase"
+        );
+        assert!(
+            !combined.contains("run_tauri_agent_task"),
+            "Proactive suggestion path must not call the Chat/StreamChat facade entrypoint"
+        );
+        assert!(
+            !combined.contains("run_tauri_scheduled_execution"),
+            "Proactive suggestions must not masquerade as scheduled execution"
+        );
+        assert!(
+            !combined.contains("handle_agent_loop_fallback")
+                && !combined.contains("FallbackStarted")
+                && !combined.contains("FallbackCompleted"),
+            "Proactive suggestion path must not inherit Chat fallback behavior"
+        );
     }
 
     #[tokio::test]
@@ -1727,6 +1774,229 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn scheduled_network_policy_denial_records_governed_failure_without_chat_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let policy = NetworkPolicy {
+            default_decision: "deny".into(),
+            ..NetworkPolicy::default()
+        };
+        let spec = AgentSpec::default_main_spec();
+        let action_ctx = scheduled_action_context_for_test(&state, policy, spec).await;
+        let executor = openlife_core::agent::ActionExecutor::new(
+            openlife_core::agent::ActionExecutorConfig::default(),
+        );
+        let run_id = "scheduled-network-denied-run";
+
+        let result = executor
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "web.search".into(),
+                    input: serde_json::json!({"query": "private scheduled query"}),
+                    source_run_id: Some(run_id.into()),
+                    step_index: 0,
+                },
+                &action_ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result
+            .action
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("default_decision=deny"));
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(run_id)
+            .unwrap();
+        let blocked = events
+            .iter()
+            .find(|event| event.event_type == AgentRunEventType::ToolCallBlocked)
+            .expect("Scheduled NetworkPolicy denial must record ToolCallBlocked");
+        assert_eq!(
+            blocked
+                .payload
+                .get("block_reason")
+                .and_then(|value| value.as_str()),
+            Some("network_policy_denied")
+        );
+        let payload = blocked.payload.to_string();
+        assert!(
+            !payload.contains("private scheduled query"),
+            "Scheduled governance event payload must stay metadata-only: {}",
+            payload
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn scheduled_network_policy_ask_records_blocked_proposal_without_chat_fallback() {
+        let state = crate::test_utils::test_app_state();
+        let policy = NetworkPolicy {
+            default_decision: "ask".into(),
+            ..NetworkPolicy::default()
+        };
+        let spec = AgentSpec::default_main_spec();
+        let action_ctx = scheduled_action_context_for_test(&state, policy, spec).await;
+        let executor = openlife_core::agent::ActionExecutor::new(
+            openlife_core::agent::ActionExecutorConfig::default(),
+        );
+        let run_id = "scheduled-network-ask-run";
+
+        let result = executor
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "web.search".into(),
+                    input: serde_json::json!({"query": "private ask query"}),
+                    source_run_id: Some(run_id.into()),
+                    step_index: 0,
+                },
+                &action_ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::NeedsConfirmation);
+        assert_eq!(
+            result.proposal_reason,
+            Some(openlife_core::agent::action_executor::ExecutionProposalReason::NetworkPolicyAsk)
+        );
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(run_id)
+            .unwrap();
+        let blocked = events
+            .iter()
+            .find(|event| event.event_type == AgentRunEventType::ToolCallBlocked)
+            .expect("Scheduled NetworkPolicy ask must record ToolCallBlocked");
+        assert_eq!(
+            blocked
+                .payload
+                .get("proposal_reason")
+                .and_then(|value| value.as_str()),
+            Some("network_policy_ask")
+        );
+        assert!(
+            blocked.payload.get("proposal_id").is_some()
+                || blocked
+                    .payload
+                    .get("details")
+                    .and_then(|details| details.get("proposal_id"))
+                    .is_some(),
+            "NetworkPolicy ask event should carry proposal metadata: {}",
+            blocked.payload
+        );
+        let payload = blocked.payload.to_string();
+        assert!(
+            !payload.contains("private ask query"),
+            "Scheduled NetworkPolicy ask event payload must stay metadata-only: {}",
+            payload
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn scheduled_sandbox_denial_records_governed_failure_without_chat_fallback() {
+        let state = crate::test_utils::test_app_state();
+        {
+            let mut registry = state.mcp_registry.lock().await;
+            registry.set_builtin_manifest_enabled("shell.run", true);
+        }
+        {
+            let permissions = state.tool_permission_store.lock().await;
+            permissions
+                .grant(
+                    "shell.run",
+                    "builtin",
+                    "high",
+                    "external_side_effect",
+                    ToolPermissionPolicy::AllowUntilRevoked,
+                    None,
+                )
+                .unwrap();
+        }
+        let spec = AgentSpec::default_main_spec();
+        let action_ctx =
+            scheduled_action_context_for_test(&state, NetworkPolicy::default(), spec).await;
+        let executor = openlife_core::agent::ActionExecutor::new(
+            openlife_core::agent::ActionExecutorConfig::default(),
+        );
+        let run_id = "scheduled-sandbox-denied-run";
+
+        let result = executor
+            .execute(
+                AgentActionRequest {
+                    action_type: "builtin_tool".into(),
+                    target: "shell.run".into(),
+                    input: serde_json::json!({"command": "echo scheduled-secret"}),
+                    source_run_id: Some(run_id.into()),
+                    step_index: 0,
+                },
+                &action_ctx,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.status, ActionExecutionStatus::Blocked);
+        assert!(result
+            .action
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sandbox.bash_enabled = false"));
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(run_id)
+            .unwrap();
+        let blocked = events
+            .iter()
+            .find(|event| event.event_type == AgentRunEventType::ToolCallBlocked)
+            .expect("Scheduled sandbox denial must record ToolCallBlocked");
+        assert_eq!(
+            blocked
+                .payload
+                .get("block_reason")
+                .and_then(|value| value.as_str()),
+            Some("sandbox_denied")
+        );
+        let payload = blocked.payload.to_string();
+        assert!(
+            !payload.contains("scheduled-secret"),
+            "Scheduled sandbox event payload must stay metadata-only: {}",
+            payload
+        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event.event_type,
+                AgentRunEventType::FallbackStarted | AgentRunEventType::FallbackCompleted
+            )
+        }));
     }
 
     #[tokio::test]
