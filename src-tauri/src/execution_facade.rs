@@ -1607,11 +1607,11 @@ mod tests {
     }
 
     #[test]
-    fn execution_facade_skill_runtime_remains_unmigrated_this_phase() {
+    fn skill_runtime_remains_unmigrated_no_chat_fallback_source_audit() {
         let source = include_str!("commands/execution.rs");
         let start = source
-            .find("pub async fn run_skill")
-            .expect("run_skill should exist");
+            .find("pub(crate) async fn run_skill_with_state")
+            .expect("run_skill_with_state should exist");
         let end = source
             .find("pub async fn get_skill_run_status")
             .expect("get_skill_run_status should follow run_skill");
@@ -1630,6 +1630,12 @@ mod tests {
                 && !skill_path.contains("FallbackStarted")
                 && !skill_path.contains("FallbackCompleted"),
             "Skill runtime must not inherit Chat fallback"
+        );
+        assert!(
+            !skill_path.contains("run_tauri_scheduled_execution")
+                && !skill_path.contains("run_tauri_replay_execution")
+                && !skill_path.contains("run_tauri_plan_execution"),
+            "Skill runtime must not masquerade as Scheduled, Replay, or Plan migration"
         );
     }
 

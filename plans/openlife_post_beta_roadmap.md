@@ -18,7 +18,7 @@ Status: active
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
-2026-05-25 当前阶段为 **Scheduled / Proactive Event Validation Hardened**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Scheduled / Proactive 本阶段完成事件创建验证与审计加固：成功和 runtime failure 路径保留 `AgentRun` / `AgentRunEvent` run_id 追踪；scheduler task 成功写 `agent_run_id` + bounded `result_preview`，失败写 readable error + optional `agent_run_id` 且不写 `completed_at` / success preview；missing `AgentSpec` fail closed 且只留下 scheduler task failure/status；NetworkPolicy hard deny/ask 和 Sandbox deny 到达工具治理时写 typed `tool.call_blocked`，无 Chat fallback。scheduler outcome merge 现在只更新仍为 `running` 的任务，避免 late completion 覆盖并发写入的 terminal 状态。Proactive command/core engine 仍是 suggestion-only，不创建 AgentRun/AgentRunEvent；被接受为 scheduled task 后才进入 Scheduled wrapper。所有新增 payload 断言保持 metadata-only，不包含 raw prompt、raw LifeModel、完整敏感上下文或原始工具输出。Builder / Calibration / Skill runtime 仍未迁移；上一阶段的 Builder / Calibration Proposal-first 安全网继续有效，不代表它们已经迁入 ExecutionFacade。
+2026-05-25 当前阶段为 **Skill Runtime Pre-Migration Audit / Safety Net**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛；Direct Tool Execution 已迁移为 Tauri-side facade wrapper；Scheduled execution 已迁移为 Scheduled-specific facade wrapper；Replay 已迁移为 Replay-specific wrapper；Plan Execution 已迁移到 Plan-specific wrapper。Scheduled / Proactive 事件创建验证已完成并保持：成功和 runtime failure 路径保留 `AgentRun` / `AgentRunEvent` run_id 追踪；scheduler task 成功写 `agent_run_id` + bounded `result_preview`，失败写 readable error + optional `agent_run_id` 且不写 `completed_at` / success preview；missing `AgentSpec` fail closed；NetworkPolicy hard deny/ask 和 Sandbox deny 写 typed `tool.call_blocked`，无 Chat fallback。Skill runtime 本阶段只做迁移前审计和安全网，不进入 ExecutionFacade：真实路径是 SkillRegistry prompt 构造 → 必需 stored `AgentSpec` → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。新增测试锁定 missing AgentSpec fail closed、AgentSpec restricted toolset gating、PromptStack / model failure failed-run observability、metadata-only event payload、frontend response shape，以及 source audit：不调用 `run_tauri_agent_task`、`handle_agent_loop_fallback`、Fallback events、Scheduled / Replay / Plan wrappers。Builder / Calibration / Skill runtime 仍未迁移；Builder / Calibration Proposal-first 安全网继续有效，不代表它们已经迁入 ExecutionFacade。
 
 ---
 
@@ -139,12 +139,14 @@ Status: active
 - [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration / Skill runtime 仍未迁移
 - [x] Scheduled/Proactive 事件创建验证
 - [x] Builder/Calibration 事件创建验证：`builder_create_proposals` 与 Calibration Proposal-first 路径写 metadata-only `proposal.created` events；payload 不包含 raw prompt、`before` / `after`、完整 LifeModel；source audit 证明无 Chat facade / fallback；ProposalStatus-gated apply 已有测试保护；`apply_calibration` 缺省 mode 和前端正式按钮默认创建 proposals，legacy `direct` 默认关闭并由 `system.allow_legacy_calibration_direct_apply` 门控，普通 UI 不暴露
+- [x] Skill runtime 迁移前审计与安全网：确认 `run_skill` 仍是模型生成 + skill envelope/proposal 执行的混合路径，不是 Chat facade；补 missing AgentSpec fail-closed、AgentSpec restricted toolset、PromptStack/model failure observability、payload 脱敏、success response shape、no Chat fallback / no wrapper masquerade source audit 测试；Skill runtime 仍未迁移
 
 ### 2.3 PromptStack 全路径审计
 
 - [ ] 列出所有 prompt 组装点 (Chat/Builder/Calibration/Scheduled/Proactive/PlanMode)
 - [ ] 逐一核对是否通过 PromptStack
 - [x] Scheduled-specific facade wrapper 路径测试锁定：`AgentSpec`、`PromptBlockRegistry`、`NetworkPolicy`、`ExecutionSandbox`、restricted toolset 均由 facade assembly helpers 提供，`scheduler_runner.rs` 不再裸调 `AgentLoop::run`
+- [x] Skill runtime 路径测试锁定：`AgentRuntime::execute_task_with_spec` 负责 PromptStack 组装；未知 PromptBlock fail closed 并持久化 failed Skill `AgentRun`，事件 payload 仅记录错误摘要和 AgentSpec/PromptBlock metadata，不写 raw prompt 或 raw LifeModel
 - [ ] 接入尚未通过 PromptStack 的路径
 - [ ] PromptBlock 版本记录到 AgentRunEvent
 - [ ] 补充 PromptStack 组装测试

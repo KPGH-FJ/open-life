@@ -2,8 +2,8 @@ use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::agent::trace_payloads;
 use openlife_core::agent::{
-    AgentAction, AgentObservation, AgentProposal, AgentRun, AgentTaskKind, ProposalSource,
-    ProposalType, RiskLevel,
+    AgentAction, AgentObservation, AgentProposal, AgentRun, AgentRunError, AgentTaskKind,
+    ProposalSource, ProposalType, RiskLevel,
 };
 use openlife_core::tool_permissions::{
     ToolPermissionDecision, ToolPermissionPolicy, ToolPermissionRecord,
@@ -121,6 +121,64 @@ pub async fn run_skill(
     input: Value,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SkillRunResponse, AppError> {
+    run_skill_with_state(skill_id, input, state.inner()).await
+}
+
+pub(crate) fn validate_skill_agent_spec_tool_policy(
+    manifest: &openlife_core::skills::SkillManifest,
+    agent_spec: &openlife_core::agent::AgentSpec,
+) -> Result<(), AppError> {
+    if let Some(disallowed) = manifest
+        .allowed_tools
+        .iter()
+        .find(|tool| !agent_spec.is_tool_allowed(tool))
+    {
+        return Err(AppError::permission(format!(
+            "Skill '{}' requires tool '{}' but AgentSpec '{}' does not allow it",
+            manifest.id, disallowed, agent_spec.id
+        )));
+    }
+    Ok(())
+}
+
+async fn persist_failed_skill_run(
+    state: &Arc<AppState>,
+    run: &AgentRun,
+    phase: &str,
+    message: &str,
+    recoverable: bool,
+) -> Result<(), AppError> {
+    let mut failed_run = run.clone();
+    failed_run.fail(AgentRunError {
+        message: crate::preview_text(message, 500),
+        phase: phase.to_string(),
+        recoverable,
+    });
+
+    if let Some(ref run_store_arc) = state.agent_run_store {
+        let store = run_store_arc.lock().await;
+        store.create_run(&failed_run).map_err(AppError::from)?;
+    }
+
+    if let Some(ref es) = state.agent_run_event_store {
+        es.append_event(&openlife_core::agent::AgentRunEvent::new(
+            &failed_run.id,
+            openlife_core::agent::AgentRunEventType::RunFailed,
+            openlife_core::agent::AgentEventActor::Runtime,
+            format!("Skill runtime failed in {}", phase),
+            trace_payloads::build_run_failed_payload(crate::preview_text(message, 500)),
+        ))
+        .map_err(AppError::from)?;
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn run_skill_with_state(
+    skill_id: String,
+    input: Value,
+    state: &Arc<AppState>,
+) -> Result<SkillRunResponse, AppError> {
     // 1. Build enhanced SkillContext and load LifeModel
     let (life_model, skill_context) = {
         let manager = state.life_model_manager.lock().await;
@@ -144,9 +202,9 @@ pub async fn run_skill(
     };
 
     // 2. Get manifest and build prompts
-    let (system_prompt, skill_prompt) = {
+    let (manifest, system_prompt, skill_prompt) = {
         let registry = state.skill_registry.lock().await;
-        let _manifest = registry
+        let manifest = registry
             .get(&skill_id)
             .ok_or_else(|| format!("未知技能: {}", skill_id))?;
         let system = registry
@@ -155,7 +213,7 @@ pub async fn run_skill(
         let prompt = registry
             .build_skill_prompt(&skill_id, &input, &skill_context)
             .map_err(AppError::from)?;
-        (system, prompt)
+        (manifest, system, prompt)
     };
 
     let scheduler = state.scheduler.lock().await.clone();
@@ -169,6 +227,7 @@ pub async fn run_skill(
     let agent_spec =
         crate::commands::agent_spec::resolve_required_agent_spec(&state.agent_spec_store, None)
             .await?;
+    validate_skill_agent_spec_tool_policy(&manifest, &agent_spec)?;
 
     // Create AgentRun before governed execution so events can reference the run_id.
     let mut run = build_skill_agent_run(&skill_id, &input, &agent_spec.id);
@@ -212,7 +271,7 @@ pub async fn run_skill(
     };
 
     // 4. Execute via AgentRuntime with stored AgentSpec governance
-    let runtime_output = agent_runtime
+    let runtime_output = match agent_runtime
         .execute_task_with_spec(
             &task,
             &life_model,
@@ -224,10 +283,24 @@ pub async fn run_skill(
             &prompt_registry,
         )
         .await
-        .map_err(AppError::from)?;
+    {
+        Ok(output) => output,
+        Err(err) => {
+            let message = format!("Skill runtime failed: {}", err);
+            let phase =
+                if message.contains("prompt stack") || message.contains("unknown prompt block") {
+                    "skill_prompt_stack"
+                } else {
+                    "skill_runtime"
+                };
+            persist_failed_skill_run(state, &run, phase, &message, err.is_governance_failure())
+                .await?;
+            return Err(AppError::internal(message));
+        }
+    };
 
     // 5. Generate skill response from model with privacy enforcement
-    let model_output = scheduler
+    let model_output = match scheduler
         .generate_governed(
             runtime_output.final_messages.clone(),
             &life_model,
@@ -235,7 +308,14 @@ pub async fn run_skill(
             agent_spec.privacy_policy,
         )
         .await
-        .map_err(AppError::external)?;
+    {
+        Ok(output) => output,
+        Err(err) => {
+            let message = format!("Skill model generation failed: {}", err);
+            persist_failed_skill_run(state, &run, "skill_model_generation", &message, true).await?;
+            return Err(AppError::external(message));
+        }
+    };
 
     // 6. Parse JSON envelope
     let (mut envelope, parse_error) = match openlife_core::skills::parse_skill_json(&model_output) {
@@ -551,9 +631,14 @@ pub async fn disable_plugin(
 
 #[cfg(test)]
 mod tests {
-    use super::build_skill_agent_run;
+    use super::{
+        build_skill_agent_run, run_skill_with_state, validate_skill_agent_spec_tool_policy,
+    };
     use crate::test_utils::test_app_state;
-    use openlife_core::agent::AgentTaskKind;
+    use openlife_core::agent::{
+        AgentRunEventType, AgentRunStatus, AgentSpec, AgentTaskKind, PrivacyPolicy,
+    };
+    use openlife_core::skills::SkillManifest;
     use serde_json::json;
 
     #[tokio::test]
@@ -586,5 +671,236 @@ mod tests {
             Some("main.default"),
             "persisted SkillRuntime run must retain agent_spec_id"
         );
+    }
+
+    #[tokio::test]
+    async fn skill_runtime_missing_agentspec_fails_closed_without_run_or_chat_fallback() {
+        let state = test_app_state();
+        {
+            let store = state.agent_spec_store.lock().await;
+            store.set_active("main.default", false).unwrap();
+        }
+
+        let err = run_skill_with_state(
+            "weekly_review".into(),
+            json!({"text": "missing AgentSpec must not call model"}),
+            &state,
+        )
+        .await
+        .expect_err("missing AgentSpec must fail closed");
+
+        assert!(
+            err.message().contains("AgentSpec")
+                || err.message().contains("no active main AgentSpec"),
+            "error should make AgentSpec resolution visible, got: {}",
+            err.message()
+        );
+
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(10, 0)
+            .unwrap();
+        assert!(
+            runs.is_empty(),
+            "missing AgentSpec must not create AgentRun"
+        );
+
+        let events = state.agent_run_event_store.as_ref().unwrap();
+        assert_eq!(
+            events
+                .count_events_by_type(AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            events
+                .count_events_by_type(AgentRunEventType::FallbackCompleted)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_runtime_prompt_stack_failure_persists_failed_run_with_safe_payload() {
+        let state = test_app_state();
+        {
+            let store = state.agent_spec_store.lock().await;
+            let mut spec = store.get_default_spec().unwrap().unwrap();
+            spec.prompt_block_ids = vec!["missing.skill.prompt.block".into()];
+            store.update_spec(&spec).unwrap();
+        }
+
+        let raw_input = "raw prompt sentinel and raw LifeModel sentinel must not enter events";
+        let err = run_skill_with_state("weekly_review".into(), json!({"text": raw_input}), &state)
+            .await
+            .expect_err("unknown PromptStack block must fail");
+        assert!(
+            err.message().contains("prompt stack")
+                || err.message().contains("unknown prompt block"),
+            "PromptStack failure must be readable, got: {}",
+            err.message()
+        );
+
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(10, 0)
+            .unwrap();
+        assert_eq!(
+            runs.len(),
+            1,
+            "PromptStack failure should persist one failed run"
+        );
+        let run = &runs[0];
+        assert_eq!(run.kind, AgentTaskKind::Skill);
+        assert_eq!(run.status, AgentRunStatus::Failed);
+        assert_eq!(run.agent_spec_id.as_deref(), Some("main.default"));
+        assert!(
+            run.error
+                .as_ref()
+                .is_some_and(|e| e.phase == "skill_prompt_stack"),
+            "failed run should identify the PromptStack phase"
+        );
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run.id)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentRunEventType::RunFailed),
+            "PromptStack failure should be observable as run.failed"
+        );
+        assert!(
+            events.iter().all(|event| {
+                let payload = event.payload.to_string();
+                !payload.contains(raw_input)
+                    && !payload.contains("raw LifeModel")
+                    && !payload.contains("raw prompt")
+            }),
+            "Skill runtime events must keep payloads metadata-only"
+        );
+        assert_eq!(
+            state
+                .agent_run_event_store
+                .as_ref()
+                .unwrap()
+                .count_events_by_type(AgentRunEventType::FallbackStarted)
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_runtime_model_generation_failure_persists_failed_run_not_success() {
+        openlife_core::ollama::set_ollama_cache_ttl_seconds(0);
+        openlife_core::ollama::set_ollama_base_url("http://127.0.0.1:9");
+        let state = test_app_state();
+        let raw_input = "model failure raw prompt sentinel";
+
+        let result =
+            run_skill_with_state("weekly_review".into(), json!({"text": raw_input}), &state).await;
+        openlife_core::ollama::set_ollama_base_url("");
+        openlife_core::ollama::set_ollama_cache_ttl_seconds(10);
+        let err = result.expect_err("unavailable model backend must fail the skill run");
+
+        assert!(
+            err.message().contains("Skill model generation failed"),
+            "model failure should be explicit, got: {}",
+            err.message()
+        );
+
+        let runs = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(10, 0)
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.status, AgentRunStatus::Failed);
+        assert_ne!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.agent_spec_id.as_deref(), Some("main.default"));
+        assert!(
+            run.error
+                .as_ref()
+                .is_some_and(|e| e.phase == "skill_model_generation"),
+            "model failure should identify skill_model_generation phase"
+        );
+
+        let events = state
+            .agent_run_event_store
+            .as_ref()
+            .unwrap()
+            .list_events_by_run(&run.id)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == AgentRunEventType::RunFailed),
+            "model generation failure should be observable as run.failed"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.payload.to_string().contains(raw_input)),
+            "model failure event payload must not include raw prompt text"
+        );
+    }
+
+    #[test]
+    fn skill_runtime_agent_spec_restricted_toolset_blocks_disallowed_skill_tools() {
+        let manifest = SkillManifest {
+            id: "tool_skill".into(),
+            name: "Tool Skill".into(),
+            description: "Requires a governed tool".into(),
+            required_context: vec![],
+            allowed_tools: vec!["web.search".into()],
+            execution_budget: Default::default(),
+            input_schema: json!({}),
+            output_schema: json!({}),
+            proposal_policy: "review_required".into(),
+        };
+        let spec = AgentSpec::default_main_spec()
+            .with_allowed_tools(vec!["goal.read".into()])
+            .with_privacy_policy(PrivacyPolicy::LocalOnly);
+
+        let err = validate_skill_agent_spec_tool_policy(&manifest, &spec)
+            .expect_err("restricted AgentSpec must block undeclared skill tools");
+        assert!(
+            err.message().contains("web.search") && err.message().contains("AgentSpec"),
+            "tool governance error should be readable, got: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn skill_runtime_success_response_shape_stays_frontend_compatible() {
+        let response = super::SkillRunResponse {
+            run_id: "run-skill-1".into(),
+            status: "completed".into(),
+            summary: "Skill completed".into(),
+            generated_proposals: vec!["proposal-skill-1".into()],
+        };
+
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["runId"], "run-skill-1");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["summary"], "Skill completed");
+        assert_eq!(value["generatedProposals"][0], "proposal-skill-1");
+        assert!(value.get("run_id").is_none());
+        assert!(value.get("generated_proposals").is_none());
     }
 }
