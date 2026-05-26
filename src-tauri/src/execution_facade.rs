@@ -2203,8 +2203,8 @@ mod tests {
         }
 
         let required_facts = [
-            "Builder prompt remains legacy/ad hoc",
-            "Calibration prompt remains legacy/ad hoc",
+            "Builder model-assisted extraction is now a Builder-specific PromptStack boundary",
+            "Calibration is currently deterministic/proposal-only and not applicable for PromptStack",
             "Skill runtime remains outside Chat ExecutionFacade",
             "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace",
             "PromptStack assembled event payload is metadata-only and excludes raw prompt",
@@ -2312,10 +2312,22 @@ mod tests {
 
         let builder_source = include_str!("commands/builder.rs");
         let calibration_source = include_str!("commands/calibration.rs");
+        let builder_step_runner_source =
+            include_str!("../../openlife-core/src/builder/engine/step_runner.rs");
+        let builder_generation_source =
+            include_str!("../../openlife-core/src/builder/engine/generation.rs");
+        let builder_core_source =
+            format!("{builder_step_runner_source}\n{builder_generation_source}");
         assert!(!builder_source.contains("PromptBlockRegistry"));
         assert!(!calibration_source.contains("PromptBlockRegistry"));
-        assert!(doc.contains("Builder prompt remains legacy/ad hoc"));
-        assert!(doc.contains("Calibration prompt remains legacy/ad hoc"));
+        assert!(builder_core_source.contains("builder_life_model_extraction_stack"));
+        assert!(builder_core_source.contains("builder_signal_extraction_stack"));
+        assert!(builder_core_source.contains("generate_raw_governed"));
+        assert!(!builder_core_source.contains(".generate_raw("));
+        assert!(!builder_core_source.contains(".generate("));
+        assert!(doc.contains("Builder model-assisted extraction helpers"));
+        assert!(doc.contains("Calibration report/evolution/proposal creation"));
+        assert!(doc.contains("Calibration does not assemble or send a model prompt"));
 
         let proactive_core = include_str!("../../openlife-core/src/proactive.rs");
         assert!(proactive_core.contains("ProactiveSuggestion"));

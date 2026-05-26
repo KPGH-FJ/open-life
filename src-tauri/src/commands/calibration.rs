@@ -965,5 +965,8 @@ mod tests {
         assert!(!production.contains("handle_agent_loop_fallback"));
         assert!(!production.contains("FallbackStarted"));
         assert!(!production.contains("FallbackCompleted"));
+        assert!(!production.contains(".generate("));
+        assert!(!production.contains(".generate_raw("));
+        assert!(!production.contains("generate_stream"));
     }
 }

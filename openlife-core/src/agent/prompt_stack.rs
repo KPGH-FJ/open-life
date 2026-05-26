@@ -586,6 +586,176 @@ impl PromptBlock {
         }
     }
 
+    pub fn builder_life_model_extraction_role() -> Self {
+        Self::new(
+            "builder.life_model_extraction.role",
+            "1.0.0",
+            PromptPurpose::Custom("life_model_builder".into()),
+            "You are OpenLife's Builder extraction helper. Convert a local Builder draft into structured LifeModel JSON suggestions only. Do not apply changes, do not invent unsupported facts, and keep all writes proposal-first.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(260)
+        .with_applies_to(vec!["Builder".into(), "LifeModelExtraction".into()])
+    }
+
+    pub fn builder_life_model_extraction_output_contract() -> Self {
+        Self::new(
+            "builder.life_model_extraction.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Return ONLY valid JSON. Do not include markdown fences or explanatory text. Use empty strings or arrays when evidence is missing. Numeric scores must be 1-10. Required schema skeleton:\n\
+             {\n\
+               \"identity\":{\"name\":\"\",\"life_philosophy\":\"\",\"mission_statement\":\"\",\"role_definition\":{\"primary_role\":\"\",\"secondary_roles\":[],\"responsibilities\":[],\"boundaries\":[]},\"values\":[{\"name\":\"\",\"weight\":1,\"description\":\"\"}],\"personality_traits\":[{\"trait_name\":\"\",\"score\":5}]},\n\
+               \"goals\":{\"short_term\":[{\"name\":\"\",\"priority\":5,\"status\":\"pending\",\"milestones\":[],\"description\":\"\"}],\"medium_term\":[],\"long_term\":[],\"life_goals\":[]},\n\
+               \"capabilities\":{\"skills\":[{\"name\":\"\",\"proficiency\":5,\"description\":\"\"}],\"resources\":[{\"name\":\"\",\"type\":\"other\",\"description\":\"\"}],\"networks\":[],\"tools\":[],\"knowledge_domains\":[{\"domain\":\"\",\"level\":5,\"description\":\"\"}]},\n\
+               \"state\":{\"current_focus\":\"\",\"emotional_state\":{\"current_mood\":\"\",\"stress_level\":5,\"fulfillment_score\":5},\"health_status\":{\"physical\":\"\",\"mental\":\"\",\"energy_level\":5}},\n\
+               \"relationships\":{\"inner_circle\":[{\"name\":\"\",\"relationship_type\":\"\",\"importance\":5,\"notes\":\"\"}],\"mentors\":[],\"collaborators\":[]},\n\
+               \"preferences\":{\"peak_energy_time\":\"\",\"communication_style\":\"\",\"learning_style\":\"\",\"decision_making_style\":\"\"}\n\
+             }",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(900)
+        .with_applies_to(vec!["Builder".into(), "LifeModelExtraction".into()])
+    }
+
+    pub fn builder_life_model_extraction_privacy_rules() -> Self {
+        Self::new(
+            "builder.life_model_extraction.privacy_rules",
+            "1.0.0",
+            PromptPurpose::Privacy,
+            "Builder extraction handles raw user self-modeling data. Product runtime must use LocalOnly model generation unless a future explicit Builder AgentSpec boundary authorizes another policy. SummaryOnly task input must omit raw user text, raw LifeModel, raw memory, and raw draft content. This helper must not emit fake prompt_stack.assembled AgentRunEvent records.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(420)
+        .with_applies_to(vec!["Builder".into(), "LifeModelExtraction".into()])
+    }
+
+    pub fn builder_signal_extraction_role() -> Self {
+        Self::new(
+            "builder.signal_extraction.role",
+            "1.0.0",
+            PromptPurpose::Custom("life_model_builder".into()),
+            "You are OpenLife's Builder signal extraction helper. Extract compact value, role, capability, preference, and emotion signals from a local Builder answer. Do not apply changes and do not infer beyond the answer.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(240)
+        .with_applies_to(vec!["Builder".into(), "SignalExtraction".into()])
+    }
+
+    pub fn builder_signal_extraction_output_contract() -> Self {
+        Self::new(
+            "builder.signal_extraction.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Return ONLY valid JSON with this contract: {\"values\":[],\"role_hints\":[],\"capability_hints\":[],\"preference_hints\":[],\"emotional_signal\":\"\"}. Do not include markdown fences or explanatory text.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(260)
+        .with_applies_to(vec!["Builder".into(), "SignalExtraction".into()])
+    }
+
+    pub fn builder_signal_extraction_privacy_rules() -> Self {
+        Self::new(
+            "builder.signal_extraction.privacy_rules",
+            "1.0.0",
+            PromptPurpose::Privacy,
+            "Builder signal extraction handles raw user self-modeling data. Product runtime must use LocalOnly model generation. SummaryOnly task input must omit raw answer text, raw LifeModel, raw memory, and raw draft content. This helper must not emit fake prompt_stack.assembled AgentRunEvent records.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(360)
+        .with_applies_to(vec!["Builder".into(), "SignalExtraction".into()])
+    }
+
+    pub fn builder_life_model_extraction_task_input(
+        draft: &str,
+        life_model: &crate::life_model::LifeModel,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let content = match privacy_policy {
+            crate::agent::types::PrivacyPolicy::SummaryOnly => format!(
+                "[SummaryOnly] builder_life_model_extraction task input. Raw Builder draft and raw LifeModel are omitted.\n{}",
+                builder_summary_only_stats(draft, life_model)
+            ),
+            crate::agent::types::PrivacyPolicy::LocalOnly => format!(
+                "[LocalOnly] builder_life_model_extraction task input. Keep this Builder draft on the local model only.\n{}\n\nBuilder draft:\n{}",
+                builder_local_lifemodel_stats(life_model),
+                draft
+            ),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => format!(
+                "[CloudAllowed] builder_life_model_extraction task input. Audit metadata must remain metadata-only and writes remain proposal-first.\n{}\n\nBuilder draft:\n{}",
+                builder_local_lifemodel_stats(life_model),
+                draft
+            ),
+        };
+        let block = Self::new(
+            "builder.life_model_extraction.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_token_budget(2_400)
+        .with_applies_to(vec!["Builder".into(), "LifeModelExtraction".into()]);
+
+        match privacy_policy {
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                block.with_privacy(PromptPrivacyLevel::StrictlyLocal)
+            }
+            crate::agent::types::PrivacyPolicy::SummaryOnly => block
+                .with_privacy(PromptPrivacyLevel::Internal)
+                .with_cloud_allowed(true),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => block
+                .with_privacy(PromptPrivacyLevel::Sensitive)
+                .with_cloud_allowed(true),
+        }
+    }
+
+    pub fn builder_signal_extraction_task_input(
+        answer: &str,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let content = match privacy_policy {
+            crate::agent::types::PrivacyPolicy::SummaryOnly => format!(
+                "[SummaryOnly] builder_signal_extraction task input. Raw Builder answer is omitted.\nanswer_character_count: {}\nline_count: {}",
+                answer.chars().count(),
+                answer.lines().count()
+            ),
+            crate::agent::types::PrivacyPolicy::LocalOnly => format!(
+                "[LocalOnly] builder_signal_extraction task input. Keep this Builder answer on the local model only.\nUser answer:\n{}",
+                answer
+            ),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => format!(
+                "[CloudAllowed] builder_signal_extraction task input. Writes remain proposal-first.\nUser answer:\n{}",
+                answer
+            ),
+        };
+        let block = Self::new(
+            "builder.signal_extraction.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_token_budget(1_200)
+        .with_applies_to(vec!["Builder".into(), "SignalExtraction".into()]);
+
+        match privacy_policy {
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                block.with_privacy(PromptPrivacyLevel::StrictlyLocal)
+            }
+            crate::agent::types::PrivacyPolicy::SummaryOnly => block
+                .with_privacy(PromptPrivacyLevel::Internal)
+                .with_cloud_allowed(true),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => block
+                .with_privacy(PromptPrivacyLevel::Sensitive)
+                .with_cloud_allowed(true),
+        }
+    }
+
     pub fn layered_reasoner_meaning_role() -> Self {
         Self::new(
             "layered_reasoner.meaning.role",
@@ -833,6 +1003,48 @@ fn web_summarization_content_stats(content: &str, source_type: &str) -> String {
             "output_format": "json",
             "required_fields": ["summary_bullets", "source_type", "limitations"]
         }
+    })
+    .to_string()
+}
+
+fn builder_summary_only_stats(draft: &str, life_model: &crate::life_model::LifeModel) -> String {
+    serde_json::json!({
+        "draft_character_count": draft.chars().count(),
+        "draft_line_count": draft.lines().count(),
+        "life_model_contract": {
+            "value_count": life_model.identity.values.len(),
+            "short_term_goal_count": life_model.goals.short_term.len(),
+            "medium_term_goal_count": life_model.goals.medium_term.len(),
+            "long_term_goal_count": life_model.goals.long_term.len(),
+            "skill_count": life_model.capabilities.skills.len(),
+            "has_current_focus": !life_model.state.current_focus.trim().is_empty(),
+            "has_mood": !life_model.state.emotional_state.current_mood.trim().is_empty()
+        },
+        "omitted": [
+            "raw_builder_draft",
+            "raw_user_text",
+            "raw_life_model",
+            "raw_memory",
+            "goal_names",
+            "goal_descriptions"
+        ],
+        "output_format": "json",
+        "proposal_first": true
+    })
+    .to_string()
+}
+
+fn builder_local_lifemodel_stats(life_model: &crate::life_model::LifeModel) -> String {
+    serde_json::json!({
+        "existing_model_counts": {
+            "values": life_model.identity.values.len(),
+            "short_term_goals": life_model.goals.short_term.len(),
+            "medium_term_goals": life_model.goals.medium_term.len(),
+            "long_term_goals": life_model.goals.long_term.len(),
+            "skills": life_model.capabilities.skills.len(),
+            "relationships": life_model.relationships.inner_circle.len()
+        },
+        "proposal_first": true
     })
     .to_string()
 }
@@ -1431,6 +1643,52 @@ impl PromptStack {
         Ok(stack)
     }
 
+    pub fn builder_life_model_extraction_block_ids() -> Vec<String> {
+        vec![
+            "builder.life_model_extraction.role".to_string(),
+            "builder.life_model_extraction.output_contract".to_string(),
+            "builder.life_model_extraction.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn builder_signal_extraction_block_ids() -> Vec<String> {
+        vec![
+            "builder.signal_extraction.role".to_string(),
+            "builder.signal_extraction.output_contract".to_string(),
+            "builder.signal_extraction.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn builder_life_model_extraction_stack(
+        draft: &str,
+        life_model: &crate::life_model::LifeModel,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack =
+            Self::try_from_agentspec(&Self::builder_life_model_extraction_block_ids(), &registry)?;
+        stack.push(PromptBlock::builder_life_model_extraction_task_input(
+            draft,
+            life_model,
+            privacy_policy,
+        ));
+        Ok(stack)
+    }
+
+    pub fn builder_signal_extraction_stack(
+        answer: &str,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack =
+            Self::try_from_agentspec(&Self::builder_signal_extraction_block_ids(), &registry)?;
+        stack.push(PromptBlock::builder_signal_extraction_task_input(
+            answer,
+            privacy_policy,
+        ));
+        Ok(stack)
+    }
+
     pub fn layered_reasoner_block_ids() -> Vec<String> {
         vec![
             "layered_reasoner.meaning.role".to_string(),
@@ -1739,6 +1997,30 @@ impl PromptBlockRegistry {
             .with_block(
                 "web_summarization.task_input",
                 PromptBlock::web_summarization_task_input_template(),
+            )
+            .with_block(
+                "builder.life_model_extraction.role",
+                PromptBlock::builder_life_model_extraction_role(),
+            )
+            .with_block(
+                "builder.life_model_extraction.output_contract",
+                PromptBlock::builder_life_model_extraction_output_contract(),
+            )
+            .with_block(
+                "builder.life_model_extraction.privacy_rules",
+                PromptBlock::builder_life_model_extraction_privacy_rules(),
+            )
+            .with_block(
+                "builder.signal_extraction.role",
+                PromptBlock::builder_signal_extraction_role(),
+            )
+            .with_block(
+                "builder.signal_extraction.output_contract",
+                PromptBlock::builder_signal_extraction_output_contract(),
+            )
+            .with_block(
+                "builder.signal_extraction.privacy_rules",
+                PromptBlock::builder_signal_extraction_privacy_rules(),
             )
             .with_block(
                 "layered_reasoner.meaning.role",
@@ -2389,6 +2671,80 @@ mod tests {
         assert!(!assembled.contains("RAW_GOAL_DESCRIPTION_SENTINEL"));
         assert!(!metadata.contains("RAW_USER_SENTINEL"));
         assert!(!metadata.contains("RAW_LIFEMODEL_SENTINEL"));
+    }
+
+    #[test]
+    fn builder_prompt_stack_has_stable_contract_blocks() {
+        let registry = PromptBlockRegistry::built_in();
+        let ids = PromptStack::builder_life_model_extraction_block_ids();
+
+        for id in &ids {
+            assert!(
+                registry.get(id).is_some(),
+                "missing Builder PromptBlock {id}"
+            );
+        }
+
+        let role = registry.get("builder.life_model_extraction.role").unwrap();
+        assert_eq!(role.version, "1.0.0");
+        assert_eq!(role.purpose.as_str(), "life_model_builder");
+
+        let output = registry
+            .get("builder.life_model_extraction.output_contract")
+            .unwrap();
+        assert_eq!(output.version, "1.0.0");
+        assert_eq!(output.purpose.as_str(), "output_format");
+        assert!(output.content.contains("identity"));
+        assert!(output.content.contains("goals"));
+    }
+
+    #[test]
+    fn builder_summary_only_prompt_excludes_raw_sentinels() {
+        let mut life_model = crate::life_model::LifeModel::default_model();
+        life_model.identity.name = "RAW_LIFEMODEL_SENTINEL".to_string();
+        life_model.identity.values = vec![crate::life_model::ValueItem {
+            name: "RAW_VALUE_SENTINEL".to_string(),
+            weight: 7,
+            description: "RAW_VALUE_DESCRIPTION".to_string(),
+        }];
+        life_model.goals.short_term = vec![crate::life_model::GoalItem {
+            name: "RAW_GOAL_SENTINEL".to_string(),
+            description: "RAW_GOAL_DESCRIPTION".to_string(),
+            priority: 5,
+            status: "pending".to_string(),
+            progress: 0.0,
+            deadline: None,
+            milestones: vec![],
+            related_memories: vec![],
+            updated_at: None,
+        }];
+
+        let mut stack = PromptStack::builder_life_model_extraction_stack(
+            "RAW_USER_SENTINEL says RAW_MEMORY_SENTINEL",
+            &life_model,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        )
+        .expect("Builder SummaryOnly PromptStack should assemble");
+        let assembled = stack.assemble();
+
+        assert!(assembled.contains("builder_life_model_extraction"));
+        assert!(!assembled.contains("RAW_USER_SENTINEL"));
+        assert!(!assembled.contains("RAW_MEMORY_SENTINEL"));
+        assert!(!assembled.contains("RAW_LIFEMODEL_SENTINEL"));
+        assert!(!assembled.contains("RAW_VALUE_SENTINEL"));
+        assert!(!assembled.contains("RAW_GOAL_SENTINEL"));
+    }
+
+    #[test]
+    fn unknown_builder_prompt_block_fails_closed() {
+        let registry = PromptBlockRegistry::built_in();
+        let err = PromptStack::try_from_agentspec(
+            &["builder.life_model_extraction.missing".to_string()],
+            &registry,
+        )
+        .expect_err("unknown Builder PromptBlock should fail closed");
+
+        assert!(err.contains("unknown prompt block"));
     }
 
     #[test]

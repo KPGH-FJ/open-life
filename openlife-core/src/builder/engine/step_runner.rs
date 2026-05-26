@@ -1,6 +1,6 @@
+use crate::agent::{prompt_stack::PromptStack, PrivacyPolicy};
 use crate::builder::types::*;
 use crate::life_model::{LifeModel, Skill, ValueItem};
-use crate::llm::ChatMessage;
 
 impl<'a> super::BuilderEngine<'a> {
     pub(crate) async fn quick_build_step(
@@ -529,65 +529,57 @@ impl<'a> super::BuilderEngine<'a> {
     }
 
     pub(crate) async fn extract_values_and_setup_pairwise(&self, session: &mut BuilderSession) {
-        let prompt = format!(
-            r#"请根据用户在峰值体验中的描述，提取多维度信号，输出严格 JSON 对象：
-{{
-  "values": ["关键词1", "关键词2"],
-  "role_hints": ["角色暗示1"],
-  "capability_hints": ["能力暗示1"],
-  "preference_hints": ["偏好暗示1"],
-  "emotional_signal": "情绪关键词"
-}}
-只输出 JSON，不要解释。
-
-用户描述：
-{}"#,
-            session.draft_yaml
-        );
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: prompt,
-        }];
         let mut values = vec![];
         let mut peak = PeakExperience {
             raw_description: session.draft_yaml.clone(),
             ..Default::default()
         };
-        if let Ok(reply) = self.scheduler.generate_raw(messages, None).await {
-            let cleaned = reply
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
-            #[derive(serde::Deserialize)]
-            struct ExtractedSignals {
-                #[serde(default)]
-                values: Vec<String>,
-                #[serde(default)]
-                role_hints: Vec<String>,
-                #[serde(default)]
-                capability_hints: Vec<String>,
-                #[serde(default)]
-                preference_hints: Vec<String>,
-                #[serde(default)]
-                emotional_signal: String,
-            }
-            if let Ok(signals) = serde_json::from_str::<ExtractedSignals>(cleaned) {
-                values = signals
-                    .values
-                    .into_iter()
-                    .map(|name| ValueItem {
-                        name,
-                        weight: 5,
-                        description: String::new(),
-                    })
-                    .collect();
-                peak.extracted_values = values.iter().map(|v| v.name.clone()).collect();
-                peak.extracted_role_hints = signals.role_hints;
-                peak.extracted_capability_hints = signals.capability_hints;
-                peak.extracted_preference_hints = signals.preference_hints;
-                peak.emotional_signal = signals.emotional_signal;
+        let stack = PromptStack::builder_signal_extraction_stack(
+            &session.draft_yaml,
+            PrivacyPolicy::LocalOnly,
+        );
+        if let Ok(mut stack) = stack {
+            let prompt = stack.assemble();
+            if let Ok(reply) = self
+                .scheduler
+                .generate_raw_governed(vec![], Some(&prompt), PrivacyPolicy::LocalOnly)
+                .await
+            {
+                let cleaned = reply
+                    .trim()
+                    .trim_start_matches("```json")
+                    .trim_start_matches("```")
+                    .trim_end_matches("```")
+                    .trim();
+                #[derive(serde::Deserialize)]
+                struct ExtractedSignals {
+                    #[serde(default)]
+                    values: Vec<String>,
+                    #[serde(default)]
+                    role_hints: Vec<String>,
+                    #[serde(default)]
+                    capability_hints: Vec<String>,
+                    #[serde(default)]
+                    preference_hints: Vec<String>,
+                    #[serde(default)]
+                    emotional_signal: String,
+                }
+                if let Ok(signals) = serde_json::from_str::<ExtractedSignals>(cleaned) {
+                    values = signals
+                        .values
+                        .into_iter()
+                        .map(|name| ValueItem {
+                            name,
+                            weight: 5,
+                            description: String::new(),
+                        })
+                        .collect();
+                    peak.extracted_values = values.iter().map(|v| v.name.clone()).collect();
+                    peak.extracted_role_hints = signals.role_hints;
+                    peak.extracted_capability_hints = signals.capability_hints;
+                    peak.extracted_preference_hints = signals.preference_hints;
+                    peak.emotional_signal = signals.emotional_signal;
+                }
             }
         }
         session.extracted_values = values.clone();

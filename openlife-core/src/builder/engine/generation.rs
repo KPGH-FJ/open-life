@@ -1,8 +1,8 @@
+use crate::agent::{prompt_stack::PromptStack, PrivacyPolicy};
 use crate::builder::types::*;
 use crate::life_model::{
     EmotionalState, GoalItem, HealthStatus, LifeModel, PersonalityTrait, Resource, Skill, ValueItem,
 };
-use crate::llm::ChatMessage;
 
 impl<'a> super::BuilderEngine<'a> {
     pub(crate) fn extract_quick_build_signals(
@@ -1404,67 +1404,18 @@ impl<'a> super::BuilderEngine<'a> {
             return model;
         }
 
-        let system_prompt = r#"你是一个结构化信息提取助手。请根据用户在 OpenLife 构建模式中的回答，提取人生模型信息，并严格只输出一段合法的 JSON（不要 Markdown 代码块，不要解释）。
-
-JSON 结构如下：
-{
-  "identity": {
-    "name": "",
-    "life_philosophy": "",
-    "mission_statement": "",
-    "role_definition": {
-      "primary_role": "",
-      "secondary_roles": [],
-      "responsibilities": [],
-      "boundaries": []
-    },
-    "values": [{"name":"", "weight":1, "description":""}],
-    "personality_traits": [{"trait_name":"", "score":5}]
-  },
-  "goals": {
-    "short_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
-    "medium_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
-    "long_term": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}],
-    "life_goals": [{"name":"", "priority":5, "status":"pending", "milestones":[], "description":""}]
-  },
-  "capabilities": {
-    "skills": [{"name":"", "proficiency":5, "description":""}],
-    "resources": [{"name":"", "type":"other", "description":""}],
-    "networks": [""],
-    "tools": [{"name":"", "proficiency":5, "description":""}],
-    "knowledge_domains": [{"domain":"", "level":5, "description":""}]
-  },
-  "state": {
-    "current_focus": "",
-    "emotional_state": {"current_mood":"", "stress_level":5, "fulfillment_score":5},
-    "health_status": {"physical":"", "mental":"", "energy_level":5}
-  },
-  "relationships": {
-    "inner_circle": [{"name":"", "relationship_type":"", "importance":5, "notes":""}],
-    "mentors": [{"name":"", "relationship_type":"mentor", "importance":5, "notes":""}],
-    "collaborators": [{"name":"", "relationship_type":"collaborator", "importance":5, "notes":""}]
-  },
-  "preferences": {
-    "peak_energy_time": "",
-    "communication_style": "",
-    "learning_style": "",
-    "decision_making_style": ""
-  }
-}
-
-规则：
-1. 如果某字段无法从回答中推断，使用空字符串或空数组。
-2. weight、priority、proficiency、score、stress_level、fulfillment_score、energy_level 是 1-10 的整数，请根据上下文合理推断。
-3. 只输出 JSON，不要任何其他文字。"#.to_string();
-
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: draft.to_string(),
-        }];
+        let prompt = match PromptStack::builder_life_model_extraction_stack(
+            draft,
+            base,
+            PrivacyPolicy::LocalOnly,
+        ) {
+            Ok(mut stack) => stack.assemble(),
+            Err(_) => return model,
+        };
 
         match self
             .scheduler
-            .generate_raw(messages, Some(&system_prompt))
+            .generate_raw_governed(vec![], Some(&prompt), PrivacyPolicy::LocalOnly)
             .await
         {
             Ok(json_text) => {

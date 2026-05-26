@@ -95,6 +95,19 @@ fn pairwise_explanation_ranks_and_connects_peak() {
 }
 
 #[test]
+fn builder_model_generation_source_uses_promptstack_governed_raw_generation() {
+    let step_runner_source = include_str!("step_runner.rs");
+    let generation_source = include_str!("generation.rs");
+    let combined = format!("{step_runner_source}\n{generation_source}");
+
+    assert!(combined.contains("builder_life_model_extraction_stack"));
+    assert!(combined.contains("generate_raw_governed"));
+    assert!(!combined.contains(".generate_raw("));
+    assert!(!combined.contains(".generate("));
+    assert!(!combined.contains("generate_stream"));
+}
+
+#[test]
 fn patch_peak_experience_populates_model() {
     let mut session = BuilderSession::new("s7", BuilderMode::Socratic);
     session.peak_experience = Some(PeakExperience {

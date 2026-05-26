@@ -134,7 +134,7 @@ Remaining prompt boundary status (updated 2026-05-26):
 |----------|-------|------|------------|
 | System prompt double-build (llm.rs/ollama.rs) | 3 | Fixed in governed paths | `InferenceScheduler::generate` / `generate_stream` and `llm::build_system_prompt` are legacy compatibility only; formal AgentRuntime / ExecutionFacade and runtime fallback use governed APIs |
 | Reasoning prompts (layered.rs) | 0 | Fixed | LayeredReasoner meaning / strategy / generation / safety prompts are PromptStack-governed internal blocks with metadata-only `ReasoningTrace` traces |
-| Builder engine prompts (builder/engine.rs) | 5 | Medium | Builder has its own execution mode; converge when Builder goes through AgentRuntime |
+| Builder model-assisted extraction prompts (builder/engine.rs) | 0 | Fixed for model calls | Builder signal extraction and draft-to-LifeModel extraction now use Builder-specific PromptBlocks and `generate_raw_governed(..., LocalOnly)`; UI/session prompts are deterministic text, not model prompts |
 | Skills prompts (skills.rs) | 2 | Medium | Skill execution should contribute PromptBlocks |
 | Proactive prompts (proactive.rs) | 5 | Low | Proactive is read-only suggestion generation |
 | Runtime/dynamic prompts | 9 | Low | JSON repair, tool list, follow-up — inherently dynamic content |
@@ -147,7 +147,7 @@ Current concern:
 Needed Post-Beta direction:
 
 - Expand `PromptBlockRegistry` with LifeModel/Memory/Task/OutputFormat blocks.
-- Route Builder/Calibration/Skills prompts through PromptStack.
+- Route any future Calibration model-assisted prompt through PromptStack before enabling model generation.
 - Eventually remove ad-hoc system prompt construction from `llm.rs` and `ollama.rs` when all callers go through governed path.
 
 ## Memory and LifeModel Evolution

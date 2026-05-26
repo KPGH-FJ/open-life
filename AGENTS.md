@@ -150,7 +150,7 @@
 │       ├── privacy.rs            # PII 检测与脱敏
 │       ├── versioning.rs         # Git-like 快照与回滚
 │       ├── feedback.rs           # 用户反馈与进化信号
-│       ├── builder.rs            # Builder 模式（引导式人生模型创建）
+│       ├── builder.rs            # Builder 模式（引导式人生模型创建；模型辅助提取走 Builder-specific PromptBlocks + LocalOnly）
 │       ├── reflex_engine.rs      # 反射引擎
 │       ├── evolution.rs          # 微进化系统
 │       ├── proactive.rs          # ProactiveEngine 主动建议
@@ -169,7 +169,7 @@
 │       │   ├── agent_loop/       # ReAct 循环（AgentLoop 双轨）
 │       │   ├── action_executor/  # ActionExecutor + ToolRuntime（6 文件 ~3500 行）
 │       │   ├── reasoning/        # 推理策略（LayeredReasoner/DirectReasoner）
-│       │   ├── prompt_stack.rs   # PromptStack (10 Block 类型)
+│       │   ├── prompt_stack.rs   # PromptStack（built-in + proposal/web/layered/builder/skill 专用 blocks）
 │       │   ├── context_assembler.rs # ContextAssembler 组装策略
 │       │   ├── model_router.rs   # ModelRouter（已毕业）
 │       │   ├── proposal_engine.rs   # ProposalEngine 生成层
@@ -322,7 +322,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 
 关键处理节点：
 1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:522), v2 在 721）：用户消息 → 向量检索/MemoryService → PrivacyEngine 脱敏 → ContextAssembler
-2. **模型调度**（[`InferenceScheduler::generate_governed`](openlife-core/src/scheduler.rs:531)）：正式 AgentRuntime / ExecutionFacade 路径根据 AgentSpec privacy policy、ModelRouter / tool prompt 决定本地/云端路径；[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:131) 仅保留给 legacy compatibility caller
+2. **模型调度**（[`InferenceScheduler::generate_governed`](openlife-core/src/scheduler.rs:531)）：正式 AgentRuntime / ExecutionFacade 路径根据 AgentSpec privacy policy、ModelRouter / tool prompt 决定本地/云端路径；[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:131) 仅保留给 legacy compatibility caller；Builder 模型辅助提取不走 legacy scheduler generation，而是 Builder-specific PromptStack + `generate_raw_governed(..., LocalOnly)`
 3. **AgentLoop 执行**（[`send_message_with_agent_loop`](src-tauri/src/lib.rs:1239)）：AgentTask → AgentLoop.run() → AgentRunEvent 事件流
 4. **工具调用**（通过 [`action_executor/`](openlife-core/src/agent/action_executor/) 模块，受 ToolPermission + ExecutionSandbox 治理）
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:2446)）：AgentLoop 流式 → stream-message-chunk Tauri 事件
@@ -762,7 +762,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
 10. ~~**vNext AgentRunEvent**~~ ✅ 已完成（AgentRunEvent (41 种事件) + append-only event_store.rs，`agent/types/mod.rs` 2183 行）
 11. **执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。
-12. ~~**PromptStack 缺失**~~ ✅ 已完成（1329 行，10 Block 类型 + 8 PromptBlock 工厂 + 2 PromptStack 工厂，llm/scheduler 已迁移到 PromptStack 内部）
+12. ~~**PromptStack 缺失**~~ ✅ 已完成（PromptStack 已覆盖 AgentSpec、Proposal/Web/LayeredReasoner/Builder/Skill 等专用 blocks；legacy scheduler generation 仅保留 compatibility boundary）
 13. ~~**MemoryEvidence 缺失**~~ ✅ 已完成（`agent/memory_evidence.rs` 实现 RepeatedPreference/RecurringGoal/CapabilitySignal/StateTrend/Contradiction/ValueSignal 六种信号提取）
 14. **ActionExecutor hardening**：继续强化 tool metadata、declarative-only 过滤、permission policy、observation/event 记录和 replay re-check。
 
