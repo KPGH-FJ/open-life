@@ -936,7 +936,7 @@ validate_frontend_typed_contract_parity(
 | Event | Backend Builder | Frontend Event Type | GF? | Required Fields | Fixture/Test Coverage Tokens |
 |-------|----------------|--------------------|-----|----------------|-----------------------------|
 | AgentSpecSelected | `build_agent_spec_selected_payload` | `agent_spec.selected` | — | `agent_spec_id`, `privacy_policy` | fixture: `agent_spec.selected`; test: `AgentRunEvent` |
-| PromptStackAssembled | `build_prompt_stack_assembled_payload` | `prompt_stack.assembled` | — | `agent_spec_id`, `prompt_blocks` | fixture: `prompt_blocks`; test: `prompt_stack.assembled` |
+| PromptStackAssembled | `build_prompt_stack_assembled_payload` | `prompt_stack.assembled` | — | `agent_spec_id`, `prompt_blocks[]` with `id`, `version`, `purpose`, `privacy_level`, `cloud_allowed`, `token_budget`, `applies_to`, `estimated_tokens` | fixture: `prompt_blocks`; test: `prompt_stack.assembled` |
 | ContextGovernanceApplied | `build_context_governance_applied_payload` | `context_governance.applied` | — | `agent_spec_id` | fixture: `privacy_policy`; test: `context_governance.applied` |
 | ToolCallBlocked | `build_tool_call_blocked_payload` | `tool.call_blocked` | — | `status`, `tool_name`, `source`, `agent_spec_id` | fixture: `block_reason`; test: `BlockReason` |
 | ReplayStarted | `build_replay_started_payload` | `replay.started` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | test: `agent_spec_id`, `tool_name`, `source` (no fixture) |
@@ -1079,10 +1079,10 @@ When a new typed event is introduced or an existing typed event payload shape ch
 | Event Type | Real Backend Fields (snake_case) | camelCase Fallback |
 |-----------|--------------------------------|-------------------|
 | `agent_spec.selected` | `agent_spec_id`, `role`, `privacy_policy` | `agentSpecId` |
-| `prompt_stack.assembled` | `agent_spec_id`, `prompt_blocks[]` (no `prompt_stack_id`) | — |
+| `prompt_stack.assembled` | `agent_spec_id`, typed metadata-only `prompt_blocks[]` (no `prompt_stack_id`, no raw prompt content) | — |
 | `context_governance.applied` | `privacy_policy` (exec/streaming), or `agent_spec_privacy_policy` (orchestrator) | `privacyPolicy` |
 
-**PromptStack scheme:** Scheme B — frontend extracts block count and IDs from `prompt_blocks` array. No `prompt_stack_id` field exists in the backend; adding one would create a fake contract. The block trace captures real data (block ids, versions, purposes) without leaking prompt content.
+**PromptStack scheme:** Scheme B — frontend extracts block count and IDs from `prompt_blocks` array. No `prompt_stack_id` field exists in the backend; adding one would create a fake contract. The block trace captures real metadata (`id`, `version`, `purpose`, `privacy_level`, `cloud_allowed`, `token_budget`, `applies_to`, `estimated_tokens`) without leaking prompt content, raw LifeModel, raw memory, or raw user content.
 
 **nextActions derivation:**
 

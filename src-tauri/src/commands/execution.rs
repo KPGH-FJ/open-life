@@ -474,7 +474,7 @@ pub(crate) async fn run_skill_with_state(
             ),
             trace_payloads::build_prompt_stack_assembled_payload(
                 &agent_spec.id,
-                serde_json::to_value(&runtime_output.prompt_block_trace).unwrap_or_default(),
+                &runtime_output.prompt_block_trace,
             ),
         ));
         let _ = es.append_event(&openlife_core::agent::AgentRunEvent::new(

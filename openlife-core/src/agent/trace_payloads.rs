@@ -19,6 +19,8 @@
 //! 3. The Rust contract tests in `event_store.rs`
 //! 4. The frontend `typedContract.ts` parser
 
+use crate::agent::prompt_stack::BlockTraceEntry;
+use serde::Serialize;
 use serde_json::{json, Value};
 
 // ── Governance events (agent_spec.selected / prompt_stack.assembled /
@@ -41,18 +43,27 @@ pub fn build_agent_spec_selected_payload(
 
 /// Build the payload for `prompt_stack.assembled`.
 ///
-/// Contract: `{agent_spec_id, prompt_blocks}` where `prompt_blocks` is an
-/// array of objects that each have at least `id`.  **No** `prompt_stack_id`
-/// field exists — the frontend extracts block info from `prompt_blocks`
-/// directly (Scheme B).
+/// Contract: `{agent_spec_id, prompt_blocks}` where `prompt_blocks` is a
+/// typed metadata-only trace containing block id, version, purpose, privacy
+/// level, cloud allowance, token budget, applies_to, and estimated tokens.
+/// **No** `prompt_stack_id` field exists — the frontend extracts block info
+/// from `prompt_blocks` directly (Scheme B).
+#[derive(Debug, Clone, Serialize)]
+pub struct PromptStackAssembledPayload<'a> {
+    pub agent_spec_id: String,
+    pub prompt_blocks: &'a [BlockTraceEntry],
+}
+
 pub fn build_prompt_stack_assembled_payload(
     agent_spec_id: impl Into<String>,
-    prompt_blocks: Value,
+    prompt_blocks: &[BlockTraceEntry],
 ) -> Value {
-    json!({
-        "agent_spec_id": agent_spec_id.into(),
-        "prompt_blocks": prompt_blocks,
+    let agent_spec_id = agent_spec_id.into();
+    serde_json::to_value(PromptStackAssembledPayload {
+        agent_spec_id: agent_spec_id.clone(),
+        prompt_blocks,
     })
+    .unwrap_or_else(|_| json!({"agent_spec_id": agent_spec_id, "prompt_blocks": []}))
 }
 
 /// Which path is emitting `context_governance.applied`.
@@ -448,8 +459,17 @@ mod tests {
         assert!(p.get("agentSpecId").is_none());
 
         // prompt_stack.assembled
-        let blocks = json!([{"id": "bs", "version": "1.0.0"}]);
-        let p = build_prompt_stack_assembled_payload("main.default", blocks);
+        let blocks = vec![BlockTraceEntry {
+            id: "bs".into(),
+            version: "1.0.0".into(),
+            purpose: "base_system".into(),
+            privacy_level: "internal".into(),
+            cloud_allowed: true,
+            token_budget: 800,
+            applies_to: vec!["Main".into()],
+            estimated_tokens: 32,
+        }];
+        let p = build_prompt_stack_assembled_payload("main.default", &blocks);
         assert_eq!(p["agent_spec_id"].as_str(), Some("main.default"));
         assert!(p["prompt_blocks"].is_array());
         assert!(p.get("prompt_stack_id").is_none());

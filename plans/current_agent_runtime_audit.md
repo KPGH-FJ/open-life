@@ -125,7 +125,7 @@ Current state (updated 2026-05-10):
 
 - **PromptStack** (`agent/prompt_stack.rs`, 922行) is implemented with `PromptBlock` and `PromptBlockRegistry` (4 built-in blocks: base_system, planning, tool_discipline, privacy_rule).
 - AgentLoop-governed paths (send_message, start_stream_message, scheduled, proactive) assemble PromptStack via `execute_task_with_spec()` and inject as `messages[0]`.
-- PromptStack assembly records `PromptStackAssembled` events with block IDs/versions (no raw content).
+- PromptStack assembly records `PromptStackAssembled` events with typed PromptBlock metadata: id, version, purpose, privacy_level, cloud_allowed, token_budget, applies_to, and estimated_tokens. It does not store raw prompt content, raw LifeModel, raw memory, or raw user content.
 - **Critical gap fixed (2026-05-10)**: `scheduler.rs:generate_governed()` previously caused dual system prompts — the PromptStack one at `messages[0]` and a second LifeModel YAML prompt from `build_system_prompt()`. Now detects existing system message and uses `_raw` variants to avoid double-injection.
 
 Remaining prompt boundary status (updated 2026-05-26):

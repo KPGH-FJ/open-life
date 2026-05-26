@@ -46,6 +46,17 @@ pub enum PromptPrivacyLevel {
     StrictlyLocal,
 }
 
+impl PromptPrivacyLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PromptPrivacyLevel::Public => "public",
+            PromptPrivacyLevel::Internal => "internal",
+            PromptPrivacyLevel::Sensitive => "sensitive",
+            PromptPrivacyLevel::StrictlyLocal => "strictly_local",
+        }
+    }
+}
+
 /// A single versioned, policy-aware block of prompt text.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptBlock {
@@ -1856,7 +1867,10 @@ impl PromptStack {
                 id: b.id.clone(),
                 version: b.version.clone(),
                 purpose: b.purpose.as_str().to_string(),
+                privacy_level: b.privacy_level.as_str().to_string(),
                 cloud_allowed: b.cloud_allowed,
+                token_budget: b.token_budget,
+                applies_to: b.applies_to.clone(),
                 estimated_tokens: b.estimated_tokens(),
             })
             .collect()
@@ -1875,7 +1889,10 @@ pub struct BlockTraceEntry {
     pub id: String,
     pub version: String,
     pub purpose: String,
+    pub privacy_level: String,
     pub cloud_allowed: bool,
+    pub token_budget: usize,
+    pub applies_to: Vec<String>,
     pub estimated_tokens: usize,
 }
 
@@ -2137,7 +2154,14 @@ mod tests {
         assert_eq!(trace.len(), 4);
         assert_eq!(trace[0].id, "base_system");
         assert_eq!(trace[0].version, "1.0.0");
+        assert_eq!(trace[0].purpose, "base_system");
+        assert_eq!(trace[0].privacy_level, "internal");
+        assert!(trace[0].cloud_allowed);
+        assert_eq!(trace[0].token_budget, 0);
+        assert!(trace[0].applies_to.is_empty());
+        assert!(trace[0].estimated_tokens > 0);
         assert_eq!(trace[3].id, "local_only");
+        assert_eq!(trace[3].privacy_level, "strictly_local");
         assert!(!trace[3].cloud_allowed);
     }
 

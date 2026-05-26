@@ -28,7 +28,11 @@
  *   ├─────────────────────────────┼──────────────────────────────────────┤
  *   │ agent_spec.selected         │ agent_spec_id, role, privacy_policy  │
  *   │ prompt_stack.assembled      │ agent_spec_id, prompt_blocks (array, │
- *   │                             │   items have id); NO prompt_stack_id │
+ *   │                             │   items have id, version, purpose,   │
+ *   │                             │   privacy_level, cloud_allowed,      │
+ *   │                             │   token_budget, applies_to,          │
+ *   │                             │   estimated_tokens); no raw content; │
+ *   │                             │   NO prompt_stack_id                 │
  *   │ context_governance.applied  │ agent_spec_id, context_included,     │
  *   │                             │   context_excluded, privacy_policy   │
  *   │                             │   or agent_spec_privacy_policy       │
@@ -94,6 +98,24 @@ function ev(
   };
 }
 
+function promptBlock(
+  id: string,
+  purpose: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id,
+    version: "1.0.0",
+    purpose,
+    privacy_level: "internal",
+    cloud_allowed: true,
+    token_budget: 800,
+    applies_to: ["Main"],
+    estimated_tokens: 32,
+    ...overrides,
+  };
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // FIXTURE 1: successfulGovernedRun
 // A cleanly governed run where everything works end-to-end.
@@ -108,9 +130,9 @@ export const successfulGovernedRun: AgentRunEvent[] = [
   ev("prompt_stack.assembled", {
     agent_spec_id: "main.default",
     prompt_blocks: [
-      { id: "base_system", version: "1.0.0", purpose: "system prompt" },
-      { id: "privacy_rule", version: "1.0.0", purpose: "privacy rule" },
-      { id: "tools_manifest", version: "1.0.0", purpose: "tool list" },
+      promptBlock("base_system", "base_system"),
+      promptBlock("privacy_rule", "privacy"),
+      promptBlock("tools_manifest", "tool", { token_budget: 400 }),
     ],
   }),
   ev("context_governance.applied", {
@@ -142,8 +164,8 @@ export const agentSpecDeniedToolRun: AgentRunEvent[] = [
   ev("prompt_stack.assembled", {
     agent_spec_id: "main.strict",
     prompt_blocks: [
-      { id: "base_system", version: "1.0.0", purpose: "system prompt" },
-      { id: "privacy_rule", version: "1.0.0", purpose: "privacy rule" },
+      promptBlock("base_system", "base_system"),
+      promptBlock("privacy_rule", "privacy"),
     ],
   }),
   ev("context_governance.applied", {
@@ -178,8 +200,8 @@ export const needsConfirmationRun: AgentRunEvent[] = [
   ev("prompt_stack.assembled", {
     agent_spec_id: "main.default",
     prompt_blocks: [
-      { id: "base_system", version: "1.0.0", purpose: "system prompt" },
-      { id: "tools_manifest", version: "1.0.0", purpose: "tool list" },
+      promptBlock("base_system", "base_system"),
+      promptBlock("tools_manifest", "tool", { token_budget: 400 }),
     ],
   }),
   ev("context_governance.applied", {
@@ -215,8 +237,8 @@ export const replayFailedRun: AgentRunEvent[] = [
   ev("prompt_stack.assembled", {
     agent_spec_id: "main.default",
     prompt_blocks: [
-      { id: "base_system", version: "1.0.0", purpose: "system prompt" },
-      { id: "tools_manifest", version: "1.0.0", purpose: "tool list" },
+      promptBlock("base_system", "base_system"),
+      promptBlock("tools_manifest", "tool", { token_budget: 400 }),
     ],
   }),
   ev("replay.failed", {

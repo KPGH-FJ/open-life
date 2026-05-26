@@ -5,7 +5,6 @@ use chrono::Utc;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use serde_json::to_value;
 use tauri::Emitter;
 use tauri::State;
 use tokio::time::{timeout, Duration};
@@ -1080,7 +1079,7 @@ pub(crate) async fn start_stream_message(
                     ),
                     trace_payloads::build_prompt_stack_assembled_payload(
                         &agent_spec.id,
-                        to_value(&output.prompt_block_trace).unwrap_or_default(),
+                        &output.prompt_block_trace,
                     ),
                 )) {
                     log::error!(

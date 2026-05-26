@@ -1100,24 +1100,35 @@ mod tests {
     // ── Trace Contract: prompt_stack.assembled payload ──────────────
     //
     //  Uses the production payload builder.  Contract: prompt_blocks
-    //  array items have `id`.  No prompt_stack_id field (Scheme B).
+    //  array items carry metadata only.  No prompt_stack_id field
+    //  (Scheme B).
 
     /// Verify that prompt_stack.assembled payloads (from the production
-    /// builder) carry agent_spec_id and prompt_blocks (array with `id`
-    /// items).  PromptStack Scheme B is enforced — no prompt_stack_id.
+    /// builder) carry agent_spec_id and prompt_blocks metadata.  PromptStack
+    /// Scheme B is enforced — no prompt_stack_id and no raw prompt content.
     #[test]
     fn test_prompt_stack_assembled_payload_contract() {
+        use crate::agent::prompt_stack::{PromptBlock, PromptPrivacyLevel, PromptStack};
         use crate::agent::tests::contract_helpers;
         use crate::agent::trace_payloads;
 
         let store = AgentRunEventStore::new_in_memory().unwrap();
         let run_id = "tc-prompt-stack";
 
-        let blocks = serde_json::json!([
-            {"id": "base_system", "version": "1.0.0", "purpose": "system prompt"},
-            {"id": "privacy_rule", "version": "1.0.0", "purpose": "privacy rule"},
-        ]);
-        let payload = trace_payloads::build_prompt_stack_assembled_payload("main.default", blocks);
+        let stack = PromptStack::new()
+            .with_block(
+                PromptBlock::base_identity()
+                    .with_token_budget(256)
+                    .with_applies_to(vec!["Main".into()]),
+            )
+            .with_block(
+                PromptBlock::planning()
+                    .with_privacy(PromptPrivacyLevel::StrictlyLocal)
+                    .with_cloud_allowed(false),
+            );
+        let block_trace = stack.block_trace();
+        let payload =
+            trace_payloads::build_prompt_stack_assembled_payload("main.default", &block_trace);
         let event = AgentRunEvent::new(
             run_id,
             AgentRunEventType::PromptStackAssembled,
@@ -1138,6 +1149,27 @@ mod tests {
         contract_helpers::assert_has_string(payload, "agent_spec_id");
         contract_helpers::assert_has_array(payload, "prompt_blocks");
         contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "id");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "version");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "purpose");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "privacy_level");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "cloud_allowed");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "token_budget");
+        contract_helpers::assert_array_items_have_field(payload, "prompt_blocks", "applies_to");
+        contract_helpers::assert_array_items_have_field(
+            payload,
+            "prompt_blocks",
+            "estimated_tokens",
+        );
+
+        let payload_text = payload.to_string();
+        assert!(payload_text.contains("base_identity"));
+        assert!(payload_text.contains("\"version\":\"1.0.0\""));
+        assert!(payload_text.contains("\"privacy_level\":\"strictly_local\""));
+        assert!(!payload_text.contains("你是 OpenLife"));
+        assert!(!payload_text.contains("raw_prompt"));
+        assert!(!payload_text.contains("raw_lifemodel"));
+        assert!(!payload_text.contains("raw_memory"));
+        assert!(!payload_text.contains("RAW_USER_SENTINEL"));
 
         // Scheme B: no prompt_stack_id / promptStackId field
         contract_helpers::assert_field_absent(payload, "prompt_stack_id");

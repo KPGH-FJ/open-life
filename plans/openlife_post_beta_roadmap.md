@@ -158,7 +158,7 @@ Status: active
 - [x] Legacy scheduler generation boundary 收口：`InferenceScheduler::generate` / `generate_stream` 标记为 legacy compatibility；`generate_governed` / `generate_stream_governed` 不再委托 legacy scheduler generation；Chat / StreamChat runtime fallback 先组装 stored AgentSpec PromptStack，再调用 governed fallback；SummaryOnly compatibility payload 和 LocalOnly cloud-blocking 测试锁定隐私边界
 - [x] Builder / Calibration prompt boundary 决策与收口：Builder 的模型辅助 signal extraction / draft-to-LifeModel extraction 迁入 Builder-specific PromptBlocks，并强制通过 `generate_raw_governed(..., LocalOnly)`，不走 legacy raw/scheduler generation；Builder direct apply 默认关闭，正式路径仍是 Review Center Proposal-first；Calibration 判定为 deterministic / proposal-only / UI metadata，source audit 锁定无模型生成、无 Chat fallback、无 legacy scheduler generation，direct apply 默认关闭并保留为显式 legacy compatibility gate
 - [ ] 后续新增的模型 prompt entrypoint 必须先归类为 governed / legacy compatibility / not applicable；当前 Calibration 保持 not applicable，除非未来变成模型生成路径
-- [ ] PromptBlock 版本记录到 AgentRunEvent
+- [x] PromptBlock version -> AgentRunEvent contract 收口：正式 Chat / StreamChat / Scheduled / Skill governed path 的 `prompt_stack.assembled` 统一通过 typed `build_prompt_stack_assembled_payload`，`prompt_blocks[]` 记录 `id`、`version`、`purpose`、`privacy_level`、`cloud_allowed`、`token_budget`、`applies_to`、`estimated_tokens`，不写 raw prompt / raw LifeModel / raw memory / raw user content；helper-only PromptStack 路径不伪造 AgentRunEvent
 - [x] 将 Builder prompt、Calibration prompt（若继续为模型生成）迁入或明确保留为专用边界；legacy scheduler generation 已明确保留为 compatibility-only，不允许正式 governed path 调用
 
 ### Phase 2 门控

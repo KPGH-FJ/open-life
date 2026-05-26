@@ -2207,7 +2207,7 @@ mod tests {
             "Calibration is currently deterministic/proposal-only and not applicable for PromptStack",
             "Skill runtime remains outside Chat ExecutionFacade",
             "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace",
-            "PromptStack assembled event payload is metadata-only and excludes raw prompt",
+            "Each `prompt_blocks[]` item records metadata only",
             "Context governance event payload is metadata-only and excludes raw LifeModel",
         ];
         for fact in required_facts {
@@ -2306,9 +2306,47 @@ mod tests {
         assert!(skill_path.contains("with_skill_prompt_blocks"));
         assert!(skill_path.contains("skill_runtime_block_ids"));
         assert!(skill_path.contains("execute_task_with_spec"));
+        assert!(skill_path.contains("build_prompt_stack_assembled_payload"));
+        assert!(skill_path.contains("&runtime_output.prompt_block_trace"));
+        assert!(
+            !skill_path.contains("to_value(&runtime_output.prompt_block_trace"),
+            "Skill PromptStack event must use typed block trace, not ad hoc JSON"
+        );
         assert!(doc.contains(
             "Skill runtime | Skill-specific PromptStack contract blocks derived from SkillManifest"
         ));
+
+        let orchestrator_source =
+            include_str!("../../openlife-core/src/agent/agent_loop/orchestrator.rs");
+        let governance_start = orchestrator_source
+            .find("pub(crate) fn record_runtime_governance_events")
+            .expect("AgentLoop governance recorder should exist");
+        let governance_end = orchestrator_source[governance_start..]
+            .find("pub(crate) fn emit_status")
+            .map(|offset| governance_start + offset)
+            .expect("emit_status should follow governance recorder");
+        let governance_path = &orchestrator_source[governance_start..governance_end];
+        assert!(governance_path.contains("build_prompt_stack_assembled_payload"));
+        assert!(governance_path.contains("&runtime_output.prompt_block_trace"));
+        assert!(
+            !governance_path.contains("to_value(&runtime_output.prompt_block_trace"),
+            "Chat/Scheduled AgentLoop PromptStack event must use typed block trace"
+        );
+
+        let stream_runtime_start = stream_source
+            .find("let runtime_output = agent_runtime")
+            .expect("streaming governed runtime output should exist");
+        let stream_runtime_end = stream_source[stream_runtime_start..]
+            .find("stream-message-start")
+            .map(|offset| stream_runtime_start + offset)
+            .expect("stream start event should follow runtime event appends");
+        let stream_runtime_path = &stream_source[stream_runtime_start..stream_runtime_end];
+        assert!(stream_runtime_path.contains("build_prompt_stack_assembled_payload"));
+        assert!(stream_runtime_path.contains("&output.prompt_block_trace"));
+        assert!(
+            !stream_runtime_path.contains("to_value(&output.prompt_block_trace"),
+            "StreamChat PromptStack event must use typed block trace"
+        );
 
         let builder_source = include_str!("commands/builder.rs");
         let calibration_source = include_str!("commands/calibration.rs");
@@ -2325,9 +2363,31 @@ mod tests {
         assert!(builder_core_source.contains("generate_raw_governed"));
         assert!(!builder_core_source.contains(".generate_raw("));
         assert!(!builder_core_source.contains(".generate("));
+        assert!(!builder_core_source.contains("AgentRunEventType::PromptStackAssembled"));
+        assert!(!builder_core_source.contains("build_prompt_stack_assembled_payload"));
         assert!(doc.contains("Builder model-assisted extraction helpers"));
         assert!(doc.contains("Calibration report/evolution/proposal creation"));
         assert!(doc.contains("Calibration does not assemble or send a model prompt"));
+
+        let proposal_helper_source =
+            include_str!("../../openlife-core/src/agent/proposal_generators/chat.rs");
+        let web_helper_source =
+            include_str!("../../openlife-core/src/agent/action_executor/helpers.rs");
+        let layered_source = include_str!("../../openlife-core/src/agent/reasoning/layered.rs");
+        for (label, source) in [
+            ("Chat proposal extraction", proposal_helper_source),
+            ("Web summarization", web_helper_source),
+            ("LayeredReasoner internal prompts", layered_source),
+        ] {
+            assert!(
+                !source.contains("AgentRunEventType::PromptStackAssembled"),
+                "{label} must not emit fake PromptStackAssembled events"
+            );
+            assert!(
+                !source.contains("build_prompt_stack_assembled_payload"),
+                "{label} must not call AgentRunEvent PromptStack payload builder"
+            );
+        }
 
         let proactive_core = include_str!("../../openlife-core/src/proactive.rs");
         assert!(proactive_core.contains("ProactiveSuggestion"));

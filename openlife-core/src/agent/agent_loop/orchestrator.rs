@@ -98,7 +98,7 @@ impl AgentLoop {
             ),
             trace_payloads::build_prompt_stack_assembled_payload(
                 &agent_spec.id,
-                serde_json::to_value(&runtime_output.prompt_block_trace).unwrap_or_default(),
+                &runtime_output.prompt_block_trace,
             ),
         );
         self.try_record_event(
