@@ -224,16 +224,32 @@ impl AgentExecutionFacade {
         deps: AgentExecutionDeps,
         error_msg: &str,
     ) -> Result<AgentExecutionOutcome> {
+        let mut prompt_stack =
+            AgentRuntime::prompt_stack_for_spec(&deps.agent_spec, &deps.prompt_registry)
+                .map_err(|e| anyhow::anyhow!("fallback prompt stack error: {}", e))?;
+        let mut fallback_messages = task.messages.clone();
+        let assembled_prompt = prompt_stack.assemble();
+        if !assembled_prompt.trim().is_empty() {
+            fallback_messages.insert(
+                0,
+                crate::llm::ChatMessage {
+                    role: "system".to_string(),
+                    content: assembled_prompt,
+                },
+            );
+        }
+
         let fallback_reply = deps
             .scheduler
-            .generate(
-                task.messages.clone(),
+            .generate_governed(
+                fallback_messages,
                 &deps.life_model,
                 if deps.tools_prompt.trim().is_empty() {
                     None
                 } else {
                     Some(&deps.tools_prompt)
                 },
+                deps.privacy_policy,
             )
             .await
             .map_err(|e| {
@@ -337,6 +353,28 @@ mod tests {
             Some("AgentLoop timeout")
         );
         assert_eq!(outcome.mode.to_string(), "fallback");
+    }
+
+    #[test]
+    fn core_execution_facade_fallback_uses_governed_generation_boundary() {
+        let source = include_str!("execution_facade.rs");
+        let start = source
+            .find("async fn handle_fallback")
+            .expect("core fallback helper should exist");
+        let end = source[start..]
+            .find("fn build_agent_loop")
+            .map(|offset| start + offset)
+            .expect("build_agent_loop should follow fallback helper");
+        let fallback_source = &source[start..end];
+
+        assert!(
+            fallback_source.contains(".generate_governed("),
+            "core ExecutionFacade fallback must preserve AgentSpec privacy governance"
+        );
+        assert!(
+            !fallback_source.contains(".generate("),
+            "core ExecutionFacade fallback must not call legacy scheduler generation"
+        );
     }
 
     #[test]

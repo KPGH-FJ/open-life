@@ -2256,6 +2256,20 @@ mod tests {
             !stream_path.contains("build_system_prompt("),
             "StreamChat entrypoint must not assemble a direct system prompt"
         );
+        let fallback_start = chat_source
+            .find("pub(crate) async fn handle_agent_loop_fallback")
+            .expect("chat fallback helper should exist");
+        let fallback_end = chat_source[fallback_start..]
+            .find("fn should_fallback_from_execution_facade_error")
+            .map(|offset| fallback_start + offset)
+            .expect("fallback decision helper should follow fallback helper");
+        let fallback_path = &chat_source[fallback_start..fallback_end];
+        assert!(fallback_path.contains("prompt_stack_for_spec"));
+        assert!(fallback_path.contains("generate_non_stream_fallback_governed"));
+        assert!(
+            !fallback_path.contains(".generate("),
+            "Chat fallback must not call legacy scheduler generation"
+        );
 
         let scheduled_source = include_str!("scheduler_runner.rs");
         let scheduled_start = scheduled_source
@@ -2309,6 +2323,20 @@ mod tests {
         assert!(doc.contains(
             "Proactive suggestions are suggestion-only and do not create AgentRun or PromptStack trace"
         ));
+
+        let core_scheduler = include_str!("../../openlife-core/src/scheduler.rs");
+        let governed_start = core_scheduler
+            .find("pub async fn generate_governed")
+            .expect("generate_governed should exist");
+        let governed_end = core_scheduler[governed_start..]
+            .find("async fn chat_preserving_prompt_stack")
+            .map(|offset| governed_start + offset)
+            .expect("chat_preserving_prompt_stack should follow generate_governed");
+        let governed_source = &core_scheduler[governed_start..governed_end];
+        assert!(
+            !governed_source.contains(".generate("),
+            "generate_governed must not delegate to legacy generate"
+        );
     }
 
     #[tokio::test]

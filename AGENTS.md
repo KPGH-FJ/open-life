@@ -256,7 +256,7 @@
 | **Proposal** | [`openlife-core/src/agent/proposal_store.rs`](openlife-core/src/agent/proposal_store.rs) | Proposal 统一层：LifeModel/Memory/Tool 权限变更必须经过用户确认（accept/reject/edit/postpone），应用前自动创建 snapshot | 被 builder.rs、calibration.rs 使用，存储在 SQLite proposals.db |
 | **LifeModel** | [`openlife-core/src/life_model.rs`](openlife-core/src/life_model.rs) | 四维人生模型：Identity（身份/价值观）、Goals（短中长期目标）、Capabilities（技能/资源）、State（当前状态/情绪/健康） | 被 reasoning.rs、scheduler.rs、memory.rs 消费 |
 | **LayeredReasoner** | [`openlife-core/src/agent/reasoning/layered.rs`](openlife-core/src/agent/reasoning/layered.rs) | 三层推理策略：MeaningPhase（语义理解/禁忌检测）→ StrategyPhase（策略规划）→ GenerationPhase（回复生成），SafetyChecker 安全检查。作为 AgentRuntime 的默认推理策略 | 依赖 scheduler.rs、life_model.rs |
-| **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型：tool prompt → 强制云端；Ollama 可用 + prefer_local → 本地；否则 fallback 云端 | 依赖 llm.rs、ollama.rs |
+| **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型。正式 AgentRuntime / ExecutionFacade 路径必须走 `generate_governed` / `generate_stream_governed` / raw governed variants；裸 `generate` / `generate_stream` 仅为 legacy compatibility boundary | 依赖 llm.rs、ollama.rs |
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
@@ -322,7 +322,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 
 关键处理节点：
 1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:522), v2 在 721）：用户消息 → 向量检索/MemoryService → PrivacyEngine 脱敏 → ContextAssembler
-2. **模型调度**（[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:127)）：根据 ModelRouter / 隐私策略 / tool prompt 决定本地/云端路径
+2. **模型调度**（[`InferenceScheduler::generate_governed`](openlife-core/src/scheduler.rs:531)）：正式 AgentRuntime / ExecutionFacade 路径根据 AgentSpec privacy policy、ModelRouter / tool prompt 决定本地/云端路径；[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:131) 仅保留给 legacy compatibility caller
 3. **AgentLoop 执行**（[`send_message_with_agent_loop`](src-tauri/src/lib.rs:1239)）：AgentTask → AgentLoop.run() → AgentRunEvent 事件流
 4. **工具调用**（通过 [`action_executor/`](openlife-core/src/agent/action_executor/) 模块，受 ToolPermission + ExecutionSandbox 治理）
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:2446)）：AgentLoop 流式 → stream-message-chunk Tauri 事件
@@ -868,7 +868,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-01 | **Beta 开发完成（Gates 0-8）**：reqwest 0.12 升级；AgentLoop 双轨（feature flag）；Action Parser JSON envelope + fail-soft；Core OS Tools + Execution Tools 注册；Permission/Replay 闭环；ModelRouter 毕业；UI 导航收敛；Settings 新增 safe paths / AgentLoop toggle；`make ci` 持续通过 | AI Agent |
 | 2026-05-01 | **Week 1: ExternalWriteAction 闭环**：`is_path_in_safe_paths` 公共化；`file.write_proposal` 自动创建 Proposal（含 content_hash/size_bytes/operation）；ExternalWriteAction apply 真实文件写入（safe_paths + 100KB 限制 + 自动创建父目录） | AI Agent |
 | 2026-05-08 | **Week 2: Stub 转 Proposal + Task MVP**：calendar.propose_event / email.propose_draft 生成 ScheduledTask/DataExport Proposal；ScheduledTask MVP（本地 JSON）；DataExport MVP（safe_paths 内文件导出） | AI Agent |
-| 2026-05-08 | **Week 3: AgentLoop Stream + Fallback**：AgentLoop 句子级分 chunk 流式输出（30ms 间隔）；AgentLoop graceful fallback 到 legacy direct generation；保持默认关闭 | AI Agent |
+| 2026-05-08 | **Week 3: AgentLoop Stream + Fallback**：AgentLoop 句子级分 chunk 流式输出（30ms 间隔）；当时引入 graceful fallback（2026-05-26 已收口为 PromptStack-governed compatibility fallback，不再调用 legacy direct generation）；保持默认关闭 | AI Agent |
 | 2026-05-08 | **Week 4: 可观察性 + Feature Flag**：stream-message-start 传递真实 ReasoningTrace（AgentLoop actions/observations）；debug 构建默认启用 AgentLoop | AI Agent |
 | 2026-05-08 | **Week 5: Workspace + Chat Trace**：Dashboard 新增 Workspace 概览卡片（Pending Proposals / Recent Runs / New Chat）；Chat 最后一条 assistant 消息显示模型/provider/工具数/Proposal 数/fallback 标记 | AI Agent |
 | 2026-05-08 | **Week 6: Review Center + 页面收敛**：Chat 顶部 pending proposals banner；主导航从 7 个收敛到 6 个（Memory 移出主导航，保留路由） | AI Agent |

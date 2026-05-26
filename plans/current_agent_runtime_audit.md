@@ -128,12 +128,12 @@ Current state (updated 2026-05-10):
 - PromptStack assembly records `PromptStackAssembled` events with block IDs/versions (no raw content).
 - **Critical gap fixed (2026-05-10)**: `scheduler.rs:generate_governed()` previously caused dual system prompts — the PromptStack one at `messages[0]` and a second LifeModel YAML prompt from `build_system_prompt()`. Now detects existing system message and uses `_raw` variants to avoid double-injection.
 
-Remaining ad-hoc prompts (27 found, audited 2026-05-10):
+Remaining prompt boundary status (updated 2026-05-26):
 
 | Category | Count | Risk | Mitigation |
 |----------|-------|------|------------|
-| System prompt double-build (llm.rs/ollama.rs) | 3 | Fixed in generate_governed path | Legacy generate() still builds LifeModel prompt for non-governed callers |
-| Reasoning prompts (layered.rs) | 3 | Medium | Should become PromptBlocks, but layered.rs is not governance-critical |
+| System prompt double-build (llm.rs/ollama.rs) | 3 | Fixed in governed paths | `InferenceScheduler::generate` / `generate_stream` and `llm::build_system_prompt` are legacy compatibility only; formal AgentRuntime / ExecutionFacade and runtime fallback use governed APIs |
+| Reasoning prompts (layered.rs) | 0 | Fixed | LayeredReasoner meaning / strategy / generation / safety prompts are PromptStack-governed internal blocks with metadata-only `ReasoningTrace` traces |
 | Builder engine prompts (builder/engine.rs) | 5 | Medium | Builder has its own execution mode; converge when Builder goes through AgentRuntime |
 | Skills prompts (skills.rs) | 2 | Medium | Skill execution should contribute PromptBlocks |
 | Proactive prompts (proactive.rs) | 5 | Low | Proactive is read-only suggestion generation |
@@ -142,7 +142,7 @@ Remaining ad-hoc prompts (27 found, audited 2026-05-10):
 Current concern:
 
 - `PromptBlockRegistry::built_in()` has only 4 entries. Missing blocks: LifeModel, MemoryEvidence, Task, Proposal, OutputFormat, Role, SubAgent.
-- Legacy `generate()` (non-governed) path in `scheduler.rs` and `llm.rs` still builds ad-hoc LifeModel system prompts for non-AgentLoop callers.
+- Legacy `generate()` / `generate_stream()` compatibility paths in `scheduler.rs` and `llm.rs` still build LifeModel system prompts for explicitly non-governed callers only. Formal AgentRuntime / ExecutionFacade Chat, StreamChat, Scheduled, Skill, Plan, Replay, and governed fallback paths must not call them.
 
 Needed Post-Beta direction:
 

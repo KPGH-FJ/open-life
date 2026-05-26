@@ -29,7 +29,7 @@ vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta �
 
 - **执行路径收敛**：统一 lib.rs 的 5+ 条执行入口到单一 facade。
 - **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端。
-- **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled / Skill-specific prompt 已 PromptStack-governed；Chat proposal extraction 已迁入 Proposal-specific PromptStack helper，web content summarization helper 已迁入 Web Summarization PromptStack helper，二者均返回 metadata-only audit 且不伪造 AgentRunEvent；LayeredReasoner meaning / strategy / generation / safety internal prompts 已迁入 PromptStack-governed internal strategy boundary，使用 metadata-only `ReasoningTrace` block trace 且不伪造 `prompt_stack.assembled`；Builder / Calibration、legacy scheduler generation 仍为未迁移 legacy/ad hoc 边界。
+- **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled / Skill-specific prompt 已 PromptStack-governed；Chat proposal extraction 已迁入 Proposal-specific PromptStack helper，web content summarization helper 已迁入 Web Summarization PromptStack helper，二者均返回 metadata-only audit 且不伪造 AgentRunEvent；LayeredReasoner meaning / strategy / generation / safety internal prompts 已迁入 PromptStack-governed internal strategy boundary，使用 metadata-only `ReasoningTrace` block trace 且不伪造 `prompt_stack.assembled`；`InferenceScheduler::generate` / `generate_stream` 仅保留为 legacy compatibility boundary，正式 AgentRuntime / ExecutionFacade governed path 及 runtime fallback 不再调用；Builder / Calibration 仍为未迁移 legacy/ad hoc 边界。
 - **生产就绪**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构。
 
 完整计划：[`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)
@@ -290,14 +290,13 @@ OpenLife 当前进入 **P12 Beta Release Candidate** 阶段。P11/P11.1 的试�
 
 ## 当前重要开发方向
 
-当前开发重心已转向 **P12 Beta Release Candidate and User Trial Delivery**：
+当前开发重心已转向 **Post-Beta Codex-level 稳定化收口**：
 
-1. 按 [P12 Task Specs](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p12_task_specs.md) 准备 Beta RC 交付包。
-2. 面向测试用户补齐简短试用指南：安装/启动、模型配置、LifeModel 构建、首次对话、Proposal Review、Runs 检查、诊断导出和反馈。
-3. 跑桌面 release build drill，记录构建命令、产物位置、平台限制和阻塞项。
-4. 用 [P11 Trial Path Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p11_trial_path_matrix.md) 完成 clean-profile 与 existing-profile smoke，并填写 [P12 Beta RC Acceptance Report](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_p12_beta_rc_acceptance_report.md)。
-5. 保持 P9 shell 治理默认关闭，不加入终端 UI 或普通 Chat shell。
-6. 按 [Test and Acceptance Matrix](/Users/fujing/Desktop/偶来福/plans/openlife_vnext_test_and_acceptance_matrix.md) 为 P12 设置门控，并以 `make ci` 作为最终发布门槛。
+1. 收紧 AgentRuntime / ExecutionFacade / PromptStack / Scheduler generation 边界，避免正式路径退回 legacy prompt 或 legacy scheduler generation。
+2. 保持 Proposal-first、MemoryEvidence、AgentRunEvent/Audit、Tool/Sandbox/Permission 的 fail-closed 语义。
+3. 继续按 [OpenLife PromptStack Coverage Audit](/Users/fujing/Desktop/偶来福/plans/openlife_prompt_stack_coverage_audit.md) 区分 governed、legacy compatibility、not applicable 路径。
+4. 暂不进入 LifeModel Evolution 深度开发、发布打包、代码签名、installer 或外部试用准备。
+5. 每轮收口仍以 `make ci` 作为最低门控。
 
 ## 常见问题
 

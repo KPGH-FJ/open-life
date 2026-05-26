@@ -623,6 +623,7 @@ async fn start_stream_message_with_agent_loop(
     };
     let agent_spec_id = agent_spec.id.clone();
     let prompt_registry = crate::execution_facade::build_prompt_registry();
+    let fallback_prompt_registry = crate::execution_facade::build_prompt_registry();
 
     let scheduler = state.scheduler.lock().await.clone();
     let cfg = state.config.lock().await;
@@ -705,7 +706,7 @@ async fn start_stream_message_with_agent_loop(
                 return Err(error_msg);
             }
             eprintln!(
-                "[warn] ExecutionFacade streaming failed, falling back to legacy: {}",
+                "[warn] ExecutionFacade streaming failed, attempting governed compatibility fallback: {}",
                 e
             );
             let user_input_txt = user_msg
@@ -723,6 +724,8 @@ async fn start_stream_message_with_agent_loop(
                 state.agent_run_event_store.as_ref(),
                 &e.to_string(),
                 agent_spec.privacy_policy,
+                &agent_spec,
+                &fallback_prompt_registry,
             )
             .await
             {

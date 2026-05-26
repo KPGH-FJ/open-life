@@ -367,6 +367,7 @@ async fn send_message_with_agent_loop_inner(
         }
     };
     let prompt_registry = execution_facade::build_prompt_registry();
+    let fallback_prompt_registry = execution_facade::build_prompt_registry();
 
     let action_ctx = execution_facade::build_governed_action_context(
         state,
@@ -424,6 +425,8 @@ async fn send_message_with_agent_loop_inner(
                 let agent_run_event_store = state.agent_run_event_store.as_ref();
                 let original_error = e.to_string();
                 let privacy_policy = agent_spec.privacy_policy;
+                let agent_spec = &agent_spec;
+                let prompt_registry = &fallback_prompt_registry;
                 async move {
                     if let Some(warning) = decision.warning_message.as_deref() {
                         eprintln!("[warn] {}", warning);
@@ -439,6 +442,8 @@ async fn send_message_with_agent_loop_inner(
                         agent_run_event_store,
                         &original_error,
                         privacy_policy,
+                        agent_spec,
+                        prompt_registry,
                     )
                     .await
                 }
@@ -516,6 +521,8 @@ pub(crate) async fn handle_agent_loop_fallback(
     event_store: Option<&std::sync::Arc<openlife_core::agent::event_store::AgentRunEventStore>>,
     original_error: &str,
     privacy_policy: openlife_core::agent::types::PrivacyPolicy,
+    agent_spec: &openlife_core::agent::types::AgentSpec,
+    prompt_registry: &openlife_core::agent::prompt_stack::PromptBlockRegistry,
 ) -> Result<(String, openlife_core::agent::AgentRun), String> {
     // Create AgentRun first so fallback.started has a real run_id
     let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(session_id, user_input_text);
@@ -533,9 +540,23 @@ pub(crate) async fn handle_agent_loop_fallback(
             log::error!("[AgentRun] Failed to append event: {}", e);
         }
     }
+    let mut prompt_stack =
+        openlife_core::agent::AgentRuntime::prompt_stack_for_spec(agent_spec, prompt_registry)
+            .map_err(|e| format!("Fallback PromptStack assembly failed: {}", e))?;
+    let mut governed_messages = messages;
+    let assembled_prompt = prompt_stack.assemble();
+    if !assembled_prompt.trim().is_empty() {
+        governed_messages.insert(
+            0,
+            ChatMessage {
+                role: "system".to_string(),
+                content: assembled_prompt,
+            },
+        );
+    }
     let fallback_reply = generate_non_stream_fallback_governed(
         scheduler,
-        messages,
+        governed_messages,
         life_model,
         tools_prompt,
         privacy_policy,
@@ -609,7 +630,7 @@ fn chat_execution_facade_error_decision(
             should_fallback: true,
             error_message: None,
             warning_message: Some(format!(
-                "AgentLoop failed in send_message, falling back to legacy: {}",
+                "AgentLoop failed in send_message, attempting governed compatibility fallback: {}",
                 error
             )),
         }
@@ -1168,7 +1189,7 @@ mod tests {
                 .warning_message
                 .as_deref()
                 .is_some_and(|warning| warning.contains("model failed")
-                    && warning.contains("falling back to legacy")),
+                    && warning.contains("governed compatibility fallback")),
             "Runtime fallback warning should preserve the original error: {decision:?}"
         );
 

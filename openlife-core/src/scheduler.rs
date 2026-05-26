@@ -121,9 +121,12 @@ impl InferenceScheduler {
         self
     }
 
-    /// Generate a reply choosing the best available backend.
-    /// If tools_prompt is provided, we skip local model (local 7B may not reliably call tools)
-    /// and go straight to OpenRouter.
+    /// Legacy compatibility generation boundary.
+    ///
+    /// This path may inject `llm::build_system_prompt` and has no AgentSpec or
+    /// PromptStack event source. Formal AgentRuntime / ExecutionFacade callers
+    /// must use `generate_governed`, `generate_stream_governed`, or raw governed
+    /// variants instead of this compatibility API.
     pub async fn generate(
         &self,
         messages: Vec<ChatMessage>,
@@ -240,7 +243,11 @@ impl InferenceScheduler {
         }
     }
 
-    /// Generate a stream choosing the best available backend.
+    /// Legacy compatibility streaming generation boundary.
+    ///
+    /// This path may inject `llm::build_system_prompt` and has no AgentSpec or
+    /// PromptStack event source. Formal streaming AgentRuntime /
+    /// ExecutionFacade callers must use `generate_stream_governed` instead.
     pub async fn generate_stream(
         &self,
         messages: Vec<ChatMessage>,
@@ -377,6 +384,11 @@ impl InferenceScheduler {
     ) -> Result<StreamResult, String> {
         use crate::agent::types::PrivacyPolicy;
 
+        let has_prompt_stack = messages
+            .first()
+            .map(|m| m.role == "system")
+            .unwrap_or(false);
+
         match privacy_policy {
             PrivacyPolicy::LocalOnly => {
                 let resolved = resolve_ollama_model(&self.local_model).await;
@@ -386,11 +398,15 @@ impl InferenceScheduler {
                             .to_string(),
                     );
                 }
-                let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+                let system_prompt = if has_prompt_stack {
+                    None
+                } else {
+                    Some(crate::llm::build_system_prompt(life_model, tools_prompt))
+                };
                 chat_with_ollama_raw_stream(
                     resolved.as_deref().unwrap_or(&self.local_model),
                     messages,
-                    Some(&system_prompt),
+                    system_prompt.as_deref(),
                 )
                 .await
                 .map_err(|e| e.to_string())
@@ -404,11 +420,15 @@ impl InferenceScheduler {
                     has_remote,
                 );
                 if use_local {
-                    let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+                    let system_prompt = if has_prompt_stack {
+                        None
+                    } else {
+                        Some(crate::llm::build_system_prompt(life_model, tools_prompt))
+                    };
                     chat_with_ollama_raw_stream(
                         resolved_local.as_deref().unwrap_or(&self.local_model),
                         messages,
-                        Some(&system_prompt),
+                        system_prompt.as_deref(),
                     )
                     .await
                     .map_err(|e| e.to_string())
@@ -433,7 +453,7 @@ impl InferenceScheduler {
                 }
             }
             PrivacyPolicy::CloudAllowed => self
-                .generate_stream(messages, life_model, tools_prompt)
+                .generate_raw_stream(messages, None)
                 .await
                 .map_err(|e| e.to_string()),
         }
@@ -598,17 +618,10 @@ impl InferenceScheduler {
                     )
                 }
             }
-            PrivacyPolicy::CloudAllowed => {
-                if has_prompt_stack {
-                    self.generate_raw(messages, None)
-                        .await
-                        .map_err(|e| e.to_string())
-                } else {
-                    self.generate(messages, life_model, tools_prompt)
-                        .await
-                        .map_err(|e| e.to_string())
-                }
-            }
+            PrivacyPolicy::CloudAllowed => self
+                .generate_raw(messages, None)
+                .await
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -1386,6 +1399,62 @@ mod tests {
     }
 
     #[test]
+    fn legacy_compatibility_summary_only_cloud_payload_filters_raw_sentinels() {
+        use crate::life_model::{GoalItem, Goals, Identity, LifeModel};
+
+        let lm = LifeModel {
+            identity: Identity {
+                name: "RAW_LIFEMODEL_IDENTITY_SENTINEL".to_string(),
+                ..Default::default()
+            },
+            goals: Goals {
+                short_term: vec![GoalItem {
+                    name: "RAW_LIFEMODEL_GOAL_SENTINEL".to_string(),
+                    description: "RAW_LIFEMODEL_GOAL_DESC_SENTINEL".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let messages = vec![
+            crate::llm::ChatMessage {
+                role: "system".to_string(),
+                content: "LifeModel RAW_LIFEMODEL_SYSTEM_SENTINEL\nmemory RAW_MEMORY_SENTINEL"
+                    .to_string(),
+            },
+            crate::llm::ChatMessage {
+                role: "user".to_string(),
+                content: "RAW_USER_SENTINEL".to_string(),
+            },
+        ];
+
+        let (safe_msgs, summary_prompt) =
+            super::prepare_summary_only_cloud_payload(&messages, &lm, Some("tools"));
+        let safe_payload = safe_msgs
+            .iter()
+            .map(|message| message.content.as_str())
+            .chain(std::iter::once(summary_prompt.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for sentinel in [
+            "RAW_LIFEMODEL_IDENTITY_SENTINEL",
+            "RAW_LIFEMODEL_GOAL_SENTINEL",
+            "RAW_LIFEMODEL_GOAL_DESC_SENTINEL",
+            "RAW_LIFEMODEL_SYSTEM_SENTINEL",
+            "RAW_MEMORY_SENTINEL",
+            "RAW_USER_SENTINEL",
+        ] {
+            assert!(
+                !safe_payload.contains(sentinel),
+                "SummaryOnly legacy compatibility payload leaked {sentinel}: {safe_payload}"
+            );
+        }
+        assert!(safe_payload.contains("SummaryOnly"));
+    }
+
+    #[test]
     fn test_prepare_cloud_payload_system_prompt_has_goal_counts() {
         use crate::life_model::{GoalItem, Goals, LifeModel};
         let lm = LifeModel {
@@ -1578,7 +1647,7 @@ mod tests {
     #[test]
     fn test_generate_governed_cloud_allowed_detects_prompt_stack() {
         // CloudAllowed with PromptStack should use generate_raw (no LifeModel injection)
-        // CloudAllowed without PromptStack should use generate (legacy path)
+        // CloudAllowed without PromptStack should still avoid legacy LifeModel injection.
         use crate::llm::ChatMessage;
 
         let msg_system = ChatMessage {
@@ -1598,6 +1667,36 @@ mod tests {
 
         assert!(has_with, "PromptStack messages should be detected");
         assert!(!has_without, "User-only messages should not be detected");
+    }
+
+    #[test]
+    fn governed_generation_boundary_does_not_delegate_to_legacy_generate() {
+        let source = include_str!("scheduler.rs");
+        let non_stream_start = source
+            .find("pub async fn generate_governed")
+            .expect("generate_governed should exist");
+        let non_stream_end = source[non_stream_start..]
+            .find("async fn chat_preserving_prompt_stack")
+            .map(|offset| non_stream_start + offset)
+            .expect("chat_preserving_prompt_stack should follow generate_governed");
+        let non_stream_source = &source[non_stream_start..non_stream_end];
+        assert!(
+            !non_stream_source.contains(".generate("),
+            "generate_governed must not fall back to legacy generate"
+        );
+
+        let stream_start = source
+            .find("pub async fn generate_stream_governed")
+            .expect("generate_stream_governed should exist");
+        let stream_end = source[stream_start..]
+            .find("pub async fn generate_raw_governed")
+            .map(|offset| stream_start + offset)
+            .expect("generate_raw_governed should follow generate_stream_governed");
+        let stream_source = &source[stream_start..stream_end];
+        assert!(
+            !stream_source.contains(".generate_stream("),
+            "generate_stream_governed must not fall back to legacy generate_stream"
+        );
     }
 
     #[test]
