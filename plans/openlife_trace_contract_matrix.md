@@ -51,9 +51,10 @@ These events carry metadata for trace/debug. They don't drive governance decisio
 | 16 | `observation.created` | ✅ `sub_agent.rs`, `plan_executor.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
 | 17 | `fallback.started` | ✅ `lib.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
 | 18 | `fallback.completed` | ✅ `lib.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
-| 19 | `json_repair.started` | ✅ `generation.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
-| 20 | `json_repair.completed` | ✅ `generation.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
-| 21 | `compaction.created` | ✅ `compaction.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
+| 19 | `fallback.failed` | ✅ `lib.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
+| 20 | `json_repair.started` | ✅ `generation.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
+| 21 | `json_repair.completed` | ✅ `generation.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
+| 22 | `compaction.created` | ✅ `compaction.rs` | ❌ Pass-through | ✅ `RunTracePanel` generic event row | Yes | N/A |
 
 ### Scale: Tier 3 Plan/Proposal Events (informational, no typed governance)
 
@@ -661,10 +662,10 @@ The **event contract coverage manifest** (`event_contract_manifest()` in `trace_
 | Tier | Count | Events |
 |------|-------|--------|
 | ProductionAudited | 7 | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |
-| IntentionallyExcluded | 5 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated |
-| LegacyInternalOnly | 31 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |
+| IntentionallyExcluded | 8 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated, FallbackStarted, FallbackCompleted, FallbackFailed |
+| LegacyInternalOnly | 29 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |
 | TypeOnlyNoDirectEmission | 1 | Unknown |
-| **Total** | **44** | |
+| **Total** | **45** | |
 
 ### 9.5.4 Admission Rules for Each Tier
 
@@ -721,7 +722,7 @@ cargo test -p openlife-core event_contract -- --nocapture
 | `event_contract_intentionally_excluded_have_reason` | No `IntentionallyExcluded` entry has an empty reason |
 | `event_contract_no_duplicate_events` | No duplicate event names in manifest |
 | `event_contract_document_matches_manifest` | Parses `trace_contract_matrix.md` Section 9.5.3 table and verifies: tier events match manifest, counts match, Total row matches, no forbidden stale strings |
-| `event_contract_parse_enum_finds_44_variants` | Enum parser finds exactly 44 variants |
+| `event_contract_parse_enum_finds_45_variants` | Enum parser finds exactly 45 variants |
 | `event_contract_parse_enum_sanitised_no_paren_in_names` | Parser strips tuple data (no parenthesised names) |
 
 **Negative tests (construct bad input, call validators, assert failure):**
@@ -770,7 +771,7 @@ Without builder coverage, a developer could:
 | Status | Meaning | Events |
 |--------|---------|--------|
 | **ProductionAudited** | Governance event — builder in production source audit (has `AuditRule`) | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |
-| **IntentionallyExcludedGenericFailure** | Generic failure event — typed builder exists but excluded from production source audit | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed |
+| **IntentionallyExcludedGenericFailure** | Generic failure or metadata-only lifecycle event — typed builder exists but is excluded from production source audit | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated, FallbackStarted, FallbackCompleted, FallbackFailed |
 | **LegacyNoTypedBuilder** | Lifecycle/internal event with no typed builder | (none currently declared in builder manifest) |
 | **TypeOnlyNoBuilder** | Catch-all variant with no typed builder (e.g. `Unknown`) | (none currently declared in builder manifest) |
 
@@ -790,6 +791,9 @@ Without builder coverage, a developer could:
 | ToolCallFailed | `build_tool_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
 | ModelCallFailed | `build_model_call_failed_payload` | IntentionallyExcludedGenericFailure | `test_generic_failure_events_round_trip`, `test_builders_produce_snake_case_fields` |
 | ProposalCreated | `build_proposal_created_payload` | IntentionallyExcludedGenericFailure | `test_builders_produce_snake_case_fields` |
+| FallbackStarted | `build_fallback_started_payload` | IntentionallyExcludedGenericFailure | `test_fallback_payload_builders_are_metadata_only` |
+| FallbackCompleted | `build_fallback_completed_payload` | IntentionallyExcludedGenericFailure | `test_fallback_payload_builders_are_metadata_only` |
+| FallbackFailed | `build_fallback_failed_payload` | IntentionallyExcludedGenericFailure | `test_fallback_payload_builders_are_metadata_only` |
 
 Skill runtime note (2026-05-25): `run_skill_with_state` emits generic `RunFailed` for PromptStack/runtime and model-generation failures only after a Skill `AgentRun` exists. The payload uses `build_run_failed_payload` with a bounded readable error string. It does not contain raw prompt text, raw LifeModel, full sensitive context, or full model output. `RunFailed` remains `IntentionallyExcludedGenericFailure`, so this does not add a production source-audit rule.
 
@@ -942,12 +946,15 @@ validate_frontend_typed_contract_parity(
 | ReplayStarted | `build_replay_started_payload` | `replay.started` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | test: `agent_spec_id`, `tool_name`, `source` (no fixture) |
 | ReplayCompleted | `build_replay_completed_payload` | `replay.completed` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `agent_spec_id`, `tool_name`, `source` | test: `agent_spec_id`, `tool_name`, `source` (no fixture) |
 | ReplayFailed | `build_replay_failed_payload` | `replay.failed` | — | `status`, `run_id`, `action_id`, `replay_of_action_id`, `human_message` | fixture: `block_reason`; test: `replay.failed` |
+| FallbackStarted | `build_fallback_started_payload` | `fallback.started` | ✅ Metadata | `status`, `fallback_mode`, `generation_path`, `agent_spec_id`, `privacy_policy`, `original_error_summary` | test: `test_fallback_payload_builders_are_metadata_only` |
+| FallbackCompleted | `build_fallback_completed_payload` | `fallback.completed` | ✅ Metadata | `status`, `fallback_mode`, `generation_path`, `agent_spec_id`, `privacy_policy`, `original_error_summary`, `response_length` | test: `test_fallback_payload_builders_are_metadata_only` |
+| FallbackFailed | `build_fallback_failed_payload` | `fallback.failed` | ✅ Metadata | `status`, `fallback_mode`, `generation_path`, `agent_spec_id`, `privacy_policy`, `original_error_summary`, `fallback_error_summary` | test: `test_fallback_payload_builders_are_metadata_only` |
 | ModelFailed | `build_model_failed_payload` | `model.failed` | ✅ GF | `agent_spec_id`, `error` | test: `error` (no fixture) |
 | RunFailed | `build_run_failed_payload` | `run.failed` | ✅ GF | `error` | test: `error` (no fixture) |
 | ToolCallFailed | `build_tool_call_failed_payload` | `tool.call_failed` | ✅ GF | `tool`, `error` | test: `error` (no fixture) |
 | ModelCallFailed | `build_model_call_failed_payload` | `model.call_failed` | ✅ GF | `provider`, `model`, `error` | test: `provider`, `model`, `error` (no fixture) |
 
-> **GF = Generic Failure**: Events pass through `parseTypedEventPayload` as `kind: "unknown"`. Required fields are verified against `typedContract.test.ts` (not `typedContract.ts`). The `frontend_event_type` is checked in `typedContract.ts` (used by `getTypedRunExplanation` for generic failure detection).
+> **GF = Generic Failure**. **Metadata = metadata-only lifecycle event**. Both pass through `parseTypedEventPayload` as `kind: "unknown"`; required backend fields are locked by Rust builder tests rather than frontend typed-governance parsing.
 
 ### 9.7.4 Test Coverage
 
@@ -1032,6 +1039,7 @@ When a new typed event is introduced or an existing typed event payload shape ch
 
 | Date | Update |
 |------|--------|
+| 2026-05-26 | **Runtime Fallback Metadata Contract**: Added `FallbackFailed` event type and builder-driven payloads for `fallback.started`, `fallback.completed`, and `fallback.failed`. Chat / StreamChat fallback remains a governed legacy compatibility retry for Runtime/model failures only; Governance failures fail closed. Fallback payloads carry metadata (`status`, `fallback_mode`, `generation_path`, `prompt_stack_source`, `agent_spec_id`, `privacy_policy`, sanitized error summaries, response length) and exclude raw prompt, raw user text, raw LifeModel, raw memory, and full model output. Event contract manifest updated to 45 variants; fallback events moved to IntentionallyExcluded metadata builder coverage. |
 | 2026-05-25 | **Skill Runtime Pre-Migration Safety Net**: Skill runtime remains outside ExecutionFacade. Added failed-run observability for PromptStack/runtime and model-generation failures using generic `run.failed` payloads from `build_run_failed_payload`; payloads are bounded readable errors only and exclude raw prompt, raw LifeModel, sensitive context, and full model output. Added tests for missing AgentSpec fail-closed/no fallback, AgentSpec restricted toolset gating, PromptStack/model failure failed-run status, success response shape, and source audit proving no Chat facade/fallback or Scheduled/Replay/Plan wrapper masquerade. |
 | 2026-05-18 | **Frontend Contract Parity Rework** (返工): (1) Removed hand-written `backend_builder_manifest()` from `frontend_contract_parity.rs`. Backend builder names now come from `trace_contract_audit::typed_payload_builder_refs()` which is derived from the real `payload_builder_contract_manifest()`. Added `pub(super)` exposure on `typed_payload_builder_refs()` and `parse_payload_builders_from_source()`. (2) Added `is_generic_failure: bool` flag to `FrontendTypedEventContractEntry`. Validator now applies different rules: governance events check required fields against `typedContract.ts` AND fixtures/tests; generic failures check required fields against fixtures/tests only (parser does not structurally parse them). (3) Generic failure entries now have proper `required_payload_fields` (ModelFailed: `agent_spec_id, error`; RunFailed: `error`; ToolCallFailed: `tool, error`; ModelCallFailed: `provider, model, error`). (4) Added 2 new negative tests: `frontend_typed_contract_backend_builder_source_drift_fails` (new builder without parity entry → fails) and `frontend_typed_contract_generic_failure_required_field_missing_fails` (generic failure field removed from test → fails). Total tests: 14 (5 positive + 9 negative). |
 | 2026-05-18 | **Backend ↔ Frontend Typed Event Contract Parity**: Added `openlife-core/src/agent/tests/frontend_contract_parity.rs` — cross-end contract parity audit with 11-event `FrontendTypedEventContractEntry` manifest. Added `validate_frontend_typed_contract_parity()` validator — 10 consistency checks across backend builder manifest, frontend `typedContract.ts` parser, `agentRunEvents.ts` fixtures, and `typedContract.test.ts` tests. Added 12 tests (5 positive + 7 negative). Negative tests prove that removing a parser token, required field, fixture token, or test token — or adding an unknown builder or duplicate event type — causes validator failure. Registered module in `tests/mod.rs`. Updated document with Section 9.7. |

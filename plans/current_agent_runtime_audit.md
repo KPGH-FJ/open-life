@@ -143,6 +143,7 @@ Current concern:
 
 - `PromptBlockRegistry::built_in()` has only 4 entries. Missing blocks: LifeModel, MemoryEvidence, Task, Proposal, OutputFormat, Role, SubAgent.
 - Legacy `generate()` / `generate_stream()` compatibility paths in `scheduler.rs` and `llm.rs` still build LifeModel system prompts for explicitly non-governed callers only. Formal AgentRuntime / ExecutionFacade Chat, StreamChat, Scheduled, Skill, Plan, Replay, and governed fallback paths must not call them.
+- Chat / StreamChat runtime fallback is intentionally retained as a governed legacy compatibility retry, not a first-class fallback mode. It only handles Runtime/model failures; Governance failures fail closed. `fallback.started` / `fallback.completed` / `fallback.failed` payloads are metadata-only and retain `agent_spec_id`, `privacy_policy`, `generation_path`, PromptStack source, and sanitized error summaries without raw prompt, raw user text, raw LifeModel, raw memory, or full model output.
 
 Needed Post-Beta direction:
 

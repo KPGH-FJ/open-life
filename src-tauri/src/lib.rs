@@ -1,7 +1,7 @@
 use crate::streaming::{
     emit_agent_status_update, generate_non_stream_fallback_governed, start_stream_message,
 };
-use openlife_core::agent::ReasoningTrace;
+use openlife_core::agent::{trace_payloads, ReasoningTrace};
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
@@ -533,16 +533,43 @@ pub(crate) async fn handle_agent_loop_fallback(
             &run_id,
             openlife_core::agent::AgentRunEventType::FallbackStarted,
             openlife_core::agent::AgentEventActor::Runtime,
-            format!("AgentLoop failed, attempting fallback: {}", original_error),
-            serde_json::json!({"error": original_error}),
+            "AgentLoop runtime failure, attempting governed compatibility fallback",
+            trace_payloads::build_fallback_started_payload(
+                agent_spec.id.clone(),
+                privacy_policy.to_string(),
+                original_error,
+            ),
         );
         if let Err(e) = es.append_event(&ev) {
             log::error!("[AgentRun] Failed to append event: {}", e);
         }
     }
-    let mut prompt_stack =
-        openlife_core::agent::AgentRuntime::prompt_stack_for_spec(agent_spec, prompt_registry)
-            .map_err(|e| format!("Fallback PromptStack assembly failed: {}", e))?;
+    let mut prompt_stack = match openlife_core::agent::AgentRuntime::prompt_stack_for_spec(
+        agent_spec,
+        prompt_registry,
+    ) {
+        Ok(prompt_stack) => prompt_stack,
+        Err(e) => {
+            if let Some(es) = event_store {
+                let ev = openlife_core::agent::AgentRunEvent::new(
+                    &run_id,
+                    openlife_core::agent::AgentRunEventType::FallbackFailed,
+                    openlife_core::agent::AgentEventActor::Runtime,
+                    "Governed compatibility fallback failed",
+                    trace_payloads::build_fallback_failed_payload(
+                        agent_spec.id.clone(),
+                        privacy_policy.to_string(),
+                        original_error,
+                        e.to_string(),
+                    ),
+                );
+                if let Err(event_err) = es.append_event(&ev) {
+                    log::error!("[AgentRun] Failed to append event: {}", event_err);
+                }
+            }
+            return Err(format!("Fallback PromptStack assembly failed: {}", e));
+        }
+    };
     let mut governed_messages = messages;
     let assembled_prompt = prompt_stack.assemble();
     if !assembled_prompt.trim().is_empty() {
@@ -554,7 +581,7 @@ pub(crate) async fn handle_agent_loop_fallback(
             },
         );
     }
-    let fallback_reply = generate_non_stream_fallback_governed(
+    let fallback_reply = match generate_non_stream_fallback_governed(
         scheduler,
         governed_messages,
         life_model,
@@ -562,12 +589,32 @@ pub(crate) async fn handle_agent_loop_fallback(
         privacy_policy,
     )
     .await
-    .map_err(|fallback_err| {
-        format!(
-            "AgentLoop failed: {}. Fallback also failed: {}",
-            original_error, fallback_err
-        )
-    })?;
+    {
+        Ok(reply) => reply,
+        Err(fallback_err) => {
+            if let Some(es) = event_store {
+                let ev = openlife_core::agent::AgentRunEvent::new(
+                    &run_id,
+                    openlife_core::agent::AgentRunEventType::FallbackFailed,
+                    openlife_core::agent::AgentEventActor::Runtime,
+                    "Governed compatibility fallback failed",
+                    trace_payloads::build_fallback_failed_payload(
+                        agent_spec.id.clone(),
+                        privacy_policy.to_string(),
+                        original_error,
+                        fallback_err.clone(),
+                    ),
+                );
+                if let Err(e) = es.append_event(&ev) {
+                    log::error!("[AgentRun] Failed to append event: {}", e);
+                }
+            }
+            return Err(format!(
+                "AgentLoop failed: {}. Fallback also failed: {}",
+                original_error, fallback_err
+            ));
+        }
+    };
 
     agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
     agent_run.output_preview = Some(preview_text(&fallback_reply, 200));
@@ -589,7 +636,12 @@ pub(crate) async fn handle_agent_loop_fallback(
             openlife_core::agent::AgentRunEventType::FallbackCompleted,
             openlife_core::agent::AgentEventActor::Runtime,
             "Fallback generation completed",
-            serde_json::json!({"reply_len": fallback_reply.len()}),
+            trace_payloads::build_fallback_completed_payload(
+                agent_spec.id.clone(),
+                privacy_policy.to_string(),
+                original_error,
+                fallback_reply.len(),
+            ),
         );
         if let Err(e) = es.append_event(&ev) {
             log::error!("[AgentRun] Failed to append event: {}", e);
@@ -1223,6 +1275,31 @@ mod tests {
                     && warning.contains("model failed")),
             "Runtime fallback should preserve fallback warning semantics: {:?}",
             outcome.agent_run.warnings
+        );
+    }
+
+    #[test]
+    fn chat_runtime_fallback_event_payloads_are_builder_owned_metadata() {
+        let source = include_str!("lib.rs");
+        let fallback_start = source
+            .find("pub(crate) async fn handle_agent_loop_fallback")
+            .expect("fallback helper should exist");
+        let fallback_end = source[fallback_start..]
+            .find("fn should_fallback_from_execution_facade_error")
+            .map(|offset| fallback_start + offset)
+            .expect("fallback decision helper should follow fallback helper");
+        let fallback_path = &source[fallback_start..fallback_end];
+
+        assert!(fallback_path.contains("build_fallback_started_payload"));
+        assert!(fallback_path.contains("build_fallback_completed_payload"));
+        assert!(fallback_path.contains("build_fallback_failed_payload"));
+        assert!(
+            !fallback_path.contains("json!({\"error\": original_error})"),
+            "fallback.started payload must not store raw original error"
+        );
+        assert!(
+            !fallback_path.contains("\"reply_len\""),
+            "fallback.completed payload must not expose legacy reply_len payload"
         );
     }
 

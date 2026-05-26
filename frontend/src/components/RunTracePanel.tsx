@@ -206,6 +206,7 @@ const EVENT_ICONS: Record<AgentRunEventType, React.ReactNode> = {
   "proposal.created": <FileText size={14} className="text-yellow-400" />,
   "fallback.started": <RefreshCw size={14} className="text-amber-400" />,
   "fallback.completed": <CheckCircle size={14} className="text-amber-400" />,
+  "fallback.failed": <XCircle size={14} className="text-red-400" />,
   "json_repair.started": <RefreshCw size={14} className="text-amber-400" />,
   "json_repair.completed": <CheckCircle size={14} className="text-amber-400" />,
   "plan.created": <FileText size={14} className="text-cyan-400" />,

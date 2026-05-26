@@ -1356,8 +1356,9 @@ fn event_contract_manifest() -> Vec<EventContractEntry> {
         EventContractEntry { event: "ToolCallCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "tool execution lifecycle event; carries observation/result metadata", production_rule_tokens: &[] },
         EventContractEntry { event: "ObservationCreated", status: EventContractStatus::LegacyInternalOnly, reason: "internal ReAct observation trace; carries tool observation, not governance", production_rule_tokens: &[] },
         EventContractEntry { event: "ProposalCreated", status: EventContractStatus::IntentionallyExcluded, reason: "proposal lifecycle tracking; typed metadata only, intentionally excluded from governance audit", production_rule_tokens: &[] },
-        EventContractEntry { event: "FallbackStarted", status: EventContractStatus::LegacyInternalOnly, reason: "fallback execution trace; carries fallback reason, not typed governance payload", production_rule_tokens: &[] },
-        EventContractEntry { event: "FallbackCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "fallback execution trace; no typed governance payload", production_rule_tokens: &[] },
+        EventContractEntry { event: "FallbackStarted", status: EventContractStatus::IntentionallyExcluded, reason: "runtime compatibility fallback metadata; builder-driven but not a governance decision", production_rule_tokens: &[] },
+        EventContractEntry { event: "FallbackCompleted", status: EventContractStatus::IntentionallyExcluded, reason: "runtime compatibility fallback metadata; builder-driven but not a governance decision", production_rule_tokens: &[] },
+        EventContractEntry { event: "FallbackFailed", status: EventContractStatus::IntentionallyExcluded, reason: "runtime compatibility fallback metadata; builder-driven but not a governance decision", production_rule_tokens: &[] },
         EventContractEntry { event: "JsonRepairStarted", status: EventContractStatus::LegacyInternalOnly, reason: "JSON self-repair trace; no typed governance payload", production_rule_tokens: &[] },
         EventContractEntry { event: "JsonRepairCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "JSON self-repair trace; no typed governance payload", production_rule_tokens: &[] },
         EventContractEntry { event: "RunCompleted", status: EventContractStatus::LegacyInternalOnly, reason: "runtime lifecycle event; no typed governance payload", production_rule_tokens: &[] },
@@ -1949,14 +1950,14 @@ fn event_contract_document_matches_manifest() {
 }
 
 #[test]
-fn event_contract_parse_enum_finds_44_variants() {
+fn event_contract_parse_enum_finds_45_variants() {
     let variants = parse_agent_run_event_type_variants();
     // Exact count — will fail if variants are added/removed, forcing
     // manifest and document updates.
     assert_eq!(
         variants.len(),
-        44,
-        "AgentRunEventType has {} variants; expected exactly 44.  \
+        45,
+        "AgentRunEventType has {} variants; expected exactly 45.  \
          If this changed, update the manifest and document.",
         variants.len(),
     );
@@ -2145,8 +2146,8 @@ fn event_contract_document_total_mismatch_fails() {
                 | Tier | Count | Events |\n\
                 |---|---|---|\n\
                 | ProductionAudited | 7 | ToolCallBlocked, ReplayFailed, ReplayStarted, ReplayCompleted, AgentSpecSelected, PromptStackAssembled, ContextGovernanceApplied |\n\
-                | IntentionallyExcluded | 5 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated |\n\
-                | LegacyInternalOnly | 31 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, FallbackStarted, FallbackCompleted, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |\n\
+                | IntentionallyExcluded | 8 | ModelFailed, RunFailed, ToolCallFailed, ModelCallFailed, ProposalCreated, FallbackStarted, FallbackCompleted, FallbackFailed |\n\
+                | LegacyInternalOnly | 29 | RunCreated, ContextAssembled, ModelRouteSelected, ModelCallStarted, ModelCallCompleted, ToolCallStarted, ToolCallCompleted, ObservationCreated, JsonRepairStarted, JsonRepairCompleted, RunCompleted, CompactionCreated, PlanCreated, PlanConfirmationRequested, PlanConfirmationResolved, PlanExecutionStarted, PlanStepStarted, PlanStepCompleted, PlanStepFailed, PlanDeviationRecorded, PlanExecutionCompleted, PlanExecutionFailed, PlanCancelRequested, PlanCancelled, PlanRetryRequested, PlanRetryStarted, PlanContinuationRequested, PlanActionReplayed, PlanActionReplayRequested |\n\
                 | TypeOnlyNoDirectEmission | 1 | Unknown |\n\
                 | **Total** | **99** | |\n";
     let manifest = event_contract_manifest();
@@ -2410,6 +2411,33 @@ fn payload_builder_contract_manifest() -> Vec<PayloadBuilderContractEntry> {
             reason: "proposal lifecycle metadata; carries no raw prompt or LifeModel values",
             required_contract_tests: &[
                 "test_builders_produce_snake_case_fields",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "FallbackStarted",
+            builder: "build_fallback_started_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "runtime compatibility fallback metadata; carries no raw prompt, user text, LifeModel, memory, or model output",
+            required_contract_tests: &[
+                "test_fallback_payload_builders_are_metadata_only",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "FallbackCompleted",
+            builder: "build_fallback_completed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "runtime compatibility fallback metadata; carries response length only, not model output",
+            required_contract_tests: &[
+                "test_fallback_payload_builders_are_metadata_only",
+            ],
+        },
+        PayloadBuilderContractEntry {
+            event: "FallbackFailed",
+            builder: "build_fallback_failed_payload",
+            status: PayloadBuilderStatus::IntentionallyExcludedGenericFailure,
+            reason: "runtime compatibility fallback failure metadata; carries sanitized error summaries only",
+            required_contract_tests: &[
+                "test_fallback_payload_builders_are_metadata_only",
             ],
         },
     ]
@@ -3059,6 +3087,9 @@ fn payload_builder_contract_comment_and_string_fake_builders_ignored() {
     let expected = vec![
         "build_agent_spec_selected_payload",
         "build_context_governance_applied_payload",
+        "build_fallback_completed_payload",
+        "build_fallback_failed_payload",
+        "build_fallback_started_payload",
         "build_model_call_failed_payload",
         "build_model_failed_payload",
         "build_prompt_stack_assembled_payload",

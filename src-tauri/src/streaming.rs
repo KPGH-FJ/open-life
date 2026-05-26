@@ -1339,4 +1339,28 @@ mod tests {
         assert!(runtime_decision.should_fallback);
         assert!(runtime_decision.emitted_events.is_empty());
     }
+
+    #[test]
+    fn stream_chat_runtime_error_fallback_uses_chat_governed_boundary() {
+        let source = include_str!("streaming.rs");
+        let start = source
+            .find("async fn start_stream_message_with_agent_loop")
+            .expect("stream chat entrypoint should exist");
+        let end = source[start..]
+            .find("fn should_fallback_from_execution_facade_error")
+            .map(|offset| start + offset)
+            .expect("stream fallback helper should follow entrypoint");
+        let stream_path = &source[start..end];
+
+        assert!(stream_path.contains("handle_agent_loop_fallback"));
+        assert!(stream_path.contains("agent_spec.privacy_policy"));
+        assert!(
+            !stream_path.contains(".generate("),
+            "StreamChat compatibility fallback must not call legacy scheduler generation"
+        );
+        assert!(
+            !stream_path.contains(".generate_stream("),
+            "StreamChat compatibility fallback must not call legacy scheduler streaming generation"
+        );
+    }
 }

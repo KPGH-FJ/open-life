@@ -286,6 +286,84 @@ pub fn build_proposal_created_payload(
     })
 }
 
+// ── Compatibility fallback events ──────────────────────────────────
+
+fn fallback_error_summary(error: impl Into<String>) -> String {
+    let mut summary = error.into();
+    for sentinel in [
+        "RAW_PROMPT_SENTINEL",
+        "RAW_USER_SENTINEL",
+        "RAW_LIFEMODEL_SENTINEL",
+        "RAW_MEMORY_SENTINEL",
+        "FULL_MODEL_OUTPUT_SENTINEL",
+    ] {
+        summary = summary.replace(sentinel, "[redacted]");
+    }
+    summary
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect()
+}
+
+fn build_fallback_base_payload(
+    status: impl Into<String>,
+    agent_spec_id: impl Into<String>,
+    privacy_policy: impl Into<String>,
+    original_error: impl Into<String>,
+) -> Value {
+    json!({
+        "status": status.into(),
+        "fallback_mode": "legacy_compatibility",
+        "generation_path": "generate_governed",
+        "prompt_stack_source": "stored_agent_spec",
+        "agent_spec_id": agent_spec_id.into(),
+        "privacy_policy": privacy_policy.into(),
+        "original_error_summary": fallback_error_summary(original_error),
+    })
+}
+
+pub fn build_fallback_started_payload(
+    agent_spec_id: impl Into<String>,
+    privacy_policy: impl Into<String>,
+    original_error: impl Into<String>,
+) -> Value {
+    build_fallback_base_payload("started", agent_spec_id, privacy_policy, original_error)
+}
+
+pub fn build_fallback_completed_payload(
+    agent_spec_id: impl Into<String>,
+    privacy_policy: impl Into<String>,
+    original_error: impl Into<String>,
+    response_length: usize,
+) -> Value {
+    let mut payload =
+        build_fallback_base_payload("completed", agent_spec_id, privacy_policy, original_error);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("response_length".to_string(), json!(response_length));
+    }
+    payload
+}
+
+pub fn build_fallback_failed_payload(
+    agent_spec_id: impl Into<String>,
+    privacy_policy: impl Into<String>,
+    original_error: impl Into<String>,
+    fallback_error: impl Into<String>,
+) -> Value {
+    let mut payload =
+        build_fallback_base_payload("failed", agent_spec_id, privacy_policy, original_error);
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert(
+            "fallback_error_summary".to_string(),
+            json!(fallback_error_summary(fallback_error)),
+        );
+    }
+    payload
+}
+
 // ── Generic-failure events ──────────────────────────────────────────
 
 /// Build a generic `model.failed` payload.
@@ -566,5 +644,56 @@ mod tests {
         assert!(p.get("life_model").is_none());
         assert!(p.get("before").is_none());
         assert!(p.get("after").is_none());
+    }
+
+    #[test]
+    fn test_fallback_payload_builders_are_metadata_only() {
+        let sentinel_error = concat!(
+            "runtime failed RAW_PROMPT_SENTINEL RAW_USER_SENTINEL ",
+            "RAW_LIFEMODEL_SENTINEL RAW_MEMORY_SENTINEL FULL_MODEL_OUTPUT_SENTINEL"
+        );
+
+        let started = build_fallback_started_payload("main.default", "local_only", sentinel_error);
+        let completed =
+            build_fallback_completed_payload("main.default", "local_only", sentinel_error, 42);
+        let failed = build_fallback_failed_payload(
+            "main.default",
+            "local_only",
+            sentinel_error,
+            sentinel_error,
+        );
+
+        for payload in [&started, &completed, &failed] {
+            assert_eq!(
+                payload["fallback_mode"].as_str(),
+                Some("legacy_compatibility")
+            );
+            assert_eq!(
+                payload["generation_path"].as_str(),
+                Some("generate_governed")
+            );
+            assert_eq!(payload["agent_spec_id"].as_str(), Some("main.default"));
+            assert_eq!(payload["privacy_policy"].as_str(), Some("local_only"));
+            assert!(payload.get("prompt").is_none());
+            assert!(payload.get("user").is_none());
+            assert!(payload.get("life_model").is_none());
+            assert!(payload.get("memory").is_none());
+            assert!(payload.get("model_output").is_none());
+            assert!(payload.get("reply").is_none());
+            assert!(payload.get("output").is_none());
+
+            let serialized = payload.to_string();
+            assert!(!serialized.contains("RAW_PROMPT_SENTINEL"));
+            assert!(!serialized.contains("RAW_USER_SENTINEL"));
+            assert!(!serialized.contains("RAW_LIFEMODEL_SENTINEL"));
+            assert!(!serialized.contains("RAW_MEMORY_SENTINEL"));
+            assert!(!serialized.contains("FULL_MODEL_OUTPUT_SENTINEL"));
+        }
+
+        assert_eq!(started["status"].as_str(), Some("started"));
+        assert_eq!(completed["status"].as_str(), Some("completed"));
+        assert_eq!(completed["response_length"].as_u64(), Some(42));
+        assert_eq!(failed["status"].as_str(), Some("failed"));
+        assert!(failed["fallback_error_summary"].is_string());
     }
 }

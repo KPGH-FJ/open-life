@@ -260,6 +260,7 @@ export type AgentRunEventType =
   | "proposal.created"
   | "fallback.started"
   | "fallback.completed"
+  | "fallback.failed"
   | "json_repair.started"
   | "json_repair.completed"
   | "plan.created"

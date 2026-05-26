@@ -69,7 +69,8 @@
  *     + proposal_id), run.completed
  *  4. replayFailedRun — replay.failed(block_reason), run.completed
  *  5. proposalCreatedMetadataRun — proposal.created metadata-only trace event
- *  6. malformedAndUnknownRun — malformed tool.call_blocked + malformed replay.failed
+ *  6. fallbackMetadataRun — fallback.started/completed/failed metadata-only events
+ *  7. malformedAndUnknownRun — malformed tool.call_blocked + malformed replay.failed
  *     + unknown eventType, run.completed
  */
 
@@ -275,7 +276,44 @@ export const proposalCreatedMetadataRun: AgentRunEvent[] = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────
-// FIXTURE 6: malformedAndUnknownRun
+// FIXTURE 6: fallbackMetadataRun
+// Runtime compatibility fallback uses metadata-only payload fields.
+// ─────────────────────────────────────────────────────────────────────
+
+export const fallbackMetadataRun: AgentRunEvent[] = [
+  ev("fallback.started", {
+    status: "started",
+    fallback_mode: "legacy_compatibility",
+    generation_path: "generate_governed",
+    prompt_stack_source: "stored_agent_spec",
+    agent_spec_id: "main.default",
+    privacy_policy: "local_only",
+    original_error_summary: "model unavailable",
+  }),
+  ev("fallback.completed", {
+    status: "completed",
+    fallback_mode: "legacy_compatibility",
+    generation_path: "generate_governed",
+    prompt_stack_source: "stored_agent_spec",
+    agent_spec_id: "main.default",
+    privacy_policy: "local_only",
+    original_error_summary: "model unavailable",
+    response_length: 42,
+  }),
+  ev("fallback.failed", {
+    status: "failed",
+    fallback_mode: "legacy_compatibility",
+    generation_path: "generate_governed",
+    prompt_stack_source: "stored_agent_spec",
+    agent_spec_id: "main.default",
+    privacy_policy: "local_only",
+    original_error_summary: "model unavailable",
+    fallback_error_summary: "retry unavailable",
+  }),
+];
+
+// ─────────────────────────────────────────────────────────────────────
+// FIXTURE 7: malformedAndUnknownRun
 // Contains malformed typed events and an entirely unknown event type.
 // Validates that UI soft-fails without crashing.
 // ─────────────────────────────────────────────────────────────────────

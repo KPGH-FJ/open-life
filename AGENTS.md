@@ -165,7 +165,7 @@
 │       │   ├── mod.rs            # Agent 模块入口
 │       │   ├── runtime.rs        # AgentRuntime 主执行体
 │       │   ├── types/
-│       │   │   └── mod.rs        # 2183行：AgentRunEvent (41 种)、AgentRun/Action 等类型
+│       │   │   └── mod.rs        # AgentRunEvent (45 种)、AgentRun/Action 等类型
 │       │   ├── agent_loop/       # ReAct 循环（AgentLoop 双轨）
 │       │   ├── action_executor/  # ActionExecutor + ToolRuntime（6 文件 ~3500 行）
 │       │   ├── reasoning/        # 推理策略（LayeredReasoner/DirectReasoner）
@@ -256,7 +256,7 @@
 | **Proposal** | [`openlife-core/src/agent/proposal_store.rs`](openlife-core/src/agent/proposal_store.rs) | Proposal 统一层：LifeModel/Memory/Tool 权限变更必须经过用户确认（accept/reject/edit/postpone），应用前自动创建 snapshot | 被 builder.rs、calibration.rs 使用，存储在 SQLite proposals.db |
 | **LifeModel** | [`openlife-core/src/life_model.rs`](openlife-core/src/life_model.rs) | 四维人生模型：Identity（身份/价值观）、Goals（短中长期目标）、Capabilities（技能/资源）、State（当前状态/情绪/健康） | 被 reasoning.rs、scheduler.rs、memory.rs 消费 |
 | **LayeredReasoner** | [`openlife-core/src/agent/reasoning/layered.rs`](openlife-core/src/agent/reasoning/layered.rs) | 三层推理策略：MeaningPhase（语义理解/禁忌检测）→ StrategyPhase（策略规划）→ GenerationPhase（回复生成），SafetyChecker 安全检查。作为 AgentRuntime 的默认推理策略 | 依赖 scheduler.rs、life_model.rs |
-| **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型。正式 AgentRuntime / ExecutionFacade 路径必须走 `generate_governed` / `generate_stream_governed` / raw governed variants；裸 `generate` / `generate_stream` 仅为 legacy compatibility boundary | 依赖 llm.rs、ollama.rs |
+| **InferenceScheduler** | [`openlife-core/src/scheduler.rs`](openlife-core/src/scheduler.rs) | 智能调度云端/本地模型。正式 AgentRuntime / ExecutionFacade 路径必须走 `generate_governed` / `generate_stream_governed` / raw governed variants；裸 `generate` / `generate_stream` 仅为 legacy compatibility boundary；Chat / StreamChat runtime fallback 是 governed legacy compatibility retry，不是 legacy generation | 依赖 llm.rs、ollama.rs |
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
@@ -322,7 +322,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 
 关键处理节点：
 1. **输入预处理**（[`preprocess_chat_input`](src-tauri/src/lib.rs:522), v2 在 721）：用户消息 → 向量检索/MemoryService → PrivacyEngine 脱敏 → ContextAssembler
-2. **模型调度**（[`InferenceScheduler::generate_governed`](openlife-core/src/scheduler.rs:531)）：正式 AgentRuntime / ExecutionFacade 路径根据 AgentSpec privacy policy、ModelRouter / tool prompt 决定本地/云端路径；[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:131) 仅保留给 legacy compatibility caller；Builder 模型辅助提取不走 legacy scheduler generation，而是 Builder-specific PromptStack + `generate_raw_governed(..., LocalOnly)`
+2. **模型调度**（[`InferenceScheduler::generate_governed`](openlife-core/src/scheduler.rs:531)）：正式 AgentRuntime / ExecutionFacade 路径根据 AgentSpec privacy policy、ModelRouter / tool prompt 决定本地/云端路径；[`InferenceScheduler::generate`](openlife-core/src/scheduler.rs:131) 仅保留给 legacy compatibility caller；Chat / StreamChat runtime fallback 只处理 Runtime/model failure，复用 stored AgentSpec / PromptStack / PrivacyPolicy 并调用 governed generation，Governance failure fail-closed；Builder 模型辅助提取不走 legacy scheduler generation，而是 Builder-specific PromptStack + `generate_raw_governed(..., LocalOnly)`
 3. **AgentLoop 执行**（[`send_message_with_agent_loop`](src-tauri/src/lib.rs:1239)）：AgentTask → AgentLoop.run() → AgentRunEvent 事件流
 4. **工具调用**（通过 [`action_executor/`](openlife-core/src/agent/action_executor/) 模块，受 ToolPermission + ExecutionSandbox 治理）
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:2446)）：AgentLoop 流式 → stream-message-chunk Tauri 事件
@@ -760,7 +760,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 7. ~~**前端 ErrorBoundary 过于简单**~~ ✅ 已完成（Sprint 15：更名为 ErrorBanner，支持重试按钮 + 错误详情，`components/ErrorBanner.tsx`）
 8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试 + 10 个集成测试）
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
-10. ~~**vNext AgentRunEvent**~~ ✅ 已完成（AgentRunEvent (41 种事件) + append-only event_store.rs，`agent/types/mod.rs` 2183 行）
+10. ~~**vNext AgentRunEvent**~~ ✅ 已完成（AgentRunEvent (45 种事件，含 Runtime fallback metadata events) + append-only event_store.rs）
 11. **执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。
 12. ~~**PromptStack 缺失**~~ ✅ 已完成（PromptStack 已覆盖 AgentSpec、Proposal/Web/LayeredReasoner/Builder/Skill 等专用 blocks；legacy scheduler generation 仅保留 compatibility boundary）
 13. ~~**MemoryEvidence 缺失**~~ ✅ 已完成（`agent/memory_evidence.rs` 实现 RepeatedPreference/RecurringGoal/CapabilitySignal/StateTrend/Contradiction/ValueSignal 六种信号提取）
@@ -897,6 +897,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-15 | **Codex-Level Batch 4: Typed Execution Result & Governance Event Unification**：新增 3 个结构化执行结果类型（`ExecutionBlockReason`、`ExecutionProposalReason`、`ExecutionFailureKind`），挂入 `ActionExecutionResult` 和 `ToolCallInternalResult`；消除 `execute_tool`/`execute_execution_tool`/`check_network_policy` 中所有通过错误字符串推断 blocked/denied/needs_confirmation 的控制流（移除 `error.starts_with("needs_confirmation:")`、`error.contains("denied by") && error.contains("AgentSpec")`、`error.contains("blocked") || error.contains("ask_every_time")` 等模式）；`__blocked_action__:` 字符串协议替换为 `PatchApplyResult.blocked_action` typed 字段；`handle_blocked` / `network_ask_proposal_ex` / `call_tool_internal_async` 均产生 typed reason 并写入 AgentRunEvent payload；新增 4 核心测试（`typed_reason_agentspec_deny_on_result`、`typed_reason_missing_mcp_server_failure_kind`、`typed_reason_mcp_client_error_on_call`、`typed_reason_disabled_manifest_block`）；812 核心 + 98 Tauri 测试全部通过；`cargo clippy --workspace --all-targets -- -D warnings` 全绿；`make ci` 全绿。控制流不再依赖字符串猜测。 | AI Agent |
 | 2026-05-15 | **Batch 4 Fix: Typed Replay Events & Accurate Governance Reasons**：新增 `ReplayStarted`/`ReplayCompleted`/`ReplayFailed` 到 `AgentRunEventType`，`replay_action_internal` 完整记录 replay lifecycle event；新增 `AgentSpecMissing` 到 `ExecutionBlockReason`；修复 `shell.run` 的 `build_blocked_result` 接受显式 typed reason；修复 `mcp.call_tool` target permission 语义；统一 `ToolCallBlocked` event payload；新增 11 测试；820 核心 + 101 Tauri 测试全部通过；`cargo clippy --workspace --all-targets -- -D warnings` 全绿；`make ci` 全绿。 | AI Agent |
 | 2026-05-15 | **Batch 4 Fix-2: Replay Failure Completeness & Event Payload Contract**：修复 clippy unused mut；`replay_action_internal` 早期失败路径（action 不需要 confirmation、缺少 tool_scope、permission 未授权）完整记录 `ReplayFailed` event 带 typed reason；ReplayCompleted/ReplayFailed 根据 exec_result status 携带 typed outcome（block_reason/proposal_reason/failure_kind）；统一所有 ToolCallBlocked event payload 为标准 contract（status/tool_name/source/block_reason/proposal_reason/failure_kind/agent_spec_id）；NetworkPolicy ask event 追加 proposal_id；mcp.call_tool target block event 追加 failure_kind；新增 7 测试（replay failure x4、event payload contract x3）；823 核心 + 105 Tauri 测试全部通过；`cargo clippy --workspace --all-targets -- -D warnings` 全绿；`make ci` 全绿。 | AI Agent |
+| 2026-05-26 | **Runtime fallback boundary 最终收口**：Chat / StreamChat runtime fallback 保留为 governed legacy compatibility retry，不升级为 first-class fallback mode；Runtime/model failure 可进入 fallback，Governance failure fail-closed；fallback 复用 stored AgentSpec / PromptStack / PrivacyPolicy 并调用 `generate_governed`，不恢复 legacy `generate` / `generate_stream`；新增 `fallback.failed` event type 与 `build_fallback_started_payload` / `build_fallback_completed_payload` / `build_fallback_failed_payload`，payload metadata-only（agent_spec_id/privacy_policy/generation_path/sanitized error summary/response_length）且不包含 raw prompt、raw user、raw LifeModel、raw memory、完整模型输出；补 Chat / StreamChat fallback source audit、payload sentinel、event round-trip、event contract manifest 测试。 | AI Agent |
 
 ---
 

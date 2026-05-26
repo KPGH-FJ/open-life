@@ -200,6 +200,7 @@ fn parse_event_type(s: &str) -> AgentRunEventType {
         "proposal.created" => AgentRunEventType::ProposalCreated,
         "fallback.started" => AgentRunEventType::FallbackStarted,
         "fallback.completed" => AgentRunEventType::FallbackCompleted,
+        "fallback.failed" => AgentRunEventType::FallbackFailed,
         "json_repair.started" => AgentRunEventType::JsonRepairStarted,
         "json_repair.completed" => AgentRunEventType::JsonRepairCompleted,
         "plan.created" => AgentRunEventType::PlanCreated,
@@ -427,6 +428,35 @@ mod tests {
         assert_eq!(
             stored.payload.get("size_bytes").unwrap().as_i64().unwrap(),
             42
+        );
+    }
+
+    #[test]
+    fn test_fallback_failed_event_round_trip() {
+        let store = AgentRunEventStore::new_in_memory().unwrap();
+        let run_id = "test-fallback-failed";
+        let event = AgentRunEvent::new(
+            run_id,
+            AgentRunEventType::FallbackFailed,
+            AgentEventActor::Runtime,
+            "Governed compatibility fallback failed",
+            crate::agent::trace_payloads::build_fallback_failed_payload(
+                "main.default",
+                "local_only",
+                "model unavailable",
+                "retry unavailable",
+            ),
+        );
+
+        store.append_event(&event).unwrap();
+
+        let events = store.list_events_by_run(run_id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, AgentRunEventType::FallbackFailed);
+        assert_eq!(events[0].payload["status"].as_str(), Some("failed"));
+        assert_eq!(
+            events[0].payload["generation_path"].as_str(),
+            Some("generate_governed")
         );
     }
 
