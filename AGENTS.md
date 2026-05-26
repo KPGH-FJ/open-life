@@ -10,48 +10,49 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：**P12 Beta Release Candidate 已通过验收（2026-05-10，CI 全绿）**。P0-P12 全部 vNext 原语已完成代码实现。当前进入 **Post-Beta 架构稳固阶段**：执行路径收敛、文档事实同步、真实用户试用反馈闭环、PromptStack 全路径审计、LifeModel Evolution 管线端到端测试。`make ci` 为发布门控。2026-05-14 全项目审阅修复已交付：Rust clippy 清零、Proposal 批量接受死锁修复、AgentSpec 统一工具治理、NetworkPolicy.default_decision 落地、keyring 一致性修复、safeInvoke 敏感日志脱敏、builder_apply_signals 配置门控、CI 全绿恢复。
+- **当前阶段**：**Codex-level Final Closeout（2026-05-26）**。P0-P12 vNext 原语和 Codex-level 稳定化收口均已完成代码侧边界，包括 ExecutionFacade 收敛、AgentSpec fail-closed、Proposal-first LifeModel/Memory 更新、PromptStack 全路径审计、AgentRunEvent typed contract、Runtime fallback governed compatibility retry。当前只做文档事实同步、验收报告和 LifeModel 阶段准入门控；不要进入 LifeModel 深度开发，不做发布打包、代码签名、installer 或公开试用流程。`make ci` 为最低验收门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
 
 后续 Agent 进入项目时，优先阅读：
 
-0. [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)：**Post-Beta 完整发展计划**（当前阶段入口，覆盖从 P12 交付收尾到 v1.0 公开发布的全路径）。
-1. [`plans/current_agent_runtime_audit.md`](plans/current_agent_runtime_audit.md)：vNext 前的代码事实审计，先确认当前真实状态。
-2. [`plans/openlife_vnext_architecture_principles.md`](plans/openlife_vnext_architecture_principles.md)：vNext 架构原则，定义下一阶段的硬约束。
-3. [`plans/openlife_vnext_architecture_diagrams.md`](plans/openlife_vnext_architecture_diagrams.md)：vNext 总体架构、时序、Tool/Prompt/Memory/SubAgent 图。
-4. [`plans/openlife_vnext_core_primitives_and_boundaries.md`](plans/openlife_vnext_core_primitives_and_boundaries.md)：AgentRunEvent、PromptStack、ToolRuntime、MemoryEvidence 等核心原语与边界。
-5. [`plans/openlife_vnext_migration_plan.md`](plans/openlife_vnext_migration_plan.md)：vNext 分阶段迁移路线。
-6. [`plans/openlife_vnext_p0_p1_task_specs.md`](plans/openlife_vnext_p0_p1_task_specs.md)：P0/P1 AI-coding-ready 任务规格。
-7. [`plans/openlife_vnext_p2_p3_task_specs.md`](plans/openlife_vnext_p2_p3_task_specs.md)：P0/P1 后的 PlanMode、SubAgent、Sandbox、Chat trace 任务规格。
-8. [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md)：P4 Confirmed Plan Execution 与 Chat trace UI 集成任务规格。
-9. [`plans/openlife_vnext_p5_task_specs.md`](plans/openlife_vnext_p5_task_specs.md)：P5 Governed Plan Operations and Recovery 任务规格。
-10. [`plans/openlife_vnext_p6_task_specs.md`](plans/openlife_vnext_p6_task_specs.md)：P6 AgentSpec-Governed Runtime and Context Assembly 任务规格。
-11. [`plans/openlife_vnext_p7_task_specs.md`](plans/openlife_vnext_p7_task_specs.md)：P7 AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 任务规格。
-12. [`plans/openlife_vnext_p8_task_specs.md`](plans/openlife_vnext_p8_task_specs.md)：P8 Compaction, Long-Context Continuity, and Privacy-Governed Summary Trace 任务规格。
-13. [`plans/openlife_vnext_p9_task_specs.md`](plans/openlife_vnext_p9_task_specs.md)：P9 ExecutionSandbox-Governed Shell Execution 任务规格。
-14. [`plans/openlife_vnext_p10_task_specs.md`](plans/openlife_vnext_p10_task_specs.md)：P10 Frontend Agent Workspace 任务规格。
-15. [`plans/openlife_vnext_p11_task_specs.md`](plans/openlife_vnext_p11_task_specs.md)：P11 Beta Trial Readiness 任务规格（已 accepted）。
-16. [`plans/openlife_vnext_p11_trial_path_matrix.md`](plans/openlife_vnext_p11_trial_path_matrix.md)：P11 Beta 试用路径矩阵。
-17. [`plans/openlife_vnext_p12_task_specs.md`](plans/openlife_vnext_p12_task_specs.md)：P12 Beta Release Candidate and User Trial Delivery 任务规格。
-18. [`plans/openlife_vnext_p12_beta_rc_acceptance_report.md`](plans/openlife_vnext_p12_beta_rc_acceptance_report.md)：P12 Beta RC 验收报告模板。
-19. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
-20. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
-21. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
-22. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed，ADR 0012 为 P7 AgentSpec store/runtime selection proposed。
-23. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
-24. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
-25. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
-26. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
-27. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-28. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+0. [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)：Post-Beta / Codex-level 总路线，当前作为阶段索引和非阻塞项记录。
+1. [`plans/openlife_codex_level_closeout_acceptance_report.md`](plans/openlife_codex_level_closeout_acceptance_report.md)：**Codex-level Final Closeout 验收报告**，LifeModel 阶段准入门控的当前事实源。
+2. [`plans/current_agent_runtime_audit.md`](plans/current_agent_runtime_audit.md)：vNext 前的代码事实审计，已补充 Codex-level 收口后的状态。
+3. [`plans/openlife_vnext_architecture_principles.md`](plans/openlife_vnext_architecture_principles.md)：vNext 架构原则，定义下一阶段的硬约束。
+4. [`plans/openlife_vnext_architecture_diagrams.md`](plans/openlife_vnext_architecture_diagrams.md)：vNext 总体架构、时序、Tool/Prompt/Memory/SubAgent 图。
+5. [`plans/openlife_vnext_core_primitives_and_boundaries.md`](plans/openlife_vnext_core_primitives_and_boundaries.md)：AgentRunEvent、PromptStack、ToolRuntime、MemoryEvidence 等核心原语与边界。
+6. [`plans/openlife_vnext_migration_plan.md`](plans/openlife_vnext_migration_plan.md)：vNext 分阶段迁移路线。
+7. [`plans/openlife_vnext_p0_p1_task_specs.md`](plans/openlife_vnext_p0_p1_task_specs.md)：P0/P1 AI-coding-ready 任务规格。
+8. [`plans/openlife_vnext_p2_p3_task_specs.md`](plans/openlife_vnext_p2_p3_task_specs.md)：P0/P1 后的 PlanMode、SubAgent、Sandbox、Chat trace 任务规格。
+9. [`plans/openlife_vnext_p4_task_specs.md`](plans/openlife_vnext_p4_task_specs.md)：P4 Confirmed Plan Execution 与 Chat trace UI 集成任务规格。
+10. [`plans/openlife_vnext_p5_task_specs.md`](plans/openlife_vnext_p5_task_specs.md)：P5 Governed Plan Operations and Recovery 任务规格。
+11. [`plans/openlife_vnext_p6_task_specs.md`](plans/openlife_vnext_p6_task_specs.md)：P6 AgentSpec-Governed Runtime and Context Assembly 任务规格。
+12. [`plans/openlife_vnext_p7_task_specs.md`](plans/openlife_vnext_p7_task_specs.md)：P7 AgentSpec Store, Runtime Selection, and Governed Agent Entry Points 任务规格。
+13. [`plans/openlife_vnext_p8_task_specs.md`](plans/openlife_vnext_p8_task_specs.md)：P8 Compaction, Long-Context Continuity, and Privacy-Governed Summary Trace 任务规格。
+14. [`plans/openlife_vnext_p9_task_specs.md`](plans/openlife_vnext_p9_task_specs.md)：P9 ExecutionSandbox-Governed Shell Execution 任务规格。
+15. [`plans/openlife_vnext_p10_task_specs.md`](plans/openlife_vnext_p10_task_specs.md)：P10 Frontend Agent Workspace 任务规格。
+16. [`plans/openlife_vnext_p11_task_specs.md`](plans/openlife_vnext_p11_task_specs.md)：P11 Beta Trial Readiness 任务规格（已 accepted）。
+17. [`plans/openlife_vnext_p11_trial_path_matrix.md`](plans/openlife_vnext_p11_trial_path_matrix.md)：P11 Beta 试用路径矩阵。
+18. [`plans/openlife_vnext_p12_task_specs.md`](plans/openlife_vnext_p12_task_specs.md)：P12 Beta Release Candidate and User Trial Delivery 任务规格。
+19. [`plans/openlife_vnext_p12_beta_rc_acceptance_report.md`](plans/openlife_vnext_p12_beta_rc_acceptance_report.md)：P12 Beta RC 验收报告模板。
+20. [`plans/openlife_vnext_agent_coding_prompts.md`](plans/openlife_vnext_agent_coding_prompts.md)：后续 Agent coding 可直接使用的任务提示词。
+21. [`plans/openlife_vnext_test_and_acceptance_matrix.md`](plans/openlife_vnext_test_and_acceptance_matrix.md)：每个阶段的测试和验收门控。
+22. [`plans/openlife_ai_coding_governance.md`](plans/openlife_ai_coding_governance.md)：AI coding 协作规则与 ADR-first 流程。
+23. [`plans/adr/README.md`](plans/adr/README.md)：vNext ADR backlog；ADR 0001-0010 已 accepted，ADR 0011 为 P5 recovery/rollback proposed，ADR 0012 为 P7 AgentSpec store/runtime selection proposed。
+24. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Beta 架构基准，作为现有架构背景。
+25. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图。
+26. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准。
+27. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线历史。
+28. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+29. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
-- vNext 已全量实现（P0-P12），当前重点转为 **Post-Beta 架构稳固**：执行路径收敛、文档同步、PromptStack 审计、LifeModel Evolution 管线闭环。顺序参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。
+- vNext 已全量实现（P0-P12），Codex-level 稳定化收口已完成代码侧边界。当前重点是 **Final Closeout**：文档事实同步、验收报告、LifeModel 阶段准入门控。顺序参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md) 和 [`plans/openlife_codex_level_closeout_acceptance_report.md`](plans/openlife_codex_level_closeout_acceptance_report.md)。
 - 所有正式 Agent 行为必须逐步收敛到 `AgentRun + append-only AgentRunEvent`，fallback、repair、block、replay、proposal apply 都必须可追踪。
 - 所有 system prompt / planning prompt / tool prompt / privacy prompt 必须收敛到 `PromptStack`，不得继续扩散 ad hoc prompt。
 - Memory 不只是检索上下文，也要升级为 LifeModel evolution 的 evidence layer；memory-driven evolution 只能生成 Proposal，不能直接改 LifeModel。
@@ -327,7 +328,7 @@ LifeModel / Memory / Audit / Snapshot 持久化
 4. **工具调用**（通过 [`action_executor/`](openlife-core/src/agent/action_executor/) 模块，受 ToolPermission + ExecutionSandbox 治理）
 5. **流式输出**（[`start_stream_message`](src-tauri/src/lib.rs:2446)）：AgentLoop 流式 → stream-message-chunk Tauri 事件
 
-> 注意：上面的数据流描述的是当前实现。目标架构会把这条链路收敛到 `AgentRun`，并让每次模型调用、上下文选择、工具调用和 LifeModel 更新都具备可查询 trace。
+> 注意：上面的数据流描述的是当前实现。正式 AgentRuntime / ExecutionFacade 路径已经收敛到 `AgentRun + append-only AgentRunEvent` 的可查询 trace；helper-only 路径只记录 metadata-only audit，且不得伪造 `prompt_stack.assembled`。
 
 ---
 
@@ -761,7 +762,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试 + 10 个集成测试）
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
 10. ~~**vNext AgentRunEvent**~~ ✅ 已完成（AgentRunEvent (45 种事件，含 Runtime fallback metadata events) + append-only event_store.rs）
-11. **执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。
+11. ~~**执行路径收敛**：Chat、streaming、fallback、scheduled/proactive 等路径需要通过统一 facade 收敛语义，避免后续 PlanMode/SubAgent 放大分叉。~~ ✅ 已完成（Chat / StreamChat / Scheduled / Direct Tool / Replay / Plan wrapper 已收敛；Skill runtime 保持 Skill-specific PromptStack 边界；runtime fallback 为 governed legacy compatibility retry）
 12. ~~**PromptStack 缺失**~~ ✅ 已完成（PromptStack 已覆盖 AgentSpec、Proposal/Web/LayeredReasoner/Builder/Skill 等专用 blocks；legacy scheduler generation 仅保留 compatibility boundary）
 13. ~~**MemoryEvidence 缺失**~~ ✅ 已完成（`agent/memory_evidence.rs` 实现 RepeatedPreference/RecurringGoal/CapabilitySignal/StateTrend/Contradiction/ValueSignal 六种信号提取）
 14. **ActionExecutor hardening**：继续强化 tool metadata、declarative-only 过滤、permission policy、observation/event 记录和 replay re-check。
@@ -868,7 +869,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-01 | **Beta 开发完成（Gates 0-8）**：reqwest 0.12 升级；AgentLoop 双轨（feature flag）；Action Parser JSON envelope + fail-soft；Core OS Tools + Execution Tools 注册；Permission/Replay 闭环；ModelRouter 毕业；UI 导航收敛；Settings 新增 safe paths / AgentLoop toggle；`make ci` 持续通过 | AI Agent |
 | 2026-05-01 | **Week 1: ExternalWriteAction 闭环**：`is_path_in_safe_paths` 公共化；`file.write_proposal` 自动创建 Proposal（含 content_hash/size_bytes/operation）；ExternalWriteAction apply 真实文件写入（safe_paths + 100KB 限制 + 自动创建父目录） | AI Agent |
 | 2026-05-08 | **Week 2: Stub 转 Proposal + Task MVP**：calendar.propose_event / email.propose_draft 生成 ScheduledTask/DataExport Proposal；ScheduledTask MVP（本地 JSON）；DataExport MVP（safe_paths 内文件导出） | AI Agent |
-| 2026-05-08 | **Week 3: AgentLoop Stream + Fallback**：AgentLoop 句子级分 chunk 流式输出（30ms 间隔）；当时引入 graceful fallback（2026-05-26 已收口为 PromptStack-governed compatibility fallback，不再调用 legacy direct generation）；保持默认关闭 | AI Agent |
+| 2026-05-08 | **Week 3: AgentLoop Stream + Fallback**：AgentLoop 句子级分 chunk 流式输出（30ms 间隔）；当时引入 graceful fallback（2026-05-26 已收口为 PromptStack-governed compatibility fallback，不再调用 legacy scheduler generation）；保持默认关闭 | AI Agent |
 | 2026-05-08 | **Week 4: 可观察性 + Feature Flag**：stream-message-start 传递真实 ReasoningTrace（AgentLoop actions/observations）；debug 构建默认启用 AgentLoop | AI Agent |
 | 2026-05-08 | **Week 5: Workspace + Chat Trace**：Dashboard 新增 Workspace 概览卡片（Pending Proposals / Recent Runs / New Chat）；Chat 最后一条 assistant 消息显示模型/provider/工具数/Proposal 数/fallback 标记 | AI Agent |
 | 2026-05-08 | **Week 6: Review Center + 页面收敛**：Chat 顶部 pending proposals banner；主导航从 7 个收敛到 6 个（Memory 移出主导航，保留路由） | AI Agent |

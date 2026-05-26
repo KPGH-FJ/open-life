@@ -1,12 +1,19 @@
 # Current Agent Runtime Audit
 
-Date: 2026-05-10 (updated: P0-P12 implementation complete)
+Date: 2026-05-10 (updated: Codex-level Final Closeout, 2026-05-26)
 
 > **Updated note (2026-05-10)** : P0-P12 vNext primitives have all been implemented in code.
 > The "gaps" described below (AgentRunEvent, PromptStack, ToolRuntime, MemoryEvidence,
 > ExecutionSandbox, PlanMode, SubAgent) are now implemented and tested.
-> The remaining concern is **execution path convergence** — lib.rs still has 5+ entry
-> paths that need to converge to the unified `ExecutionFacade` model.
+>
+> **Closeout note (2026-05-26)** : Codex-level stabilization has now closed the runtime
+> substrate boundaries. Chat / StreamChat, Scheduled, Direct Tool, Replay, and Plan execution
+> use Tauri/core facade or wrapper paths; formal model entrypoints are PromptStack-governed;
+> AgentSpec governance is fail-closed; Builder model helpers are Builder-specific PromptStack +
+> LocalOnly; Calibration is deterministic / proposal-only / not applicable for PromptStack;
+> Runtime fallback is a governed legacy compatibility retry for Runtime/model failure only.
+> Remaining items below are non-blocking engineering debt or LifeModel-stage work unless they
+> are explicitly marked as active blockers.
 
 ## Summary
 
@@ -15,10 +22,10 @@ OpenLife is not a broken project. The current codebase has a real Agent Framewor
 - `AgentLoop` exists and executes an iterative ReAct-style loop.
 - `ActionExecutor` exists and owns many core/execution tool paths.
 - `ProposalEngine` and `ProposalStore` exist.
-- Chat, Builder, Calibration, Memory, ToolPermission, and ExternalWriteAction flows are partially unified through proposals.
-- AgentRun tracing exists, but still needs a stronger append-only event model.
+- Chat, Builder, Calibration, Memory, ToolPermission, and ExternalWriteAction flows are proposal-first for high-risk writes.
+- AgentRun tracing uses append-only `AgentRunEvent` records with typed payload builders for governance, PromptStack metadata, context governance, replay, and runtime fallback events.
 
-The main gap is not missing modules. The main gap is runtime authority: every meaningful agent behavior should be forced through one traceable path with one prompt architecture, one tool runtime, one permission/proposal protocol, and one audit model.
+The main gap is no longer runtime substrate convergence. The remaining large work is the next LifeModel phase: evidence-backed LifeModel Evolution / Editor / Review depth, plus non-blocking engineering debt such as `lib.rs` size, ChatPage decomposition, release packaging, and platform validation.
 
 ## Current Execution Paths
 
@@ -29,18 +36,21 @@ Observed code paths:
 - `src-tauri/src/lib.rs::start_stream_message`
 - `src-tauri/src/lib.rs::start_stream_message_with_agent_loop`
 - L1 reflex path in streaming mode
-- AgentLoop fallback path after runtime/model failure
+- Runtime fallback governed legacy compatibility retry after Runtime/model failure
 - Scheduled task execution path in `src-tauri/src/scheduler_runner.rs`
 
-Current concern:
+Current status:
 
-- The primary path is AgentLoop-oriented, but fallback and streaming branches still create multiple behavioral surfaces.
-- Fallback handling can produce valid user output while losing parts of the normal action/tool trace semantics.
-- `src-tauri/src/lib.rs` is still a large orchestration file, even after bootstrap extraction.
+- Chat and StreamChat enter Tauri `ExecutionFacade` and then `AgentRuntime::execute_task_with_spec`.
+- Scheduled execution uses a Scheduled-specific wrapper and does not inherit Chat fallback.
+- Direct Tool, Replay, and Plan execution are no-model wrapper/action paths; they do not emit fake PromptStack traces.
+- Skill runtime remains outside Chat ExecutionFacade by design, but model execution is Skill PromptStack-governed through stored `AgentSpec`.
+- Runtime fallback is retained only as governed legacy compatibility retry: Runtime/model failures may fallback, Governance failures fail closed, and `fallback.started` / `fallback.completed` / `fallback.failed` payloads are metadata-only.
+- `src-tauri/src/lib.rs` is still a large orchestration file, but size reduction is non-blocking for LifeModel phase entry.
 
-vNext audit conclusion:
+Closeout conclusion:
 
-All chat, scheduled, proactive, builder, calibration, and future sub-agent executions should converge on one `AgentRuntime`/`AgentLoop` entry model, with mode-specific adapters rather than separate behavioral paths.
+All formal model paths that currently create AgentRun records have a governed prompt/runtime boundary or an explicit not-applicable classification. New LifeModel-stage model entrypoints must choose one of `governed`, `legacy compatibility`, or `not applicable` before implementation.
 
 ## AgentLoop
 
@@ -58,7 +68,7 @@ Current concern:
 - Tests exist, but vNext needs behavior tests for full step execution, streaming/non-streaming parity, fallback trace preservation, tool failure observation, and proposal generation under error conditions.
 - AgentLoop status updates are useful but are not a complete append-only event trace.
 
-Needed vNext direction:
+Legacy vNext direction (implemented as of P0-P12; keep for historical context):
 
 - Split AgentLoop internals into smaller phases:
   - `generate_model_reply`
@@ -85,7 +95,7 @@ Current state:
 - Execution tools include file, web, calendar/email/task/a2a-related capabilities depending on current implementation.
 - Proposal-generating tools are treated specially so they can create reviewable side effects instead of being blocked as arbitrary writes.
 
-Current concern:
+Current residual concern:
 
 - `ActionExecutionContext` is an 11-field dependency carrier and has Service Locator pressure.
 - Tool policy, sandbox policy, and executor boundaries are not yet first-class enough for sub-agent and bash expansion.
@@ -109,11 +119,11 @@ Current state:
 
 Current concern:
 
-- Some calibration paths still allow direct apply modes.
-- Proposal generation and proposal application are real, but the event trace around them is not yet strong enough to be the single source of runtime truth.
+- Calibration direct apply modes are default-disabled and remain explicit legacy compatibility gates.
+- Proposal generation and proposal application are real; richer evidence linkage is still needed for the LifeModel phase.
 - Proposal sources exist, but vNext needs richer evidence linkage, especially for memory-driven LifeModel evolution.
 
-Needed vNext direction:
+Next LifeModel direction:
 
 - Treat proposal-first as a framework-level side-effect protocol, not as UI convention.
 - High-risk LifeModel fields must never silently auto-apply.
@@ -124,7 +134,7 @@ Needed vNext direction:
 Current state (updated 2026-05-10):
 
 - **PromptStack** (`agent/prompt_stack.rs`, 922行) is implemented with `PromptBlock` and `PromptBlockRegistry` (4 built-in blocks: base_system, planning, tool_discipline, privacy_rule).
-- AgentLoop-governed paths (send_message, start_stream_message, scheduled, proactive) assemble PromptStack via `execute_task_with_spec()` and inject as `messages[0]`.
+- AgentLoop-governed model paths (Chat, StreamChat, Scheduled, Skill runtime, plus model helper boundaries where documented) assemble PromptStack via `execute_task_with_spec()` or a dedicated helper stack. Proactive suggestion generation is not applicable because it does not create an AgentRun or model PromptStack trace.
 - PromptStack assembly records `PromptStackAssembled` events with typed PromptBlock metadata: id, version, purpose, privacy_level, cloud_allowed, token_budget, applies_to, and estimated_tokens. It does not store raw prompt content, raw LifeModel, raw memory, or raw user content.
 - **Critical gap fixed (2026-05-10)**: `scheduler.rs:generate_governed()` previously caused dual system prompts — the PromptStack one at `messages[0]` and a second LifeModel YAML prompt from `build_system_prompt()`. Now detects existing system message and uses `_raw` variants to avoid double-injection.
 
@@ -139,15 +149,15 @@ Remaining prompt boundary status (updated 2026-05-26):
 | Proactive prompts (proactive.rs) | 5 | Low | Proactive is read-only suggestion generation |
 | Runtime/dynamic prompts | 9 | Low | JSON repair, tool list, follow-up — inherently dynamic content |
 
-Current concern:
+Current residual concern:
 
-- `PromptBlockRegistry::built_in()` has only 4 entries. Missing blocks: LifeModel, MemoryEvidence, Task, Proposal, OutputFormat, Role, SubAgent.
+- `PromptBlockRegistry::built_in()` has expanded with AgentSpec, proposal, web, layered, builder, and skill-specific blocks. Future LifeModel-stage model entrypoints may still need dedicated LifeModel/Evidence/Editor blocks.
 - Legacy `generate()` / `generate_stream()` compatibility paths in `scheduler.rs` and `llm.rs` still build LifeModel system prompts for explicitly non-governed callers only. Formal AgentRuntime / ExecutionFacade Chat, StreamChat, Scheduled, Skill, Plan, Replay, and governed fallback paths must not call them.
 - Chat / StreamChat runtime fallback is intentionally retained as a governed legacy compatibility retry, not a first-class fallback mode. It only handles Runtime/model failures; Governance failures fail closed. `fallback.started` / `fallback.completed` / `fallback.failed` payloads are metadata-only and retain `agent_spec_id`, `privacy_policy`, `generation_path`, PromptStack source, and sanitized error summaries without raw prompt, raw user text, raw LifeModel, raw memory, or full model output.
 
-Needed Post-Beta direction:
+Next-stage direction:
 
-- Expand `PromptBlockRegistry` with LifeModel/Memory/Task/OutputFormat blocks.
+- Add LifeModel / Evidence / Editor / Review-specific PromptBlocks only when those model entrypoints are implemented.
 - Route any future Calibration model-assisted prompt through PromptStack before enabling model generation.
 - Eventually remove ad-hoc system prompt construction from `llm.rs` and `ollama.rs` when all callers go through governed path.
 
@@ -187,29 +197,24 @@ Current strengths:
 - There are meaningful Rust tests around AgentLoop parsing, integration behavior, tool allowlists, proposal tools, and proposal application.
 - The codebase does not appear to rely on large visible TODO/FIXME/HACK markers for known debt.
 
-Current gaps for vNext:
+Remaining gaps for LifeModel phase / non-blocking hardening:
 
-- Full AgentLoop behavior tests for generated action execution.
-- Streaming/non-streaming parity tests.
-- Fallback event preservation tests.
-- ToolRuntime policy matrix tests.
-- PromptStack assembly tests.
+- Broader full AgentLoop behavior tests for generated action execution.
+- Additional streaming/non-streaming parity tests beyond the locked fallback/governance cases.
+- ToolRuntime policy matrix tests for future tools.
 - Memory evidence to LifeModel proposal tests.
 - Sub-agent isolation tests before sub-agent feature work.
 
 ## Audit Conclusion
 
-OpenLife is ready for an Agent Framework upgrade, but the safe order is:
+OpenLife has completed the Codex-level Agent Framework stabilization needed before LifeModel deep development. The safe next order is:
 
 ```text
-runtime convergence
--> event trace
--> tool policy hardening
--> prompt architecture
--> memory evidence/evolution
--> plan mode
--> sub-agents
--> bash/sandbox
+Codex-level acceptance report
+-> LifeModel phase entry gate
+-> evidence-backed LifeModel Evolution proposals
+-> LifeModel Editor / Review workflow hardening
+-> broader product and release readiness
 ```
 
-Sub-agents and bash should not be the first implementation step. They should arrive after the framework has a stronger runtime authority.
+Sub-agents, bash expansion, and release packaging should remain out of the LifeModel entry slice unless a separate acceptance gate explicitly scopes them.

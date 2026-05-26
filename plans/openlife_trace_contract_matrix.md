@@ -5,6 +5,8 @@ Date: 2026-05-18
 Status: active
 
 > This document defines the end-to-end typed event contract from backend emission through frontend parsing to UI display. Every event that carries typed governance payloads (block_reason, proposal_reason, failure_kind, agent_spec_id, proposal_id) is tracked here.
+>
+> Closeout note (2026-05-26): Codex-level Final Closeout keeps runtime fallback as governed legacy compatibility, not a new first-class fallback mode. `fallback.started`, `fallback.completed`, and `fallback.failed` remain Tier 2 metadata events; PromptStack contracts remain metadata-only and do not store raw prompt, raw user text, raw LifeModel, raw memory, or full model output.
 
 ---
 

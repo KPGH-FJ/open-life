@@ -6,6 +6,8 @@ Status: PromptStack full-path audit and safety-net matrix. `prompt_stack.assembl
 
 Scope: Chat, StreamChat, Scheduled, PlanMode / Plan execution, Replay, Skill runtime, Builder, Calibration, Proactive suggestions, Direct tool execution, plus additional prompt assembly findings discovered by source audit.
 
+Closeout note: this matrix is accepted as the PromptStack fact source for Codex-level Final Closeout. Future LifeModel-stage model entrypoints must be classified as governed, legacy compatibility, or not applicable before implementation.
+
 ## Path Classification Summary
 
 - Governed: Chat, StreamChat, Scheduled, Skill runtime, Chat proposal extraction helper, Web content summarization helper, LayeredReasoner internal prompts, Builder model-assisted extraction helpers, and PlanMode planning helper.

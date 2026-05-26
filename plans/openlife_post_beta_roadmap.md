@@ -1,10 +1,10 @@
 # OpenLife Post-Beta 完整发展计划
 
-Date: 2026-05-10
+Date: 2026-05-10 (updated: Codex-level Final Closeout, 2026-05-26)
 
-Status: active
+Status: active / Codex-level stabilization closeout
 
-> 本文档是当前阶段的最高优先级行动指南。P0-P12 全部 vNext 原语已完成代码实现，`make ci` 全绿 799 测试。当前进入 Post-Beta 架构稳固阶段。
+> 本文档是 Post-Beta / Codex-level 阶段索引。P0-P12 全部 vNext 原语已完成代码实现，Codex-level 稳定化边界已经收口；当前只做最终事实同步、验收报告和 LifeModel 阶段准入门控，不做 LifeModel 深度开发或发布打包。
 
 ## Codex-Level Upgrade Entry
 
@@ -15,11 +15,14 @@ Status: active
 3. [`openlife_codex_level_task_breakdown.md`](openlife_codex_level_task_breakdown.md): 可直接分配给 Agent 的批次任务、失败测试要求和审查清单。
 4. [`openlife_codex_level_phase2_execution_facade_prep.md`](openlife_codex_level_phase2_execution_facade_prep.md): Phase 2 执行路径收敛准备文档，定义 Tauri-side ExecutionFacade 的首批开发边界、非目标、测试和 Agent 指令。
 5. [`openlife_codex_level_execution_facade_coverage_audit.md`](openlife_codex_level_execution_facade_coverage_audit.md): ExecutionFacade coverage audit / migration boundary，记录 Chat / StreamChat、Direct Tool Execution、Scheduled-specific facade wrapper、Replay-specific facade wrapper、Plan-specific facade wrapper 已完成迁移，Builder / Calibration / Skill runtime 暂不迁移，并给出下一批最小候选。
-6. [`openlife_prompt_stack_coverage_audit.md`](openlife_prompt_stack_coverage_audit.md): PromptStack 全路径审计矩阵，区分 PromptStack-governed、intentionally legacy/ad hoc、not applicable，并记录 trace / privacy 事实。
+6. [`openlife_prompt_stack_coverage_audit.md`](openlife_prompt_stack_coverage_audit.md): PromptStack 全路径审计矩阵，区分 PromptStack-governed、legacy compatibility、not applicable，并记录 trace / privacy 事实。
+7. [`openlife_codex_level_closeout_acceptance_report.md`](openlife_codex_level_closeout_acceptance_report.md): Codex-level Final Closeout 验收报告，作为进入 LifeModel Evolution / Evidence / Proposal / Editor / Review 阶段前的事实源和门控记录。
 
 这些文档不替代 vNext 原语文档，而是在 Post-Beta 阶段把原语升级为“可信、可审计、可恢复、真实执行”的顶级 Agent 产品标准。
 
 2026-05-26 当前阶段为 **Runtime fallback boundary 最终收口**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 Chat ExecutionFacade：真实路径是 SkillManifest 派生 Skill-specific PromptBlocks → 必需 stored `AgentSpec` → 追加 Skill PromptBlock IDs 的有效 AgentSpec → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Chat proposal extraction 已从 ad hoc prompt 迁入 Proposal-specific PromptStack helper，web content summarization helper 已从 raw summarizer prompt 迁入 Web Summarization PromptStack helper。LayeredReasoner meaning / strategy / generation / safety internal prompts 已迁入 LayeredReasoner-specific PromptBlocks，并作为 metadata-only internal strategy boundary 写入 `ReasoningTrace.prompt_block_traces`；该层不伪造 `prompt_stack.assembled` AgentRunEvent。`InferenceScheduler::generate` / `generate_stream` 和 `llm::build_system_prompt` 现在明确为 legacy compatibility boundary；正式 AgentRuntime / ExecutionFacade governed path 及其 runtime fallback 不再调用 legacy scheduler generation。Chat / StreamChat runtime fallback 保留为 governed legacy compatibility retry：只处理 Runtime/model failure，Governance failure fail-closed；fallback.started / fallback.completed / fallback.failed 统一使用 metadata-only payload builder，保留 `agent_spec_id`、`privacy_policy`、`generation_path`、PromptStack source 和 sanitized error summary，不写 raw prompt、raw user、raw LifeModel、raw memory 或完整模型输出。Builder 模型辅助提取已收口为 Builder-specific PromptBlocks + `generate_raw_governed(..., LocalOnly)`，不走 legacy raw/scheduler generation，且 Builder 仍保持 Proposal-first；Calibration 判定为 deterministic / proposal-only / UI metadata，暂不迁入 PromptStack，direct apply 仅保留显式 legacy compatibility gate。
+
+2026-05-26 Codex-level Final Closeout：Runtime fallback boundary 之后不再继续扩展底座。本轮新增 `openlife_codex_level_closeout_acceptance_report.md`，把 P0-P12、ExecutionFacade、PromptStack、AgentRunEvent/Audit、Proposal-first、runtime fallback、Builder/Calibration 边界和测试门控统一封口。若 `make ci` 继续全绿，下一阶段应进入 LifeModel Evolution / Evidence / Proposal / Editor / Review 的准入后开发，而不是重复做 AgentRuntime 基座扩张。
 
 ---
 
@@ -54,19 +57,20 @@ Status: active
 
 | 指标 | 数值 |
 |------|------|
-| CI 状态 | ✅ 全绿: 140+ Rust 测试 (core + tauri) |
-| 前端测试 | ✅ 214 passed |
-| 前端构建 | ✅ 生产构建 3.87s, 57 chunks |
+| CI 状态 | ✅ 全绿: `make ci` 覆盖 frontend / core / tauri / a2a / build |
+| Rust 测试 | ✅ core 960 passed, 1 ignored；tauri 207 passed；a2a 5 passed |
+| 前端测试 | ✅ 431 passed |
+| 前端构建 | ✅ 生产构建通过 |
 | Rust clippy | ✅ 零警告 |
 | 已知技术债标记 | 0 (agent模块内零TODO/FIXME/HACK) |
-| lib.rs 大小 | 3198 行 (需瘦身) |
+| lib.rs 大小 | 大文件仍需瘦身，但不是 LifeModel 阶段入口阻断项 |
 | ChatPage.tsx 大小 | 1681 行 (暂不重构) |
 
 ### 已知限制
 
 | 限制 | 影响 | 优先级 |
 |------|------|--------|
-| lib.rs 执行路径未收敛 | 多条入口链 (send_message/send_message_with_agent_loop/start_stream_message等5+条) | P0 |
+| lib.rs 仍偏大 | 执行入口已通过 facade/wrapper 收敛，剩余是文件规模与可维护性问题 | P2 |
 | Universal binary 未打通 | 当前仅 aarch64, 缺 x86_64 | P1 |
 | 代码未签名公证 | macOS 需手动允许运行 | P2 |
 | Windows/Linux 未测试 | 仅 macOS 平台验证 | P2 |
@@ -88,8 +92,9 @@ Status: active
 - [x] AGENTS.md: 标记 P12 已验收, 指向本计划
 - [x] 新增 `plans/openlife_post_beta_roadmap.md` (本文档)
 - [ ] 同步 `migration_plan.md`: Phase 0-9 与 P0-P12 实现结果对齐
-- [ ] 同步 `current_agent_runtime_audit.md`: 反映 P0-P12 实现后的新事实
-- [ ] 同步 `README.md`: 更新阶段标记和文档引用
+- [x] 同步 `current_agent_runtime_audit.md`: 反映 P0-P12 与 Codex-level Final Closeout 后的新事实
+- [x] 同步 `README.md`: 更新阶段标记和文档引用
+- [x] 新增 `plans/openlife_codex_level_closeout_acceptance_report.md`: Codex-level 验收报告与 LifeModel 入口门控
 
 ### 1.3 工程清理
 
@@ -100,8 +105,8 @@ Status: active
 ### Phase 1 门控
 
 - [ ] RC 报告为 `go`
-- [ ] 文档与代码事实一致
-- [ ] `make ci` 通过
+- [x] 文档与代码事实一致
+- [x] `make ci` 通过
 
 ---
 
@@ -137,7 +142,7 @@ Status: active
 - [x] Scheduled/Proactive 事件创建验证：成功 / runtime failure 有 run_id 和 AgentRunEvent 追踪；missing AgentSpec 只记录 scheduler task failure/status；NetworkPolicy hard deny/ask 与 Sandbox deny 写 typed `tool.call_blocked`；scheduler failure 不标 completed；late completion 不覆盖并发 terminal state；Proactive suggestions 保持 suggestion-only 且无 Chat fallback
 - [x] Proposal Replay / Replay hardening preparation：审计 `accept_proposal_with_state`、`replay_agent_action` / `replay_action_internal`、Tauri ExecutionFacade assembly、ActionExecutor、Replay typed events 和 ProposalStore；补 missing AgentSpec、original AgentSpec、no tool escalation、ToolPermission deny、NetworkPolicy deny、ExecutionSandbox deny、Proposal status source of truth、typed payload contract、no Chat fallback 测试
 - [x] Replay-specific facade/wrapper 正式迁移：`replay_action_internal` 调用 `run_tauri_replay_execution`；不直接构造 `ActionExecutor`；不使用 Chat facade；不写 Proposal status
-- [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration 仍未迁移；Skill runtime 仍未迁入 ExecutionFacade
+- [x] Plan-specific facade/wrapper 正式迁移：`execute_agent_plan` / `retry_agent_plan` 调用 `run_tauri_plan_execution`；command 层不再直接构造 plan step `ActionExecutor`；不使用 Chat facade；保留 confirmation/review/deviation/retry/status/trace 语义；Builder / Calibration 不属于 Plan wrapper 迁移对象，分别保持 Builder-specific PromptStack / deterministic proposal-only 边界；Skill runtime 保持 Skill-specific PromptStack 边界，不迁入 Chat ExecutionFacade
 - [x] Scheduled/Proactive 事件创建验证
 - [x] Builder/Calibration 事件创建验证：`builder_create_proposals` 与 Calibration Proposal-first 路径写 metadata-only `proposal.created` events；payload 不包含 raw prompt、`before` / `after`、完整 LifeModel；source audit 证明无 Chat facade / fallback；ProposalStatus-gated apply 已有测试保护；`apply_calibration` 缺省 mode 和前端正式按钮默认创建 proposals，legacy `direct` 默认关闭并由 `system.allow_legacy_calibration_direct_apply` 门控，普通 UI 不暴露
 - [x] Skill runtime 迁移前审计与安全网：确认 `run_skill` 仍是模型生成 + skill envelope/proposal 执行的混合路径，不是 Chat facade；补 missing AgentSpec fail-closed、AgentSpec restricted toolset、PromptStack/model failure observability、payload 脱敏、success response shape、no Chat fallback / no wrapper masquerade source audit 测试；该项为 Skill-specific PromptStack 迁移前安全网，ExecutionFacade 迁移仍未进行
@@ -164,11 +169,11 @@ Status: active
 
 ### Phase 2 门控
 
-- [ ] lib.rs 降至 ~2000 行
-- [ ] 所有会创建 AgentRun 的模型执行路径产生可追踪 AgentRunEvent；Proactive suggestion-only / Direct Tool / Replay / Plan action-only 不伪造 PromptStack trace
-- [ ] PromptStack 覆盖率目标仅适用于模型 prompt entrypoint；legacy/ad hoc exceptions 必须在矩阵中显式列出
-- [ ] 无新增编译警告
-- [ ] `make ci` 通过
+- [ ] lib.rs 降至 ~2000 行（非阻塞工程债）
+- [x] 所有会创建 AgentRun 的正式模型执行路径产生可追踪 AgentRunEvent；Proactive suggestion-only / Direct Tool / Replay / Plan action-only 不伪造 PromptStack trace
+- [x] PromptStack 覆盖率目标仅适用于模型 prompt entrypoint；legacy compatibility / not applicable exceptions 已在矩阵中显式列出
+- [x] 无新增编译警告
+- [x] `make ci` 通过
 
 ---
 

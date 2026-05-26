@@ -12,25 +12,24 @@ LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Executio
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Beta** 阶段（P12 Beta Release Candidate 已验收）：
+当前项目处于 **Codex-level Final Closeout** 阶段：P12 Beta Release Candidate 已验收，Codex-level 稳定化正在做最终事实同步、验收报告和 LifeModel 阶段准入门控。
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **P0-P12 vNext 原语全部实现（2026-05-10 验收）**：AgentRunEvent (45种，含 Runtime fallback metadata events)、PromptStack (10 Block)、ToolRuntime/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。`make ci` 全绿（140+ Rust 测试 + 214 前端测试）。
-- **当前进入 Post-Beta 架构稳固阶段**：执行路径收敛、文档同步、真实用户试用反馈闭环、LifeModel Evolution 管线闭环。完整计划参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)。
+- **P0-P12 vNext 原语全部实现（2026-05-10 验收）**：AgentRunEvent (45种，含 Runtime fallback metadata events)、PromptStack (10 Block)、ToolRuntime/ExecutionSandbox/ShellExecutor、MemoryEvidence、AgentSpec/PlanMode/SubAgentRuntime、Compaction、Proactive Engine。最新 `make ci` 覆盖 frontend / core / tauri / a2a / build，并保持全绿。
+- **当前不做发布打包，也不进入 LifeModel 深度开发**：本轮只做 Codex-level 稳定化收口。完整计划参考 [`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)，收口报告参考 [`plans/openlife_codex_level_closeout_acceptance_report.md`](plans/openlife_codex_level_closeout_acceptance_report.md)。
 
-下一大阶段是 **vNext Agent Framework Upgrade**。目标不是继续堆页面或工具，而是把 OpenLife 升级为：
+下一大阶段是 **LifeModel Evolution / Evidence / Proposal / Editor / Review**。目标不是继续扩展 runtime 底座，而是让 LifeModel 深度功能踩在稳定、可治理、可审计的 Agent Framework 地基上：
 
 ```text
 LifeModel-governed Personal Agent Framework
 ```
 
-vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta 架构稳固**：
+vNext 全部原语（P0-P12）已完成代码实现，Codex-level 稳定化边界也已收口。下一步是 **LifeModel 阶段准入后再启动深度开发**：
 
-- **执行路径收敛**：统一 lib.rs 的 5+ 条执行入口到单一 facade。
-- **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端。
+- **LifeModel Evolution 管线闭环**：MemoryEvidence → EvolutionEngine → Proposal 端到端，但必须保持 Proposal-first 和 fail-closed 治理。
 - **PromptStack 全路径审计**：已新增覆盖矩阵，明确 Chat / StreamChat / Scheduled / Skill-specific prompt 已 PromptStack-governed；正式 `prompt_stack.assembled` AgentRunEvent 统一记录 typed PromptBlock metadata（id/version/purpose/privacy/cloud/budget/applies_to/tokens）且不写 raw prompt / raw LifeModel / raw memory / raw user content；Chat proposal extraction 已迁入 Proposal-specific PromptStack helper，web content summarization helper 已迁入 Web Summarization PromptStack helper，二者均返回 metadata-only audit 且不伪造 AgentRunEvent；LayeredReasoner meaning / strategy / generation / safety internal prompts 已迁入 PromptStack-governed internal strategy boundary，使用 metadata-only `ReasoningTrace` block trace 且不伪造 `prompt_stack.assembled`；`InferenceScheduler::generate` / `generate_stream` 仅保留为 legacy compatibility boundary，正式 AgentRuntime / ExecutionFacade governed path 及 runtime fallback 不再调用；Chat / StreamChat runtime fallback 保留为 governed legacy compatibility retry，仅处理 Runtime/model failure，Governance failure fail-closed，fallback payload metadata-only；Builder 模型辅助提取已迁入 Builder-specific PromptBlocks 并强制 LocalOnly；Calibration 当前为 deterministic / proposal-only / UI metadata，不适用 PromptStack，direct apply 仅保留显式 legacy compatibility gate。
-- **生产就绪**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构。
+- **非当前阶段事项**：Universal binary、代码签名、Windows/Linux 验证、ChatPage 重构、公开试用发布。
 
 完整计划：[`plans/openlife_post_beta_roadmap.md`](plans/openlife_post_beta_roadmap.md)
 
@@ -40,6 +39,7 @@ vNext 全部原语（P0-P12）已完成代码实现。下一步是 **Post-Beta �
 - [OpenLife ReAct Beta Roadmap](plans/openlife_react_beta_roadmap.md)
 - [OpenLife vNext Architecture Principles](plans/openlife_vnext_architecture_principles.md)
 - [OpenLife post-Beta Development Plan](plans/openlife_post_beta_roadmap.md) (当前活跃)
+- [OpenLife Codex-level Closeout Acceptance Report](plans/openlife_codex_level_closeout_acceptance_report.md) (当前收口报告)
 - [OpenLife PromptStack Coverage Audit](plans/openlife_prompt_stack_coverage_audit.md) (当前 PromptStack 事实矩阵)
 
 ## 核心能力
