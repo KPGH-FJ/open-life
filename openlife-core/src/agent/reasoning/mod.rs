@@ -40,6 +40,11 @@ pub struct ReasoningTrace {
     pub layer_timings_ms: HashMap<String, u64>,
     #[serde(default)]
     pub stable_steps: Vec<String>,
+    /// Metadata-only PromptBlock traces for internal LayeredReasoner phases.
+    /// This is not an AgentRunEvent prompt_stack.assembled payload and contains
+    /// no raw assembled prompt text.
+    #[serde(default)]
+    pub prompt_block_traces: HashMap<String, Vec<crate::agent::prompt_stack::BlockTraceEntry>>,
 }
 
 impl ReasoningTrace {

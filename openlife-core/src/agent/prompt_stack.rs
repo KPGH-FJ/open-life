@@ -586,6 +586,153 @@ impl PromptBlock {
         }
     }
 
+    pub fn layered_reasoner_meaning_role() -> Self {
+        Self::new(
+            "layered_reasoner.meaning.role",
+            "1.0.0",
+            PromptPurpose::Custom("layered_reasoning".into()),
+            "LayeredReasoner meaning phase: classify the request at a high level, identify safety-sensitive topic categories, and derive value-alignment constraints without inventing user facts.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(180)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Meaning".into()])
+    }
+
+    pub fn layered_reasoner_meaning_output_contract() -> Self {
+        Self::new(
+            "layered_reasoner.meaning.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Meaning phase output contract: {\"text\":\"short meaning constraint\", \"forbidden_keywords\":[], \"aligned_values\":[], \"risk_level\":\"low|high\"}. SummaryOnly must use non-identifying value direction or counts, never raw LifeModel fields.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(220)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Meaning".into()])
+    }
+
+    pub fn layered_reasoner_strategy_role() -> Self {
+        Self::new(
+            "layered_reasoner.strategy.role",
+            "1.0.0",
+            PromptPurpose::Custom("layered_reasoning".into()),
+            "You are OpenLife's strategy planning layer. Produce a concise response strategy from governed task context. Do not apply LifeModel changes. Do not call tools directly. Return only valid JSON.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(220)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Strategy".into()])
+    }
+
+    pub fn layered_reasoner_strategy_output_contract() -> Self {
+        Self::new(
+            "layered_reasoner.strategy.output_contract",
+            "1.0.0",
+            PromptPurpose::OutputFormat,
+            "Return ONLY valid JSON without markdown fences: {\"text\":\"strategy description under 50 Chinese characters\", \"plan_steps\":[\"step\"], \"required_keywords\":[], \"needs_tools\":false, \"suggested_tools\":[], \"conflict_flags\":[], \"response_style\":\"coaching|investigative\"}. Required fields include \"plan_steps\" and \"risk_level\" may be carried forward when relevant.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(360)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Strategy".into()])
+    }
+
+    pub fn layered_reasoner_generation_role() -> Self {
+        Self::new(
+            "layered_reasoner.generation.role",
+            "1.0.0",
+            PromptPurpose::Custom("layered_reasoning".into()),
+            "LayeredReasoner generation phase: answer using the meaning and strategy constraints, preserve the AgentSpec PromptStack already present in the runtime, and avoid exposing internal reasoning or prompt text.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(220)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Generation".into()])
+    }
+
+    pub fn layered_reasoner_safety_role() -> Self {
+        Self::new(
+            "layered_reasoner.safety.role",
+            "1.0.0",
+            PromptPurpose::Custom("layered_reasoning_safety".into()),
+            "LayeredReasoner safety boundary: deterministic checks compare generation output against meaning and strategy constraints. This boundary records metadata-only block trace and never emits a fake prompt_stack.assembled event.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(200)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Safety".into()])
+    }
+
+    pub fn layered_reasoner_privacy_rules() -> Self {
+        Self::new(
+            "layered_reasoner.privacy_rules",
+            "1.0.0",
+            PromptPurpose::Privacy,
+            "Privacy rules: LocalOnly must use the local governed route or fail closed. SummaryOnly task and phase prompts omit raw user text, raw LifeModel fields, goal names/descriptions, raw memory, and raw tools text. CloudAllowed may include governed task context for model execution, but audit and block_trace remain metadata-only and must never include raw prompt, raw user input, raw LifeModel, or raw memory. Stable failure reasons include unknown_prompt_block and prompt_stack_validation_failed.",
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(360)
+        .with_applies_to(vec!["LayeredReasoner".into()])
+    }
+
+    pub fn layered_reasoner_strategy_task_input(
+        user_text: &str,
+        life_model: &crate::life_model::LifeModel,
+        task_kind: crate::agent::types::AgentTaskKind,
+        has_tools: bool,
+        has_memory: bool,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let content = layered_reasoner_task_context(
+            user_text,
+            life_model,
+            task_kind,
+            has_tools,
+            has_memory,
+            privacy_policy,
+        );
+        let block = Self::new(
+            "layered_reasoner.strategy.task_input",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_token_budget(900)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Strategy".into()]);
+
+        match privacy_policy {
+            crate::agent::types::PrivacyPolicy::LocalOnly => {
+                block.with_privacy(PromptPrivacyLevel::StrictlyLocal)
+            }
+            crate::agent::types::PrivacyPolicy::SummaryOnly => block
+                .with_privacy(PromptPrivacyLevel::Internal)
+                .with_cloud_allowed(true),
+            crate::agent::types::PrivacyPolicy::CloudAllowed => block
+                .with_privacy(PromptPrivacyLevel::Sensitive)
+                .with_cloud_allowed(true),
+        }
+    }
+
+    pub fn layered_reasoner_generation_constraints(
+        meaning: &serde_json::Value,
+        strategy: &serde_json::Value,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> Self {
+        let content = render_layered_generation_constraints(meaning, strategy, privacy_policy);
+        Self::new(
+            "layered_reasoner.generation.constraints",
+            "1.0.0",
+            PromptPurpose::Task,
+            content,
+        )
+        .with_privacy(PromptPrivacyLevel::Internal)
+        .with_cloud_allowed(true)
+        .with_token_budget(700)
+        .with_applies_to(vec!["LayeredReasoner".into(), "Generation".into()])
+    }
+
     /// Estimate token count using a simple heuristic (≈ chars / 4).
     pub fn estimated_tokens(&self) -> usize {
         self.content.chars().count() / 4
@@ -688,6 +835,161 @@ fn web_summarization_content_stats(content: &str, source_type: &str) -> String {
         }
     })
     .to_string()
+}
+
+fn layered_reasoner_task_context(
+    user_text: &str,
+    life_model: &crate::life_model::LifeModel,
+    task_kind: crate::agent::types::AgentTaskKind,
+    has_tools: bool,
+    has_memory: bool,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+) -> String {
+    match privacy_policy {
+        crate::agent::types::PrivacyPolicy::SummaryOnly => {
+            let goal_count = life_model.goals.short_term.len()
+                + life_model.goals.medium_term.len()
+                + life_model.goals.long_term.len()
+                + life_model.goals.life_goals.len();
+            let high_priority_goal_count = life_model
+                .goals
+                .short_term
+                .iter()
+                .chain(life_model.goals.medium_term.iter())
+                .chain(life_model.goals.long_term.iter())
+                .chain(life_model.goals.life_goals.iter())
+                .filter(|g| g.priority >= 3)
+                .count();
+            let contract = serde_json::json!({
+                "privacy_policy": "SummaryOnly",
+                "task_kind": task_kind.to_string(),
+                "message_character_count": user_text.chars().count(),
+                "goal_count": goal_count,
+                "high_priority_goal_count": high_priority_goal_count,
+                "value_count": life_model.identity.values.len(),
+                "has_tools": has_tools,
+                "has_memory": has_memory,
+                "omitted": [
+                    "raw_user_text",
+                    "raw_life_model",
+                    "goal_names",
+                    "goal_descriptions",
+                    "raw_memory",
+                    "raw_tools"
+                ]
+            });
+            format!(
+                "[SummaryOnly] LayeredReasoner strategy task input.\n请求方法: {}\n用户输入: 用户提出了一个请求，原文因 SummaryOnly 隐私策略已省略。\n用户共有 {} 个目标，其中 {} 个为高优先级（未列出名称/描述因隐私策略）。\n可用工具: {}\n相关记忆: {}{}\nmetadata-only contract:\n{}",
+                task_kind,
+                goal_count,
+                high_priority_goal_count,
+                if has_tools { "是" } else { "否" },
+                if has_memory { "存在" } else { "不存在" },
+                if has_memory {
+                    "（内容因隐私策略省略）。策略应保持一致性。"
+                } else {
+                    ""
+                },
+                contract
+            )
+        }
+        crate::agent::types::PrivacyPolicy::LocalOnly => {
+            let active_goals = layered_reasoner_active_goal_lines(life_model);
+            format!(
+                "[LocalOnly] Keep this strategy task input on the local model only.\n请求方法: {}\n用户输入: {}\n用户高优先级目标:\n{}\n可用工具: {}\n相关记忆: {}",
+                task_kind,
+                user_text,
+                if active_goals.is_empty() {
+                    "[]".to_string()
+                } else {
+                    active_goals.join("\n")
+                },
+                if has_tools { "是" } else { "否" },
+                if has_memory { "存在。策略应保持一致性。" } else { "不存在" }
+            )
+        }
+        crate::agent::types::PrivacyPolicy::CloudAllowed => {
+            let active_goals = layered_reasoner_active_goal_lines(life_model);
+            format!(
+                "[CloudAllowed] Audit metadata must remain metadata-only.\n请求方法: {}\n用户输入: {}\n用户高优先级目标:\n{}\n可用工具: {}\n相关记忆: {}",
+                task_kind,
+                user_text,
+                if active_goals.is_empty() {
+                    "[]".to_string()
+                } else {
+                    active_goals.join("\n")
+                },
+                if has_tools { "是" } else { "否" },
+                if has_memory { "存在。策略应保持一致性。" } else { "不存在" }
+            )
+        }
+    }
+}
+
+fn layered_reasoner_active_goal_lines(life_model: &crate::life_model::LifeModel) -> Vec<String> {
+    life_model
+        .goals
+        .short_term
+        .iter()
+        .chain(life_model.goals.medium_term.iter())
+        .chain(life_model.goals.long_term.iter())
+        .chain(life_model.goals.life_goals.iter())
+        .filter(|g| g.priority >= 3)
+        .map(|g| format!("- [{}] {} (priority {})", g.name, g.description, g.priority))
+        .collect()
+}
+
+fn render_layered_generation_constraints(
+    meaning: &serde_json::Value,
+    strategy: &serde_json::Value,
+    privacy_policy: crate::agent::types::PrivacyPolicy,
+) -> String {
+    let mut parts = Vec::new();
+    if privacy_policy == crate::agent::types::PrivacyPolicy::SummaryOnly {
+        parts.push(
+            "[SummaryOnly] Use only sanitized meaning/strategy constraints. Raw user text, raw LifeModel, goal names/descriptions, and raw memory are omitted."
+                .to_string(),
+        );
+    }
+
+    if let Some(text) = meaning.get("text").and_then(|t| t.as_str()) {
+        parts.push(format!("Meaning constraint: {}", text));
+    }
+
+    if let Some(text) = strategy.get("text").and_then(|t| t.as_str()) {
+        parts.push(format!("Strategy constraint: {}", text));
+    }
+
+    if privacy_policy != crate::agent::types::PrivacyPolicy::SummaryOnly {
+        if let Some(goals) = strategy.get("aligned_goals").and_then(|v| v.as_array()) {
+            let goals_text = goals
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            if !goals_text.is_empty() {
+                parts.push(format!("Priority goals: {}", goals_text));
+            }
+        }
+    }
+
+    if let Some(steps) = strategy.get("plan_steps").and_then(|s| s.as_array()) {
+        let rendered_steps = steps
+            .iter()
+            .filter_map(|step| step.as_str())
+            .enumerate()
+            .map(|(idx, step)| format!("{}. {}", idx + 1, step))
+            .collect::<Vec<_>>();
+        if !rendered_steps.is_empty() {
+            parts.push(format!("Plan steps:\n{}", rendered_steps.join("\n")));
+        }
+    }
+
+    if parts.is_empty() {
+        "LayeredReasoner generation constraints: respond as OpenLife with warmth, clarity, and practical next steps.".to_string()
+    } else {
+        parts.join("\n")
+    }
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -1129,6 +1431,105 @@ impl PromptStack {
         Ok(stack)
     }
 
+    pub fn layered_reasoner_block_ids() -> Vec<String> {
+        vec![
+            "layered_reasoner.meaning.role".to_string(),
+            "layered_reasoner.meaning.output_contract".to_string(),
+            "layered_reasoner.strategy.role".to_string(),
+            "layered_reasoner.strategy.output_contract".to_string(),
+            "layered_reasoner.generation.role".to_string(),
+            "layered_reasoner.safety.role".to_string(),
+            "layered_reasoner.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn layered_reasoner_strategy_block_ids() -> Vec<String> {
+        vec![
+            "layered_reasoner.strategy.role".to_string(),
+            "layered_reasoner.strategy.output_contract".to_string(),
+            "layered_reasoner.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn layered_reasoner_generation_block_ids() -> Vec<String> {
+        vec![
+            "layered_reasoner.generation.role".to_string(),
+            "layered_reasoner.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn layered_reasoner_safety_block_ids() -> Vec<String> {
+        vec![
+            "layered_reasoner.safety.role".to_string(),
+            "layered_reasoner.privacy_rules".to_string(),
+        ]
+    }
+
+    pub fn layered_reasoner_strategy_stack(
+        user_text: &str,
+        life_model: &crate::life_model::LifeModel,
+        task_kind: crate::agent::types::AgentTaskKind,
+        has_tools: bool,
+        has_memory: bool,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        Self::layered_reasoner_strategy_stack_with_registry(
+            user_text,
+            life_model,
+            task_kind,
+            has_tools,
+            has_memory,
+            privacy_policy,
+            &registry,
+            &Self::layered_reasoner_strategy_block_ids(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn layered_reasoner_strategy_stack_with_registry(
+        user_text: &str,
+        life_model: &crate::life_model::LifeModel,
+        task_kind: crate::agent::types::AgentTaskKind,
+        has_tools: bool,
+        has_memory: bool,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+        registry: &PromptBlockRegistry,
+        block_ids: &[String],
+    ) -> std::result::Result<Self, String> {
+        let mut stack = Self::try_from_agentspec(block_ids, registry)?;
+        stack.push(PromptBlock::layered_reasoner_strategy_task_input(
+            user_text,
+            life_model,
+            task_kind,
+            has_tools,
+            has_memory,
+            privacy_policy,
+        ));
+        Ok(stack)
+    }
+
+    pub fn layered_reasoner_generation_stack(
+        meaning: &serde_json::Value,
+        strategy: &serde_json::Value,
+        privacy_policy: crate::agent::types::PrivacyPolicy,
+    ) -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        let mut stack =
+            Self::try_from_agentspec(&Self::layered_reasoner_generation_block_ids(), &registry)?;
+        stack.push(PromptBlock::layered_reasoner_generation_constraints(
+            meaning,
+            strategy,
+            privacy_policy,
+        ));
+        Ok(stack)
+    }
+
+    pub fn layered_reasoner_safety_stack() -> std::result::Result<Self, String> {
+        let registry = PromptBlockRegistry::built_in();
+        Self::try_from_agentspec(&Self::layered_reasoner_safety_block_ids(), &registry)
+    }
+
     /// Push a block onto the stack.
     pub fn push(&mut self, block: PromptBlock) {
         self.blocks.push(block);
@@ -1211,7 +1612,7 @@ impl Default for PromptStack {
 }
 
 /// A trace entry for a single block in the stack.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockTraceEntry {
     pub id: String,
     pub version: String,
@@ -1338,6 +1739,34 @@ impl PromptBlockRegistry {
             .with_block(
                 "web_summarization.task_input",
                 PromptBlock::web_summarization_task_input_template(),
+            )
+            .with_block(
+                "layered_reasoner.meaning.role",
+                PromptBlock::layered_reasoner_meaning_role(),
+            )
+            .with_block(
+                "layered_reasoner.meaning.output_contract",
+                PromptBlock::layered_reasoner_meaning_output_contract(),
+            )
+            .with_block(
+                "layered_reasoner.strategy.role",
+                PromptBlock::layered_reasoner_strategy_role(),
+            )
+            .with_block(
+                "layered_reasoner.strategy.output_contract",
+                PromptBlock::layered_reasoner_strategy_output_contract(),
+            )
+            .with_block(
+                "layered_reasoner.generation.role",
+                PromptBlock::layered_reasoner_generation_role(),
+            )
+            .with_block(
+                "layered_reasoner.safety.role",
+                PromptBlock::layered_reasoner_safety_role(),
+            )
+            .with_block(
+                "layered_reasoner.privacy_rules",
+                PromptBlock::layered_reasoner_privacy_rules(),
             )
     }
 }
@@ -1864,6 +2293,102 @@ mod tests {
         assert!(!assembled.contains("RAW_URL_SENTINEL"));
         assert!(!metadata.contains("RAW_WEB_CONTENT_SENTINEL"));
         assert!(!metadata.contains("RAW_URL_SENTINEL"));
+    }
+
+    #[test]
+    fn layered_reasoner_prompt_stack_has_stable_contract_blocks() {
+        let registry = PromptBlockRegistry::built_in();
+        let ids = PromptStack::layered_reasoner_block_ids();
+        let stack = PromptStack::try_from_agentspec(&ids, &registry).unwrap();
+
+        let trace = stack.block_trace();
+        let expected = [
+            (
+                "layered_reasoner.meaning.role",
+                "1.0.0",
+                "layered_reasoning",
+            ),
+            (
+                "layered_reasoner.meaning.output_contract",
+                "1.0.0",
+                "output_format",
+            ),
+            (
+                "layered_reasoner.strategy.role",
+                "1.0.0",
+                "layered_reasoning",
+            ),
+            (
+                "layered_reasoner.strategy.output_contract",
+                "1.0.0",
+                "output_format",
+            ),
+            (
+                "layered_reasoner.generation.role",
+                "1.0.0",
+                "layered_reasoning",
+            ),
+            (
+                "layered_reasoner.safety.role",
+                "1.0.0",
+                "layered_reasoning_safety",
+            ),
+            ("layered_reasoner.privacy_rules", "1.0.0", "privacy"),
+        ];
+        for (id, version, purpose) in expected {
+            assert!(
+                trace.iter().any(|entry| entry.id == id
+                    && entry.version == version
+                    && entry.purpose == purpose),
+                "missing stable PromptBlock trace entry for {id}@{version}/{purpose}: {trace:?}"
+            );
+        }
+
+        let mut stack = stack;
+        let assembled = stack.assemble();
+        assert!(assembled.contains("\"risk_level\""));
+        assert!(assembled.contains("\"plan_steps\""));
+        assert!(assembled.contains("LocalOnly"));
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(assembled.contains("metadata-only"));
+    }
+
+    #[test]
+    fn layered_reasoner_summary_only_prompt_excludes_raw_sentinels() {
+        let mut lm = crate::life_model::LifeModel::default();
+        lm.identity.values = vec![crate::life_model::ValueItem {
+            name: "RAW_LIFEMODEL_SENTINEL".to_string(),
+            weight: 10,
+            description: "must not leave summary-only boundary".to_string(),
+        }];
+        lm.goals.short_term = vec![crate::life_model::GoalItem {
+            name: "RAW_GOAL_SENTINEL".to_string(),
+            description: "RAW_GOAL_DESCRIPTION_SENTINEL".to_string(),
+            priority: 9,
+            ..Default::default()
+        }];
+
+        let mut stack = PromptStack::layered_reasoner_strategy_stack(
+            "RAW_USER_SENTINEL asks for help",
+            &lm,
+            crate::agent::types::AgentTaskKind::Conversation,
+            true,
+            true,
+            crate::agent::types::PrivacyPolicy::SummaryOnly,
+        )
+        .unwrap();
+        let assembled = stack.assemble();
+        let metadata = serde_json::to_string(&stack.block_trace()).unwrap();
+
+        assert!(assembled.contains("SummaryOnly"));
+        assert!(assembled.contains("message_character_count"));
+        assert!(assembled.contains("goal_count"));
+        assert!(!assembled.contains("RAW_USER_SENTINEL"));
+        assert!(!assembled.contains("RAW_LIFEMODEL_SENTINEL"));
+        assert!(!assembled.contains("RAW_GOAL_SENTINEL"));
+        assert!(!assembled.contains("RAW_GOAL_DESCRIPTION_SENTINEL"));
+        assert!(!metadata.contains("RAW_USER_SENTINEL"));
+        assert!(!metadata.contains("RAW_LIFEMODEL_SENTINEL"));
     }
 
     #[test]
