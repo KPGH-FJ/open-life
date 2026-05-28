@@ -1,6 +1,7 @@
 pub mod action_executor;
 pub mod agent_loop;
 pub mod context_assembler;
+pub mod evidence_store;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
@@ -23,6 +24,10 @@ pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallb
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,
+};
+pub use evidence_store::{
+    EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
+    EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
