@@ -3,6 +3,7 @@ pub mod agent_loop;
 pub mod context_assembler;
 pub mod evidence_store;
 pub mod heuristic_store;
+pub mod hs_selector;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
@@ -35,6 +36,10 @@ pub use heuristic_store::{
     DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicDraft, HeuristicLifecycleStatus,
     HeuristicLineage, HeuristicQuery, HeuristicRecord, HeuristicStore, HeuristicUsageMetadata,
     HeuristicValidationState,
+};
+pub use hs_selector::{
+    HSAssetExclusion, HSAssetKind, HSExclusionReason, HSSelectionAudit, HSSelector,
+    HSSelectorInput, RuntimeHSPacket, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
