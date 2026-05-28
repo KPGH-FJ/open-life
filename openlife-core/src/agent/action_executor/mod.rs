@@ -82,6 +82,7 @@ pub struct ActionExecutionContext<'a> {
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
     pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
+    pub hs_runtime_packet: Option<&'a crate::agent::RuntimeHSPacket>,
     /// ICS calendar file paths for calendar.read tool
     pub calendar_ics_paths: &'a [String],
 }
@@ -107,6 +108,7 @@ impl<'a> ActionExecutionContext<'a> {
             proposal_store: None,
             agent_run_store: None,
             network_policy: None,
+            hs_runtime_packet: None,
             calendar_ics_paths: &[],
         }
     }
@@ -141,6 +143,11 @@ impl<'a> ActionExecutionContext<'a> {
 
     pub fn with_calendar_ics_paths(mut self, paths: &'a [String]) -> Self {
         self.calendar_ics_paths = paths;
+        self
+    }
+
+    pub fn with_hs_runtime_packet(mut self, packet: &'a crate::agent::RuntimeHSPacket) -> Self {
+        self.hs_runtime_packet = Some(packet);
         self
     }
 }

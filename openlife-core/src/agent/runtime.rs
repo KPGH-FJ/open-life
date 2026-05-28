@@ -4,6 +4,7 @@ use crate::agent::reasoning::{
     ReasoningStrategy, ReasoningTrace,
 };
 use crate::agent::types::AgentTask;
+use crate::agent::{HSSelectionAudit, RuntimeHSPacket};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -178,6 +179,7 @@ impl AgentRuntime {
             suggested_tools: reasoning_output.suggested_tools,
             plan_steps: reasoning_output.plan_steps,
             context_summary: context.context_summary,
+            hs_selection_audit: None,
         })
     }
 
@@ -190,6 +192,50 @@ impl AgentRuntime {
         memory_context: Option<String>,
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            None,
+        )
+        .await
+    }
+
+    pub async fn generate_direct_with_hs_packet(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+        )
+        .await
+    }
+
+    async fn generate_direct_inner(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         let input = AssembleInput {
             session_id: task.session_id.clone(),
@@ -207,12 +253,25 @@ impl AgentRuntime {
             .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
+        let mut final_messages = context.desensitized_messages.to_vec();
+        let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+        if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+            final_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: prompt,
+                },
+            );
+        }
+
         Ok(AgentRuntimeOutput {
-            final_messages: context.desensitized_messages.to_vec(),
+            final_messages,
             reasoning_trace: ReasoningTrace::default(),
             suggested_tools: vec![],
             plan_steps: vec![],
             context_summary: context.context_summary,
+            hs_selection_audit,
         })
     }
 }
@@ -225,6 +284,24 @@ pub struct AgentRuntimeOutput {
     pub suggested_tools: Vec<String>,
     pub plan_steps: Vec<String>,
     pub context_summary: crate::agent::types::ContextSummary,
+    pub hs_selection_audit: Option<HSSelectionAudit>,
+}
+
+fn build_hs_runtime_prompt(packet: &RuntimeHSPacket) -> Option<String> {
+    if packet.selected_heuristics.is_empty() {
+        return None;
+    }
+    let guidance = packet
+        .selected_heuristics
+        .iter()
+        .take(4)
+        .map(|heuristic| format!("- [{}] {}", heuristic.heuristic_id, heuristic.guidance))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "Selected personal collaboration guidance for this run:\n{}",
+        guidance
+    ))
 }
 
 /// Errors from AgentRuntime.

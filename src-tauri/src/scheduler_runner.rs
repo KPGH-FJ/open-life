@@ -211,6 +211,7 @@ async fn execute_scheduled_task(
             proposal_store: proposal_store_guard.as_deref(),
             agent_run_store: agent_run_store_guard.as_deref(),
             network_policy: Some(&network_policy),
+            hs_runtime_packet: None,
         };
 
         agent_loop

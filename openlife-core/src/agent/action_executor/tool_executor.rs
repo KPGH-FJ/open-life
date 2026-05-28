@@ -14,10 +14,12 @@ use super::ActionExecutionContext;
 use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
+use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
 use crate::agent::types::{
     AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
     ToolActionScope,
 };
+use ring::digest::{digest, SHA256};
 
 /// Returns true if the tool name indicates a proposal-generation tool that
 /// only creates a user-confirmable Proposal (no direct side effect).
@@ -32,6 +34,29 @@ fn is_proposal_generation_tool(name: &str) -> bool {
         || name.ends_with(".propose_patch")
         || name.ends_with(".propose_update")
         || name.ends_with(".propose_event")
+}
+
+fn hs_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
+    ctx.hs_runtime_packet.is_some_and(|packet| {
+        packet
+            .selected_policies
+            .iter()
+            .any(|policy| policy.policy_id == BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST)
+    })
+}
+
+fn is_direct_external_write_tool(manifest: &ToolManifest) -> bool {
+    if manifest.declarative_only || is_proposal_generation_tool(&manifest.name) {
+        return false;
+    }
+
+    matches!(
+        manifest.action_type.as_str(),
+        "write" | "external_side_effect"
+    ) || manifest
+        .capabilities
+        .iter()
+        .any(|capability| matches!(capability.as_str(), "write" | "external_side_effect"))
 }
 
 impl super::ActionExecutor {
@@ -175,6 +200,20 @@ impl super::ActionExecutor {
             }
 
             let needs_confirmation = should_mark_needs_confirmation(&decision, &inspection);
+
+            // HS proposal-first policies convert blocked direct writes into
+            // user-reviewable ExternalWriteAction proposals.
+            if needs_confirmation {
+                if let Some(m) = manifest.as_ref().filter(|m| {
+                    hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+                }) {
+                    if let Some(result) = self
+                        .create_external_write_action_proposal(&request, ctx, tool_name, &args, m)
+                    {
+                        return result;
+                    }
+                }
+            }
 
             // Auto-generate ToolPermission Proposal when blocked by policy
             // so the user can grant permission and continue in the Review Center.
@@ -656,6 +695,100 @@ impl super::ActionExecutor {
             &format!(
                 "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
                 tool_name, proposal.id
+            ),
+        );
+
+        Some(Ok(result))
+    }
+
+    fn create_external_write_action_proposal(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        manifest: &ToolManifest,
+    ) -> Option<anyhow::Result<ActionExecutionResult>> {
+        let proposal_store = ctx.proposal_store?;
+        let source = canonical_tool_source(manifest);
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file_path"))
+            .or_else(|| args.get("destination"))
+            .and_then(Value::as_str)
+            .unwrap_or(tool_name);
+        let content_value = args
+            .get("content")
+            .or_else(|| args.get("body"))
+            .or_else(|| args.get("data"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let content_text = content_value
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| content_value.to_string());
+        let hash = digest(&SHA256, content_text.as_bytes());
+        let content_hash: String = hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
+        let size_bytes = content_text.len();
+        let content_preview = if content_text.len() > 4000 {
+            let preview: String = content_text.chars().take(4000).collect();
+            format!(
+                "{}... [truncated {} bytes]",
+                preview,
+                content_text.len() - preview.len()
+            )
+        } else {
+            content_text.clone()
+        };
+        let operation = if !path.is_empty() && std::path::Path::new(path).exists() {
+            "overwrite"
+        } else {
+            "create"
+        };
+
+        let mut proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("{}.{}", source, path),
+            serde_json::json!({
+                "tool_name": tool_name,
+                "tool_id": manifest.id,
+                "source": source,
+                "arguments": args,
+                "path": path,
+                "content_preview": content_preview,
+                "content_hash": content_hash,
+                "size_bytes": size_bytes,
+                "operation": operation,
+                "requires_confirmation": true,
+                "hs_policy_id": BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            }),
+            &format!(
+                "Agent proposed external write via '{}' ({})",
+                tool_name, operation
+            ),
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+
+        if let Some(ref run_id) = request.source_run_id {
+            proposal.run_id = Some(run_id.clone());
+        }
+        let proposal_id = proposal.id.clone();
+
+        if let Err(e) = proposal_store.create_proposal(&proposal) {
+            eprintln!(
+                "[warn] Failed to create ExternalWriteAction Proposal for {}: {}",
+                tool_name, e
+            );
+            return None;
+        }
+
+        let result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: created ExternalWriteAction proposal (id: {}) for HS proposal-first policy",
+                tool_name, proposal_id
             ),
         );
 

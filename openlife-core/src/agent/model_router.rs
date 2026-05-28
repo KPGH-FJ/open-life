@@ -1,5 +1,6 @@
 use crate::agent::types::RedactionLevel;
 use crate::agent::ModelRouteTrace;
+use crate::agent::RuntimeHSPacket;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -554,6 +555,30 @@ impl ModelRouter {
             fallback_provider: fallback.map(|s| s.provider.clone()),
             fallback_model: fallback.map(|s| s.model.clone()),
         })
+    }
+
+    pub fn route_with_hs_packet(
+        &self,
+        task_type: TaskType,
+        tools_needed: bool,
+        hs_packet: &RuntimeHSPacket,
+    ) -> Result<ModelRouteDecision> {
+        let hs_requires_local_only = hs_packet
+            .selected_policies
+            .iter()
+            .any(|policy| policy.route == Some(crate::agent::ModelRoutePolicy::LocalOnly));
+        let mut decision = self.route(
+            task_type,
+            tools_needed,
+            hs_requires_local_only.then_some(PrivacyRequirement::Critical),
+        )?;
+        if hs_requires_local_only {
+            decision.reason = format!(
+                "{}; HS policy enforced LocalOnly via {:?}",
+                decision.reason, hs_packet.audit.selected_policy_ids
+            );
+        }
+        Ok(decision)
     }
 
     /// Quick route for chat messages (backward compatible with existing scheduler logic).

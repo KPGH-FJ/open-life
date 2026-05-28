@@ -1383,6 +1383,7 @@ mod tests {
                 proposal_store: None,
                 agent_run_store: None,
                 network_policy: None,
+                hs_runtime_packet: None,
                 calendar_ics_paths: &[],
             }
         }

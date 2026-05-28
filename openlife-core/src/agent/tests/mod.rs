@@ -5,4 +5,5 @@ mod heuristic_store;
 mod integration;
 mod policy_store;
 mod regression_suite;
+mod runtime_integration;
 mod selector;

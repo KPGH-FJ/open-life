@@ -133,6 +133,7 @@ fn test_action_parser_final_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let reply = r#"{"final": "Hello, I can help you!", "thought_summary": "User greeted me"}"#;
@@ -164,6 +165,7 @@ fn test_action_parser_actions_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let reply = r#"{"actions": [{"name": "weather", "arguments": {"city": "Beijing"}}], "warnings": ["Test warning"]}"#;
@@ -197,6 +199,7 @@ fn test_action_parser_legacy_tool_calls() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let reply = r#"{"tool_calls": [{"name": "echo", "arguments": {"text": "hello"}}]}"#;
@@ -228,6 +231,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let reply = "{broken json";
@@ -260,6 +264,7 @@ fn test_action_parser_no_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let reply = "This is just a plain text response without any JSON.";
@@ -291,6 +296,7 @@ fn test_action_parser_final_with_actions() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     // Model returns both final text and tool calls
@@ -368,6 +374,7 @@ fn test_max_tool_calls_stop_reason() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     // Simulate model returning actions when budget is already exceeded
@@ -401,6 +408,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     // Malformed JSON: missing closing brace
@@ -437,6 +445,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let valid = r#"{"actions": [{"name": "web.search", "arguments": {"query": "test"}}], "final": "Let me search"}"#;
@@ -476,6 +485,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -544,6 +554,7 @@ fn test_permission_check_tool() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
@@ -596,6 +607,7 @@ fn test_memory_propose_write_creates_proposal() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        hs_runtime_packet: None,
     };
 
     let executor = ActionExecutor::new(ActionExecutorConfig::default());
