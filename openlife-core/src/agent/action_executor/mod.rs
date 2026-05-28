@@ -126,7 +126,10 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
-    pub fn with_agent_run_store(mut self, agent_run_store: &'a crate::agent::AgentRunStore) -> Self {
+    pub fn with_agent_run_store(
+        mut self,
+        agent_run_store: &'a crate::agent::AgentRunStore,
+    ) -> Self {
         self.agent_run_store = Some(agent_run_store);
         self
     }

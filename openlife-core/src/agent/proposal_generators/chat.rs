@@ -213,7 +213,10 @@ impl ChatProposalGenerator {
     }
 
     fn get_last_extraction(&self, session_id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
-        let map = self.last_extraction.lock().unwrap_or_else(|e| e.into_inner());
+        let map = self
+            .last_extraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.get(session_id).copied()
     }
 
@@ -373,7 +376,10 @@ impl ChatProposalGenerator {
     }
 
     fn update_last_extraction(&self, session_id: &str) {
-        let mut map = self.last_extraction.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .last_extraction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.insert(session_id.to_string(), chrono::Utc::now());
     }
 
