@@ -3,6 +3,7 @@ description: Track a bounded non-LMHS engineering task.
 title: "Task: "
 labels:
   - engineering
+  - task
   - needs-plan
 body:
   - type: textarea

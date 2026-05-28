@@ -16,6 +16,10 @@
   color: "3b0a45"
   description: Parent issue tracking multiple tasks.
 
+- name: task
+  color: "1f883d"
+  description: Bounded implementation, documentation, or infrastructure task.
+
 - name: needs-plan
   color: "fbca04"
   description: Requires an implementation plan before coding.
@@ -23,6 +27,26 @@
 - name: needs-triage
   color: "d4c5f9"
   description: Needs human triage before assignment.
+
+- name: ready-for-codex
+  color: "0e8a16"
+  description: Issue has enough scope, context, and approval for Codex to work.
+
+- name: codex-in-progress
+  color: "5319e7"
+  description: Codex is actively working on this issue or pull request.
+
+- name: needs-human
+  color: "b60205"
+  description: Requires a human decision, approval, clarification, or authorization.
+
+- name: needs-fix
+  color: "d93f0b"
+  description: Changes requested or CI/review found an issue that must be fixed.
+
+- name: ready-for-review
+  color: "1d76db"
+  description: Work is ready for human review.
 
 - name: governance
   color: "b60205"

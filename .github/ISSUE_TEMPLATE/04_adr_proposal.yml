@@ -1,0 +1,133 @@
+name: ADR Proposal
+description: Propose or revise a high-risk architectural decision before implementation.
+title: "ADR Proposal: "
+labels:
+  - architecture
+  - governance
+  - needs-human
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when a change may affect source of truth, privacy,
+        runtime authority, model routing, tool execution, proposal semantics,
+        persistence boundaries, or long-term LifeModel-HS architecture.
+
+        ADR proposals should be decided before implementation work starts.
+
+  - type: textarea
+    id: decision_context
+    attributes:
+      label: Decision Context
+      description: What decision is needed, and why now?
+      placeholder: "We need to decide..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected_boundaries
+    attributes:
+      label: Affected Boundaries
+      description: List affected modules, data stores, policies, prompts, runtime paths, or user-facing surfaces.
+      value: |
+        - LifeModel source of truth:
+        - Memory / evidence:
+        - Privacy / permissions:
+        - PromptStack / ModelRouter:
+        - ToolRuntime / ExecutionFacade:
+        - Proposal / review:
+        - AgentRunEvent / audit:
+        - Frontend / review surface:
+    validations:
+      required: true
+
+  - type: textarea
+    id: options_considered
+    attributes:
+      label: Options Considered
+      description: Compare realistic options, including the conservative/status-quo option.
+      value: |
+        Option A:
+
+        - Pros:
+        - Cons:
+
+        Option B:
+
+        - Pros:
+        - Cons:
+
+        Status quo:
+
+        - Pros:
+        - Cons:
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_decision
+    attributes:
+      label: Proposed Decision
+      description: State the recommended decision and its scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture_invariants
+    attributes:
+      label: Architecture Invariants
+      description: Which invariants must remain true after this decision?
+      value: |
+        - Privacy remains hard Policy and cannot be relaxed by heuristics.
+        - Risky LifeModel-HS mutation remains Proposal-first.
+        - Runtime and audit records remain metadata-safe.
+        - Source-of-truth migration remains phased and reversible.
+        - PromptStack, ModelRouter, ToolRuntime, ExecutionFacade, Proposal, and AgentRunEvent governance remain intact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks And Failure Modes
+      description: Describe likely technical, product, privacy, governance, and maintenance risks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollout
+    attributes:
+      label: Rollout / Migration Plan
+      description: Explain how the decision can be introduced, tested, reverted, or phased.
+      value: |
+        - MVP step:
+        - Tests / regression:
+        - Rollback:
+        - Follow-up ADRs or issues:
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification Strategy
+      description: What must be proven before implementation can be accepted?
+      value: |
+        - Deterministic checks:
+        - Manual review:
+        - CI:
+        - Privacy / redaction review:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: governance
+    attributes:
+      label: Governance Check
+      options:
+        - label: This ADR proposal does not authorize implementation by itself.
+          required: true
+        - label: Human approval is required before coding begins.
+          required: true
+        - label: Sensitive examples are redacted or represented as metadata.
+          required: true

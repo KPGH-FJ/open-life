@@ -4,6 +4,7 @@ title: "LMHS-N: Task Title"
 labels:
   - lifemodel-hs
   - mvp
+  - task
   - needs-plan
 body:
   - type: markdown
