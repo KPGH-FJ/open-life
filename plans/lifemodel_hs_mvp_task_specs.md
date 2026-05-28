@@ -556,6 +556,7 @@ Expected behavior:
   - disabled/declarative-only.
 - Any new HS write path introduced by LMHS-1 through LMHS-9 is listed.
 - No hidden high-risk direct-write path is introduced by the MVP.
+- Completion artifact: `plans/lifemodel_hs_legacy_write_path_audit.md`.
 
 Allowed edit areas:
 
