@@ -11,12 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 describe("DashboardPage", () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(invoke).mockImplementation(mockInvoke);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
