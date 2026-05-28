@@ -2837,7 +2837,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("Tauri build failed: {}", e))
         .run(|app_handle, event| match event {
-            tauri::RunEvent::Ready | tauri::RunEvent::Reopen { .. } => {
+            tauri::RunEvent::Ready => {
+                if let Err(e) = ensure_main_window_visible(app_handle) {
+                    log::warn!("[runtime] failed to show main window: {}", e);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
                 if let Err(e) = ensure_main_window_visible(app_handle) {
                     log::warn!("[runtime] failed to show main window: {}", e);
                 }

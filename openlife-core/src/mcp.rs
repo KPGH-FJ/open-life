@@ -3,6 +3,7 @@ use crate::tool_manifest::{ToolManifest, ToolSource};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -957,7 +958,7 @@ impl McpRegistry {
             })
             .filter(|(s, _)| *s > 0)
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|item| Reverse(item.0));
         scored.truncate(top_k);
         scored.into_iter().map(|(_, m)| m.clone()).collect()
     }
