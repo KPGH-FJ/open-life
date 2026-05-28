@@ -1,0 +1,38 @@
+name: Quick Task
+description: Capture a small, bounded task without full governance ceremony.
+title: "Task: "
+labels:
+  - task
+  - needs-triage
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should change, and why?
+      placeholder: "Keep this short. One task, one outcome."
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link relevant files, notes, screenshots, or prior discussion if useful.
+
+  - type: textarea
+    id: done
+    attributes:
+      label: Done When
+      description: What would make this task clearly complete?
+      value: |
+        - [ ]
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: risk
+    attributes:
+      label: Risk
+      options:
+        - label: This touches LifeModel source of truth, memory, privacy, model routing, tool execution, proposals, audit, or runtime authority.

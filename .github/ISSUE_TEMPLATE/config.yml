@@ -1,5 +1,8 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
+  - name: Solo + Agent GitHub Flow
+    url: https://github.com/KPGH-FJ/open-life/blob/main/docs/github_repository_governance.md
+    about: Use the lightweight default flow unless the work is high-risk or multi-day.
   - name: LifeModel-HS MVP Specs
     url: https://github.com/KPGH-FJ/open-life/blob/main/plans/lifemodel_hs_mvp_task_specs.md
     about: Read the task specs before opening or implementing LMHS issues.
