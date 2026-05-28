@@ -151,6 +151,36 @@ export interface ReasoningTrace {
   };
   layer_timings_ms?: Record<string, number>;
   stable_steps?: string[];
+  hsSelectionAudit?: HSSelectionAudit;
+  behaviorChecks?: HSBehaviorCheckSummary[];
+}
+
+export interface HSAssetExclusion {
+  assetId: string;
+  assetKind: string;
+  reason: string;
+}
+
+export interface HSSelectionAudit {
+  selectedPolicyIds?: string[];
+  selectedHeuristicIds?: string[];
+  excludedAssets?: HSAssetExclusion[];
+  estimatedTokens?: number;
+  tokenBudget?: number;
+}
+
+export interface HSBehaviorCheckSummary {
+  id: string;
+  label: string;
+  passed: boolean;
+  summary?: string;
+}
+
+export interface HSEvidenceSummary {
+  id: string;
+  summary: string;
+  sourceAssetIds?: string[];
+  contentDigest?: string;
 }
 
 export interface SendMessageResult {
@@ -1275,6 +1305,10 @@ export interface AgentRun {
   generatedProposals: string[];
   actions: AgentAction[];
   observations: AgentObservation[];
+  reasoningStrategy?: string;
+  reasoningTrace?: ReasoningTrace;
+  hsSelectionAudit?: HSSelectionAudit;
+  behaviorChecks?: HSBehaviorCheckSummary[];
   statusUpdates?: AgentStatusUpdate[];
   stepCount?: number;
   toolCallCount?: number;
@@ -1476,6 +1510,9 @@ export interface AgentProposal {
   confidence: number;
   riskLevel: RiskLevel;
   status: ProposalStatus;
+  whyOpenLifeThinksThis?: string;
+  evidenceSummaries?: HSEvidenceSummary[];
+  behaviorChecks?: HSBehaviorCheckSummary[];
   createdAt: string;
   resolvedAt?: string;
   expiresAt?: string;

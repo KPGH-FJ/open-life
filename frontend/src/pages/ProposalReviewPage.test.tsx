@@ -26,6 +26,23 @@ describe("ProposalReviewPage", () => {
             confidence: 0.9,
             riskLevel: "low",
             status: "pending",
+            whyOpenLifeThinksThis: "User approved this name during builder review.",
+            evidenceSummaries: [
+              {
+                id: "ev-1",
+                summary: "Builder confirmation supports the candidate.",
+                sourceAssetIds: ["run-1"],
+                contentDigest: "digest-abc123",
+              },
+            ],
+            behaviorChecks: [
+              {
+                id: "regression.external_write_proposal_first",
+                label: "External writes stay reviewable",
+                passed: true,
+                summary: "Direct writes remain proposals.",
+              },
+            ],
             createdAt: new Date().toISOString(),
             expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
           },
@@ -68,5 +85,16 @@ describe("ProposalReviewPage", () => {
         })
       );
     });
+  });
+
+  it("renders concise evidence summaries without raw sensitive payloads", async () => {
+    render(<ProposalReviewPage />);
+
+    expect(await screen.findByText("why OpenLife thinks this")).toBeInTheDocument();
+    expect(screen.getByText("User approved this name during builder review.")).toBeInTheDocument();
+    expect(screen.getByText("Builder confirmation supports the candidate.")).toBeInTheDocument();
+    expect(screen.getByText("behavior check")).toBeInTheDocument();
+    expect(screen.getByText("External writes stay reviewable")).toBeInTheDocument();
+    expect(screen.queryByText("raw-sensitive-payload")).not.toBeInTheDocument();
   });
 });

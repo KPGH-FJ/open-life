@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { getAgentRun, deleteAgentRun, replayAgentAction, type AgentRun } from "../tauri";
+import RunTracePanel from "../components/RunTracePanel";
 import {
   ArrowLeft,
   Activity,
@@ -294,6 +295,11 @@ export default function AgentRunDetail() {
               </div>
             </div>
           )}
+
+          <div className="mb-6">
+            <h3 className="text-sm font-semibold text-stone-700 mb-2">协作行为</h3>
+            <RunTracePanel run={run} />
+          </div>
 
           {/* Status Timeline */}
           {run.statusUpdates && run.statusUpdates.length > 0 && (

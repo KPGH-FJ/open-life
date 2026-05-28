@@ -11,6 +11,8 @@ import {
   Edit2,
   Hammer,
   SlidersHorizontal,
+  CheckCircle2,
+  CircleAlert,
 } from "lucide-react";
 import {
   acceptProposal,
@@ -40,6 +42,11 @@ function riskClass(risk: AgentProposal["riskLevel"]): string {
   if (risk === "high" || risk === "critical") return "border-rose-200 bg-rose-50 text-rose-800";
   if (risk === "medium") return "border-amber-200 bg-amber-50 text-amber-800";
   return "border-emerald-200 bg-emerald-50 text-emerald-800";
+}
+
+function shortDigest(value?: string): string | null {
+  if (!value) return null;
+  return value.length > 16 ? `${value.slice(0, 16)}...` : value;
 }
 
 const TYPE_OPTIONS = [
@@ -493,6 +500,79 @@ export default function ProposalReviewPage() {
                               <span className="rounded bg-stone-100 px-1.5 py-0.5">
                                 风险：{proposal.after.risk_level}
                               </span>
+                            )}
+                          </div>
+                        )}
+                        {(proposal.whyOpenLifeThinksThis ||
+                          (proposal.evidenceSummaries?.length ?? 0) > 0 ||
+                          (proposal.behaviorChecks?.length ?? 0) > 0) && (
+                          <div className="mt-3 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-xs text-sky-950">
+                            <div className="flex items-center gap-2 font-medium text-sky-800">
+                              <AlertCircle size={14} />
+                              why OpenLife thinks this
+                            </div>
+                            {proposal.whyOpenLifeThinksThis && (
+                              <p className="mt-2 leading-5">{proposal.whyOpenLifeThinksThis}</p>
+                            )}
+                            {(proposal.evidenceSummaries?.length ?? 0) > 0 && (
+                              <div className="mt-3 space-y-2">
+                                {proposal.evidenceSummaries?.map(summary => (
+                                  <div
+                                    key={summary.id}
+                                    className="rounded-lg border border-sky-100 bg-white/80 p-2"
+                                  >
+                                    <div className="font-medium text-stone-700">
+                                      {summary.summary}
+                                    </div>
+                                    <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-stone-500">
+                                      {summary.sourceAssetIds?.slice(0, 3).map(sourceId => (
+                                        <span
+                                          key={sourceId}
+                                          className="rounded-full bg-stone-100 px-2 py-0.5"
+                                        >
+                                          source {sourceId}
+                                        </span>
+                                      ))}
+                                      {shortDigest(summary.contentDigest) && (
+                                        <span className="rounded-full bg-stone-100 px-2 py-0.5 font-mono">
+                                          digest {shortDigest(summary.contentDigest)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            {(proposal.behaviorChecks?.length ?? 0) > 0 && (
+                              <div className="mt-3 space-y-2">
+                                <div className="text-[11px] font-medium text-stone-600">
+                                  behavior check
+                                </div>
+                                {proposal.behaviorChecks?.map(check => (
+                                  <div
+                                    key={check.id}
+                                    className="flex items-start gap-2 rounded-lg bg-white/80 p-2 text-stone-700"
+                                  >
+                                    {check.passed ? (
+                                      <CheckCircle2
+                                        size={14}
+                                        className="mt-0.5 shrink-0 text-emerald-600"
+                                      />
+                                    ) : (
+                                      <CircleAlert
+                                        size={14}
+                                        className="mt-0.5 shrink-0 text-amber-600"
+                                      />
+                                    )}
+                                    <div>
+                                      <div className="font-medium">{check.label}</div>
+                                      {check.summary && (
+                                        <div className="mt-0.5 text-stone-500">{check.summary}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
                             )}
                           </div>
                         )}
