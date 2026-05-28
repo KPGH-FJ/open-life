@@ -105,7 +105,9 @@ describe("DashboardPage", () => {
       expect(screen.getByText("技能")).toBeInTheDocument();
     });
     const skillCard = screen.getByText("技能").parentElement;
-    expect(skillCard).toHaveTextContent("2");
+    await waitFor(() => {
+      expect(skillCard).toHaveTextContent("2");
+    });
   });
 
   it("shows memory count stats", async () => {
@@ -120,7 +122,9 @@ describe("DashboardPage", () => {
     });
     // DashboardPage shows memory count in a card with "记忆" label
     const memoryCard = screen.getByText("记忆").parentElement;
-    expect(memoryCard).toHaveTextContent("42");
+    await waitFor(() => {
+      expect(memoryCard).toHaveTextContent("42");
+    });
   });
 
   it("shows state trend explanation for selected dimension", async () => {
