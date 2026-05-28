@@ -117,6 +117,10 @@ fn write_scheduled_tasks(tasks: &[Value]) -> Result<(), String> {
     let temp = path.with_extension("tmp");
     let content = serde_json::to_string_pretty(tasks)
         .map_err(|e| format!("Failed to serialize tasks: {}", e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create scheduled task directory: {}", e))?;
+    }
     std::fs::write(&temp, &content).map_err(|e| format!("Failed to write tasks temp: {}", e))?;
     std::fs::rename(&temp, &path).map_err(|e| format!("Failed to atomically save tasks: {}", e))?;
     Ok(())

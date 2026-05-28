@@ -420,26 +420,21 @@ impl ModelRouter {
 
         // Task-specific capabilities
         match task_type {
-            TaskType::ToolUse => {
-                if provider == "deepseek" || provider == "openrouter" {
-                    score += Self::TOOL_USE_BONUS;
-                    capability += 3;
-                } else if provider == "ollama" {
-                    score += Self::TOOL_USE_PENALTY;
-                    capability -= 2;
-                }
+            TaskType::ToolUse if provider == "deepseek" || provider == "openrouter" => {
+                score += Self::TOOL_USE_BONUS;
+                capability += 3;
             }
-            TaskType::Planner => {
-                if provider == "deepseek" || provider == "openrouter" {
-                    score += Self::PLANNER_BONUS;
-                    capability += 2;
-                }
+            TaskType::ToolUse if provider == "ollama" => {
+                score += Self::TOOL_USE_PENALTY;
+                capability -= 2;
             }
-            TaskType::Embedding => {
-                if provider == "ollama" || provider == "openai" {
-                    score += Self::EMBEDDING_BONUS;
-                    capability += 3;
-                }
+            TaskType::Planner if provider == "deepseek" || provider == "openrouter" => {
+                score += Self::PLANNER_BONUS;
+                capability += 2;
+            }
+            TaskType::Embedding if provider == "ollama" || provider == "openai" => {
+                score += Self::EMBEDDING_BONUS;
+                capability += 3;
             }
             _ => {}
         }

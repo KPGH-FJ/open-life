@@ -894,6 +894,16 @@ async fn apply_proposal_to_state(
             tasks.push(task.clone());
 
             let temp_path = tasks_path.with_extension("tmp");
+            if let Some(parent) = tasks_path.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    return Ok(patch_result_for_proposal(
+                        proposal,
+                        false,
+                        "scheduled_task",
+                        Some(format!("Failed to create scheduled task directory: {}", e)),
+                    ));
+                }
+            }
             if let Err(e) = std::fs::write(
                 &temp_path,
                 serde_json::to_string_pretty(&tasks).map_err(|e| e.to_string())?,

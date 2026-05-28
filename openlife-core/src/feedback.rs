@@ -2,6 +2,7 @@ use crate::life_model::LifeModel;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -441,7 +442,7 @@ impl FeedbackStore {
 
         // Extract top patterns
         let mut up_vec: Vec<(String, i32)> = up_keywords.clone().into_iter().collect();
-        up_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        up_vec.sort_by_key(|item| Reverse(item.1));
         let liked: Vec<String> = up_vec
             .into_iter()
             .take(5)
@@ -449,7 +450,7 @@ impl FeedbackStore {
             .collect();
 
         let mut down_vec: Vec<(String, i32)> = down_keywords.clone().into_iter().collect();
-        down_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        down_vec.sort_by_key(|item| Reverse(item.1));
         let disliked: Vec<String> = down_vec
             .into_iter()
             .take(5)
@@ -678,7 +679,7 @@ impl FeedbackStore {
         }
 
         let mut up_vec: Vec<(String, i32)> = up_keywords.clone().into_iter().collect();
-        up_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        up_vec.sort_by_key(|item| Reverse(item.1));
         let top_liked: Vec<String> = up_vec
             .into_iter()
             .take(5)
@@ -686,7 +687,7 @@ impl FeedbackStore {
             .collect();
 
         let mut down_vec: Vec<(String, i32)> = down_keywords.clone().into_iter().collect();
-        down_vec.sort_by(|a, b| b.1.cmp(&a.1));
+        down_vec.sort_by_key(|item| Reverse(item.1));
         let top_disliked: Vec<String> = down_vec
             .into_iter()
             .take(5)

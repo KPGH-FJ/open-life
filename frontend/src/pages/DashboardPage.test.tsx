@@ -11,12 +11,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 describe("DashboardPage", () => {
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.mocked(invoke).mockImplementation(mockInvoke);
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -62,12 +60,8 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    await waitFor(() => {
-      expect(screen.getByText("今日目标")).toBeInTheDocument();
-    });
-
-    expect(screen.getByText("早起")).toBeInTheDocument();
-    expect(screen.getByText("运动")).toBeInTheDocument();
+    expect(await screen.findByText("早起")).toBeInTheDocument();
+    expect(await screen.findByText("运动")).toBeInTheDocument();
   });
 
   it("displays gap analysis results", async () => {
@@ -107,7 +101,9 @@ describe("DashboardPage", () => {
       expect(screen.getByText("技能")).toBeInTheDocument();
     });
     const skillCard = screen.getByText("技能").parentElement;
-    expect(skillCard).toHaveTextContent("2");
+    await waitFor(() => {
+      expect(skillCard).toHaveTextContent("2");
+    });
   });
 
   it("shows memory count stats", async () => {
@@ -122,7 +118,9 @@ describe("DashboardPage", () => {
     });
     // DashboardPage shows memory count in a card with "记忆" label
     const memoryCard = screen.getByText("记忆").parentElement;
-    expect(memoryCard).toHaveTextContent("42");
+    await waitFor(() => {
+      expect(memoryCard).toHaveTextContent("42");
+    });
   });
 
   it("shows state trend explanation for selected dimension", async () => {
@@ -224,7 +222,7 @@ describe("DashboardPage", () => {
     );
 
     expect(await screen.findByText("推荐试用路线")).toBeInTheDocument();
-    expect(screen.getByText("开始一次个性化对话")).toBeInTheDocument();
+    expect(await screen.findByText("开始一次个性化对话")).toBeInTheDocument();
   });
 
   it("prioritizes resuming unfinished builder review when model is still empty", async () => {

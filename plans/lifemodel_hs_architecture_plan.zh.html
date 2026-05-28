@@ -1,0 +1,1481 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenLife LifeModel-HS 架构计划</title>
+  <style>
+    :root {
+      --paper: #f7f3ea;
+      --ink: #23211d;
+      --muted: #6f675c;
+      --line: #d8cec0;
+      --accent: #116a65;
+      --accent-2: #a94724;
+      --code-bg: #171b1b;
+      --code-ink: #e8eee9;
+      --table-head: #ebe2d4;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(17, 106, 101, 0.08) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(169, 71, 36, 0.07) 1px, transparent 1px),
+        var(--paper);
+      background-size: 42px 42px;
+      font-family: "Iowan Old Style", "Songti SC", "Noto Serif CJK SC", "PingFang SC", serif;
+      line-height: 1.72;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration-color: rgba(17, 106, 101, 0.35);
+      text-underline-offset: 0.16em;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(220px, 320px) minmax(0, 980px);
+      gap: 44px;
+      width: min(1440px, calc(100% - 48px));
+      margin: 0 auto;
+      padding: 44px 0 72px;
+    }
+
+    .toc {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      max-height: calc(100vh - 48px);
+      overflow: auto;
+      border-left: 4px solid var(--accent);
+      padding: 4px 0 4px 18px;
+      font-family: "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 14px;
+    }
+
+    .toc h2 {
+      margin: 0 0 12px;
+      font-size: 13px;
+      letter-spacing: 0;
+      color: var(--accent-2);
+      text-transform: uppercase;
+    }
+
+    .toc ol {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    .toc li {
+      margin: 7px 0;
+    }
+
+    .toc a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+
+    .toc a:hover {
+      color: var(--accent);
+    }
+
+    article {
+      background: rgba(255, 252, 246, 0.86);
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 60px rgba(45, 33, 18, 0.12);
+      padding: clamp(24px, 4vw, 64px);
+    }
+
+    .kicker {
+      margin: 0 0 10px;
+      color: var(--accent-2);
+      font-family: "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0 0 20px;
+      font-size: clamp(34px, 6vw, 68px);
+      line-height: 1.05;
+      letter-spacing: 0;
+      color: #161410;
+    }
+
+    .meta {
+      display: grid;
+      gap: 6px;
+      margin: 0 0 34px;
+      padding: 16px 0;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-family: "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 14px;
+    }
+
+    h2,
+    h3 {
+      letter-spacing: 0;
+      line-height: 1.25;
+      color: #171512;
+    }
+
+    h2 {
+      margin: 56px 0 16px;
+      padding-top: 20px;
+      border-top: 2px solid var(--line);
+      font-size: clamp(24px, 3vw, 34px);
+    }
+
+    h3 {
+      margin: 34px 0 12px;
+      font-size: clamp(19px, 2.2vw, 24px);
+    }
+
+    p,
+    li {
+      font-size: 17px;
+    }
+
+    ul,
+    ol {
+      padding-left: 1.35em;
+    }
+
+    code {
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 0.92em;
+      background: rgba(17, 106, 101, 0.1);
+      border: 1px solid rgba(17, 106, 101, 0.16);
+      border-radius: 4px;
+      padding: 0.05em 0.28em;
+    }
+
+    pre {
+      margin: 20px 0;
+      overflow: auto;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      border-radius: 8px;
+      padding: 18px 20px;
+      line-height: 1.55;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    }
+
+    pre code {
+      display: block;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: inherit;
+      font-size: 13px;
+      white-space: pre;
+    }
+
+    .table-wrap {
+      width: 100%;
+      margin: 20px 0 28px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffaf1;
+    }
+
+    table {
+      width: 100%;
+      min-width: 760px;
+      border-collapse: collapse;
+      font-family: "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+    }
+
+    th:last-child,
+    td:last-child {
+      border-right: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    th {
+      background: var(--table-head);
+      color: #2b2620;
+      text-align: left;
+      font-weight: 700;
+    }
+
+    .note {
+      color: var(--muted);
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        display: block;
+        width: min(100% - 28px, 960px);
+        padding-top: 20px;
+      }
+
+      .toc {
+        position: static;
+        max-height: none;
+        margin: 0 0 24px;
+        padding: 14px 16px;
+        border: 1px solid var(--line);
+        border-left: 4px solid var(--accent);
+        background: rgba(255, 252, 246, 0.82);
+      }
+
+      article {
+        padding: 24px 18px 40px;
+      }
+
+      p,
+      li {
+        font-size: 16px;
+      }
+    }
+
+    @media print {
+      body {
+        background: #fff;
+      }
+
+      .layout {
+        display: block;
+        width: 100%;
+        padding: 0;
+      }
+
+      .toc {
+        position: static;
+        max-height: none;
+        margin-bottom: 24px;
+      }
+
+      article {
+        border: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <nav class="toc" aria-label="目录">
+      <h2>目录</h2>
+      <ol>
+        <li><a href="#executive-design">1. 执行层设计</a></li>
+        <li><a href="#evidence-reviewed">2. 已审阅依据</a></li>
+        <li><a href="#current-vs-target">3. 当前事实与目标设计</a></li>
+        <li><a href="#problem-response">4. 问题响应矩阵</a></li>
+        <li><a href="#invariants">5. 不可协商的不变量</a></li>
+        <li><a href="#concepts">6. 核心概念定义</a></li>
+        <li><a href="#boundary">7. 系统边界</a></li>
+        <li><a href="#topology">8. 数据拓扑</a></li>
+        <li><a href="#model-direction">9. 数据模型方向</a></li>
+        <li><a href="#pipeline">10. HL 工程流水线</a></li>
+        <li><a href="#internal-architecture">11. HS 内部架构</a></li>
+        <li><a href="#heuristic-schema">12. 启发式 Schema</a></li>
+        <li><a href="#react-design">13. ReAct 交互设计</a></li>
+        <li><a href="#selection">14. 上下文与启发式选择</a></li>
+        <li><a href="#views">15. 物化视图</a></li>
+        <li><a href="#governance">16. 治理设计</a></li>
+        <li><a href="#regression">17. 回归设计</a></li>
+        <li><a href="#maintenance">18. 维护机制</a></li>
+        <li><a href="#ui">19. UI 与产品交互</a></li>
+        <li><a href="#comparison">20. 对比</a></li>
+        <li><a href="#migration">21. 迁移路径</a></li>
+        <li><a href="#mvp">22. 第一版 MVP</a></li>
+        <li><a href="#failure-modes">23. 失效模式与防御</a></li>
+        <li><a href="#questions">24. 开放设计问题</a></li>
+        <li><a href="#checklist">25. 架构验收清单</a></li>
+        <li><a href="#final-position">26. 最终架构定位</a></li>
+      </ol>
+    </nav>
+
+    <article>
+      <p class="kicker">中文译文</p>
+      <h1>OpenLife LifeModel-HS 架构计划</h1>
+      <div class="meta">
+        <span>日期：2026-05-27</span>
+        <span>状态：仅设计的架构计划</span>
+        <span>范围：下一代 OpenLife LifeModel，作为本地优先、由用户治理的个人启发式系统</span>
+        <span>源文件：<code>plans/lifemodel_hs_architecture_plan.md</code></span>
+      </div>
+
+      <p>本计划的实现入口已由 <code>plans/adr/0013-lifemodel-hs-source-of-truth-governance.md</code> 和 <code>plans/lifemodel_hs_mvp_task_specs.md</code> 接管。它仍是设计基线，但本身不要求、也不包含生产代码变更、迁移、运行时变更或功能实现。</p>
+
+      <h2 id="executive-design">1. 执行层设计</h2>
+      <p>LifeModel-HS 将当前 LifeModel 从一个主要被物化出来的用户画像，转变为用户拥有的个人启发式系统。</p>
+      <p>目标 LifeModel 不是一个 YAML 文件，也不是一段自然语言画像。它是一小组持久、类型化的存储和运行时选择器：</p>
+      <ul>
+        <li>原始 Life Data 保留在其来源系统中，例如聊天、记忆、日历、文件、工具轨迹、反馈和 AgentRunEvent。</li>
+        <li>启发式学习把原始数据转换为规范化的 Life Event、Signal、Evidence、Candidate Heuristic、Candidate State Patch，以及可治理的 Proposal。</li>
+        <li>已接受的 HS 资产存放在专用存储中：EvidenceStore、HeuristicStore、StateStore、PolicyStore、RegressionSuite 和 AuditLog。</li>
+        <li>物化视图把选定的已接受资产渲染为当前 OpenLife 界面所需的格式，包括当前 LifeModel YAML、PromptStack 块、UI 摘要和运行时上下文包。</li>
+        <li>AgentRuntime 不再“默认接收整个 LifeModel”。它向 ContextSelector 和 HeuristicSelector 请求字段级、任务级、隐私感知的上下文。</li>
+        <li>任何高风险的身份、价值观、长期目标或隐私边界都不会被静默改写。HL 可以提出建议；用户负责治理。</li>
+      </ul>
+      <p>核心转变是：</p>
+      <pre><code>当前：
+LifeModel YAML -> 宽泛的 PromptStack 注入 -> Agent 输出 -> Proposal -> LifeModel patch
+
+目标：
+Raw Life Data -> Life Event -> Signal -> Evidence -> Candidate Heuristic/State Patch
+-> Governance -> Regression -> Accepted HS Asset -> Materialized LifeModel View
+-> Context/Heuristic selection -> AgentRuntime behavior</code></pre>
+
+      <h2 id="evidence-reviewed">2. 已审阅依据</h2>
+      <p>本计划中的当前事实基于以下项目文件：</p>
+      <ul>
+        <li><code>AGENTS.md</code>：当前阶段、架构原语、治理规则、运行时边界。</li>
+        <li><code>README.md</code>：产品定义、当前 beta 状态、下一阶段 LifeModel 方向。</li>
+        <li><code>plans/openlife_post_beta_roadmap.md</code>：当前 post-beta 状态和 LifeModel Evolution 入口。</li>
+        <li><code>plans/openlife_vnext_core_primitives_and_boundaries.md</code>：AgentRunEvent、PromptStack、ToolRuntime、AgentSpec、MemoryEvidence、LifeModelEvolutionEngine 边界。</li>
+        <li><code>openlife-core/src/life_model.rs</code>：当前 LifeModel schema、面向 YAML 的状态、校验、patch 应用。</li>
+        <li><code>openlife-core/src/memory.rs</code>：当前 MemoryStore 中的消息、记忆、快照、聊天会话和状态历史表。</li>
+        <li><code>openlife-core/src/vectors.rs</code>：当前 VectorStore 的 chunk、tier、archive 和检索维护模型。</li>
+        <li><code>openlife-core/src/agent/memory_evidence.rs</code>：当前 MemoryEvidence 结构体和 evidence-to-proposal 辅助逻辑。</li>
+        <li><code>openlife-core/src/agent/proposal_engine.rs</code>：当前 proposal 生成器以及从运行创建 proposal 的逻辑。</li>
+        <li><code>openlife-core/src/agent/proposal_generators/chat.rs</code>：当前由 PromptStack 治理的聊天 proposal 抽取，带启发式 fallback。</li>
+        <li><code>openlife-core/src/agent/context_assembler.rs</code>：当前类别级上下文装配和 ContextPolicy。</li>
+        <li><code>openlife-core/src/agent/prompt_stack.rs</code>：当前 PromptBlock、PromptStack、隐私分类和 block trace。</li>
+        <li><code>src-tauri/src/chat_preprocess.rs</code>：当前聊天预处理、隐私脱敏、记忆检索、hot cache 注入和 ContextAssembler V2。</li>
+        <li><code>src-tauri/src/chat_persistence.rs</code>：当前聊天持久化、向量记忆持久化和聊天 proposal 生成超时。</li>
+        <li><code>src-tauri/src/commands/proposal.rs</code>：当前 Proposal 应用路径、patch store 交互、memory write/archive、工具权限和 replay closure。</li>
+        <li><code>src-tauri/src/commands/calibration.rs</code>：当前 calibration 的 proposal-first 路径，以及由 legacy gate 控制的 direct apply 路径。</li>
+      </ul>
+
+      <h2 id="current-vs-target">3. 当前事实与目标设计</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>领域</th><th>当前事实</th><th>目标设计</th></tr></thead>
+          <tbody>
+            <tr><td>LifeModel 真相来源</td><td><code>LifeModel</code> 是序列化为 YAML 的 Rust struct，包含 identity、goals、capabilities、state、relationships、preferences 和 <code>evolution_rules</code>。</td><td>已接受的 HS 资产成为真相来源；YAML 成为物化出来的兼容视图。</td></tr>
+            <tr><td>运行时注入</td><td>PromptStack 可以注入完整 YAML、state hint、evolution hint 或 summary。ContextPolicy 是类别级的。</td><td>ContextSelector 和 HeuristicSelector 按任务、风险、隐私和 token budget 选择具体状态字段、启发式、证据摘要和策略。</td></tr>
+            <tr><td>记忆</td><td>MemoryStore 持久化 messages/memories/snapshots/state history。VectorStore 检索 chunks 并支持 tier/archive 维护。</td><td>Memory 仍然是原始/检索层。EvidenceStore 是单独的精选层，包含 provenance、negative evidence、confidence、conflict、decay 和 governance status。</td></tr>
+            <tr><td>证据</td><td><code>MemoryEvidence</code> 已存在，并且可以把 evidence 转换为 proposal。它还不是完整持久化的证据图。</td><td>EvidenceStore 是一等公民：append-only、可查询、感知冲突，并且链接到 events、signals、proposals、heuristics、regressions 和 materialized views。</td></tr>
+            <tr><td>信号抽取</td><td>聊天 proposal 抽取使用带 PromptStack 的本地 LLM 和 fallback heuristics。它可以生成 goal、state、capability 和 memory proposals。</td><td>SignalExtractor 输出类型化 Signals，带 extraction method、confidence、uncertainty、negative cues 和 audit。候选生成不能直接修改 HS。</td></tr>
+            <tr><td>治理</td><td>LifeModel、MemoryWrite、MemoryArchive、ToolPermission、外部写入、计划任务、数据导出都有 proposal-first 路径。</td><td>LifeModelGovernor 使用风险策略、证据阈值、回归结果、冲突检查、批处理和用户审阅疲劳控制来治理候选 HS 资产。</td></tr>
+            <tr><td>Patch</td><td>LifeModel patch/risk/snapshot 路径已存在。</td><td>Patch 仍然是物化视图的应用机制，但已接受的 HS 资产才是规范来源。PatchStore 记录视图物化和兼容性 mutation。</td></tr>
+            <tr><td>运行时 trace</td><td>AgentRunEvent 是 append-only，并对运行时转换做 metadata-redacted 处理。</td><td>HL 和 HS 维护也输出 metadata-safe event，或并行的 HS audit log，并链接到 AgentRunEvent ID。</td></tr>
+            <tr><td>Legacy evolution</td><td>Calibration 默认 proposal-first，但如果结果表示已应用，<code>run_micro_evolution</code> 仍可直接应用；legacy direct calibration 在配置后面。</td><td>所有 LifeModel-HS mutation 汇聚到 Proposal-first。Direct apply 被移除，或隔离为 dev/test legacy 兼容路径，绝不作为产品路径。</td></tr>
+            <tr><td>回归</td><td>还没有持久的 LifeModel regression suite 来覆盖偏好/启发式。</td><td>RegressionSuite 存储用户批准的场景，并在接受或提升有影响的启发式前运行。</td></tr>
+            <tr><td>压缩</td><td>VectorStore 有 tier/archive；LifeModel 没有 HS compression。</td><td>CompressionEngine 合并重复启发式、削弱过时规则、归档低价值资产，并物化简洁视图。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="problem-response">4. 问题响应矩阵</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>当前问题</th><th>设计响应</th><th>剩余风险</th><th>新增复杂度</th></tr></thead>
+          <tbody>
+            <tr><td>LifeModel 表现得像静态画像/YAML 快照。</td><td>HS canonical stores 将原始数据、证据、状态、策略、启发式、回归和物化视图分离。</td><td>早期 MVP 仍可能通过 YAML 渲染。</td><td>需要维护更多 store 和迁移。</td></tr>
+            <tr><td>LifeModel 主要通过 PromptStack 注入并由 Agent 消费。</td><td>ContextSelector 和 HeuristicSelector 成为 PromptStack 装配和工具执行前的运行时网关。</td><td>Selector 质量决定运行时有用性。</td><td>需要任务分类和 selection audit。</td></tr>
+            <tr><td>Agent run 在执行后产生 Proposals，间接更新 LifeModel。</td><td>HL 在 After Observe 和 Reflect 期间运行，在 Proposal 之前产生有证据支撑的候选资产。</td><td>长时异步 HL 可能落后于用户预期。</td><td>需要 job orchestration 和状态 UI。</td></tr>
+            <tr><td>Memory 主要是检索上下文，而不是完整证据。</td><td>EvidenceStore 只提升来自 memory/events 的规范化、带 provenance 链接的 claim。</td><td>一些原始记忆可能永远不会成为 evidence。</td><td>需要 evidence schema、scoring 和 review。</td></tr>
+            <tr><td>Signal extraction 有误报、漏报和污染风险。</td><td>Signals 携带 method、confidence、uncertainty、negative cues、source spans 和 audit；低置信度不会成为 evidence。</td><td>LLM 和 heuristics 仍会遗漏细微信号。</td><td>每次抽取需要更多 metadata。</td></tr>
+            <tr><td>没有可执行启发式、证据链、回归测试、压缩、遗忘、冲突检测。</td><td>Heuristic schema 包含 triggers、conditions、guidance、risk、evidence、opposing evidence、lifecycle 和 validation state；RegressionSuite、CompressionEngine、MaintenanceEngine 是一等模块。</td><td>MVP 不能立刻解决所有维护质量问题。</td><td>启发式 lifecycle 必须保持小而可理解。</td></tr>
+            <tr><td>注入是宽类别级，不是字段/任务级。</td><td>Selectors 按 task kind、risk、privacy 和 budget 选择精确的 heuristics/state/policies。</td><td>仍可能过选或少选。</td><td>需要 selector diagnostics。</td></tr>
+            <tr><td>YAML 快照不适合作为长期真相来源。</td><td>YAML 降级为 Materialized LifeModel View。</td><td>迁移完成前，现有代码仍消费 YAML。</td><td>有双写或物化一致性风险。</td></tr>
+            <tr><td>Legacy micro-evolution/direct-apply 路径并存。</td><td>迁移让所有 HS 更新通过 LifeModelGovernor 和 ProposalStore。</td><td>某些 dev/test flags 可能残留。</td><td>需要源码审计和废弃 gate。</td></tr>
+            <tr><td>规则膨胀、过时记忆污染、短期状态污染、确认疲劳、prompt 污染。</td><td>证据阈值、时间衰减、state-vs-identity 边界、proposal 批处理、selector token budgets、compression 和 negative evidence 降低这些风险。</td><td>用户特定行为仍可能过拟合。</td><td>维护任务成为产品关键路径。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="invariants">5. 不可协商的不变量</h2>
+      <ol>
+        <li>Raw Life Data 永远不能直接修改 LifeModel-HS。</li>
+        <li>HL 可以生成候选；只有经治理接受后才会创建已接受的 HS 资产。</li>
+        <li>高风险的身份、价值观、使命、长期目标、关系和隐私边界必须经过用户明确确认。</li>
+        <li>被拒绝的 proposal 会成为 negative evidence，而不是被丢弃的噪音。</li>
+        <li>运行时上下文按任务和策略选择；宽泛的 full-block 注入仅作为兼容路径。</li>
+        <li>云模型路径只能接收策略批准的物化摘要。</li>
+        <li>每个已接受的 heuristic 都必须能通过 evidence 和 audit lineage 解释。</li>
+        <li>每个有影响的 heuristic 在提升前必须具备 regression awareness。</li>
+        <li>Compression 和 forgetting 不是额外清理工作；它们是正确性的一部分。</li>
+        <li>UI 必须让用户能检查、编辑、拒绝、回滚、归档并理解 HS 资产。</li>
+      </ol>
+
+      <h2 id="concepts">6. 核心概念定义</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>概念</th><th>定义与边界</th><th>输入</th><th>输出</th><th>生命周期与所有权</th><th>与现有 OpenLife 的关系</th></tr></thead>
+          <tbody>
+            <tr><td>LifeModel</td><td>用户拥有的个人启发式系统：已接受的 state、policy、evidence、heuristics、regression、maintenance rules 和 materialized views。不只是 YAML、画像文本或 prompt 内容。</td><td>已接受的 HS 资产、materialization policy、用户编辑、已接受的 proposals。</td><td>Materialized YAML、PromptStack blocks、UI summaries、runtime context packets、selector results。</td><td>由用户拥有；由 LifeModelGovernor 和 MaintenanceEngine 维护；可版本化、可审计、可回滚。</td><td>当前 <code>LifeModel</code> struct 成为物化视图和兼容 schema。</td></tr>
+            <tr><td>Raw Life Data</td><td>来自对话、文件、工具结果、日历、反馈、状态记录、计划、AgentRunEvents 和外部来源的原始记录。原始数据不能被信任为模型真相。</td><td>聊天消息、记忆、向量 chunks、工具输出、run events、反馈、用户上传。</td><td>仅作为 normalization input。</td><td>由用户拥有；按来源设置 retention 和隐私控制。</td><td>当前 MemoryStore、VectorStore、AgentRunEvent、feedback、files 和 state_history 是原始来源。</td></tr>
+            <tr><td>Life Event</td><td>一个规范化、不可变的事件，描述用户生活或 agent 交互中发生的事。</td><td>原始记录和 source metadata。</td><td>带 source refs、time、actor、privacy、payload digest、redacted summary 的类型化 event。</td><td>Append-only；可以被 supersede，但不被 mutation。</td><td>把 AgentRunEvent 思路扩展到生活领域事件，但不取代 AgentRunEvent。</td></tr>
+            <tr><td>Signal</td><td>从一个或多个 Life Events 中抽取出的潜在有意义模式。Signal 弱于 Evidence。</td><td>Life Events、source spans、extractor prompts/rules、model outputs。</td><td>带 confidence、uncertainty、polarity、affected domain 和 extraction audit 的类型化 signal。</td><td>由 SignalExtractor 创建；被提升、削弱或丢弃。</td><td>当前 chat extraction 和 MemoryEvidence detection 成为产生 Signal 的步骤。</td></tr>
+            <tr><td>Evidence</td><td>关于用户的受支持 claim，带 source lineage、confidence、recency、negative evidence 和 conflict links。Evidence 强于 Signal，但自身仍不是 heuristic。</td><td>Signals、用户确认、已接受/拒绝的 proposals、run outcomes、重复观察。</td><td>供 candidate generation、selectors、explanations 和 regression 使用的 evidence record。</td><td>Append-only versions；confidence 会衰减；可被 opposing、archived 或 superseded。</td><td>当前 <code>MemoryEvidence</code> 是种子形状，但需要持久化和 graph links。</td></tr>
+            <tr><td>Heuristic</td><td>Agent 的可执行指导单元：scope、trigger、condition、guidance、priority、confidence、risk、evidence links、opposing evidence 和 lifecycle state。</td><td>Evidence clusters、用户撰写的 rules、已接受 proposals、regression outcomes。</td><td>Runtime guidance、policy constraints、selector candidates、prompt blocks 或 tool constraints。</td><td>Draft -> proposed -> accepted -> active -> trial -> deprecated/archived；用户治理高风险变更。</td><td>取代 freeform <code>evolution_rules</code>，成为类型化、可治理、可执行资产。</td></tr>
+            <tr><td>State</td><td>用户当前或近期状况、关注点、能量、健康、情绪、义务和临时上下文的时间敏感表示。不是 identity。</td><td>State events、check-ins、feedback、tool observations、用户编辑。</td><td>State assets 和 materialized current-state views。</td><td>默认短 TTL；没有重复 evidence 和确认，不得提升为 identity。</td><td>当前 <code>state</code> 字段和 <code>state_history</code> 成为物化层与原始层。</td></tr>
+            <tr><td>Policy</td><td>治理 privacy、model routing、context selection、tool behavior、confirmation、retention 和 HS maintenance 的规则。</td><td>用户设置、已接受的 policy proposals、risk classifier、defaults。</td><td>Runtime decisions、selector constraints、proposal requirements、audit reasons。</td><td>可版本化并对用户可见；privacy policies 需要明确确认。</td><td>构建于 PrivacyPolicy、ContextPolicy、ToolRuntime、risk classifier、network policy 之上。</td></tr>
+            <tr><td>Proposal</td><td>针对 HS assets、materialized views、memory、tools 或 external actions 的可治理变更请求。Proposal 是风险 mutation 唯一的产品路径。</td><td>Candidate heuristic/state/policy patches、用户编辑、tool permission requests、memory writes。</td><td>Pending/accepted/rejected/edited/postponed decision 和可选 apply result。</td><td>由 Governor 或 tools 创建；由用户或允许的策略解决；拒绝会创建 negative evidence。</td><td>当前 AgentProposal 和 ProposalStore 仍是核心。</td></tr>
+            <tr><td>Regression Scenario</td><td>一个稳定测试用例，用来描述已接受 HS 行为在未来运行中应如何响应。</td><td>用户批准的示例、被拒绝的不良行为、已接受 proposals、privacy incidents。</td><td>针对 candidates、selectors、materialized views 和 prompts 的 pass/fail results。</td><td>从重要决策创建；可版本化；在提升前和维护期间运行。</td><td>新层，补充现有 unit tests 和 AgentRun replay。</td></tr>
+            <tr><td>Compression</td><td>在不丢失 provenance 或 rollback 的前提下，合并、摘要、削弱、归档或遗忘 HS 资产的维护过程。</td><td>Heuristic clusters、stale evidence、low-use rules、conflicts、negative evidence。</td><td>Compressed heuristics、archived records、materialized summaries、deletion proposals。</td><td>定期或用户触发；高风险 compression 需要审阅。</td><td>基于 VectorStore tier/archive，但应用于 HS assets。</td></tr>
+            <tr><td>Materialized View</td><td>为某个特定 consumer 派生出来的已接受 HS 资产表示。它不是规范真相。</td><td>Accepted assets 加 render policy。</td><td>YAML LifeModel、prompt blocks、UI cards、route policies、context packets。</td><td>确定性重建；带 version 和 source asset IDs 缓存。</td><td>当前 LifeModel YAML 成为 <code>view:lifemodel_yaml@compat</code>。</td></tr>
+            <tr><td>Personal Heuristic System</td><td>完整的软件化系统，组织用户拥有的 heuristics、state、policy、evidence、regression、selectors、materialization 和 maintenance。</td><td>所有已接受的 HS stores 和 governance rules。</td><td>更好的 Agent behavior、explanations、稳定个人连续性、更安全更新。</td><td>长期存在；用户拥有；AI 可通过 schema 和 audit 维护。</td><td>成为下一代 LifeModel 架构。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="boundary">7. 系统边界</h2>
+      <p>LifeModel-HS 是：</p>
+      <ul>
+        <li>面向个人 heuristics、state、evidence、policy、regression、materialized views 和 maintenance 的本地优先资产系统。</li>
+        <li>一个运行时决策层，在 ReAct 之前、期间和之后改善 Agent 行为。</li>
+        <li>一个治理系统，让学习过程可解释、可审阅、可逆，并归用户所有。</li>
+        <li>一个维护系统，旨在抵抗 memory corruption、rule bloat、prompt pollution 和 stale identity。</li>
+      </ul>
+      <p>LifeModel-HS 不是：</p>
+      <ul>
+        <li>单个 YAML 文件。</li>
+        <li>向量数据库。</li>
+        <li>Prompt template。</li>
+        <li>通用的、自主自修改用户身份系统。</li>
+        <li>隐藏的 personalization cache。</li>
+        <li>LLM、AgentRuntime、MemoryStore、ProposalStore、ToolRuntime 或 PrivacyEngine 的替代品。</li>
+      </ul>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>邻近系统</th><th>关系</th></tr></thead>
+          <tbody>
+            <tr><td>LLM</td><td>LLM 可以抽取 signals、摘要 evidence、提出 candidates、解释 conflicts 或运行 regression simulations。它从不拥有 truth，也不会静默写入已接受的 HS assets。</td></tr>
+            <tr><td>AgentRuntime</td><td>Runtime 向 selectors 查询相关 heuristics/state/policy。Runtime 也把 observations 和 outcomes 反写为 Life Events。</td></tr>
+            <tr><td>ReAct</td><td>HS 参与 Reason、Act、Observe、Reflect、Proposal 和 Replay。它约束 action intensity、tool choice、privacy route 和 explanation style。</td></tr>
+            <tr><td>Memory</td><td>Memory 是原始/检索数据。EvidenceStore 是精选 claim data。Memory 可以支撑 Evidence，但 memory 默认不是 Evidence。</td></tr>
+            <tr><td>PromptStack</td><td>PromptStack 将已选 HS assets 渲染为 model-facing blocks。它应接收被选择、版本化、按策略限定范围的 blocks，而不是默认接收宽泛 YAML。</td></tr>
+            <tr><td>Proposal</td><td>Proposal 是 HS mutation 的治理门。已接受 proposals 创建或更新 HS assets 和 materialized views。拒绝成为 negative evidence。</td></tr>
+            <tr><td>Patch</td><td>Patch 应用 materialized view changes 和兼容 LifeModel mutations。Patch 不绕过 HS canonical stores。</td></tr>
+            <tr><td>ToolRuntime</td><td>HS policies 约束 tool availability、confirmation thresholds、action intensity 和 replay。Tool observations 流入 Life Events。</td></tr>
+            <tr><td>Privacy</td><td>Privacy policy gate extraction、storage、model route、context selection、materialized views、audit payloads 和 retention。</td></tr>
+            <tr><td>UI</td><td>UI 是用户的治理驾驶舱：review candidates、inspect evidence、edit heuristics、resolve conflicts、run regressions、rollback、archive，并调节 proposal frequency。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="topology">8. 数据拓扑</h2>
+      <p>目标拓扑使用一小组类型化 store。SQLite 是自然的第一实现，因为现有 app 已经使用本地 SQLite 管理 memory、vectors、proposals、patches、events 和 stores。</p>
+      <pre><code>Raw sources:
+  MemoryStore, VectorStore, AgentRunEventStore, FeedbackStore, Calendar/File/Tool traces
+
+HL normalization:
+  LifeEventStore -> SignalStore -> EvidenceStore
+
+HS canonical assets:
+  HeuristicStore
+  StateStore
+  PolicyStore
+  RegressionSuite
+  HS AuditLog
+
+Governance:
+  LifeModelGovernor -> ProposalStore -> PatchStore/ViewMaterializer
+
+Runtime:
+  ContextSelector + HeuristicSelector -> PromptStack / ToolRuntime / ModelRouter / UI
+
+Materialized views:
+  LifeModel YAML compatibility view
+  PromptStack HS blocks
+  UI summary views
+  model-routing policy view</code></pre>
+
+      <h2 id="model-direction">9. 数据模型方向</h2>
+      <p>这些 schema 是设计契约，不是本轮的代码需求。</p>
+
+      <h3>9.1 LifeEvent</h3>
+      <pre><code>LifeEvent:
+  id: event_*
+  source_type: chat_message | agent_run_event | tool_result | feedback | calendar | file | state_checkin | user_edit
+  source_id: string
+  source_span:
+    start: optional_integer
+    end: optional_integer
+  occurred_at: rfc3339
+  recorded_at: rfc3339
+  actor: user | agent | tool | system | external
+  privacy_level: public | internal | sensitive | strictly_local
+  event_type: preference_expression | goal_mention | state_checkin | rejection | tool_outcome | plan_outcome | relationship_update | custom
+  payload_ref: raw pointer or encrypted blob ref
+  payload_digest: sha256
+  redacted_summary: string
+  tags: [string]
+  audit:
+    normalized_by: deterministic | llm | user
+    normalizer_version: string</code></pre>
+
+      <h3>9.2 Signal</h3>
+      <pre><code>Signal:
+  id: signal_*
+  event_ids: [event_*]
+  signal_type: preference | goal | state | capability | privacy | action_constraint | anti_pattern | relationship | contradiction
+  claim_candidate: string
+  affected_domain: identity | goals | capabilities | state | preferences | relationships | policy | runtime_behavior
+  polarity: supporting | opposing | ambiguous
+  confidence: 0.0-1.0
+  uncertainty_reasons: [string]
+  extraction_method: deterministic_rule | local_llm | cloud_summary_llm | user_marked | runtime_outcome
+  extractor_version: string
+  created_at: rfc3339
+  expires_at: optional_rfc3339
+  audit_id: audit_*</code></pre>
+
+      <h3>9.3 Evidence</h3>
+      <pre><code>Evidence:
+  id: evidence_*
+  signal_ids: [signal_*]
+  event_ids: [event_*]
+  evidence_type: repeated_preference | recurring_goal | capability_signal | state_trend | contradiction | relationship_update | value_signal | proposal_rejection | runtime_outcome
+  claim: string
+  affected_path: string
+  support_count: integer
+  opposing_evidence_ids: [evidence_*]
+  confidence: 0.0-1.0
+  recency_score: 0.0-1.0
+  stability: transient | recurring | durable
+  risk: low | medium | high | critical
+  privacy_level: public | internal | sensitive | strictly_local
+  source_summary: string
+  status: active | weakened | contradicted | archived | deleted_by_user
+  created_at: rfc3339
+  last_seen_at: rfc3339
+  decay_policy_id: policy_*</code></pre>
+
+      <h3>9.4 StateAsset</h3>
+      <pre><code>StateAsset:
+  id: state_*
+  path: state.current_focus | state.energy | state.emotional_state | custom
+  value: json
+  confidence: 0.0-1.0
+  evidence_ids: [evidence_*]
+  ttl: duration
+  valid_from: rfc3339
+  valid_until: optional_rfc3339
+  promotion_guard:
+    can_promote_to_preference: boolean
+    required_evidence_count: integer
+    requires_user_confirmation: boolean
+  status: active | expired | archived</code></pre>
+
+      <h3>9.5 PolicyAsset</h3>
+      <pre><code>PolicyAsset:
+  id: policy_*
+  policy_type: privacy | model_route | context_selection | tool_permission | confirmation | retention | compression
+  scope: global | task_kind | domain | tool | path
+  rule: structured_json
+  priority: integer
+  risk: low | medium | high | critical
+  evidence_ids: [evidence_*]
+  user_confirmed: boolean
+  status: active | draft | deprecated | archived
+  created_at: rfc3339
+  updated_at: rfc3339</code></pre>
+
+      <h3>9.6 RegressionScenario</h3>
+      <pre><code>RegressionScenario:
+  id: reg_*
+  title: string
+  task_kind: conversation | planning | tool_use | proactive | scheduled | replay
+  input_summary: string
+  synthetic_input: optional_string
+  required_context_assets: [heuristic_* | state_* | policy_*]
+  forbidden_context_assets: [heuristic_* | state_* | policy_*]
+  expected_behavior:
+    must: [string]
+    must_not: [string]
+    preferred: [string]
+  privacy_policy: local_only | summary_only | cloud_allowed
+  risk: low | medium | high | critical
+  created_from: proposal_* | user | incident | accepted_run | rejected_run
+  status: active | archived
+  last_result:
+    passed: boolean
+    run_id: optional_string
+    checked_at: rfc3339</code></pre>
+
+      <h3>9.7 MaterializedView</h3>
+      <pre><code>MaterializedView:
+  id: view_*
+  view_type: lifemodel_yaml | prompt_block | ui_summary | context_packet | policy_export
+  consumer: PromptStack | UI | AgentRuntime | ModelRouter | compatibility
+  source_asset_ids: [string]
+  render_policy_id: policy_*
+  content_digest: sha256
+  content_ref: local blob or inline compact string
+  created_at: rfc3339
+  expires_at: optional_rfc3339</code></pre>
+
+      <h2 id="pipeline">10. HL 工程流水线</h2>
+      <pre><code>Raw Life Data
+-> Life Event
+-> Signal
+-> Evidence
+-> Candidate Heuristic / State Patch
+-> Governance
+-> Regression
+-> Accepted HS Asset
+-> Materialized LifeModel View</code></pre>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>步骤</th><th>输入</th><th>输出</th><th>职责</th><th>LLM 使用</th><th>用户确认</th><th>失效模式</th><th>审计记录</th><th>错误学习防御</th></tr></thead>
+          <tbody>
+            <tr><td>Raw Life Data</td><td>Messages、memories、tool results、files、feedback、AgentRunEvents。</td><td>Source refs 和 digests。</td><td>在 privacy/retention policy 下保留原始数据。</td><td>否。</td><td>取决于来源。</td><td>来源缺失、重复、隐私泄漏、payload 损坏。</td><td>Source id、digest、privacy level、retention policy。</td><td>Raw data 永远不是 model truth，也永远不能直接修改 HS。</td></tr>
+            <tr><td>Life Event</td><td>Raw source refs。</td><td>Normalized event。</td><td>创建带 actor、time、redacted summary、source link 的稳定类型化 event。</td><td>可选，仅用于摘要。</td><td>否，除非 source 是手工输入。</td><td>Normalization 错误、上下文丢失、过度脱敏。</td><td>Normalizer version、source refs、payload digest。</td><td>保留 source pointer 和 digest；允许重新 normalization。</td></tr>
+            <tr><td>Signal</td><td>Life Events。</td><td>Weak typed claim candidate。</td><td>抽取可能的 preference、state、goal、capability、privacy、anti-pattern、contradiction、outcome。</td><td>可选本地 LLM 加确定性 rules。</td><td>否。</td><td>误报、漏报、model parse failure。</td><td>Extractor version、prompt block trace、method、confidence、uncertainty。</td><td>低置信度不能提升；ambiguous signals 保持 ambiguous。</td></tr>
+            <tr><td>Evidence</td><td>Signals 和 confirmations/rejections。</td><td>带 provenance 的 supported claim。</td><td>聚类 signals，评分 support/opposition，分类 risk/path/stability。</td><td>可选摘要和聚类。</td><td>低层 evidence 不需要；用户可 inspect/delete。</td><td>弱 evidence 被提升、opposing evidence 被漏掉、claim 过时。</td><td>Evidence ids、source signals、scoring version、conflict links。</td><td>Minimum support thresholds、negative evidence、decay、conflict detection。</td></tr>
+            <tr><td>Candidate Heuristic / State Patch</td><td>Evidence clusters、当前 HS、用户撰写意图。</td><td>Draft heuristic 或 state/policy patch。</td><td>生成可执行 guidance 或 current-state update。</td><td>可选；优先结构化生成。</td><td>尚未接受。</td><td>规则过宽、identity contamination、duplicate rule。</td><td>Candidate generator version、evidence ids、affected scope。</td><td>Candidate status 是 draft；risk classifier 和 duplicate search 会 gate 它。</td></tr>
+            <tr><td>Governance</td><td>Candidate、risk、evidence、current HS。</td><td>Proposal 或 rejection/merge/archive recommendation。</td><td>应用 risk policy、evidence thresholds、conflict checks、batching、user fatigue policy。</td><td>可选 explanation。</td><td>高/中风险需要；低风险可批处理或由用户配置。</td><td>Proposal spam、diff 不清晰、hidden risk。</td><td>Proposal payload、reason、before/after、evidence summary。</td><td>Proposal-first；高风险明确确认；rejection 成为 negative evidence。</td></tr>
+            <tr><td>Regression</td><td>Candidate proposal、RegressionSuite、selector simulation。</td><td>Regression pass/fail report。</td><td>检查 candidate 不破坏已知用户偏好/隐私。</td><td>可选 evaluator，但优先确定性检查。</td><td>用户可带警告 override。</td><td>LLM 判断不稳定、scenarios 不完整。</td><td>Scenario ids、input summaries、expected checks、result。</td><td>高风险 candidates 没有 regression 或明确 override 不能 promote。</td></tr>
+            <tr><td>Accepted HS Asset</td><td>Accepted proposal 和 regression report。</td><td>Active heuristic/state/policy/evidence update。</td><td>提交 canonical asset，更新 audit，链接 proposal。</td><td>否。</td><td>已经确认。</td><td>Partial commit、stale materialized view。</td><td>Accepted asset event、proposal id、patch id、view version。</td><td>事务性本地写入；rollback snapshot。</td></tr>
+            <tr><td>Materialized LifeModel View</td><td>Accepted assets 和 render policy。</td><td>YAML、prompt block、UI view、context packet。</td><td>渲染确定性的 consumer-specific view。</td><td>Canonical rendering 不使用。</td><td>否，除非 view 暴露敏感新资产。</td><td>Prompt pollution、stale cache、wrong privacy route。</td><td>View source asset ids、digest、render policy。</td><td>Views 可重建；selectors 限制内容和 token budget。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="internal-architecture">11. HS 内部架构</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>模块</th><th>职责</th><th>数据结构</th><th>当前关系</th><th>实现方向</th><th>风险</th></tr></thead>
+          <tbody>
+            <tr><td>LifeEventStore</td><td>持久化来自 raw sources 的规范化、不可变 life events。</td><td><code>LifeEvent</code>、source refs、privacy metadata、digest。</td><td>扩展 AgentRunEvent 和 MemoryStore，但不合并它们。</td><td>SQLite table 加 chat、memory、tool、feedback、calibration、user edits 的 source adapters。</td><td>Event duplication、privacy payload mistakes。</td></tr>
+            <tr><td>SignalExtractor</td><td>把 Life Events 转换为 weak Signals。</td><td><code>Signal</code>、extractor audit、confidence、uncertainty。</td><td>泛化当前 chat proposal extraction 和 MemoryEvidence creation。</td><td>从 deterministic + 现有本地 LLM PromptStack helper 开始；输出 Signals 而不是 Proposals。</td><td>False positives/negatives；extractor drift。</td></tr>
+            <tr><td>EvidenceStore</td><td>存储精选的 supported claims 和 opposition。</td><td><code>Evidence</code>、conflict links、confidence、recency、status。</td><td>将当前 <code>MemoryEvidence</code> 演进为持久 graph。</td><td>SQLite，按 affected_path、evidence_type、status、risk、privacy 建索引。</td><td>Evidence bloat 和 stale claims。</td></tr>
+            <tr><td>HeuristicStore</td><td>存储可执行的个人 heuristics。</td><td>下方 <code>Heuristic</code> schema、lifecycle、examples、validation。</td><td>取代 freeform <code>evolution_rules</code> 作为 canonical asset。</td><td>SQLite 加 JSON columns 存 trigger/condition/guidance；确定性 materialization。</td><td>Rule bloat、overfitting、conflicts。</td></tr>
+            <tr><td>StateStore</td><td>将当前和历史 state assets 与 identity 分开存储。</td><td><code>StateAsset</code>、TTL、promotion guard、evidence links。</td><td>构建于 <code>state</code> 和 <code>state_history</code>。</td><td>保持 transient state 分离；物化进当前 LifeModel YAML state。</td><td>短期状态污染长期身份。</td></tr>
+            <tr><td>PolicyStore</td><td>存储 privacy、route、context、confirmation、retention 和 maintenance policies。</td><td><code>PolicyAsset</code>。</td><td>构建于 PrivacyPolicy、ContextPolicy、ToolRuntime policy、risk classifier。</td><td>从只读 default policies 和 proposal-backed user changes 开始。</td><td>Hidden policy complexity。</td></tr>
+            <tr><td>LifeModelGovernor</td><td>候选 HS 变更的主治理编排器。</td><td>Candidate、Proposal、risk decision、evidence summary、regression report。</td><td>构建于 ProposalEngine、ProposalStore、risk classifier、PatchStore。</td><td>创建 Proposals 的新 service；绝不 direct writes。</td><td>Proposal fatigue；accidental bypass。</td></tr>
+            <tr><td>HeuristicSelector</td><td>为任务选择 active heuristics。</td><td>Query: task, intent, risk, privacy, context budget；Output: ranked heuristics。</td><td>PromptStack/AgentRuntime 前的新层。</td><td>确定性 filter + scoring；之后对 heuristic text 做 semantic retrieval。</td><td>遗漏关键 heuristic；选择太多。</td></tr>
+            <tr><td>ContextSelector</td><td>选择 state、evidence summaries、materialized fields 和 memories。</td><td>带 included/excluded/audit 的 Context packet。</td><td>用 field-level selection 取代 broad ContextPolicy。</td><td>用 path-level selectors 和 metadata-only audit 扩展 ContextAssembler。</td><td>Prompt pollution、privacy leakage。</td></tr>
+            <tr><td>RegressionSuite</td><td>存储并运行 behavior/privacy regression scenarios。</td><td><code>RegressionScenario</code>、result records。</td><td>新层；补充 AgentRun replay。</td><td>从 deterministic scenario checks 和 prompt snapshots 开始；之后做 model simulations。</td><td>Flaky validation、coverage gaps。</td></tr>
+            <tr><td>CompressionEngine</td><td>合并重复 heuristics/evidence，摘要、归档和削弱。</td><td>Compression proposals、cluster ids、archive records。</td><td>把 VectorStore archive 概念扩展到 HS assets。</td><td>定期维护任务为有影响的 compression 创建 proposals。</td><td>丢失 nuance 或 user trust。</td></tr>
+            <tr><td>MaintenanceEngine</td><td>运行 decay、conflict detection、stale asset scans、quality weakening 和 audit checks。</td><td>MaintenanceRun、findings、proposals。</td><td>新层，使用当前 event/audit stores。</td><td>本地定期或用户触发维护；fail closed。</td><td>Maintenance 变得嘈杂或不可见。</td></tr>
+            <tr><td>Materializer</td><td>把已接受 HS assets 渲染为 YAML、PromptBlocks、UI summaries 和 runtime packets。</td><td><code>MaterializedView</code>、source asset ids、digest。</td><td>当前 LifeModelManager 和 PromptStack 消费物化输出。</td><td>确定性 renderer；YAML compatibility 优先。</td><td>Canonical assets 与 views 发生 divergence。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="heuristic-schema">12. 启发式 Schema</h2>
+      <p>Heuristic 是 Personal Heuristic System 中最小的可执行单元。</p>
+      <pre><code>Heuristic:
+  id: heuristic_*
+  title: string
+  description: string
+  scope:
+    domains: [planning | conversation | privacy | tool_use | proactive | memory | goals | state]
+    paths: [lifemodel path or policy path]
+    applies_to_task_kinds: [conversation | planning | scheduled | proactive | replay | skill]
+  trigger:
+    type: intent | state | time | event | tool | privacy | pattern | manual
+    match: structured condition
+  condition:
+    expression: structured boolean expression
+    required_state_ids: [state_*]
+    excluded_context: [string]
+  guidance:
+    action: prefer | avoid | require_confirmation | route_local | reduce_intensity | ask_clarifying | run_analysis_first | suppress
+    text: human-readable guidance
+    runtime_effect:
+      prompt_block: optional compact text
+      tool_policy_delta: optional json
+      model_route_delta: optional json
+      context_policy_delta: optional json
+  priority: integer
+  confidence: 0.0-1.0
+  risk: low | medium | high | critical
+  status: draft | proposed | active | trial | weakened | deprecated | archived | rejected
+  lifecycle_state:
+    phase: candidate | review | active | probation | sunset | archived
+    reason: string
+  evidence_ids: [evidence_*]
+  opposing_evidence_ids: [evidence_*]
+  regression_scenario_ids: [reg_*]
+  created_at: rfc3339
+  updated_at: rfc3339
+  last_validated_at: optional_rfc3339
+  owner:
+    type: user | system | agent | migration
+    id: string
+  source:
+    proposal_id: optional proposal_*
+    generator: user_authored | hl_pipeline | migration | maintenance
+    generator_version: string
+  decay:
+    half_life_days: optional_integer
+    last_used_at: optional_rfc3339
+    use_count: integer
+  audit:
+    created_by_run_id: optional run_*
+    accepted_by_user_at: optional_rfc3339
+    last_materialized_view_ids: [view_*]</code></pre>
+      <p>Status 语义：</p>
+      <ul>
+        <li><code>draft</code>：已生成，但尚未准备进入 review。</li>
+        <li><code>proposed</code>：在 Review Center 中可见。</li>
+        <li><code>trial</code>：已接受，但运行时影响有限，并处于主动监控。</li>
+        <li><code>active</code>：可被 runtime 选择。</li>
+        <li><code>weakened</code>：仍存在，但由于 decay、negative evidence 或 failed regression，priority/confidence 更低。</li>
+        <li><code>deprecated</code>：默认不被选择；保留用于 explanation 和 rollback。</li>
+        <li><code>archived</code>：对 runtime 隐藏；可恢复。</li>
+        <li><code>rejected</code>：不 active；对未来相似 candidates 起 negative evidence 作用。</li>
+      </ul>
+
+      <h3>12.1 示例：低能量计划</h3>
+      <pre><code>id: heuristic_low_energy_planning
+title: 低能量计划应降低强度
+scope:
+  domains: [planning, conversation, state]
+  paths: [state.health_status.energy_level, preferences.planning_style]
+  applies_to_task_kinds: [conversation, planning]
+trigger:
+  type: state
+  match:
+    path: state.health_status.energy_level
+    operator: &lt;=
+    value: 4
+condition:
+  expression: task.requires_planning == true
+guidance:
+  action: reduce_intensity
+  text: 能量低时，提出更少步骤、更短时间块，以及考虑恢复的选项。
+  runtime_effect:
+    prompt_block: "使用低能量计划模式：更少步骤、更小承诺，不做激进优化。"
+priority: 70
+confidence: 0.78
+risk: low
+status: active
+lifecycle_state:
+  phase: active
+  reason: 来自重复的状态/计划结果并已接受。
+evidence_ids: [evidence_energy_planning_001, evidence_energy_planning_002]
+opposing_evidence_ids: []
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+last_validated_at: 2026-05-27T00:00:00Z
+owner:
+  type: user
+  id: local_user
+source:
+  proposal_id: proposal_low_energy_planning
+  generator: hl_pipeline
+  generator_version: hl_mvp_1</code></pre>
+
+      <h3>12.2 示例：用户偏好执行前先看草稿</h3>
+      <pre><code>id: heuristic_draft_before_execution
+title: 外部执行前先给草稿
+scope:
+  domains: [tool_use, planning]
+  paths: [policy.confirmation.external_write, preferences.collaboration]
+  applies_to_task_kinds: [planning, skill, replay]
+trigger:
+  type: tool
+  match:
+    side_effect_type: external_write
+condition:
+  expression: action.risk != low
+guidance:
+  action: require_confirmation
+  text: 在执行类似写入的操作前，展示草稿或计划。
+  runtime_effect:
+    tool_policy_delta:
+      external_write: proposal_first
+priority: 90
+confidence: 0.86
+risk: medium
+status: active
+evidence_ids: [evidence_rejected_direct_write_001, evidence_user_requested_draft_002]
+opposing_evidence_ids: []
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+last_validated_at: 2026-05-27T00:00:00Z
+owner:
+  type: user
+  id: local_user
+source:
+  proposal_id: proposal_draft_before_execution
+  generator: hl_pipeline
+  generator_version: hl_mvp_1
+lifecycle_state:
+  phase: active
+  reason: 在反复出现的用户偏好信号之后被接受。</code></pre>
+
+      <h3>12.3 示例：隐私敏感主题优先使用本地模型</h3>
+      <pre><code>id: heuristic_sensitive_topics_local_model
+title: 敏感主题优先使用本地模型
+scope:
+  domains: [privacy, conversation, model_route]
+  paths: [policy.privacy.model_route]
+  applies_to_task_kinds: [conversation, planning, skill]
+trigger:
+  type: privacy
+  match:
+    detected_topics: [health, relationships, identity, finances, private_files]
+condition:
+  expression: privacy.sensitivity >= sensitive
+guidance:
+  action: route_local
+  text: 除非用户明确覆盖，否则敏感主题保持在本地模型上处理。
+  runtime_effect:
+    model_route_delta:
+      privacy_policy: local_only
+priority: 100
+confidence: 0.95
+risk: high
+status: active
+evidence_ids: [evidence_user_privacy_preference_001]
+opposing_evidence_ids: []
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+last_validated_at: 2026-05-27T00:00:00Z
+owner:
+  type: user
+  id: local_user
+source:
+  proposal_id: proposal_sensitive_local
+  generator: user_authored
+  generator_version: manual
+lifecycle_state:
+  phase: active
+  reason: 用户确认的隐私边界。</code></pre>
+
+      <h3>12.4 示例：被拒绝的提醒会降低主动频率</h3>
+      <pre><code>id: heuristic_reduce_rejected_reminders
+title: 反复被拒绝的提醒会降低主动频率
+scope:
+  domains: [proactive, memory]
+  paths: [policy.proactive.reminder_frequency]
+  applies_to_task_kinds: [proactive, scheduled]
+trigger:
+  type: pattern
+  match:
+    event_type: proposal_rejection
+    proposal_type: schedule_checkin
+    count_within_days:
+      count: 3
+      days: 14
+condition:
+  expression: rejection.reason in [not_useful, too_frequent, wrong_timing]
+guidance:
+  action: suppress
+  text: 减少相似主动提醒，并且只在一段安静期后询问节奏。
+  runtime_effect:
+    context_policy_delta:
+      proactive_reminder_cooldown_days: 14
+priority: 75
+confidence: 0.82
+risk: low
+status: active
+evidence_ids: [evidence_rejected_reminders_001]
+opposing_evidence_ids: []
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+last_validated_at: 2026-05-27T00:00:00Z
+owner:
+  type: system
+  id: openlife
+source:
+  proposal_id: proposal_reduce_reminders
+  generator: hl_pipeline
+  generator_version: hl_mvp_1
+lifecycle_state:
+  phase: active
+  reason: 从反复被拒绝的 proposals 中作为 negative evidence 学到。</code></pre>
+
+      <h3>12.5 示例：停滞的长期目标先触发阻力分析</h3>
+      <pre><code>id: heuristic_stalled_goals_friction_first
+title: 停滞的长期目标先触发阻力分析
+scope:
+  domains: [goals, planning, conversation]
+  paths: [goals.long_term, preferences.planning_strategy]
+  applies_to_task_kinds: [conversation, planning]
+trigger:
+  type: pattern
+  match:
+    path: goals.long_term
+    status: active
+    progress_delta_days: 30
+    progress_delta_max: 0
+condition:
+  expression: user_asks_for_more_planning == true
+guidance:
+  action: run_analysis_first
+  text: 在增加任务之前，先分析阻力、约束、能量、动机和被阻塞的依赖。
+  runtime_effect:
+    prompt_block: "对于停滞的长期目标，在提出更多任务前先诊断阻力。"
+priority: 85
+confidence: 0.76
+risk: medium
+status: trial
+evidence_ids: [evidence_stalled_goal_001, evidence_overplanning_rejected_002]
+opposing_evidence_ids: []
+created_at: 2026-05-27T00:00:00Z
+updated_at: 2026-05-27T00:00:00Z
+last_validated_at: null
+owner:
+  type: user
+  id: local_user
+source:
+  proposal_id: proposal_stalled_goal_friction
+  generator: hl_pipeline
+  generator_version: hl_mvp_1
+lifecycle_state:
+  phase: probation
+  reason: 中风险计划策略在完整提升前先接受为试用。</code></pre>
+
+      <h2 id="react-design">13. ReAct 交互设计</h2>
+      <p>LifeModel-HS 应改善下一次 Agent run，而不只是存储知识。</p>
+
+      <h3>13.1 Reason 之前</h3>
+      <p>输入：</p>
+      <ul>
+        <li>AgentTask、用户消息、privacy policy、可用工具、近期运行上下文。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>ContextSelector 识别相关 state fields、已接受 policies、compact evidence summaries 和 memories。</li>
+        <li>HeuristicSelector 按 trigger、task kind、risk、privacy 和 token budget 选择 active heuristics。</li>
+        <li>Materializer 将已选 assets 渲染为 PromptBlocks 或内部 runtime constraints。</li>
+        <li>Audit 记录 included/excluded assets，但不包含原始敏感内容。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>更好的上下文选择、更低 prompt pollution、字段级 privacy、更少过时 profile 注入。</li>
+      </ul>
+
+      <h3>13.2 Act 期间</h3>
+      <p>输入：</p>
+      <ul>
+        <li>拟议工具调用、model route、action intensity、write/external side effect。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>PolicyStore 和已选 heuristics 约束 tool choice、confirmation level、model route 和 action intensity。</li>
+        <li>Privacy-sensitive heuristics 可以强制 LocalOnly。</li>
+        <li>Draft-before-execution heuristic 可以把 write action 转换为 Proposal。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>更安全的 tools、更少意外写入、更好的隐私策略、更贴合用户的行动节奏。</li>
+      </ul>
+
+      <h3>13.3 Observe 之后</h3>
+      <p>输入：</p>
+      <ul>
+        <li>Tool result、model result、user reaction、被拒绝/接受的 proposal、run outcome。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>LifeEventStore 规范化 observations。</li>
+        <li>SignalExtractor 找出 outcome、preference、rejection、success、failure、privacy 和 contradiction signals。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>Outcomes 成为可学习 evidence，而不是消失在 logs 中。</li>
+      </ul>
+
+      <h3>13.4 Reflect 期间</h3>
+      <p>输入：</p>
+      <ul>
+        <li>Run trace、observations、已选 heuristics、user feedback、result quality。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>EvidenceStore 更新 confidence、recency、opposition 和 negative evidence。</li>
+        <li>MaintenanceEngine 记录低质量 heuristic usage 或 conflict。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>Heuristics 根据实际效用提升或削弱。</li>
+      </ul>
+
+      <h3>13.5 Proposal 期间</h3>
+      <p>输入：</p>
+      <ul>
+        <li>Candidate heuristic/state/policy patches 和 evidence summary。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>LifeModelGovernor 分类风险、检查冲突、批处理低风险变更、附加 evidence 和 regression results，并创建 Proposals。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>用户看到可治理、可解释的更新，而不是隐藏 personalization。</li>
+      </ul>
+
+      <h3>13.6 Replay / Regression 期间</h3>
+      <p>输入：</p>
+      <ul>
+        <li>New candidate heuristic、historical scenarios、accepted/rejected examples。</li>
+      </ul>
+      <p>HS 工作：</p>
+      <ul>
+        <li>RegressionSuite 验证 candidate 不违反已知 preferences、privacy policies 或 tool governance。</li>
+        <li>Replay 使用存储的 AgentSpec 和 ToolRuntime policy；HS 添加 scenario-level expected behavior checks。</li>
+      </ul>
+      <p>运行时效果：</p>
+      <ul>
+        <li>新的学习更不容易破坏旧的已确认偏好。</li>
+      </ul>
+
+      <h3>13.7 伪流程</h3>
+      <pre><code>User message
+  -> AgentTask created
+  -> ContextSelector.select(task, privacy, budget)
+       -> selected_state
+       -> selected_policies
+       -> selected_evidence_summaries
+       -> selected_memory_refs
+  -> HeuristicSelector.select(task, selected_state, risk, privacy)
+       -> active_heuristics
+       -> excluded_heuristics with reasons
+  -> Materializer.render_runtime_packet(...)
+  -> PromptStack assembles selected blocks and metadata trace
+  -> ModelRouter chooses route under HS privacy policies
+  -> ReAct Reason
+  -> ReAct Act
+       -> ToolRuntime checks ToolPolicy + selected HS policies
+       -> action may run, block, or create Proposal
+  -> Observe
+       -> AgentRunEvent appended
+       -> LifeEventStore normalizes observation
+  -> Reflect
+       -> SignalExtractor emits Signals
+       -> EvidenceStore updates evidence and negative evidence
+  -> Candidate generation
+       -> LifeModelGovernor produces Proposal if thresholds met
+  -> RegressionSuite checks candidate
+  -> User review
+       -> accepted: commit HS asset, materialize views, link patch/snapshot
+       -> rejected: store negative evidence, weaken similar candidates</code></pre>
+
+      <h3>13.8 时序图</h3>
+      <pre><code>sequenceDiagram
+    participant User
+    participant AgentRuntime
+    participant ContextSelector
+    participant HeuristicSelector
+    participant PromptStack
+    participant ToolRuntime
+    participant LifeEventStore
+    participant SignalExtractor
+    participant EvidenceStore
+    participant Governor
+    participant ProposalStore
+    participant RegressionSuite
+    participant Materializer
+
+    User->>AgentRuntime: AgentTask / message
+    AgentRuntime->>ContextSelector: 按 task/privacy/budget 选择 context
+    ContextSelector-->>AgentRuntime: state、policy、evidence summaries、memory refs
+    AgentRuntime->>HeuristicSelector: 选择可执行 heuristics
+    HeuristicSelector-->>AgentRuntime: ranked heuristics + exclusions
+    AgentRuntime->>PromptStack: 渲染已选 PromptBlocks
+    PromptStack-->>AgentRuntime: model input + metadata trace
+    AgentRuntime->>ToolRuntime: HS policy 下的拟议 action
+    ToolRuntime-->>AgentRuntime: executed / blocked / proposal needed
+    AgentRuntime->>LifeEventStore: 规范化 observations 和 outcomes
+    LifeEventStore->>SignalExtractor: events ready
+    SignalExtractor->>EvidenceStore: signals 和 extraction audit
+    EvidenceStore->>Governor: evidence clusters 和 candidate assets
+    Governor->>RegressionSuite: 运行相关 scenarios
+    RegressionSuite-->>Governor: pass/fail report
+    Governor->>ProposalStore: 创建可治理 proposal
+    User->>ProposalStore: accept / reject / edit
+    ProposalStore->>Materializer: accepted HS asset
+    Materializer-->>AgentRuntime: updated views available</code></pre>
+
+      <h2 id="selection">14. 上下文与启发式选择</h2>
+      <p>Selection 是运行时有用性的核心。没有 selection，HS 就会变成知识库。</p>
+      <p>Selector 输入：</p>
+      <ul>
+        <li>AgentTask kind、intent、risk、initiator、privacy policy。</li>
+        <li>用户消息和近期对话摘要。</li>
+        <li>可用工具集和 side-effect class。</li>
+        <li>当前 StateAssets 和适用的 PolicyAssets。</li>
+        <li>Candidate memory hits 和 evidence summaries。</li>
+        <li>Token budget 和 model route。</li>
+      </ul>
+      <p>Selector 输出：</p>
+      <pre><code>RuntimeHSPacket:
+  selected_heuristics:
+    - heuristic_id
+    - title
+    - compact_guidance
+    - runtime_effect
+    - evidence_summary
+  selected_state:
+    - path
+    - value_summary
+    - ttl
+  selected_policies:
+    - policy_id
+    - runtime_decision
+  selected_evidence_summaries:
+    - evidence_id
+    - claim_summary
+  excluded:
+    - asset_id
+    - reason: privacy | stale | low_relevance | conflict | token_budget | risk
+  audit:
+    selector_version: string
+    task_id: string
+    privacy_policy: string
+    estimated_tokens: integer</code></pre>
+      <p>Selection scoring：</p>
+      <pre><code>score =
+  trigger_match * 0.30
+  + task_relevance * 0.20
+  + confidence * 0.15
+  + recency_or_state_validity * 0.10
+  + priority * 0.10
+  + regression_health * 0.10
+  - conflict_penalty
+  - prompt_pollution_penalty</code></pre>
+      <p>硬过滤：</p>
+      <ul>
+        <li>Privacy disallow。</li>
+        <li>Status 不是 active/trial。</li>
+        <li>Expired state。</li>
+        <li>Critical conflict unresolved。</li>
+        <li>Regression failed for this task class。</li>
+        <li>Token budget exhausted，除非 policy priority 是 high。</li>
+      </ul>
+
+      <h2 id="views">15. 物化视图</h2>
+      <p>Materialized views 是派生的、可重建的，并且面向特定 consumer。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>视图</th><th>Consumer</th><th>内容</th><th>来源</th><th>风险控制</th></tr></thead>
+          <tbody>
+            <tr><td><code>lifemodel_yaml@compat</code></td><td>现有 LifeModelManager、旧 PromptStack 路径、UI compatibility。</td><td>当前 identity/goals/capabilities/state/preferences，加上必要时的 compact accepted heuristics。</td><td>Accepted StateAssets、Heuristics、PolicyAssets。</td><td>永不作为 canonical；包含 source asset ids 和 digest。</td></tr>
+            <tr><td><code>prompt_block.hs_runtime@1</code></td><td>PromptStack。</td><td>Compact selected heuristic guidance 和 state summaries。</td><td>RuntimeHSPacket。</td><td>Field/task-level selection、token budget、privacy filter。</td></tr>
+            <tr><td><code>ui.hs_overview@1</code></td><td>LifeModel/Review UI。</td><td>用户可读的 assets、conflicts、recent changes。</td><td>HS stores。</td><td>默认不包含 raw sensitive payload。</td></tr>
+            <tr><td><code>model_route_policy@1</code></td><td>ModelRouter。</td><td>LocalOnly topics 等 route constraints。</td><td>PolicyStore 和 selected heuristics。</td><td>明确的 privacy priority。</td></tr>
+            <tr><td><code>review_candidate@1</code></td><td>Review Center。</td><td>Before/after、evidence summary、regression result、risk。</td><td>Governor output。</td><td>User confirmation、edit、reject、postpone。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>当前 YAML view 应在迁移期间保留。第一个目标不是移除当前 LifeModel 代码；而是改变什么拥有权威性。</p>
+
+      <h2 id="governance">16. 治理设计</h2>
+      <p>LifeModelGovernor 负责从 candidate 到 proposal 的转换。</p>
+      <p>决策阶段：</p>
+      <ol>
+        <li>Candidate intake：heuristic/state/policy patch 加 evidence links。</li>
+        <li>Schema validation：required fields、paths、lifecycle state、owner/source。</li>
+        <li>Risk classification：复用现有 LifeModel risk classifier，并扩展到 heuristics/policies。</li>
+        <li>Evidence threshold：</li>
+      </ol>
+      <ul>
+        <li>低风险 state：一个强 explicit signal 或重复弱 signals。</li>
+        <li>中风险 preference/planning：多个 evidence points 或一个 explicit user statement。</li>
+        <li>高风险 identity/values/privacy/long-term goals：即使 evidence 很强，也需要 explicit user confirmation。</li>
+      </ul>
+      <ol start="5">
+        <li>Conflict check：比较 affected paths、triggers、action effects 和 opposing evidence。</li>
+        <li>Duplicate check：搜索相似 active heuristics，并提议 merge，而不是创建新 rule。</li>
+        <li>Regression check：为中/高风险和 privacy/tool policies 运行相关 scenarios。</li>
+        <li>Proposal shaping：产生简洁 explanation、before/after、evidence summary、risk、regression result 和 suggested action。</li>
+        <li>Fatigue control：批处理相关低风险 proposals，推迟低置信度 changes，抑制反复被拒绝的 categories。</li>
+        <li>Commit：已接受 proposals 在一个 transaction 中创建 HS assets 和 materialized view updates。</li>
+      </ol>
+      <p>Governance 输出：</p>
+      <ul>
+        <li>创建 Proposal。</li>
+        <li>合并进已有 Proposal。</li>
+        <li>削弱/归档现有 asset。</li>
+        <li>请求澄清。</li>
+        <li>带 audit 丢弃 candidate。</li>
+        <li>从重要的 accepted/rejected decision 创建 regression scenario。</li>
+      </ul>
+
+      <h2 id="regression">17. 回归设计</h2>
+      <p>Regression scenarios 是用户级行为测试，不只是代码测试。</p>
+      <p>Scenario 来源：</p>
+      <ul>
+        <li>用户明确说“做/不要做这个”。</li>
+        <li>用户因行为错误拒绝 proposal。</li>
+        <li>用户接受高风险 heuristic。</li>
+        <li>Privacy incident 或 near-miss。</li>
+        <li>Tool/action mistake。</li>
+        <li>长期偏好经过时间确认。</li>
+      </ul>
+      <p>Regression run 类型：</p>
+      <ul>
+        <li>Deterministic policy check：“Sensitive topic must be LocalOnly.”</li>
+        <li>Selector check：“Draft-before-execution heuristic must be selected for external write.”</li>
+        <li>Prompt inclusion check：“No raw LifeModel appears in SummaryOnly view.”</li>
+        <li>Behavioral simulation：检查 model output 是否符合 must/must_not rules。</li>
+        <li>Replay-linked check：用 new heuristic 重新评估已存 run/action。</li>
+      </ul>
+      <p>MVP 应从 deterministic checks 和 selector/prompt assertions 开始。由 LLM 判定的 behavioral simulation 是后续增强，因为它可能不稳定。</p>
+
+      <h2 id="maintenance">18. 维护机制</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>机制</th><th>设计</th></tr></thead>
+          <tbody>
+            <tr><td>Conflict detection</td><td>检测 path conflicts、与相反 guidance 的 trigger overlap、evidence opposition、policy contradiction 和 regression failures。Conflicts 创建 review items；高风险 assets 不做静默自动解决。</td></tr>
+            <tr><td>Expiration and time decay</td><td>State 默认有 TTL。Evidence 有 recency decay。Heuristics 除非 user-pinned，否则可以有 half-life。低使用和过时 assets 在归档前先变为 weakened。</td></tr>
+            <tr><td>Low-quality heuristic weakening</td><td>跟踪 selection count、user corrections、ignored guidance、proposal rejection、failed regression 和 negative outcomes。降低 confidence 或移动到 trial/weakened。</td></tr>
+            <tr><td>Rejected proposal as negative evidence</td><td>每次 rejection 都记录 reason、affected path、candidate fingerprint、source evidence 和 future suppression hints。相似 candidates 需要更强 evidence 或 explicit user request。</td></tr>
+            <tr><td>Duplicate heuristic compression</td><td>按 scope、trigger、guidance action 和 semantic similarity 聚类。提议 merge，同时保留 evidence ids 和 old asset aliases。</td></tr>
+            <tr><td>Rule bloat prevention</td><td>默认更新/合并现有 heuristic，而不是创建新 heuristic；限制每个 scope 的 active heuristics；按 relevance 和 token budget 选择。</td></tr>
+            <tr><td>Short-term state vs identity boundary</td><td>StateAssets 需要 TTL，并且不能在没有重复 evidence、stability classification 和 user confirmation 的情况下提升为 preferences/identity。</td></tr>
+            <tr><td>Proposal fatigue prevention</td><td>批处理低风险相关 proposals，给重复 categories 设置 cooldown，改用澄清问题而不是许多 proposals，并展示“why now”。</td></tr>
+            <tr><td>AI-coding-friendly maintenance</td><td>稳定 schemas、versioned prompt blocks、deterministic renderers、metadata-only audit、migration guides、fixture scenarios，以及明确的 source/target boundaries。</td></tr>
+            <tr><td>Forgetting</td><td>用户可以 archive/delete evidence 和 heuristics。Deletion tombstones 防止系统从旧 raw data 再生成，除非用户允许 re-learning。</td></tr>
+            <tr><td>Compression audit</td><td>每次 compression 都记录 source assets、resulting asset、lost fields、preserved evidence links 和 rollback path。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="ui">19. UI 与产品交互</h2>
+      <p>目标 UI 不是 CRUD admin surface。它应该像一个个人操作系统的治理控制台。</p>
+      <p>必需界面：</p>
+      <ul>
+        <li>Review Center：候选 heuristic/state/policy proposals，带 risk、evidence、regression 和“why now”。</li>
+        <li>Evidence drawer：显示 supporting 和 opposing evidence summaries、source type、recency 和 confidence。展示 raw source 需要用户操作。</li>
+        <li>Heuristic browser：active/trial/weakened/archived heuristics 按 domain 分组，而不是无尽 rule list。</li>
+        <li>Conflict queue：需要用户澄清的 contradictions。</li>
+        <li>Regression view：重要的个人行为测试、last run result 和 impacted candidates。</li>
+        <li>Materialized view inspector：展示 PromptStack 或 runtime packet 中包含了什么，同时不暴露 raw sensitive content。</li>
+        <li>Rollback/history：已接受 HS asset timeline、相关 proposal、patch 和 materialized view versions。</li>
+        <li>Maintenance inbox：compression、decay、stale rule 和 forgetting suggestions。</li>
+      </ul>
+      <p>Review card 最少字段：</p>
+      <ul>
+        <li>Candidate title 和 type。</li>
+        <li>Affected scope/path。</li>
+        <li>Risk 和 confirmation requirement。</li>
+        <li>Evidence summary 和 opposing evidence count。</li>
+        <li>Regression result。</li>
+        <li>Runtime effect。</li>
+        <li>Suggested action：accept、edit、reject、postpone、ask why、archive similar。</li>
+      </ul>
+      <p>用户控制默认值：</p>
+      <ul>
+        <li>High-risk proposals 绝不 batch accepted。</li>
+        <li>Low-risk proposals 可以批处理，但必须可检查。</li>
+        <li>“暂时拒绝类似项”应创建 negative evidence 和 cooldown。</li>
+        <li>“永远这样做”应创建带 high priority 的 user-authored heuristic proposal。</li>
+      </ul>
+
+      <h2 id="comparison">20. 与 Codex、Claude Code 和 Hermes 类自进化的对比</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>系统</th><th>Memory / Evolution Unit</th><th>相似性</th><th>OpenLife 的差异</th></tr></thead>
+          <tbody>
+            <tr><td>Codex / Claude Code project memory</td><td>Project instructions、working habits、coding preferences、repo conventions。</td><td>Trace 和 experience 可以改善未来工作。</td><td>范围是 project/workspace behavior，而不是个人生活身份；通常像 instructions，不是由用户治理的 life evidence。</td></tr>
+            <tr><td>OpenLife current memory</td><td>Chat records、vector chunks、snapshots、state history、proposals。</td><td>已经 local-first，并能支持 retrieval/proposals。</td><td>需要 evidence graph、executable heuristics、regression、compression 和 field-level selection。</td></tr>
+            <tr><td>Hermes-like self-evolution</td><td>由 trace 驱动优化 skills、prompts、tool descriptions 或 agent behavior。</td><td>OpenLife 可以从 run traces 和 outcomes 学习。</td><td>OpenLife 不能自主重写用户身份；用户主权和隐私要求更严格。</td></tr>
+            <tr><td>OpenLife LifeModel-HS</td><td>由 trace 驱动优化个人 heuristics、context policy、privacy route、collaboration strategy 和 state continuity。</td><td>使用 self-evolution patterns，但处于 governance 之下。</td><td>强优势：在 chat/planning/tools 间提供个人连续性，并带 local-first audit。主要风险：错误学习会显得很个人，因此必须可逆。</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>OpenLife 优势：</p>
+      <ul>
+        <li>Local-first personal data boundary。</li>
+        <li>已有 ProposalStore、PatchStore、PromptStack、AgentRunEvent、ToolRuntime、ModelRouter 和 Privacy primitives。</li>
+        <li>可以把个人上下文连接到真实行动治理，而不只是 chat memory。</li>
+        <li>User-governed negative evidence 和 regression 可以让学习比隐藏 memory 系统更安全。</li>
+      </ul>
+      <p>OpenLife 缺口：</p>
+      <ul>
+        <li>还没有持久的 EvidenceStore/HeuristicStore。</li>
+        <li>没有 selector quality metrics。</li>
+        <li>没有 durable regression suite。</li>
+        <li>Legacy direct apply paths 仍需收敛。</li>
+        <li>UI 必须让 evidence 和 governance 易懂，且不压垮用户。</li>
+      </ul>
+
+      <h2 id="migration">21. 迁移路径</h2>
+      <p>迁移应该是增量式、兼容优先。不要重写当前 Agent framework。</p>
+
+      <h3>Phase 0：ADR 和 Schema Freeze</h3>
+      <ul>
+        <li>为 LifeModel source-of-truth shift 编写 ADR。</li>
+        <li>冻结 LifeEvent、Signal、Evidence、Heuristic、StateAsset、PolicyAsset、RegressionScenario、MaterializedView 的 MVP schemas。</li>
+        <li>定义 asset ids、versioning、privacy metadata 和 audit payload limits。</li>
+        <li>将当前 YAML 定义为 <code>lifemodel_yaml@compat</code>。</li>
+      </ul>
+
+      <h3>Phase 1：EvidenceStore MVP</h3>
+      <ul>
+        <li>添加 EvidenceStore 作为单独的 local store。</li>
+        <li>将当前 <code>MemoryEvidence</code> 形状适配为持久 evidence。</li>
+        <li>把 proposal rejection 记录为 negative evidence。</li>
+        <li>把 evidence 链接到 memory ids、AgentRunEvent ids、proposals 和 affected paths。</li>
+        <li>还不改变 runtime behavior。</li>
+      </ul>
+
+      <h3>Phase 2：HeuristicStore 和 Materializer MVP</h3>
+      <ul>
+        <li>添加 HeuristicStore，使用上面的 schema。</li>
+        <li>将 <code>evolution_rules</code> 迁移为 inactive/imported heuristics 或 materialized text。</li>
+        <li>创建确定性的 YAML materializer，可以把 accepted state/preferences/heuristics 渲染到当前 LifeModel YAML fields。</li>
+        <li>保留当前 LifeModelManager API，同时改变它的输入来源。</li>
+      </ul>
+
+      <h3>Phase 3：Selector MVP</h3>
+      <ul>
+        <li>在 internal feature gate 或 design gate 后添加 HeuristicSelector 和 ContextSelector。</li>
+        <li>第一次 runtime integration 只选择：</li>
+        <li>privacy-sensitive local model heuristic，</li>
+        <li>draft-before-execution heuristic，</li>
+        <li>low-energy planning heuristic。</li>
+        <li>把已选 assets 渲染为 compact PromptBlocks 和 policy deltas。</li>
+        <li>输出 metadata-only selection audit。</li>
+      </ul>
+
+      <h3>Phase 4：Governor 和 Regression MVP</h3>
+      <ul>
+        <li>通过 LifeModelGovernor 路由候选 HS changes。</li>
+        <li>为 privacy、draft-before-execution、low-energy planning 和 rejected reminders 添加 deterministic regression scenarios。</li>
+        <li>中/高风险 heuristic promotion 需要 regression report。</li>
+        <li>保持 ProposalStore 和 Review Center 作为面向用户的治理入口。</li>
+      </ul>
+
+      <h3>Phase 5：Compression 和 Maintenance MVP</h3>
+      <ul>
+        <li>添加 maintenance scans：</li>
+        <li>duplicate heuristic clusters，</li>
+        <li>stale state assets，</li>
+        <li>low-quality heuristics，</li>
+        <li>conflict queue，</li>
+        <li>proposal fatigue signals。</li>
+        <li>Maintenance 创建 proposals，而不是 direct writes。</li>
+      </ul>
+
+      <h3>Phase 6：收敛 Legacy Paths</h3>
+      <ul>
+        <li>把 <code>run_micro_evolution</code> direct apply behavior 转换为 proposal-only output。</li>
+        <li>仅在 dev/test 中保留 <code>allow_legacy_calibration_direct_apply</code>，直到移除。</li>
+        <li>审计所有 LifeModel writes：Builder、Calibration、Chat、Memory、Tool Permission、Proactive、Skill。</li>
+        <li>要求 source audit，确认没有产品路径在 Governor/Proposal acceptance 外修改 canonical HS。</li>
+      </ul>
+
+      <h2 id="mvp">22. 第一版 MVP</h2>
+      <p>第一版 MVP 应证明 HS 可以在不大范围重写的情况下改善一个真实 Agent run。</p>
+      <p>MVP 范围：</p>
+      <ul>
+        <li>EvidenceStore 持久化。</li>
+        <li>HeuristicStore 持久化。</li>
+        <li>三个 active heuristics：</li>
+        <li>敏感主题优先使用本地模型，</li>
+        <li>执行前先给草稿，</li>
+        <li>低能量计划。</li>
+        <li>一个 negative-evidence loop：</li>
+        <li>被拒绝的提醒会降低主动提醒频率。</li>
+        <li>ContextSelector/HeuristicSelector 按 task 和 privacy 选择这些 heuristics。</li>
+        <li>Materializer 输出 compact runtime PromptBlock 和 policy deltas。</li>
+        <li>Review Center 可以 accept/reject/edit heuristic proposals。</li>
+        <li>RegressionSuite 对三个 active heuristics 有 deterministic checks。</li>
+        <li>YAML 仍是物化的兼容视图。</li>
+      </ul>
+      <p>MVP 不应做：</p>
+      <ul>
+        <li>自主 identity rewrite。</li>
+        <li>基于云的 raw LifeModel extraction。</li>
+        <li>完整 automatic compression。</li>
+        <li>跨所有 memories 的宽泛 semantic heuristic retrieval。</li>
+        <li>Auto-apply high-risk changes。</li>
+        <li>替换现有 PromptStack 或 AgentRuntime foundations。</li>
+        <li>构建复杂 expert-system rule editor。</li>
+      </ul>
+      <p>MVP 验证：</p>
+      <ul>
+        <li>隐私敏感对话因为已选择的 HS policy 而路由为 LocalOnly。</li>
+        <li>外部写入 action 因已选择的 HS heuristic 而变成 draft/proposal-first。</li>
+        <li>低能量 state 导致更小的计划建议。</li>
+        <li>被拒绝的提醒 proposals 减少未来 reminder candidates，或创建 cadence proposal。</li>
+        <li>Selection audit 展示 included/excluded heuristics，且不包含 raw sensitive payload。</li>
+        <li>Regression 捕获会违反 LocalOnly privacy 的 candidate。</li>
+      </ul>
+
+      <h2 id="failure-modes">23. 失效模式与防御</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>失效模式</th><th>防御策略</th></tr></thead>
+          <tbody>
+            <tr><td>Memory corruption</td><td>Raw memory 不能直接修改 HS。Evidence 需要 source refs、confidence、support count 和用户可检查 lineage。Memory archive/delete 可以移除或削弱 linked evidence。</td></tr>
+            <tr><td>Wrong signal recognition</td><td>Signals 保持 weak；低 confidence 不提升。使用 extraction audit、uncertainty reasons、evidence thresholds、conflict checks，以及将 user rejection 作为 negative evidence。</td></tr>
+            <tr><td>Missing signal recognition</td><td>提供用户“mark as preference/state/goal”操作，用新 extractor 定期 re-extraction，并按 source type 提供 coverage metrics。</td></tr>
+            <tr><td>Rule conflict</td><td>对 paths、triggers、runtime effects 和 opposing evidence 做 conflict detection。Conflicts 进入 review queue；高风险 conflicts 需要用户解决。</td></tr>
+            <tr><td>Rule bloat</td><td>优先更新/合并现有 heuristics、按 scope 设置 active heuristic caps、compression scans、trial status 和 selector token budgets。</td></tr>
+            <tr><td>Overfitting to user's past</td><td>衰减旧 evidence，对 transient behavior 要求近期 support，保留 opposing evidence，并在把重复 state 转为长期 preference 前先询问。</td></tr>
+            <tr><td>Incorrectly fixed user identity</td><td>Identity 和 values 是高风险。需要明确确认、多个 evidence points、regression scenarios 和便捷 rollback。State 不能静默提升为 identity。</td></tr>
+            <tr><td>Prompt pollution</td><td>Runtime selectors 提供 compact task-level assets；materialized PromptBlocks 有 token budgets 和 metadata traces；full YAML 仅为兼容路径。</td></tr>
+            <tr><td>Privacy leakage</td><td>PrivacyPolicy 和 PolicyStore gate extraction、evidence summaries、materialized views、PromptStack、ModelRouter 和 audit。StrictlyLocal assets 永远不进入 cloud。</td></tr>
+            <tr><td>User confirmation fatigue</td><td>批处理 low-risk proposals、cooldown repeated categories、抑制 similar rejected candidates、询问澄清问题，并暴露“why now”。</td></tr>
+            <tr><td>AI coding maintenance errors</td><td>Stable schemas、ADRs、migration guides、regression fixtures、source audits、metadata-only trace contracts，以及没有 hidden direct-write paths。</td></tr>
+            <tr><td>Materialized view drift</td><td>存储 source asset ids 和 digest；重建 deterministic views；运行 view consistency checks；保留 PatchStore/snapshot rollback。</td></tr>
+            <tr><td>Selector misses critical heuristic</td><td>Regression scenarios 断言 expected selection；高优先级 privacy/tool heuristics 使用 hard filters；UI 可以 pin critical heuristics。</td></tr>
+            <tr><td>Compression loses nuance</td><td>有影响的 compression 走 proposal-first，保留 source evidence links 和 old aliases，并支持 rollback。</td></tr>
+            <tr><td>LLM unavailable</td><td>Deterministic fallback 保持 pipeline 运行；缺少 LLM 会创建 audit reason 并降低 confidence，而不是静默失败。</td></tr>
+            <tr><td>Bad model JSON or hallucinated evidence</td><td>Parse failure 是显式的；model output 没有有效 source refs 就不能创建 Evidence；source ids 会被检查。</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="questions">24. 开放设计问题</h2>
+      <p>这些问题应在实现前通过 ADR 或产品评审解决：</p>
+      <ol>
+        <li>哪些低风险 state updates 可以 auto-accept，如果有的话？</li>
+        <li>Raw Life Data、Evidence、Heuristics 的默认 retention period 分别是什么？</li>
+        <li>用户删除 raw data 时，应强制删除、削弱，还是 tombstone 派生 evidence？</li>
+        <li>什么样的 UI 语言能让普通用户理解“heuristic”？</li>
+        <li>Regression suite 默认应向用户展示多少？</li>
+        <li>Privacy policies 应建模为 heuristics、policies，还是二者兼有但运行时效果不同？</li>
+        <li>每个 domain 默认 active heuristic cap 是多少？</li>
+        <li>Compatibility mode 中，哪些 materialized YAML fields 应包含 heuristic-derived text？</li>
+        <li>Multi-user 或 shared-device 场景应如何影响 LifeModel-HS ownership？</li>
+        <li>什么时候任何 HS maintenance action 可以自动执行，而不是 proposal-first？</li>
+      </ol>
+
+      <h2 id="checklist">25. 本架构的验收清单</h2>
+      <p>本设计满足目前由 ADR 0013 与 MVP task specs 治理的 LifeModel-HS 设计领域：</p>
+      <ul>
+        <li>A. Core concept definitions：第 6 节。</li>
+        <li>B. LifeModel softwareized model system boundary：第 3、5、7、8 节。</li>
+        <li>C. HL engineering pipeline：第 10 节。</li>
+        <li>D. HS internal architecture：第 11 节。</li>
+        <li>E. Heuristic schema and required examples：第 12 节。</li>
+        <li>F. ReAct interaction design and pseudo-flow/sequence diagram：第 13 节。</li>
+        <li>G. Maintenance mechanisms：第 18 节。</li>
+        <li>H. Comparison with Codex, Claude Code, Hermes-like self-evolution：第 20 节。</li>
+        <li>I. Migration path and MVP：第 21 和第 22 节。</li>
+        <li>J. Failure modes and defenses：第 23 节。</li>
+        <li>K. Complete detailed plan with data models, flows, lifecycle, audit, maintenance, migration, and risk defenses：第 8 到第 24 节。</li>
+      </ul>
+
+      <h2 id="final-position">26. 最终架构定位</h2>
+      <p>LifeModel-HS 应作为增量架构层落地，而不是一次重写。当前 OpenLife Agent framework 已经拥有正确的治理主干：ProposalStore、PatchStore、AgentRunEvent、PromptStack、ToolRuntime、ExecutionSandbox、ModelRouter、ContextAssembler、MemoryStore、VectorStore 和 privacy policies。下一代 LifeModel 应使用这条主干，成为由用户治理的 Personal Heuristic System。</p>
+      <p>最重要的产品判断是克制。OpenLife 应从 traces 中学习，但它不应表现得好像每条 trace 都是真相。它应该把 life data 转化为 evidence，把 evidence 转化为 proposed heuristics，把 proposals 转化为 accepted assets，再把 accepted assets 转化为更好的 runtime behavior。用户仍然是所有者；HS 仍然可解释；materialized views 仍然可重建；Agent 变得更个人化，是因为它受到更多治理，而不是因为它更加隐藏。</p>
+    </article>
+  </div>
+</body>
+</html>
