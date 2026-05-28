@@ -322,8 +322,7 @@ impl HeuristicStore {
     }
 
     pub fn seed_mvp_heuristics(&self) -> Result<Vec<HeuristicRecord>> {
-        let mut seeded = Vec::new();
-        seeded.push(
+        let seeded = vec![
             self.seed_mvp_heuristic(
                 BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
                 HeuristicDraft::new(
@@ -337,8 +336,6 @@ impl HeuristicStore {
                 )
                 .with_stable_id(BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING),
             )?,
-        );
-        seeded.push(
             self.seed_mvp_heuristic(
                 BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
                 HeuristicDraft::new(
@@ -352,7 +349,7 @@ impl HeuristicStore {
                 )
                 .with_stable_id(BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY),
             )?,
-        );
+        ];
         Ok(seeded)
     }
 

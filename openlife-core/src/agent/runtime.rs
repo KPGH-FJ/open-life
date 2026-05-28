@@ -205,6 +205,7 @@ impl AgentRuntime {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn generate_direct_with_hs_packet(
         &self,
         task: &AgentTask,
@@ -227,6 +228,7 @@ impl AgentRuntime {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn generate_direct_inner(
         &self,
         task: &AgentTask,
