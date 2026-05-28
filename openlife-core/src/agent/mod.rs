@@ -6,6 +6,7 @@ pub mod heuristic_store;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
+pub mod policy_store;
 pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_store;
@@ -40,6 +41,12 @@ pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     ProviderHealth, TaskType,
+};
+pub use policy_store::{
+    ContextPolicyDecision, HeuristicPolicyEffect, ModelRoutePolicy, PolicyConflictAudit,
+    PolicyEvaluationRequest, PolicyRecord, PolicyStore, PolicyTopic, ToolPolicyDecision,
+    BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
+    BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
 pub use proposal_engine::{
     BuilderProposalGenerator, CalibrationProposalGenerator, ChatProposalGeneratorAdapter,

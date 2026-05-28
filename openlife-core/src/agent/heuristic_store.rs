@@ -1,4 +1,7 @@
 use crate::agent::evidence_store::EvidencePrivacyLevel;
+use crate::agent::policy_store::{
+    BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING, BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
+};
 use crate::agent::types::RiskLevel;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -102,6 +105,7 @@ pub struct HeuristicRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeuristicDraft {
+    pub stable_id: Option<String>,
     pub domain: String,
     pub trigger: String,
     pub conditions: Vec<String>,
@@ -126,6 +130,7 @@ impl HeuristicDraft {
         privacy_level: EvidencePrivacyLevel,
     ) -> Self {
         Self {
+            stable_id: None,
             domain: domain.into(),
             trigger: trigger.into(),
             conditions,
@@ -142,6 +147,11 @@ impl HeuristicDraft {
 
     pub fn with_trigger(mut self, trigger: impl Into<String>) -> Self {
         self.trigger = trigger.into();
+        self
+    }
+
+    pub fn with_stable_id(mut self, stable_id: impl Into<String>) -> Self {
+        self.stable_id = Some(stable_id.into());
         self
     }
 
@@ -265,7 +275,9 @@ impl HeuristicStore {
     pub fn create_heuristic(&self, draft: HeuristicDraft) -> Result<HeuristicRecord> {
         let now = Utc::now();
         let record = HeuristicRecord {
-            id: format!("hr_{}", Uuid::new_v4().simple()),
+            id: draft
+                .stable_id
+                .unwrap_or_else(|| format!("hr_{}", Uuid::new_v4().simple())),
             domain: draft.domain,
             trigger: draft.trigger,
             conditions: draft.conditions,
@@ -307,6 +319,53 @@ impl HeuristicStore {
             ],
         )?;
         Ok(record)
+    }
+
+    pub fn seed_mvp_heuristics(&self) -> Result<Vec<HeuristicRecord>> {
+        let mut seeded = Vec::new();
+        seeded.push(
+            self.seed_mvp_heuristic(
+                BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
+                HeuristicDraft::new(
+                    "planning",
+                    "current_energy_is_low",
+                    vec!["state.energy <= 3".into()],
+                    "Reduce planning intensity, step count, and pressure.",
+                    90,
+                    RiskLevel::Low,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_stable_id(BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING),
+            )?,
+        );
+        seeded.push(
+            self.seed_mvp_heuristic(
+                BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
+                HeuristicDraft::new(
+                    "proactive",
+                    "similar_reminder_was_rejected",
+                    vec!["recent.proactive_reminder.status == rejected".into()],
+                    "Weaken or delay similar proactive reminders after rejection.",
+                    80,
+                    RiskLevel::Low,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_stable_id(BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY),
+            )?,
+        );
+        Ok(seeded)
+    }
+
+    fn seed_mvp_heuristic(&self, id: &str, draft: HeuristicDraft) -> Result<HeuristicRecord> {
+        if let Some(existing) = self.get_heuristic(id)? {
+            return Ok(existing);
+        }
+        let record = self.create_heuristic(draft)?;
+        self.update_lifecycle(
+            &record.id,
+            HeuristicLifecycleStatus::Active,
+            Some(HeuristicActivationAuthority::SeededBuiltInPolicy(id.into())),
+        )
     }
 
     pub fn get_heuristic(&self, id: &str) -> Result<Option<HeuristicRecord>> {
