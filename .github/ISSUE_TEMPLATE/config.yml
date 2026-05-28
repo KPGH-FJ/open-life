@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: LifeModel-HS MVP Specs
+    url: https://github.com/KPGH-FJ/open-life/blob/main/plans/lifemodel_hs_mvp_task_specs.md
+    about: Read the task specs before opening or implementing LMHS issues.
+  - name: ADR 0013
+    url: https://github.com/KPGH-FJ/open-life/blob/main/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
+    about: Governance baseline for LifeModel-HS source of truth, policy, proposals, and MVP boundaries.

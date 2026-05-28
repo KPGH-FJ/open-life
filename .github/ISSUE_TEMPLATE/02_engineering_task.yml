@@ -1,0 +1,66 @@
+name: Engineering Task
+description: Track a bounded non-LMHS engineering task.
+title: "Task: "
+labels:
+  - engineering
+  - needs-plan
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should change, and why?
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Link relevant docs, code, prior issues, or acceptance reports.
+    validations:
+      required: true
+
+  - type: textarea
+    id: allowed_edit_areas
+    attributes:
+      label: Allowed Edit Areas
+      description: List the files or modules expected to change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-Goals
+      description: What must not be changed?
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Commands and acceptance checks required before PR review.
+      value: |
+        ```bash
+        # focused tests
+        ```
+
+        ```bash
+        make ci
+        ```
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: governance
+    attributes:
+      label: Governance
+      options:
+        - label: This task does not broaden runtime authority without an accepted ADR.
+          required: true
+        - label: This task does not bypass Proposal, Privacy, PromptStack, ToolRuntime, ModelRouter, ExecutionFacade, or AgentRunEvent governance.
+          required: true
+        - label: This task avoids unrelated refactors.
+          required: true
