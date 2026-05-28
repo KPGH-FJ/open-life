@@ -45,6 +45,12 @@ For non-LMHS work, mark items as not applicable only when they truly do not touc
 - [ ] Focused module tests:
 - [ ] `make ci`:
 
+## Screenshots / Logs
+
+- Screenshots:
+- Logs or trace excerpts:
+- Redaction note:
+
 ## Documentation
 
 - [ ] Docs updated, or not needed because:
