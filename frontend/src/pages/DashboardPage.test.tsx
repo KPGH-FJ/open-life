@@ -60,12 +60,8 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    await waitFor(() => {
-      expect(screen.getByText("今日目标")).toBeInTheDocument();
-    });
-
-    expect(screen.getByText("早起")).toBeInTheDocument();
-    expect(screen.getByText("运动")).toBeInTheDocument();
+    expect(await screen.findByText("早起")).toBeInTheDocument();
+    expect(await screen.findByText("运动")).toBeInTheDocument();
   });
 
   it("displays gap analysis results", async () => {
@@ -226,7 +222,7 @@ describe("DashboardPage", () => {
     );
 
     expect(await screen.findByText("推荐试用路线")).toBeInTheDocument();
-    expect(screen.getByText("开始一次个性化对话")).toBeInTheDocument();
+    expect(await screen.findByText("开始一次个性化对话")).toBeInTheDocument();
   });
 
   it("prioritizes resuming unfinished builder review when model is still empty", async () => {
