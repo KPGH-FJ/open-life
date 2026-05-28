@@ -19,10 +19,13 @@
 
 1. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：新的架构基准，优先级最高。
 2. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate。
-3. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
-4. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
-5. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-6. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+3. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
+4. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
+5. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013 和 MVP specs 接管实现入口。
+6. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
+7. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+8. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+9. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
@@ -34,6 +37,7 @@
 - 新功能必须能挂到 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal`、`LifeModel`、`Memory`、`ModelRouter` 或 `Workspace` 中。
 - Chat、Builder、Calibration、Dashboard 都只是 Agent Framework 的不同表面，不是彼此孤立的产品中心。
 - 高风险 LifeModel 更新、外部工具写操作、敏感数据上云必须可解释、可确认、可回滚。
+- LifeModel-HS 开发必须遵守 ADR 0013：增量落地、Proposal-first、privacy as hard Policy、metadata-safe audit、YAML 仅作为 compatibility materialized view。
 - 插件在 Beta 阶段默认是本地 Manifest / declarative-only；除非存在真实安全 executor，否则 plugin-declared tool 不能显示为可执行能力。
 
 ---

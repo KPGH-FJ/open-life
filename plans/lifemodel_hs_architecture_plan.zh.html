@@ -351,21 +351,21 @@ Raw Life Data -> Life Event -> Signal -> Evidence -> Candidate Heuristic/State P
       <ul>
         <li><code>AGENTS.md</code>：当前阶段、架构原语、治理规则、运行时边界。</li>
         <li><code>README.md</code>：产品定义、当前 beta 状态、下一阶段 LifeModel 方向。</li>
-        <li><code>plans/openlife_post_beta_roadmap.md</code>：当前 post-beta 状态和 LifeModel Evolution 入口。</li>
-        <li><code>plans/openlife_vnext_core_primitives_and_boundaries.md</code>：AgentRunEvent、PromptStack、ToolRuntime、AgentSpec、MemoryEvidence、LifeModelEvolutionEngine 边界。</li>
+        <li><code>plans/openlife_remaining_tasks_plan.md</code>：当前 remaining-task context 和 LifeModel Evolution 入口。</li>
+        <li><code>plans/openlife_agent_framework_architecture.md</code>：AgentRun、ContextAssembler、ModelRouter、ActionExecutor、ProposalStore、Memory 和 LifeModel 边界。</li>
         <li><code>openlife-core/src/life_model.rs</code>：当前 LifeModel schema、面向 YAML 的状态、校验、patch 应用。</li>
         <li><code>openlife-core/src/memory.rs</code>：当前 MemoryStore 中的消息、记忆、快照、聊天会话和状态历史表。</li>
         <li><code>openlife-core/src/vectors.rs</code>：当前 VectorStore 的 chunk、tier、archive 和检索维护模型。</li>
-        <li><code>openlife-core/src/agent/memory_evidence.rs</code>：当前 MemoryEvidence 结构体和 evidence-to-proposal 辅助逻辑。</li>
+        <li><code>openlife-core/src/agent/proposal_engine.rs</code> 和 <code>openlife-core/src/agent/proposal_generators/chat.rs</code>：当前 proposal 生成和 chat/memory signal extraction 辅助逻辑。</li>
         <li><code>openlife-core/src/agent/proposal_engine.rs</code>：当前 proposal 生成器以及从运行创建 proposal 的逻辑。</li>
-        <li><code>openlife-core/src/agent/proposal_generators/chat.rs</code>：当前由 PromptStack 治理的聊天 proposal 抽取，带启发式 fallback。</li>
+        <li><code>openlife-core/src/agent/proposal_generators/chat.rs</code>：当前聊天 proposal 抽取，带启发式 fallback。</li>
         <li><code>openlife-core/src/agent/context_assembler.rs</code>：当前类别级上下文装配和 ContextPolicy。</li>
-        <li><code>openlife-core/src/agent/prompt_stack.rs</code>：当前 PromptBlock、PromptStack、隐私分类和 block trace。</li>
-        <li><code>src-tauri/src/chat_preprocess.rs</code>：当前聊天预处理、隐私脱敏、记忆检索、hot cache 注入和 ContextAssembler V2。</li>
-        <li><code>src-tauri/src/chat_persistence.rs</code>：当前聊天持久化、向量记忆持久化和聊天 proposal 生成超时。</li>
+        <li><code>openlife-core/src/agent/context_assembler.rs</code>、<code>openlife-core/src/agent/runtime.rs</code> 和 <code>openlife-core/src/agent/agent_loop.rs</code>：当前 context assembly、prompt construction、privacy classification 和 run trace 路径。</li>
+        <li><code>src-tauri/src/lib.rs</code>：当前聊天预处理、隐私脱敏、记忆检索、ContextAssembler V2 使用、持久化、向量记忆持久化和聊天 proposal 生成超时。</li>
         <li><code>src-tauri/src/commands/proposal.rs</code>：当前 Proposal 应用路径、patch store 交互、memory write/archive、工具权限和 replay closure。</li>
         <li><code>src-tauri/src/commands/calibration.rs</code>：当前 calibration 的 proposal-first 路径，以及由 legacy gate 控制的 direct apply 路径。</li>
       </ul>
+      <p>术语说明：本设计有时使用 <code>PromptStack</code>、<code>ToolRuntime</code>、<code>AgentRunEvent</code> 和 <code>AgentSpec</code> 作为目标架构概念。在当前代码库中，最接近的具体实现分布在 <code>ContextAssembler</code>、<code>AgentRuntime</code>、<code>AgentLoop</code>、<code>ActionExecutor</code>、<code>tool_permissions</code>、<code>AgentRun</code> 和 <code>agent::store</code> 中。</p>
 
       <h2 id="current-vs-target">3. 当前事实与目标设计</h2>
       <div class="table-wrap">
@@ -375,7 +375,7 @@ Raw Life Data -> Life Event -> Signal -> Evidence -> Candidate Heuristic/State P
             <tr><td>LifeModel 真相来源</td><td><code>LifeModel</code> 是序列化为 YAML 的 Rust struct，包含 identity、goals、capabilities、state、relationships、preferences 和 <code>evolution_rules</code>。</td><td>已接受的 HS 资产成为真相来源；YAML 成为物化出来的兼容视图。</td></tr>
             <tr><td>运行时注入</td><td>PromptStack 可以注入完整 YAML、state hint、evolution hint 或 summary。ContextPolicy 是类别级的。</td><td>ContextSelector 和 HeuristicSelector 按任务、风险、隐私和 token budget 选择具体状态字段、启发式、证据摘要和策略。</td></tr>
             <tr><td>记忆</td><td>MemoryStore 持久化 messages/memories/snapshots/state history。VectorStore 检索 chunks 并支持 tier/archive 维护。</td><td>Memory 仍然是原始/检索层。EvidenceStore 是单独的精选层，包含 provenance、negative evidence、confidence、conflict、decay 和 governance status。</td></tr>
-            <tr><td>证据</td><td><code>MemoryEvidence</code> 已存在，并且可以把 evidence 转换为 proposal。它还不是完整持久化的证据图。</td><td>EvidenceStore 是一等公民：append-only、可查询、感知冲突，并且链接到 events、signals、proposals、heuristics、regressions 和 materialized views。</td></tr>
+            <tr><td>证据</td><td>当前 chat/memory proposal extraction 可以产生候选更新，但还没有完整持久化的证据图。</td><td>EvidenceStore 是一等公民：append-only、可查询、感知冲突，并且链接到 events、signals、proposals、heuristics、regressions 和 materialized views。</td></tr>
             <tr><td>信号抽取</td><td>聊天 proposal 抽取使用带 PromptStack 的本地 LLM 和 fallback heuristics。它可以生成 goal、state、capability 和 memory proposals。</td><td>SignalExtractor 输出类型化 Signals，带 extraction method、confidence、uncertainty、negative cues 和 audit。候选生成不能直接修改 HS。</td></tr>
             <tr><td>治理</td><td>LifeModel、MemoryWrite、MemoryArchive、ToolPermission、外部写入、计划任务、数据导出都有 proposal-first 路径。</td><td>LifeModelGovernor 使用风险策略、证据阈值、回归结果、冲突检查、批处理和用户审阅疲劳控制来治理候选 HS 资产。</td></tr>
             <tr><td>Patch</td><td>LifeModel patch/risk/snapshot 路径已存在。</td><td>Patch 仍然是物化视图的应用机制，但已接受的 HS 资产才是规范来源。PatchStore 记录视图物化和兼容性 mutation。</td></tr>
@@ -428,8 +428,8 @@ Raw Life Data -> Life Event -> Signal -> Evidence -> Candidate Heuristic/State P
             <tr><td>LifeModel</td><td>用户拥有的个人启发式系统：已接受的 state、policy、evidence、heuristics、regression、maintenance rules 和 materialized views。不只是 YAML、画像文本或 prompt 内容。</td><td>已接受的 HS 资产、materialization policy、用户编辑、已接受的 proposals。</td><td>Materialized YAML、PromptStack blocks、UI summaries、runtime context packets、selector results。</td><td>由用户拥有；由 LifeModelGovernor 和 MaintenanceEngine 维护；可版本化、可审计、可回滚。</td><td>当前 <code>LifeModel</code> struct 成为物化视图和兼容 schema。</td></tr>
             <tr><td>Raw Life Data</td><td>来自对话、文件、工具结果、日历、反馈、状态记录、计划、AgentRunEvents 和外部来源的原始记录。原始数据不能被信任为模型真相。</td><td>聊天消息、记忆、向量 chunks、工具输出、run events、反馈、用户上传。</td><td>仅作为 normalization input。</td><td>由用户拥有；按来源设置 retention 和隐私控制。</td><td>当前 MemoryStore、VectorStore、AgentRunEvent、feedback、files 和 state_history 是原始来源。</td></tr>
             <tr><td>Life Event</td><td>一个规范化、不可变的事件，描述用户生活或 agent 交互中发生的事。</td><td>原始记录和 source metadata。</td><td>带 source refs、time、actor、privacy、payload digest、redacted summary 的类型化 event。</td><td>Append-only；可以被 supersede，但不被 mutation。</td><td>把 AgentRunEvent 思路扩展到生活领域事件，但不取代 AgentRunEvent。</td></tr>
-            <tr><td>Signal</td><td>从一个或多个 Life Events 中抽取出的潜在有意义模式。Signal 弱于 Evidence。</td><td>Life Events、source spans、extractor prompts/rules、model outputs。</td><td>带 confidence、uncertainty、polarity、affected domain 和 extraction audit 的类型化 signal。</td><td>由 SignalExtractor 创建；被提升、削弱或丢弃。</td><td>当前 chat extraction 和 MemoryEvidence detection 成为产生 Signal 的步骤。</td></tr>
-            <tr><td>Evidence</td><td>关于用户的受支持 claim，带 source lineage、confidence、recency、negative evidence 和 conflict links。Evidence 强于 Signal，但自身仍不是 heuristic。</td><td>Signals、用户确认、已接受/拒绝的 proposals、run outcomes、重复观察。</td><td>供 candidate generation、selectors、explanations 和 regression 使用的 evidence record。</td><td>Append-only versions；confidence 会衰减；可被 opposing、archived 或 superseded。</td><td>当前 <code>MemoryEvidence</code> 是种子形状，但需要持久化和 graph links。</td></tr>
+            <tr><td>Signal</td><td>从一个或多个 Life Events 中抽取出的潜在有意义模式。Signal 弱于 Evidence。</td><td>Life Events、source spans、extractor prompts/rules、model outputs。</td><td>带 confidence、uncertainty、polarity、affected domain 和 extraction audit 的类型化 signal。</td><td>由 SignalExtractor 创建；被提升、削弱或丢弃。</td><td>当前 chat 和 memory proposal extraction 成为产生 Signal 的步骤。</td></tr>
+            <tr><td>Evidence</td><td>关于用户的受支持 claim，带 source lineage、confidence、recency、negative evidence 和 conflict links。Evidence 强于 Signal，但自身仍不是 heuristic。</td><td>Signals、用户确认、已接受/拒绝的 proposals、run outcomes、重复观察。</td><td>供 candidate generation、selectors、explanations 和 regression 使用的 evidence record。</td><td>Append-only versions；confidence 会衰减；可被 opposing、archived 或 superseded。</td><td>当前 proposal extraction outputs 是 seed signals，还不是 persisted evidence。</td></tr>
             <tr><td>Heuristic</td><td>Agent 的可执行指导单元：scope、trigger、condition、guidance、priority、confidence、risk、evidence links、opposing evidence 和 lifecycle state。</td><td>Evidence clusters、用户撰写的 rules、已接受 proposals、regression outcomes。</td><td>Runtime guidance、policy constraints、selector candidates、prompt blocks 或 tool constraints。</td><td>Draft -> proposed -> accepted -> active -> trial -> deprecated/archived；用户治理高风险变更。</td><td>取代 freeform <code>evolution_rules</code>，成为类型化、可治理、可执行资产。</td></tr>
             <tr><td>State</td><td>用户当前或近期状况、关注点、能量、健康、情绪、义务和临时上下文的时间敏感表示。不是 identity。</td><td>State events、check-ins、feedback、tool observations、用户编辑。</td><td>State assets 和 materialized current-state views。</td><td>默认短 TTL；没有重复 evidence 和确认，不得提升为 identity。</td><td>当前 <code>state</code> 字段和 <code>state_history</code> 成为物化层与原始层。</td></tr>
             <tr><td>Policy</td><td>治理 privacy、model routing、context selection、tool behavior、confirmation、retention 和 HS maintenance 的规则。</td><td>用户设置、已接受的 policy proposals、risk classifier、defaults。</td><td>Runtime decisions、selector constraints、proposal requirements、audit reasons。</td><td>可版本化并对用户可见；privacy policies 需要明确确认。</td><td>构建于 PrivacyPolicy、ContextPolicy、ToolRuntime、risk classifier、network policy 之上。</td></tr>
@@ -662,8 +662,8 @@ Materialized views:
           <thead><tr><th>模块</th><th>职责</th><th>数据结构</th><th>当前关系</th><th>实现方向</th><th>风险</th></tr></thead>
           <tbody>
             <tr><td>LifeEventStore</td><td>持久化来自 raw sources 的规范化、不可变 life events。</td><td><code>LifeEvent</code>、source refs、privacy metadata、digest。</td><td>扩展 AgentRunEvent 和 MemoryStore，但不合并它们。</td><td>SQLite table 加 chat、memory、tool、feedback、calibration、user edits 的 source adapters。</td><td>Event duplication、privacy payload mistakes。</td></tr>
-            <tr><td>SignalExtractor</td><td>把 Life Events 转换为 weak Signals。</td><td><code>Signal</code>、extractor audit、confidence、uncertainty。</td><td>泛化当前 chat proposal extraction 和 MemoryEvidence creation。</td><td>从 deterministic + 现有本地 LLM PromptStack helper 开始；输出 Signals 而不是 Proposals。</td><td>False positives/negatives；extractor drift。</td></tr>
-            <tr><td>EvidenceStore</td><td>存储精选的 supported claims 和 opposition。</td><td><code>Evidence</code>、conflict links、confidence、recency、status。</td><td>将当前 <code>MemoryEvidence</code> 演进为持久 graph。</td><td>SQLite，按 affected_path、evidence_type、status、risk、privacy 建索引。</td><td>Evidence bloat 和 stale claims。</td></tr>
+            <tr><td>SignalExtractor</td><td>把 Life Events 转换为 weak Signals。</td><td><code>Signal</code>、extractor audit、confidence、uncertainty。</td><td>泛化当前 chat 和 memory proposal extraction。</td><td>从 deterministic + 现有 extraction helpers 开始；输出 Signals，而不是直接创建 accepted facts。</td><td>False positives/negatives；extractor drift。</td></tr>
+            <tr><td>EvidenceStore</td><td>存储精选的 supported claims 和 opposition。</td><td><code>Evidence</code>、conflict links、confidence、recency、status。</td><td>把 proposal extraction outputs 和 run outcomes 转成 persisted graph。</td><td>SQLite，按 affected_path、evidence_type、status、risk、privacy 建索引。</td><td>Evidence bloat 和 stale claims。</td></tr>
             <tr><td>HeuristicStore</td><td>存储可执行的个人 heuristics。</td><td>下方 <code>Heuristic</code> schema、lifecycle、examples、validation。</td><td>取代 freeform <code>evolution_rules</code> 作为 canonical asset。</td><td>SQLite 加 JSON columns 存 trigger/condition/guidance；确定性 materialization。</td><td>Rule bloat、overfitting、conflicts。</td></tr>
             <tr><td>StateStore</td><td>将当前和历史 state assets 与 identity 分开存储。</td><td><code>StateAsset</code>、TTL、promotion guard、evidence links。</td><td>构建于 <code>state</code> 和 <code>state_history</code>。</td><td>保持 transient state 分离；物化进当前 LifeModel YAML state。</td><td>短期状态污染长期身份。</td></tr>
             <tr><td>PolicyStore</td><td>存储 privacy、route、context、confirmation、retention 和 maintenance policies。</td><td><code>PolicyAsset</code>。</td><td>构建于 PrivacyPolicy、ContextPolicy、ToolRuntime policy、risk classifier。</td><td>从只读 default policies 和 proposal-backed user changes 开始。</td><td>Hidden policy complexity。</td></tr>
@@ -1326,7 +1326,7 @@ lifecycle_state:
       <h3>Phase 1：EvidenceStore MVP</h3>
       <ul>
         <li>添加 EvidenceStore 作为单独的 local store。</li>
-        <li>将当前 <code>MemoryEvidence</code> 形状适配为持久 evidence。</li>
+        <li>将当前 chat/memory proposal extraction outputs 适配为 persisted evidence candidates。</li>
         <li>把 proposal rejection 记录为 negative evidence。</li>
         <li>把 evidence 链接到 memory ids、AgentRunEvent ids、proposals 和 affected paths。</li>
         <li>还不改变 runtime behavior。</li>
@@ -1473,7 +1473,7 @@ lifecycle_state:
       </ul>
 
       <h2 id="final-position">26. 最终架构定位</h2>
-      <p>LifeModel-HS 应作为增量架构层落地，而不是一次重写。当前 OpenLife Agent framework 已经拥有正确的治理主干：ProposalStore、PatchStore、AgentRunEvent、PromptStack、ToolRuntime、ExecutionSandbox、ModelRouter、ContextAssembler、MemoryStore、VectorStore 和 privacy policies。下一代 LifeModel 应使用这条主干，成为由用户治理的 Personal Heuristic System。</p>
+      <p>LifeModel-HS 应作为增量架构层落地，而不是一次重写。当前 OpenLife Agent framework 已经拥有正确的治理主干：ProposalStore、PatchStore、AgentRun records、context/prompt assembly、ActionExecutor、tool-permission checks、ModelRouter、ContextAssembler、MemoryStore、VectorStore 和 privacy policies。下一代 LifeModel 应使用这条主干，成为由用户治理的 Personal Heuristic System。</p>
       <p>最重要的产品判断是克制。OpenLife 应从 traces 中学习，但它不应表现得好像每条 trace 都是真相。它应该把 life data 转化为 evidence，把 evidence 转化为 proposed heuristics，把 proposals 转化为 accepted assets，再把 accepted assets 转化为更好的 runtime behavior。用户仍然是所有者；HS 仍然可解释；materialized views 仍然可重建；Agent 变得更个人化，是因为它受到更多治理，而不是因为它更加隐藏。</p>
     </article>
   </div>

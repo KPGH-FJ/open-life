@@ -25,19 +25,20 @@ Reference documents:
 
 - `plans/lifemodel_hs_architecture_plan.md`
 - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
-- `plans/adr/0004-lifemodel-field-risk-classification.md`
-- `plans/adr/0005-memoryevidence-and-lifemodel-evolution-proposal-policy.md`
-- `plans/adr/0006-cloud-privacy-policy-and-modelrouter-disclosure-rules.md`
-- `plans/openlife_codex_level_closeout_acceptance_report.md`
+- `plans/openlife_agent_framework_architecture.md`
+- `plans/openlife_stabilization_and_spine_consolidation_plan.md`
+- `docs/decisions/0001-lifemodel-patch.md`
+- `docs/decisions/0002-proposal-unified.md`
+- `docs/decisions/0003-agent-run-tracking.md`
 
 ## Baseline Review
 
 Before LifeModel-HS MVP implementation:
 
 - P0-P12 Agent Framework primitives are already in place.
-- `AgentRunEvent` append-only trace, `PromptStack`, `ProposalStore`,
-  `MemoryEvidence`, `ModelRouter`, `ExecutionFacade`, and governed runtime
-  paths exist.
+- `AgentRun` trace, `ContextAssembler`, `ProposalStore`, chat/memory proposal
+  generators, `ModelRouter`, `ActionExecutor`, and governed runtime paths
+  exist.
 - Current `LifeModel` YAML remains the compatibility runtime view.
 - Memory currently supports chat/session/state/custom memory plus vector
   retrieval, but it is not yet a complete evidence layer.
@@ -106,9 +107,11 @@ Allowed edit areas:
 
 - `AGENTS.md`
 - `README.md`
-- `plans/openlife_post_beta_roadmap.md`
-- `plans/adr/README.md`
+- `plans/openlife_development_plan.md`
+- `plans/openlife_remaining_tasks_plan.md`
+- `plans/openlife_react_beta_roadmap.md`
 - `plans/lifemodel_hs_mvp_task_specs.md`
+- `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
 
 Constraints:
 
@@ -126,7 +129,8 @@ Verification:
 Goal:
 
 Introduce a persisted EvidenceStore as a curated evidence layer separate from
-raw MemoryStore, VectorStore, and current `MemoryEvidence` extraction helpers.
+raw MemoryStore, VectorStore, and current chat/memory proposal extraction
+helpers.
 
 Expected behavior:
 
@@ -134,17 +138,19 @@ Expected behavior:
   affected path, evidence type, confidence, risk, privacy level, status,
   recency, support count, opposing refs, and optional tombstone metadata.
 - Evidence can be created, queried, weakened, archived, contradicted, and linked
-  to proposals or AgentRunEvents.
+  to proposals, AgentRun records, or run metadata.
 - Evidence records store source references and digests, not raw sensitive
   payloads by default.
-- Existing `MemoryEvidence` can be mapped into EvidenceStore candidates without
-  changing runtime behavior.
+- Existing chat/memory proposal extraction output can be mapped into
+  EvidenceStore candidates without changing runtime behavior.
 - No evidence item becomes an accepted LifeModel fact merely because it was
   extracted.
 
 Allowed edit areas:
 
-- `openlife-core/src/agent/memory_evidence.rs`
+- `openlife-core/src/agent/proposal_generators/chat.rs`
+- `openlife-core/src/agent/proposal_engine.rs`
+- `openlife-core/src/agent/memory_service.rs`
 - new `openlife-core/src/agent/evidence_store.rs`
 - `openlife-core/src/agent/mod.rs`
 - `openlife-core/src/json_utils.rs` if schema helpers are needed
@@ -161,7 +167,7 @@ Verification:
 
 - Unit tests cover create/query/weaken/archive/contradict/tombstone basics.
 - Unit tests prove raw payload is not required in stored evidence records.
-- Existing MemoryEvidence tests still pass.
+- Existing chat proposal and memory proposal tests still pass.
 - `cargo test -p openlife-core evidence`
 
 ## LMHS-2: HeuristicStore MVP Skeleton
@@ -195,7 +201,7 @@ Constraints:
 
 - Do not build a complex heuristic editor.
 - Do not let HeuristicStore override privacy policy.
-- Do not inject all heuristics into PromptStack.
+- Do not inject all heuristics into prompt/context assembly.
 - Do not promote extracted signals directly into active heuristics.
 
 Verification:
@@ -240,8 +246,9 @@ Allowed edit areas:
 - new `openlife-core/src/agent/policy_store.rs` if needed
 - `openlife-core/src/privacy.rs`
 - `openlife-core/src/agent/heuristic_store.rs`
-- `openlife-core/src/agent/execution_sandbox.rs`
 - `openlife-core/src/agent/action_executor/`
+- `openlife-core/src/tool_permissions.rs`
+- `openlife-core/src/tool_manifest.rs`
 - focused Rust tests
 
 Constraints:
@@ -270,7 +277,7 @@ Expected behavior:
 
 - Selector input includes task kind, intent summary, privacy classification,
   risk level, tool requirements, current state hints, token budget, and
-  optional AgentSpec context.
+  optional AgentTask or AgentRun context.
 - ContextSelector selects relevant state summaries, policy refs, evidence
   summaries, and compatibility LifeModel fields.
 - HeuristicSelector selects active/trial heuristics by domain, trigger,
@@ -279,16 +286,16 @@ Expected behavior:
 - Selector output is a `RuntimeHSPacket` or equivalent metadata structure with
   included assets, excluded assets, reasons, source ids, digests, and token
   estimates.
-- Selection audit is metadata-safe and can be attached to AgentRunEvent or run
-  detail metadata without raw sensitive payloads.
+- Selection audit is metadata-safe and can be attached to AgentRun or run detail
+  metadata without raw sensitive payloads.
 
 Allowed edit areas:
 
 - new `openlife-core/src/agent/hs_selector.rs`
 - `openlife-core/src/agent/context_assembler.rs`
-- `openlife-core/src/agent/prompt_stack.rs`
-- `openlife-core/src/agent/types/`
-- `openlife-core/src/agent/event_store.rs`
+- `openlife-core/src/agent/runtime.rs`
+- `openlife-core/src/agent/types.rs`
+- `openlife-core/src/agent/store.rs`
 - focused Rust tests
 
 Constraints:
@@ -362,10 +369,12 @@ Expected behavior:
 
 - For privacy-sensitive topics, the selected hard policy affects ModelRouter so
   the run uses LocalOnly or fails closed when LocalOnly is unavailable.
-- For external write actions, the selected policy/rule affects ToolRuntime or
-  ActionExecutor so the action becomes draft/proposal-first unless confirmed.
-- For low-energy planning, selected heuristic guidance affects PromptStack or
-  plan generation so generated plans are smaller and lower pressure.
+- For external write actions, the selected policy/rule affects ActionExecutor or
+  tool-permission checks so the action becomes draft/proposal-first unless
+  confirmed.
+- For low-energy planning, selected heuristic guidance affects ContextAssembler,
+  AgentRuntime prompt construction, or plan generation so generated plans are
+  smaller and lower pressure.
 - Runtime output records which HS assets affected the run through metadata-safe
   selection audit.
 - Existing non-HS flows continue to work if no relevant HS assets are selected.
@@ -373,19 +382,20 @@ Expected behavior:
 Allowed edit areas:
 
 - `openlife-core/src/agent/context_assembler.rs`
-- `openlife-core/src/agent/prompt_stack.rs`
+- `openlife-core/src/agent/runtime.rs`
+- `openlife-core/src/agent/agent_loop.rs`
 - `openlife-core/src/agent/model_router.rs`
 - `openlife-core/src/scheduler.rs`
 - `openlife-core/src/agent/action_executor/`
-- `openlife-core/src/agent/execution_facade.rs`
-- `openlife-core/src/agent/types/`
+- `openlife-core/src/tool_permissions.rs`
+- `openlife-core/src/agent/types.rs`
 - focused tests
 
 Constraints:
 
 - Do not create a second runtime path.
-- Do not route around `ExecutionFacade`, `PromptStack`, `ModelRouter`, or
-  `ToolRuntime` governance.
+- Do not route around `AgentRuntime`, `ContextAssembler`, `ModelRouter`,
+  `ActionExecutor`, or tool-permission governance.
 - Do not add broad prompt injection of all HS assets.
 - Do not make cloud calls for sensitive raw HS extraction.
 
@@ -504,6 +514,7 @@ Expected behavior:
 Allowed edit areas:
 
 - `frontend/src/components/RunTracePanel.tsx`
+- `frontend/src/components/ReasoningTracePanel.tsx`
 - `frontend/src/pages/AgentRunDetail.tsx`
 - `frontend/src/pages/ProposalReviewPage.tsx`
 - `frontend/src/types.ts`
