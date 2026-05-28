@@ -15,7 +15,7 @@ anyhow = "1.0"
 dirs = "5.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1.10"
-similar = "2.4"
+similar = "3.1"
 async-trait = "0.1"
 rand = "0.8"
 futures = "0.3"
