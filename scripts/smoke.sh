@@ -50,7 +50,7 @@ fi
 echo ""
 echo "5️⃣  核心模块检查..."
 MODULES=(
-    "openlife-core/src/agent/types.rs"
+    "openlife-core/src/agent/types/mod.rs"
     "openlife-core/src/agent/store.rs"
     "openlife-core/src/agent/proposal_store.rs"
     "openlife-core/src/scheduler.rs"
