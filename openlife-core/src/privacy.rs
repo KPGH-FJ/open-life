@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -264,7 +265,7 @@ impl PrivacyEngine {
         let mut counters: HashMap<PrivacyType, usize> = HashMap::new();
 
         let mut sorted: Vec<_> = findings;
-        sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+        sorted.sort_by_key(|item| Reverse(item.1.len()));
 
         for (ptype, original) in sorted {
             match self.policy.action_for(&ptype) {

@@ -416,17 +416,13 @@ impl ModelRouter {
                     capability -= 2;
                 }
             }
-            TaskType::Planner => {
-                if provider == "deepseek" || provider == "openrouter" {
-                    score += Self::PLANNER_BONUS;
-                    capability += 2;
-                }
+            TaskType::Planner if provider == "deepseek" || provider == "openrouter" => {
+                score += Self::PLANNER_BONUS;
+                capability += 2;
             }
-            TaskType::Embedding => {
-                if provider == "ollama" || provider == "openai" {
-                    score += Self::EMBEDDING_BONUS;
-                    capability += 3;
-                }
+            TaskType::Embedding if provider == "ollama" || provider == "openai" => {
+                score += Self::EMBEDDING_BONUS;
+                capability += 3;
             }
             _ => {}
         }
