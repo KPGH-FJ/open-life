@@ -13,7 +13,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
 dirs = "5.0"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 regex = "1.10"
 similar = "2.4"
 async-trait = "0.1"
