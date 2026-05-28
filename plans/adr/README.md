@@ -42,6 +42,7 @@ Implementation should not begin for high-risk boundaries until the relevant ADR 
 | 0010 | ChatPage State Model Migration Policy | accepted | Phase 10, P4 Trace UI |
 | 0011 | Plan Recovery and Rollback Policy | proposed | P5 retry/cancel/rollback |
 | 0012 | AgentSpec Store And Runtime Selection | proposed | P7 AgentSpecStore, runtime selection |
+| 0013 | LifeModel-HS Source Of Truth And Governance | accepted | Post-Beta LifeModel-HS design and MVP |
 
 ## Recommended Acceptance Sequence
 
@@ -63,6 +64,8 @@ ADR 0007-0010 are accepted and have guided P2/P3 plus P3 hardening. Further high
 ADR 0011 is proposed for P5. Implement cancellation and whole-plan retry only within the conservative policy in `plans/openlife_vnext_p5_task_specs.md`; rollback implementation should wait until ADR 0011 is accepted.
 
 ADR 0012 is proposed for P7. Implement AgentSpecStore and runtime selection conservatively: bootstrap a stored default main AgentSpec, resolve specs deterministically, and do not let AgentSpec grant authority beyond ToolRuntime, ActionExecutor, Proposal, PromptStack, ContextPolicy, AgentRunEvent, ExecutionSandbox, or PlanExecutor.
+
+ADR 0013 is accepted for Post-Beta LifeModel-HS work. Implement the next LifeModel phase as an additive Personal Heuristic System layer: keep current YAML as a compatibility materialized view during migration, introduce canonical accepted HS assets incrementally, enforce Proposal-first governance for risky changes, treat privacy as hard Policy rather than a soft Heuristic, and limit automatic updates to low-risk transient state plus low-risk maintenance metadata. Coding work should follow `plans/lifemodel_hs_mvp_task_specs.md` one task at a time.
 
 ## Decision Backlog
 
@@ -118,6 +121,17 @@ These must be resolved before advanced specialist agents or AgentSpec editing:
 3. Should missing explicit AgentSpec ids fail or fall back to the stored default main spec?
 4. Which AgentSpec changes eventually require Proposal review?
 5. Should inactive AgentSpecs be usable for historical replay only?
+
+### Post-Beta LifeModel-HS Decisions
+
+These are resolved by ADR 0013 and should guide LifeModel-HS MVP planning:
+
+1. LifeModel-HS canonical truth should move toward accepted HS assets; YAML remains a compatibility materialized view during migration.
+2. Low-risk auto-accept is limited to transient StateAsset updates with TTL.
+3. Privacy is a hard Policy boundary, not merely a Heuristic.
+4. Raw data deletion must weaken, archive, or tombstone linked evidence according to user intent.
+5. Active heuristics should have per-domain caps and compression pressure.
+6. Maintenance auto-actions are limited to low-risk metadata, expiration, cache, diagnostics, and materialized-view rebuilds.
 
 ## ADR Template
 

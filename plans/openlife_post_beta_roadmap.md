@@ -1,10 +1,10 @@
 # OpenLife Post-Beta 完整发展计划
 
-Date: 2026-05-10 (updated: Codex-level Final Closeout, 2026-05-26)
+Date: 2026-05-10 (updated: LifeModel-HS spec prep, 2026-05-28)
 
-Status: active / Codex-level stabilization closeout
+Status: active / LifeModel-HS planning gate
 
-> 本文档是 Post-Beta / Codex-level 阶段索引。P0-P12 全部 vNext 原语已完成代码实现，Codex-level 稳定化边界已经收口；当前只做最终事实同步、验收报告和 LifeModel 阶段准入门控，不做 LifeModel 深度开发或发布打包。
+> 本文档是 Post-Beta / Codex-level 阶段索引。P0-P12 全部 vNext 原语已完成代码实现，Codex-level 稳定化边界已经收口；当前已经进入 LifeModel-HS 设计与 spec 准备门控。LifeModel-HS 开发必须先对齐 ADR 0013 与 MVP task specs，不允许绕过治理边界直接做 LifeModel 深度开发或旧式 evolution 扩张。
 
 ## Codex-Level Upgrade Entry
 
@@ -23,6 +23,16 @@ Status: active / Codex-level stabilization closeout
 2026-05-26 当前阶段为 **Runtime fallback boundary 最终收口**：Chat / StreamChat 已完成 Tauri ExecutionFacade 收敛并通过 `AgentRuntime::execute_task_with_spec` / PromptStack；Direct Tool Execution、Replay、Plan Execution 是无模型 PromptStack 的专用 facade/wrapper 或 action-only 路径；Scheduled execution 已迁移为 Scheduled-specific wrapper 并通过 PromptStack；Proactive suggestions 保持 suggestion-only，不创建 AgentRun / PromptStack trace。Skill runtime 仍不进入 Chat ExecutionFacade：真实路径是 SkillManifest 派生 Skill-specific PromptBlocks → 必需 stored `AgentSpec` → 追加 Skill PromptBlock IDs 的有效 AgentSpec → `AgentRuntime::execute_task_with_spec` / PromptStack / context governance → `InferenceScheduler::generate_governed` → skill JSON envelope 解析和 ProposalStore 写入。Chat proposal extraction 已从 ad hoc prompt 迁入 Proposal-specific PromptStack helper，web content summarization helper 已从 raw summarizer prompt 迁入 Web Summarization PromptStack helper。LayeredReasoner meaning / strategy / generation / safety internal prompts 已迁入 LayeredReasoner-specific PromptBlocks，并作为 metadata-only internal strategy boundary 写入 `ReasoningTrace.prompt_block_traces`；该层不伪造 `prompt_stack.assembled` AgentRunEvent。`InferenceScheduler::generate` / `generate_stream` 和 `llm::build_system_prompt` 现在明确为 legacy compatibility boundary；正式 AgentRuntime / ExecutionFacade governed path 及其 runtime fallback 不再调用 legacy scheduler generation。Chat / StreamChat runtime fallback 保留为 governed legacy compatibility retry：只处理 Runtime/model failure，Governance failure fail-closed；fallback.started / fallback.completed / fallback.failed 统一使用 metadata-only payload builder，保留 `agent_spec_id`、`privacy_policy`、`generation_path`、PromptStack source 和 sanitized error summary，不写 raw prompt、raw user、raw LifeModel、raw memory 或完整模型输出。Builder 模型辅助提取已收口为 Builder-specific PromptBlocks + `generate_raw_governed(..., LocalOnly)`，不走 legacy raw/scheduler generation，且 Builder 仍保持 Proposal-first；Calibration 判定为 deterministic / proposal-only / UI metadata，暂不迁入 PromptStack，direct apply 仅保留显式 legacy compatibility gate。
 
 2026-05-26 Codex-level Final Closeout：Runtime fallback boundary 之后不再继续扩展底座。本轮新增 `openlife_codex_level_closeout_acceptance_report.md`，把 P0-P12、ExecutionFacade、PromptStack、AgentRunEvent/Audit、Proposal-first、runtime fallback、Builder/Calibration 边界和测试门控统一封口。若 `make ci` 继续全绿，下一阶段应进入 LifeModel Evolution / Evidence / Proposal / Editor / Review 的准入后开发，而不是重复做 AgentRuntime 基座扩张。
+
+## LifeModel-HS Entry
+
+2026-05-28 LifeModel-HS 设计门控已完成第一轮沉淀。后续 LifeModel 相关开发必须优先阅读：
+
+1. [`lifemodel_hs_architecture_plan.md`](lifemodel_hs_architecture_plan.md): LifeModel-HS / Personal Heuristic System 总体架构设计。
+2. [`adr/0013-lifemodel-hs-source-of-truth-governance.md`](adr/0013-lifemodel-hs-source-of-truth-governance.md): Source of truth、治理、自动更新、retention、删除、Policy/Heuristic 边界、MVP 范围的 accepted ADR。
+3. [`lifemodel_hs_mvp_task_specs.md`](lifemodel_hs_mvp_task_specs.md): 可交给 Agent 执行的 LifeModel-HS MVP coding specs。
+
+LifeModel-HS MVP 的默认路线是 additive：先建立 EvidenceStore、HeuristicStore、Policy/Heuristic boundary、ContextSelector/HeuristicSelector、deterministic RegressionSuite、negative evidence loop 和 YAML compatibility materialized view guardrails。当前 YAML LifeModel 仍是兼容视图，不在 MVP 中一次性切换为完整 HS canonical source。
 
 ---
 
@@ -177,7 +187,9 @@ Status: active / Codex-level stabilization closeout
 
 ---
 
-## 三、Phase 3: LifeModel Evolution 管线闭环 (2-4周, 可与 Phase 2 并行)
+## 三、Phase 3: LifeModel-HS MVP / Evolution 管线闭环 (2-4周, 可与 Phase 2 并行)
+
+> 本节保留历史 Evolution Pipeline 任务语义，但新的 LifeModel 开发入口已经升级为 LifeModel-HS。具体 coding 必须按 `lifemodel_hs_mvp_task_specs.md` 单任务推进，并遵守 ADR 0013。旧式 MemoryEvidence -> Evolution Proposal 管线只能作为 HS Evidence / Proposal / negative evidence 的兼容输入或迁移对象，不能绕过 EvidenceStore、Policy、Selector、Regression 和 Proposal-first 治理。
 
 ### 3.1 MemoryEvidence → Evolution Pipeline
 
