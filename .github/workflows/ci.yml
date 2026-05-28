@@ -190,7 +190,7 @@ jobs:
         run: cargo tarpaulin -p openlife-core --out json --output-dir coverage-rust
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-coverage-report
           path: coverage-rust/
