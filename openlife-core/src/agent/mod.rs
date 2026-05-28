@@ -12,6 +12,7 @@ pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_store;
 pub mod reasoning;
+pub mod regression_suite;
 pub mod runtime;
 pub mod store;
 pub mod types;
@@ -64,6 +65,9 @@ pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
     ReasoningOutput, ReasoningPhaseKind, ReasoningStrategy, ReasoningTrace,
+};
+pub use regression_suite::{
+    RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use store::AgentRunStore;
