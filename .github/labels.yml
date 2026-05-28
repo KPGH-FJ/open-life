@@ -1,0 +1,85 @@
+# Source-of-truth label taxonomy for OpenLife.
+#
+# GitHub does not apply this file automatically. Use it as the canonical label
+# set when configuring repository labels manually or through a future label sync
+# tool. Keep issue templates and PR templates aligned with these names.
+
+- name: lifemodel-hs
+  color: "5319e7"
+  description: LifeModel-HS / Personal Heuristic System work.
+
+- name: mvp
+  color: "1d76db"
+  description: Required for the current MVP package.
+
+- name: epic
+  color: "3b0a45"
+  description: Parent issue tracking multiple tasks.
+
+- name: needs-plan
+  color: "fbca04"
+  description: Requires an implementation plan before coding.
+
+- name: needs-triage
+  color: "d4c5f9"
+  description: Needs human triage before assignment.
+
+- name: governance
+  color: "b60205"
+  description: Proposal, privacy, permission, source-of-truth, or ADR-sensitive work.
+
+- name: privacy
+  color: "d93f0b"
+  description: Privacy, redaction, model routing, LocalOnly, or sensitive data handling.
+
+- name: proposal-first
+  color: "c2e0c6"
+  description: Changes that must preserve proposal-first mutation behavior.
+
+- name: architecture
+  color: "0e8a16"
+  description: Architecture, ADR, boundaries, or long-term system shape.
+
+- name: backend
+  color: "0052cc"
+  description: Rust core or Tauri backend work.
+
+- name: frontend
+  color: "bfdadc"
+  description: React / TypeScript frontend work.
+
+- name: rust
+  color: "dea584"
+  description: Rust implementation or tests.
+
+- name: test
+  color: "0e8a16"
+  description: Tests, fixtures, verification, or regression coverage.
+
+- name: bug
+  color: "d73a4a"
+  description: Reproducible bug or behavioral regression.
+
+- name: engineering
+  color: "c5def5"
+  description: Bounded engineering task outside a specific product epic.
+
+- name: documentation
+  color: "0075ca"
+  description: Documentation-only change.
+
+- name: dependencies
+  color: "0366d6"
+  description: Dependency update.
+
+- name: github-actions
+  color: "000000"
+  description: GitHub Actions workflow or action dependency.
+
+- name: blocked
+  color: "b60205"
+  description: Blocked on human decision, external dependency, or missing prerequisite.
+
+- name: do-not-merge
+  color: "b60205"
+  description: PR must not merge until this label is removed.

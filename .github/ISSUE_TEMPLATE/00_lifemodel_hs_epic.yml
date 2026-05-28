@@ -1,0 +1,129 @@
+name: LifeModel-HS Epic
+description: Track the full LifeModel-HS MVP phase.
+title: "Epic: LifeModel-HS MVP"
+labels:
+  - lifemodel-hs
+  - mvp
+  - epic
+  - governance
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for the top-level LifeModel-HS MVP tracking issue.
+
+        Required references:
+        - `plans/lifemodel_hs_mvp_task_specs.md`
+        - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
+        - `plans/lifemodel_hs_architecture_plan.md`
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: State the phase goal in one or two paragraphs.
+      value: |
+        Implement the LifeModel-HS MVP according to:
+
+        - `plans/lifemodel_hs_mvp_task_specs.md`
+        - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
+        - `plans/lifemodel_hs_architecture_plan.md`
+
+        LifeModel-HS should move OpenLife from a mostly static YAML/profile LifeModel toward an additive, local-first, user-governed Personal Heuristic System.
+    validations:
+      required: true
+
+  - type: textarea
+    id: mvp_definition
+    attributes:
+      label: MVP Definition
+      description: Define what makes the MVP real, not just structurally present.
+      value: |
+        The MVP proves that LifeModel-HS can influence real Agent behavior through accepted, governed, metadata-safe HS assets without replacing the current YAML LifeModel source path.
+
+        The MVP is not complete because stores exist. It is complete only when selected policies/heuristics can affect narrow runtime behavior, be audited, be regression-checked, and remain proposal-first for risky changes.
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture_invariants
+    attributes:
+      label: Architecture Invariants
+      description: These invariants should not be violated by task PRs.
+      value: |
+        - Current YAML LifeModel remains a compatibility materialized view.
+        - Accepted HS assets are the long-term target source of truth, but migration is phased.
+        - Privacy is hard Policy, not soft Heuristic.
+        - Heuristics cannot relax Policy.
+        - Raw Life Data cannot directly mutate canonical HS assets.
+        - Risky HS mutation is Proposal-first.
+        - High-risk identity, values, long-term goals, sensitive relationships, and privacy boundaries require explicit user confirmation.
+        - Runtime selection audit must be metadata-safe.
+        - Deterministic regression comes before broad runtime integration.
+        - Existing PromptStack, ModelRouter, ToolRuntime, ExecutionFacade, Proposal, and AgentRunEvent governance must remain intact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: review_policy
+    attributes:
+      label: Review Policy
+      description: Define what each task PR must prove and what reviewers should reject.
+      value: |
+        Each task PR must include:
+
+        - Summary of changed files.
+        - Explanation of how the change follows ADR 0013.
+        - Tests run and results.
+        - Any out-of-scope work intentionally avoided.
+        - Remaining risks or follow-ups.
+
+        Review should reject PRs that:
+
+        - broaden runtime authority without an accepted ADR,
+        - bypass Proposal-first governance,
+        - store raw sensitive data unnecessarily,
+        - relax privacy policy through heuristics,
+        - switch LifeModel source of truth in one step,
+        - implement adjacent LMHS tasks without explicit scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: task_issues
+    attributes:
+      label: Task Issues
+      description: Link each child issue as it is created.
+      value: |
+        - [ ] LMHS-1: EvidenceStore MVP Skeleton
+        - [ ] LMHS-2: HeuristicStore MVP Skeleton
+        - [ ] LMHS-3: Policy/Heuristic Boundary And Built-In MVP Assets
+        - [ ] LMHS-4: ContextSelector And HeuristicSelector MVP
+        - [ ] LMHS-5: Deterministic RegressionSuite MVP
+        - [ ] LMHS-6: Runtime Integration MVP
+        - [ ] LMHS-7: Negative Evidence Loop MVP
+        - [ ] LMHS-8: Materialized YAML Compatibility View MVP
+        - [ ] LMHS-9: Minimal Review And Trace Surface
+        - [ ] LMHS-10: Legacy Evolution Path Audit
+    validations:
+      required: true
+
+  - type: textarea
+    id: exit_criteria
+    attributes:
+      label: Exit Criteria
+      value: |
+        - EvidenceStore and HeuristicStore exist with focused tests.
+        - Privacy-sensitive LocalOnly policy is enforced as hard policy.
+        - External write actions remain draft/proposal-first.
+        - Low-energy planning changes runtime guidance in a bounded, testable way.
+        - Rejected reminder behavior creates negative evidence and affects similar future reminders narrowly.
+        - ContextSelector and HeuristicSelector select assets by task, privacy, risk, lifecycle, and budget without injecting the whole HS.
+        - Runtime selection audit is metadata-safe and inspectable.
+        - RegressionSuite has deterministic checks for the MVP behaviors.
+        - YAML remains a compatibility materialized view and does not contain raw HS internals.
+        - No high-risk identity, value, mission, long-term goal, sensitive relationship, or privacy-boundary update can auto-apply.
+        - Legacy write-path audit exists and does not reveal newly introduced hidden high-risk direct writes.
+        - `make ci` passes.
+    validations:
+      required: true

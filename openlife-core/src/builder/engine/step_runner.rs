@@ -1,6 +1,7 @@
 use crate::agent::{prompt_stack::PromptStack, PrivacyPolicy};
 use crate::builder::types::*;
 use crate::life_model::{LifeModel, Skill, ValueItem};
+use std::cmp::Reverse;
 
 impl<'a> super::BuilderEngine<'a> {
     pub(crate) async fn quick_build_step(
@@ -406,7 +407,7 @@ impl<'a> super::BuilderEngine<'a> {
                 *counts.entry(choice.clone()).or_insert(0) += 1;
             }
             let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            sorted.sort_by_key(|item| Reverse(item.1));
             if let Some((top, _)) = sorted.first() {
                 lines.push(format!("价值排序中最优先的是：{}", top));
             }
@@ -422,7 +423,7 @@ impl<'a> super::BuilderEngine<'a> {
             *counts.entry(choice.clone()).or_insert(0) += 1;
         }
         let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|item| Reverse(item.1));
         let mut lines = vec!["根据你的回答，我整理出了你最重视的价值排序：".to_string()];
         for (i, (name, count)) in sorted.iter().enumerate() {
             lines.push(format!("{}. {}（在 {} 次比较中胜出）", i + 1, name, count));
@@ -472,7 +473,7 @@ impl<'a> super::BuilderEngine<'a> {
                 }
             })
             .collect();
-        values.sort_by(|a, b| b.weight.cmp(&a.weight));
+        values.sort_by_key(|item| Reverse(item.weight));
         if !values.is_empty() {
             model.identity.values = values;
         }
