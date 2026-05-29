@@ -1,14 +1,15 @@
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
 use crate::mcp_audit::McpAuditStore;
-use crate::tool_manifest::ToolManifest;
+use crate::tool_manifest::{ToolManifest, ToolSource};
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
 use serde_json::Value;
 
 use super::helpers::{
-    canonical_tool_source, filesystem_access_error, is_path_in_safe_paths, normalize_tool_name,
-    should_mark_needs_confirmation, ToolCallInternalResult,
+    canonical_tool_source, filesystem_access_error, hs_requires_external_write_proposal,
+    is_direct_external_write_tool, is_path_in_safe_paths, is_proposal_generation_tool,
+    normalize_tool_name, should_mark_needs_confirmation, ToolCallInternalResult,
 };
 use super::ActionExecutionContext;
 use super::ActionExecutionResult;
@@ -20,44 +21,6 @@ use crate::agent::types::{
     ToolActionScope,
 };
 use ring::digest::{digest, SHA256};
-
-/// Returns true if the tool name indicates a proposal-generation tool that
-/// only creates a user-confirmable Proposal (no direct side effect).
-fn is_proposal_generation_tool(name: &str) -> bool {
-    name.ends_with("_proposal")
-        || name.ends_with("_propose_write")
-        || name.ends_with("_propose_archive")
-        || name.ends_with("_propose_patch")
-        || name.ends_with("_propose_update")
-        || name.ends_with(".propose_write")
-        || name.ends_with(".propose_archive")
-        || name.ends_with(".propose_patch")
-        || name.ends_with(".propose_update")
-        || name.ends_with(".propose_event")
-}
-
-fn hs_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
-    ctx.hs_runtime_packet.is_some_and(|packet| {
-        packet
-            .selected_policies
-            .iter()
-            .any(|policy| policy.policy_id == BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST)
-    })
-}
-
-fn is_direct_external_write_tool(manifest: &ToolManifest) -> bool {
-    if manifest.declarative_only || is_proposal_generation_tool(&manifest.name) {
-        return false;
-    }
-
-    matches!(
-        manifest.action_type.as_str(),
-        "write" | "external_side_effect"
-    ) || manifest
-        .capabilities
-        .iter()
-        .any(|capability| matches!(capability.as_str(), "write" | "external_side_effect"))
-}
 
 impl super::ActionExecutor {
     /// Execute a tool action (MCP, builtin, or plugin).
@@ -154,6 +117,39 @@ impl super::ActionExecutor {
         let is_proposal_tool = manifest
             .as_ref()
             .is_none_or(|m| is_proposal_generation_tool(&m.name));
+
+        if let Some(m) = manifest.as_ref().filter(|m| {
+            hs_requires_external_write_proposal(ctx) && is_direct_external_write_tool(m)
+        }) {
+            if let Some(result) =
+                self.create_external_write_action_proposal(&request, ctx, tool_name, &args, m)
+            {
+                return result;
+            }
+
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: true,
+                decision: "proposal_required".into(),
+                reason: "HS proposal-first policy requires an ExternalWriteAction proposal before direct external write".into(),
+                policy_id: Some(BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.into()),
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                manifest.as_ref(),
+                &request,
+            );
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::NeedsConfirmation,
+                stop_reason: Some("hs_external_write_proposal_first".into()),
+            });
+        }
+
         let permission_blocks =
             !is_proposal_tool && (decision.requires_confirmation || !decision.allowed);
         let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
@@ -316,7 +312,7 @@ impl super::ActionExecutor {
             )
         };
 
-        let (mut action, observation) = self.build_success_action_observation(
+        let (mut action, mut observation) = self.build_success_action_observation(
             tool_name,
             &args,
             &result,
@@ -349,6 +345,33 @@ impl super::ActionExecutor {
             // If target tool permission was denied, treat as NeedsConfirmation
             if !result.success {
                 if let Some(ref error) = result.error {
+                    if error.contains("hs_external_write_proposal_first") {
+                        action.status = "needs_confirmation".to_string();
+                        action.permission_decision = Some("proposal_required".into());
+                        if let Some(structured) = observation.structured_result.as_mut() {
+                            if let Some(object) = structured.as_object_mut() {
+                                object.insert(
+                                    "status".into(),
+                                    serde_json::json!("needs_confirmation"),
+                                );
+                                object.insert(
+                                    "requires_confirmation".into(),
+                                    serde_json::json!(true),
+                                );
+                                object.insert(
+                                    "permission_decision".into(),
+                                    serde_json::json!("proposal_required"),
+                                );
+                                object.insert("proposal_required".into(), serde_json::json!(true));
+                            }
+                        }
+                        return Ok(ActionExecutionResult {
+                            action,
+                            observation,
+                            status: ActionExecutionStatus::NeedsConfirmation,
+                            stop_reason: Some("hs_external_write_proposal_first".into()),
+                        });
+                    }
                     if error.contains("blocked") || error.contains("ask_every_time") {
                         action.status = "needs_confirmation".to_string();
                         return Ok(ActionExecutionResult {
@@ -701,7 +724,7 @@ impl super::ActionExecutor {
         Some(Ok(result))
     }
 
-    fn create_external_write_action_proposal(
+    pub(crate) fn create_external_write_action_proposal(
         &self,
         request: &AgentActionRequest,
         ctx: &ActionExecutionContext<'_>,
@@ -709,8 +732,43 @@ impl super::ActionExecutor {
         args: &Value,
         manifest: &ToolManifest,
     ) -> Option<anyhow::Result<ActionExecutionResult>> {
+        let proposal_id = match self
+            .create_external_write_action_proposal_record(request, ctx, tool_name, args, manifest)
+        {
+            Some(Ok(proposal_id)) => proposal_id,
+            Some(Err(e)) => return Some(Err(e)),
+            None => return None,
+        };
+
+        let mut result = self.build_proposal_required_action(
+            request.clone(),
+            &format!(
+                "{}: created ExternalWriteAction proposal (id: {}) for HS proposal-first policy",
+                tool_name, proposal_id
+            ),
+        );
+        result.stop_reason = Some("hs_external_write_proposal_first".into());
+
+        Some(Ok(result))
+    }
+
+    pub(crate) fn create_external_write_action_proposal_record(
+        &self,
+        request: &AgentActionRequest,
+        ctx: &ActionExecutionContext<'_>,
+        tool_name: &str,
+        args: &Value,
+        manifest: &ToolManifest,
+    ) -> Option<anyhow::Result<String>> {
         let proposal_store = ctx.proposal_store?;
         let source = canonical_tool_source(manifest);
+        let server = match &manifest.source {
+            ToolSource::Mcp { server_name } => Some(server_name.clone()),
+            _ => None,
+        };
+        let risk_level = manifest.risk_level.clone();
+        let action_type = manifest.action_type.clone();
+        let capabilities = manifest.capabilities.clone();
         let path = args
             .get("path")
             .or_else(|| args.get("file_path"))
@@ -753,12 +811,17 @@ impl super::ActionExecutor {
                 "tool_name": tool_name,
                 "tool_id": manifest.id,
                 "source": source,
+                "server": server,
                 "arguments": args,
                 "path": path,
+                "content": content_text,
                 "content_preview": content_preview,
                 "content_hash": content_hash,
                 "size_bytes": size_bytes,
                 "operation": operation,
+                "risk_level": risk_level,
+                "action_type": action_type,
+                "capabilities": capabilities,
                 "requires_confirmation": true,
                 "hs_policy_id": BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
             }),
@@ -784,14 +847,6 @@ impl super::ActionExecutor {
             return None;
         }
 
-        let result = self.build_proposal_required_action(
-            request.clone(),
-            &format!(
-                "{}: created ExternalWriteAction proposal (id: {}) for HS proposal-first policy",
-                tool_name, proposal_id
-            ),
-        );
-
-        Some(Ok(result))
+        Some(Ok(proposal_id))
     }
 }

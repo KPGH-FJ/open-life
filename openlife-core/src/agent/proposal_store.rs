@@ -483,6 +483,28 @@ mod tests {
     }
 
     #[test]
+    fn test_create_and_get_chat_conversation_proposal() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.candidates",
+            serde_json::json!({ "content": "prefers concise replies" }),
+            "Chat conversation suggested a memory candidate",
+            0.72,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        store.create_proposal(&proposal).unwrap();
+
+        let fetched = store.get_proposal(&proposal.id).unwrap().unwrap();
+        assert_eq!(fetched.id, proposal.id);
+        assert_eq!(fetched.proposal_type, ProposalType::MemoryWrite);
+        assert_eq!(fetched.source, ProposalSource::ChatConversation);
+        assert_eq!(fetched.after, proposal.after);
+        assert!(fetched.expires_at.is_some());
+    }
+
+    #[test]
     fn test_accept_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let mut proposal = AgentProposal::new(

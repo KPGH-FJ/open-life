@@ -600,6 +600,7 @@ impl rusqlite::types::FromSql for ProposalSource {
             "skill_runtime" => Ok(ProposalSource::SkillRuntime),
             "plugin" => Ok(ProposalSource::Plugin),
             "manual" => Ok(ProposalSource::Manual),
+            "chat_conversation" => Ok(ProposalSource::ChatConversation),
             "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         })

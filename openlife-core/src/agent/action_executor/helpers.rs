@@ -1,3 +1,5 @@
+use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
+use crate::agent::ActionExecutionContext;
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
 use crate::tool_manifest::ToolManifest;
@@ -90,6 +92,47 @@ pub fn should_mark_needs_confirmation(
     inspection: &McpArgumentInspection,
 ) -> bool {
     decision.requires_confirmation || (inspection.requires_confirmation && inspection.pii_found)
+}
+
+/// Returns true if the tool name indicates a proposal-generation tool that
+/// only creates a user-confirmable Proposal (no direct side effect).
+pub fn is_proposal_generation_tool(name: &str) -> bool {
+    name.ends_with("_proposal")
+        || name.ends_with("_propose_write")
+        || name.ends_with("_propose_archive")
+        || name.ends_with("_propose_patch")
+        || name.ends_with("_propose_update")
+        || name.ends_with(".propose_write")
+        || name.ends_with(".propose_archive")
+        || name.ends_with(".propose_patch")
+        || name.ends_with(".propose_update")
+        || name.ends_with(".propose_event")
+}
+
+pub fn hs_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
+    ctx.hs_runtime_packet.is_some_and(|packet| {
+        packet
+            .selected_policies
+            .iter()
+            .any(|policy| policy.policy_id == BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST)
+    })
+}
+
+pub fn is_direct_external_write_tool(manifest: &ToolManifest) -> bool {
+    if manifest.name == "mcp.call_tool"
+        || manifest.declarative_only
+        || is_proposal_generation_tool(&manifest.name)
+    {
+        return false;
+    }
+
+    matches!(
+        manifest.action_type.as_str(),
+        "write" | "external_side_effect"
+    ) || manifest
+        .capabilities
+        .iter()
+        .any(|capability| matches!(capability.as_str(), "write" | "external_side_effect"))
 }
 
 pub fn fetch_url_on_worker_thread(url: &str) -> Result<ToolCallInternalResult> {

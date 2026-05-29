@@ -590,11 +590,16 @@ export async function generateMicroEvolutionChanges(): Promise<{
 
 export async function applyCalibration(
   changes: EvolutionChange[],
-  mode: "direct" | "proposal" = "direct"
+  mode: "direct" | "proposal" = "proposal"
 ): Promise<{
   success: boolean;
-  snapshot_version: string;
-  applied_count: number;
+  snapshot_version?: string;
+  applied_count?: number;
+  created_count?: number;
+  created_ids?: string[];
+  run_id?: string;
+  error_count?: number;
+  errors?: string[];
   message: string;
 }> {
   return safeInvoke("apply_calibration", { changes, mode });
@@ -1495,6 +1500,7 @@ export type ProposalSource =
   | "skill_runtime"
   | "plugin"
   | "manual"
+  | "chat_conversation"
   | "proactive_agent";
 
 export interface AgentProposal {

@@ -1773,6 +1773,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proposal_accepts_hs_external_write_payload_and_verifies_hash() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+
+        let safe_path = temp_dir.path().join("safe");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path_canonical = safe_path.canonicalize().unwrap();
+        {
+            let mut cfg = state.config.lock().await;
+            cfg.system.safe_paths = vec![safe_path_canonical.to_string_lossy().to_string()];
+        }
+
+        let file_path = safe_path_canonical.join("hs-payload.txt");
+        let content = "真实 content 应由 HS ExternalWriteAction payload 写入";
+        let content_hash = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(content.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("builtin.{}", file_path.display()),
+            serde_json::json!({
+                "tool_name": "file.write",
+                "tool_id": "file.write",
+                "source": "builtin",
+                "arguments": {
+                    "path": file_path.to_string_lossy().to_string(),
+                    "content": content
+                },
+                "path": file_path.to_string_lossy().to_string(),
+                "content": content,
+                "content_preview": content,
+                "content_hash": content_hash,
+                "size_bytes": content.len(),
+                "operation": "create",
+                "requires_confirmation": true,
+                "hs_policy_id": openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+            }),
+            "HS proposal-first 写入文件",
+            0.9,
+            RiskLevel::High,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        accept_proposal_with_state(id.clone(), &state)
+            .await
+            .unwrap();
+
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Accepted);
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+    }
+
+    #[tokio::test]
     async fn accept_external_write_action_blocks_outside_safe_paths() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);

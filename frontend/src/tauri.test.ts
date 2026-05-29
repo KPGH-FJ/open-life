@@ -4,6 +4,7 @@ import {
   addDailyGoal,
   acceptProposal,
   builderStart,
+  applyCalibration,
   editProposal,
   getStateHistory,
   recordState,
@@ -115,6 +116,18 @@ describe("tauri command argument aliases", () => {
         proposal_id: "proposal-1",
         newAfter: { name: "新值" },
         new_after: { name: "新值" },
+      })
+    );
+  });
+
+  it("defaults calibration apply calls to proposal mode", async () => {
+    await applyCalibration([]);
+
+    expect(invoke).toHaveBeenCalledWith(
+      "apply_calibration",
+      expect.objectContaining({
+        changes: [],
+        mode: "proposal",
       })
     );
   });

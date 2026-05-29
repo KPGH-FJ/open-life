@@ -1,8 +1,9 @@
 use crate::agent::action_executor::helpers::is_private_url;
 use crate::agent::action_executor::helpers::{
     call_a2a_agent_blocking, canonical_tool_source, extract_host_from_url,
-    fetch_url_on_worker_thread, filesystem_access_error, is_path_in_safe_paths,
-    search_web_on_worker_thread, summarize_content_blocking, ToolCallInternalResult,
+    fetch_url_on_worker_thread, filesystem_access_error, hs_requires_external_write_proposal,
+    is_direct_external_write_tool, is_path_in_safe_paths, search_web_on_worker_thread,
+    summarize_content_blocking, ToolCallInternalResult,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::tool_manifest::ToolSource;
@@ -354,6 +355,41 @@ impl super::ActionExecutor {
                         )),
                     });
                 };
+
+                if hs_requires_external_write_proposal(ctx)
+                    && is_direct_external_write_tool(&target_manifest)
+                {
+                    return match self.create_external_write_action_proposal_record(
+                        request,
+                        ctx,
+                        &target_manifest.name,
+                        &tool_args,
+                        &target_manifest,
+                    ) {
+                        Some(Ok(proposal_id)) => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: Some(serde_json::json!({
+                                "proposal_required": true,
+                                "proposal_type": "external_write_action",
+                                "proposal_id": proposal_id.clone(),
+                                "target_tool": target_manifest.name,
+                            }).to_string()),
+                            error: Some(format!(
+                                "hs_external_write_proposal_first: created ExternalWriteAction proposal (id: {})",
+                                proposal_id
+                            )),
+                        }),
+                        Some(Err(e)) => Err(e),
+                        None => Ok(ToolCallInternalResult {
+                            success: false,
+                            output: None,
+                            error: Some(
+                                "hs_external_write_proposal_first: proposal store unavailable; direct execution blocked"
+                                    .to_string(),
+                            ),
+                        }),
+                    };
+                }
 
                 // 2. Check permission using target tool's canonical scope
                 let target_source = canonical_tool_source(&target_manifest);

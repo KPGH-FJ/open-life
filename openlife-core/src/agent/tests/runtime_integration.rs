@@ -17,6 +17,11 @@ use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
 use crate::tool_manifest::{ToolManifest, ToolSource};
+use crate::tool_permissions::ToolPermissionPolicy;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 fn seeded_packet(
     task_kind: AgentTaskKind,
@@ -376,4 +381,255 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         )
         .unwrap();
     assert_eq!(proposals.len(), 1);
+}
+
+#[test]
+fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
+    let packet = seeded_packet(
+        AgentTaskKind::ToolExecution,
+        PolicyTopic::General,
+        serde_json::json!({}),
+        vec!["write".into()],
+    );
+
+    let executor_ran = Arc::new(AtomicBool::new(false));
+    let executor_ran_for_tool = executor_ran.clone();
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_builtin(
+        ToolManifest {
+            id: "file.write".into(),
+            name: "file.write".into(),
+            description: "Direct file write test executor".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "high".into(),
+            risk_level: "high".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities: vec!["filesystem".into(), "write".into()],
+            requires_confirmation: true,
+            enabled: true,
+            declarative_only: false,
+            action_type: "write".into(),
+            tags: vec![],
+        },
+        Box::new(move |_| {
+            executor_ran_for_tool.store(true, Ordering::SeqCst);
+            Ok("direct write should not run".into())
+        }),
+    );
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    permission_store
+        .grant(
+            "file.write",
+            "builtin",
+            "high",
+            "write",
+            ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let file_path = safe_dir.path().join("allowed-but-proposal-first.txt");
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[safe_path],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: Some(&proposal_store),
+        agent_run_store: None,
+        network_policy: None,
+        hs_runtime_packet: Some(&packet),
+    };
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "file.write".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "path": file_path.to_string_lossy().to_string(),
+                        "content": "hello from HS proposal-first"
+                    }
+                }),
+                source_run_id: Some("run-runtime".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::NeedsConfirmation
+    );
+    assert!(!executor_ran.load(Ordering::SeqCst));
+    assert!(!file_path.exists());
+
+    let proposals = proposal_store
+        .list_proposals_filtered(
+            None,
+            Some(crate::agent::ProposalType::ExternalWriteAction),
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(proposals.len(), 1);
+    assert_eq!(
+        proposals[0].after["content"],
+        serde_json::json!("hello from HS proposal-first")
+    );
+}
+
+#[test]
+fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() {
+    let packet = seeded_packet(
+        AgentTaskKind::ToolExecution,
+        PolicyTopic::General,
+        serde_json::json!({}),
+        vec!["write".into()],
+    );
+
+    let executor_ran = Arc::new(AtomicBool::new(false));
+    let executor_ran_for_tool = executor_ran.clone();
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_builtin(
+        ToolManifest {
+            id: "wrapped.file.write".into(),
+            name: "wrapped.file.write".into(),
+            description: "Wrapped direct file write test executor".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "high".into(),
+            risk_level: "high".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities: vec!["filesystem".into(), "write".into()],
+            requires_confirmation: true,
+            enabled: true,
+            declarative_only: false,
+            action_type: "write".into(),
+            tags: vec![],
+        },
+        Box::new(move |_| {
+            executor_ran_for_tool.store(true, Ordering::SeqCst);
+            Ok("wrapped direct write should not run".into())
+        }),
+    );
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    permission_store
+        .grant(
+            "mcp.call_tool",
+            "builtin",
+            "medium",
+            "external_side_effect",
+            ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+    permission_store
+        .grant(
+            "wrapped.file.write",
+            "builtin",
+            "high",
+            "write",
+            ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let file_path = safe_dir
+        .path()
+        .join("wrapped-allowed-but-proposal-first.txt");
+    let content = "hello from wrapped HS proposal-first";
+
+    let ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[safe_path],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: Some(&proposal_store),
+        agent_run_store: None,
+        network_policy: None,
+        hs_runtime_packet: Some(&packet),
+    };
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "mcp.call_tool".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "tool_name": "wrapped.file.write",
+                        "arguments": {
+                            "path": file_path.to_string_lossy().to_string(),
+                            "content": content
+                        }
+                    }
+                }),
+                source_run_id: Some("run-runtime".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::NeedsConfirmation
+    );
+    assert_eq!(
+        result.stop_reason.as_deref(),
+        Some("hs_external_write_proposal_first")
+    );
+    assert!(!executor_ran.load(Ordering::SeqCst));
+    assert!(!file_path.exists());
+
+    let proposals = proposal_store
+        .list_proposals_filtered(
+            None,
+            Some(crate::agent::ProposalType::ExternalWriteAction),
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(proposals.len(), 1);
+    let after = &proposals[0].after;
+    assert_eq!(after["tool_name"], serde_json::json!("wrapped.file.write"));
+    assert_eq!(after["source"], serde_json::json!("builtin"));
+    assert_eq!(after["server"], serde_json::Value::Null);
+    assert_eq!(after["arguments"]["content"], serde_json::json!(content));
+    assert_eq!(after["content"], serde_json::json!(content));
+    assert_eq!(after["risk_level"], serde_json::json!("high"));
+    assert_eq!(after["action_type"], serde_json::json!("write"));
+    assert_eq!(
+        after["capabilities"],
+        serde_json::json!(["filesystem", "write"])
+    );
+    assert!(after["content_hash"]
+        .as_str()
+        .is_some_and(|hash| hash.len() == 64));
+    assert_eq!(after["size_bytes"], serde_json::json!(content.len()));
 }

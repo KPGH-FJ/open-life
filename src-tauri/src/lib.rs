@@ -1312,6 +1312,7 @@ async fn send_message_with_agent_loop(
                 &user_input_text,
                 state.agent_run_store.as_ref(),
                 &e.to_string(),
+                hs_packet.clone(),
             )
             .await?;
 
@@ -1427,10 +1428,23 @@ async fn generate_non_stream_fallback(
     messages: Vec<ChatMessage>,
     life_model: &LifeModel,
     tools_prompt: &str,
+    hs_packet: Option<openlife_core::agent::RuntimeHSPacket>,
 ) -> Result<String, String> {
+    let fallback = async {
+        if let Some(packet) = hs_packet {
+            scheduler
+                .generate_with_hs_packet(messages, life_model, Some(tools_prompt), &packet)
+                .await
+        } else {
+            scheduler
+                .generate(messages, life_model, Some(tools_prompt))
+                .await
+        }
+    };
+
     timeout(
         Duration::from_secs(NON_STREAM_FALLBACK_TIMEOUT_SECS),
-        scheduler.generate(messages, life_model, Some(tools_prompt)),
+        fallback,
     )
     .await
     .map_err(|_| {
@@ -1457,9 +1471,10 @@ async fn handle_agent_loop_fallback(
         &std::sync::Arc<tokio::sync::Mutex<openlife_core::agent::AgentRunStore>>,
     >,
     original_error: &str,
+    hs_packet: Option<openlife_core::agent::RuntimeHSPacket>,
 ) -> Result<(String, openlife_core::agent::AgentRun), String> {
     let fallback_reply =
-        generate_non_stream_fallback(scheduler, messages, life_model, tools_prompt)
+        generate_non_stream_fallback(scheduler, messages, life_model, tools_prompt, hs_packet)
             .await
             .map_err(|fallback_err| {
                 format!(
@@ -1586,32 +1601,151 @@ fn classify_hs_policy_topic(
     tools_prompt: &str,
 ) -> openlife_core::agent::PolicyTopic {
     let text = format!("{} {}", user_text, tools_prompt).to_lowercase();
+    let privacy_engine = PrivacyEngine::new();
+    let privacy_findings = privacy_engine.detect(&text);
+    if privacy_findings
+        .iter()
+        .any(|(ptype, _)| matches!(ptype, openlife_core::privacy::PrivacyType::IdCard))
+    {
+        return openlife_core::agent::PolicyTopic::Identity;
+    }
+    if privacy_findings
+        .iter()
+        .any(|(ptype, _)| matches!(ptype, openlife_core::privacy::PrivacyType::BankCard))
+    {
+        return openlife_core::agent::PolicyTopic::Finance;
+    }
+    if privacy_findings.iter().any(|(ptype, _)| {
+        matches!(
+            ptype,
+            openlife_core::privacy::PrivacyType::Email
+                | openlife_core::privacy::PrivacyType::Phone
+                | openlife_core::privacy::PrivacyType::Address
+                | openlife_core::privacy::PrivacyType::Name
+                | openlife_core::privacy::PrivacyType::Generic
+        )
+    }) {
+        return openlife_core::agent::PolicyTopic::PrivateFile;
+    }
+
     if contains_any(
         &text,
         &[
-            "health", "medical", "doctor", "therapy", "mental", "illness", "病", "医院", "健康",
+            "health",
+            "medical",
+            "medicine",
+            "medication",
+            "prescription",
+            "doctor",
+            "therapy",
+            "mental",
+            "mental health",
+            "illness",
+            "diagnosis",
+            "diagnose",
+            "anxiety",
+            "depression",
+            "drug",
+            "药",
+            "用药",
+            "处方",
+            "病",
+            "医院",
+            "健康",
             "心理",
+            "焦虑",
+            "抑郁",
+            "诊断",
+            "治疗",
         ],
     ) {
         openlife_core::agent::PolicyTopic::Health
     } else if contains_any(
         &text,
-        &["relationship", "partner", "family", "关系", "伴侣", "家人"],
-    ) {
-        openlife_core::agent::PolicyTopic::Relationship
-    } else if contains_any(
-        &text,
-        &["identity", "values", "mission", "身份", "价值观", "使命"],
-    ) {
-        openlife_core::agent::PolicyTopic::Identity
-    } else if contains_any(
-        &text,
-        &["finance", "bank", "salary", "tax", "投资", "银行", "工资"],
+        &[
+            "finance",
+            "bank",
+            "salary",
+            "income",
+            "insurance",
+            "debt",
+            "loan",
+            "tax",
+            "credit",
+            "mortgage",
+            "投资",
+            "银行",
+            "工资",
+            "收入",
+            "保险",
+            "债务",
+            "负债",
+            "贷款",
+            "税",
+            "信用卡",
+        ],
     ) {
         openlife_core::agent::PolicyTopic::Finance
     } else if contains_any(
         &text,
-        &["private file", "secret", "confidential", "私人文件", "机密"],
+        &[
+            "identity",
+            "identity card",
+            "id card",
+            "passport",
+            "ssn",
+            "values",
+            "mission",
+            "身份",
+            "身份证",
+            "护照",
+            "证件",
+            "价值观",
+            "使命",
+        ],
+    ) {
+        openlife_core::agent::PolicyTopic::Identity
+    } else if contains_any(
+        &text,
+        &[
+            "relationship",
+            "intimate relationship",
+            "partner",
+            "family",
+            "breakup",
+            "break up",
+            "divorce",
+            "family conflict",
+            "关系",
+            "亲密关系",
+            "伴侣",
+            "家人",
+            "分手",
+            "家庭矛盾",
+            "家庭冲突",
+            "婚姻",
+            "离婚",
+            "恋爱",
+        ],
+    ) {
+        openlife_core::agent::PolicyTopic::Relationship
+    } else if contains_any(
+        &text,
+        &[
+            "private file",
+            "privacy",
+            "private",
+            "secret",
+            "confidential",
+            "contract",
+            "resume",
+            "cv",
+            "私人文件",
+            "隐私",
+            "机密",
+            "合同",
+            "简历",
+        ],
     ) {
         openlife_core::agent::PolicyTopic::PrivateFile
     } else {
@@ -1935,6 +2069,7 @@ async fn start_stream_message_with_agent_loop(
                 &user_input_txt,
                 state.agent_run_store.as_ref(),
                 &e.to_string(),
+                hs_packet.clone(),
             )
             .await
             {
@@ -2278,6 +2413,10 @@ async fn start_stream_message(
         layer,
     };
 
+    let hs_packet =
+        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
+            .await?;
+
     let mut reasoning_trace = ReasoningTrace::default();
     let mut messages_with_reasoning = desensitized_messages.clone();
 
@@ -2338,17 +2477,32 @@ async fn start_stream_message(
     }
 
     if full_reply.is_empty() {
-        match timeout(
-            Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
-            scheduler_clone.generate_stream(
-                messages_with_reasoning.clone(),
-                &life_model,
-                Some(&tools_prompt),
-            ),
-        )
-        .await
-        .map_err(|_| format!("流式响应初始化超时（{} 秒）", STREAM_INIT_TIMEOUT_SECS))
-        .and_then(|result| result.map_err(|e| e.to_string()))
+        let stream_init = if let Some(ref packet) = hs_packet {
+            timeout(
+                Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
+                scheduler_clone.generate_stream_with_hs_packet(
+                    messages_with_reasoning.clone(),
+                    &life_model,
+                    Some(&tools_prompt),
+                    packet,
+                ),
+            )
+            .await
+        } else {
+            timeout(
+                Duration::from_secs(STREAM_INIT_TIMEOUT_SECS),
+                scheduler_clone.generate_stream(
+                    messages_with_reasoning.clone(),
+                    &life_model,
+                    Some(&tools_prompt),
+                ),
+            )
+            .await
+        };
+
+        match stream_init
+            .map_err(|_| format!("流式响应初始化超时（{} 秒）", STREAM_INIT_TIMEOUT_SECS))
+            .and_then(|result| result.map_err(|e| e.to_string()))
         {
             Ok(mut stream) => loop {
                 let next_chunk = match timeout(
@@ -2366,6 +2520,7 @@ async fn start_stream_message(
                             messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
+                            hs_packet.clone(),
                         )
                         .await
                         {
@@ -2443,6 +2598,7 @@ async fn start_stream_message(
                             messages_with_reasoning.clone(),
                             &life_model,
                             &tools_prompt,
+                            hs_packet.clone(),
                         )
                         .await
                         {
@@ -2505,6 +2661,7 @@ async fn start_stream_message(
                     messages_with_reasoning.clone(),
                     &life_model,
                     &tools_prompt,
+                    hs_packet.clone(),
                 )
                 .await
                 {
@@ -2552,6 +2709,7 @@ async fn start_stream_message(
                 messages_with_reasoning.clone(),
                 &life_model,
                 &tools_prompt,
+                hs_packet.clone(),
             )
             .await
             {
@@ -3015,6 +3173,31 @@ pub fn run() {
 mod hs_runtime_tests {
     use super::*;
 
+    fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
+        openlife_core::agent::RuntimeHSPacket {
+            selected_policies: vec![openlife_core::agent::SelectedPolicyRef {
+                policy_id: openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
+                reason: "test_sensitive_topic".into(),
+                route: Some(openlife_core::agent::ModelRoutePolicy::LocalOnly),
+                digest: "digest".into(),
+            }],
+            selected_heuristics: vec![],
+            estimated_tokens: 0,
+            audit: openlife_core::agent::HSSelectionAudit {
+                agent_task_id: None,
+                agent_run_id: Some("run-fallback-hs".into()),
+                input_digest: "input-digest".into(),
+                selected_policy_ids: vec![
+                    openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
+                ],
+                selected_heuristic_ids: vec![],
+                excluded_assets: vec![],
+                estimated_tokens: 0,
+                token_budget: 128,
+            },
+        }
+    }
+
     #[tokio::test]
     async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
         let state = crate::test_utils::test_app_state();
@@ -3056,5 +3239,94 @@ mod hs_runtime_tests {
         let audit_json = serde_json::to_string(&packet.audit).unwrap();
         assert!(!audit_json.contains("raw-health-secret-999"));
         assert!(!audit_json.contains("Reduce planning intensity"));
+    }
+
+    #[tokio::test]
+    async fn hs_runtime_fallback_local_only_does_not_fall_back_to_cloud_without_ollama() {
+        let mut router = openlife_core::agent::ModelRouter::new();
+        router.providers.insert(
+            "ollama".into(),
+            openlife_core::agent::ProviderAvailability {
+                provider: "ollama".into(),
+                available: false,
+                latency_ms: None,
+                models: vec![],
+                last_checked: chrono::Utc::now(),
+                last_error: Some("not running".into()),
+                health_is_estimated: false,
+            },
+        );
+        router.providers.insert(
+            "openai".into(),
+            openlife_core::agent::ProviderAvailability {
+                provider: "openai".into(),
+                available: true,
+                latency_ms: Some(120),
+                models: vec!["gpt-4o-mini".into()],
+                last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
+            },
+        );
+        let scheduler = openlife_core::scheduler::InferenceScheduler::new(
+            "openlife-test-local-model-that-should-not-exist".into(),
+            false,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "sk-test-cloud-key-present".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            true,
+        )
+        .with_model_router(router);
+
+        let err = generate_non_stream_fallback(
+            &scheduler,
+            vec![ChatMessage {
+                role: "user".into(),
+                content: "请处理我的用药记录".into(),
+            }],
+            &LifeModel::default(),
+            "",
+            Some(local_only_test_packet()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.contains("LocalOnly") || err.contains("local") || err.contains("本地"),
+            "unexpected fallback error: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
+        let state = crate::test_utils::test_app_state();
+        let life_model = LifeModel::default();
+        let text = "最近用药、债务、身份证和分手这些事情让我压力很大";
+        let topic = classify_hs_policy_topic(text, "");
+        assert_ne!(topic, openlife_core::agent::PolicyTopic::General);
+
+        let task = openlife_core::agent::AgentTask {
+            kind: openlife_core::agent::AgentTaskKind::Conversation,
+            session_id: "session-sensitive-zh".into(),
+            user_text: text.into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: text.into(),
+            }],
+            layer: Layer::L2,
+        };
+
+        let packet = build_chat_runtime_hs_packet(&state, &task, &life_model, "", None)
+            .await
+            .unwrap()
+            .expect("Chinese sensitive keywords should select HS assets");
+
+        assert!(packet
+            .selected_policies
+            .iter()
+            .any(|policy| policy.route == Some(openlife_core::agent::ModelRoutePolicy::LocalOnly)));
     }
 }

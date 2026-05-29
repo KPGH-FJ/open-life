@@ -188,11 +188,18 @@ pub async fn apply_calibration(
     mode: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    let mode = mode.as_deref().unwrap_or("direct");
+    apply_calibration_with_state(changes, mode, state.inner()).await
+}
 
-    if mode == "proposal" {
-        // 创建 Proposal 而不是直接应用
-        return calibration_create_proposals(changes, state).await;
+async fn apply_calibration_with_state(
+    changes: Vec<EvolutionChange>,
+    mode: Option<String>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    let mode = mode.as_deref().unwrap_or("proposal");
+
+    if mode != "direct" {
+        return calibration_create_proposals_with_state(changes, state).await;
     }
 
     // direct 模式：直接应用变更
@@ -202,7 +209,7 @@ pub async fn apply_calibration(
     let mut model = manager.load().map_err(AppError::from)?;
     MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
     drop(manager);
-    let model = persist_life_model(&state.inner().clone(), model, false).await?;
+    let model = persist_life_model(state, model, false).await?;
     let vm = state.version_manager.lock().await;
     let snap = vm
         .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")
@@ -258,6 +265,13 @@ pub async fn calibration_create_proposals(
     changes: Vec<EvolutionChange>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    calibration_create_proposals_with_state(changes, state.inner()).await
+}
+
+async fn calibration_create_proposals_with_state(
+    changes: Vec<EvolutionChange>,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
     // Create AgentRun for this calibration
     let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
     let run_id = agent_run.id.clone();
@@ -309,6 +323,7 @@ pub async fn calibration_create_proposals(
     }
 
     Ok(serde_json::json!({
+        "success": true,
         "created_count": created_ids.len(),
         "created_ids": created_ids,
         "run_id": run_id,
@@ -329,4 +344,71 @@ pub async fn mark_calibration_shown(
         .log_event(&event, None, None)
         .map_err(AppError::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn calibration_test_change() -> EvolutionChange {
+        EvolutionChange {
+            dimension: "identity.values".into(),
+            target_name: "成长".into(),
+            old_value: 5.0,
+            new_value: 7.0,
+            reason: "测试校准默认走 proposal".into(),
+            confidence: 0.8,
+            sources: vec![openlife_core::evolution::SignalSource {
+                source: "feedback".into(),
+                score: 0.8,
+                weight: 1.0,
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn calibration_default_mode_creates_proposals_instead_of_direct_apply() {
+        let state = crate::test_utils::test_app_state();
+
+        let result = apply_calibration_with_state(vec![calibration_test_change()], None, &state)
+            .await
+            .unwrap();
+
+        assert_eq!(result["created_count"], 1);
+        assert_eq!(result["success"], true);
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].source, ProposalSource::CalibrationRun);
+    }
+
+    #[tokio::test]
+    async fn calibration_direct_mode_requires_explicit_direct() {
+        let state = crate::test_utils::test_app_state();
+
+        let result = apply_calibration_with_state(
+            vec![calibration_test_change()],
+            Some("direct".to_string()),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["applied_count"], 1);
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert!(proposals.is_empty());
+    }
 }
