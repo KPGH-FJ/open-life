@@ -274,6 +274,16 @@ pub struct AgentRunError {
     pub recoverable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HSBehaviorCheckSummary {
+    pub id: String,
+    pub label: String,
+    pub passed: bool,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
 /// A single traceable execution of an Agent task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -298,6 +308,12 @@ pub struct AgentRun {
     pub reasoning_strategy: Option<String>,
     /// Trace from the reasoning process (e.g., LayeredReasoner phases)
     pub reasoning_trace: Option<crate::agent::reasoning::ReasoningTrace>,
+    /// Metadata-safe HS asset selection audit for this run.
+    #[serde(default)]
+    pub hs_selection_audit: Option<crate::agent::hs_selector::HSSelectionAudit>,
+    /// Metadata-safe deterministic behavior checks relevant to selected HS assets.
+    #[serde(default)]
+    pub behavior_checks: Vec<HSBehaviorCheckSummary>,
     /// Warnings generated during execution (e.g., parse warnings, budget warnings)
     #[serde(default)]
     pub warnings: Vec<String>,
@@ -335,6 +351,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -364,6 +382,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -393,6 +413,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,
@@ -422,6 +444,8 @@ impl AgentRun {
             observations: Vec::new(),
             reasoning_strategy: None,
             reasoning_trace: None,
+            hs_selection_audit: None,
+            behavior_checks: Vec::new(),
             warnings: Vec::new(),
             status_updates: Vec::new(),
             step_count: 0,

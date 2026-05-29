@@ -63,6 +63,15 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         agent_run_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
         ))),
+        evidence_store: Arc::new(Mutex::new(
+            openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
+        )),
+        heuristic_store: Arc::new(Mutex::new({
+            let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
+            store.seed_mvp_heuristics().unwrap();
+            store
+        })),
+        policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
         ))),

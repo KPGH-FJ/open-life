@@ -1226,6 +1226,9 @@ async fn send_message_with_agent_loop(
         layer,
     };
 
+    let hs_packet =
+        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
+            .await?;
     let network_policy = cfg.system.network_policy.clone();
 
     let loop_result = {
@@ -1258,6 +1261,9 @@ async fn send_message_with_agent_loop(
         }
         if let Some(ref store) = agent_run_store_guard {
             action_ctx = action_ctx.with_agent_run_store(store);
+        }
+        if let Some(ref packet) = hs_packet {
+            action_ctx = action_ctx.with_hs_runtime_packet(packet);
         }
 
         agent_loop
@@ -1541,6 +1547,153 @@ fn agent_actions_to_tool_call_results(
         .collect()
 }
 
+async fn build_chat_runtime_hs_packet(
+    state: &Arc<AppState>,
+    task: &openlife_core::agent::AgentTask,
+    life_model: &LifeModel,
+    tools_prompt: &str,
+    agent_run_id: Option<String>,
+) -> Result<Option<openlife_core::agent::RuntimeHSPacket>, String> {
+    let topic = classify_hs_policy_topic(&task.user_text, tools_prompt);
+    let tool_requirements = hs_tool_requirements(&task.user_text, tools_prompt);
+    let risk_level = hs_risk_level(topic, &tool_requirements);
+    let state_hints = serde_json::json!({
+        "energy": life_model.state.health_status.energy_level,
+    });
+    let sanitized_intent_summary =
+        sanitized_hs_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
+
+    let heuristic_store = state.heuristic_store.lock().await;
+    openlife_core::agent::build_runtime_hs_packet(
+        &state.policy_store,
+        &heuristic_store,
+        openlife_core::agent::RuntimeHSPacketBuildInput {
+            task,
+            sanitized_intent_summary,
+            privacy_topic: topic,
+            risk_level,
+            tool_requirements,
+            current_state_hints: state_hints,
+            token_budget: 384,
+            agent_run_id,
+        },
+    )
+    .map_err(|e| format!("HS runtime packet build failed: {}", e))
+}
+
+fn classify_hs_policy_topic(
+    user_text: &str,
+    tools_prompt: &str,
+) -> openlife_core::agent::PolicyTopic {
+    let text = format!("{} {}", user_text, tools_prompt).to_lowercase();
+    if contains_any(
+        &text,
+        &[
+            "health", "medical", "doctor", "therapy", "mental", "illness", "病", "医院", "健康",
+            "心理",
+        ],
+    ) {
+        openlife_core::agent::PolicyTopic::Health
+    } else if contains_any(
+        &text,
+        &["relationship", "partner", "family", "关系", "伴侣", "家人"],
+    ) {
+        openlife_core::agent::PolicyTopic::Relationship
+    } else if contains_any(
+        &text,
+        &["identity", "values", "mission", "身份", "价值观", "使命"],
+    ) {
+        openlife_core::agent::PolicyTopic::Identity
+    } else if contains_any(
+        &text,
+        &["finance", "bank", "salary", "tax", "投资", "银行", "工资"],
+    ) {
+        openlife_core::agent::PolicyTopic::Finance
+    } else if contains_any(
+        &text,
+        &["private file", "secret", "confidential", "私人文件", "机密"],
+    ) {
+        openlife_core::agent::PolicyTopic::PrivateFile
+    } else {
+        openlife_core::agent::PolicyTopic::General
+    }
+}
+
+fn hs_tool_requirements(user_text: &str, tools_prompt: &str) -> Vec<String> {
+    let text = format!("{} {}", user_text, tools_prompt).to_lowercase();
+    let mut requirements = Vec::new();
+    if contains_any(
+        &text,
+        &[
+            "write",
+            "save",
+            "send",
+            "email",
+            "calendar",
+            "file.write",
+            "propose_event",
+            "保存",
+            "写入",
+            "发送",
+            "邮件",
+            "日历",
+        ],
+    ) {
+        requirements.push("write".to_string());
+    }
+    if contains_any(
+        &text,
+        &[
+            "send", "email", "calendar", "external", "发送", "邮件", "日历",
+        ],
+    ) {
+        requirements.push("external_side_effect".to_string());
+    }
+    requirements.sort();
+    requirements.dedup();
+    requirements
+}
+
+fn hs_risk_level(
+    topic: openlife_core::agent::PolicyTopic,
+    tool_requirements: &[String],
+) -> openlife_core::agent::RiskLevel {
+    if topic != openlife_core::agent::PolicyTopic::General
+        || tool_requirements
+            .iter()
+            .any(|requirement| requirement == "write" || requirement == "external_side_effect")
+    {
+        openlife_core::agent::RiskLevel::High
+    } else {
+        openlife_core::agent::RiskLevel::Low
+    }
+}
+
+fn sanitized_hs_intent_summary(
+    task_kind: openlife_core::agent::AgentTaskKind,
+    topic: openlife_core::agent::PolicyTopic,
+    tool_requirements: &[String],
+    user_text: &str,
+) -> String {
+    let char_count = user_text.chars().count();
+    let length_bucket = match char_count {
+        0..=80 => "short",
+        81..=240 => "medium",
+        _ => "long",
+    };
+    format!(
+        "task_kind={}; topic={:?}; length_bucket={}; tool_requirements={}",
+        task_kind,
+        topic,
+        length_bucket,
+        tool_requirements.join(",")
+    )
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
 /// Streaming callback that forwards AgentLoop events to Tauri frontend via emit().
 struct TauriStreamingCallback {
     app_handle: tauri::AppHandle,
@@ -1691,6 +1844,9 @@ async fn start_stream_message_with_agent_loop(
         layer: _layer,
     };
 
+    let hs_packet =
+        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
+            .await?;
     let network_policy = cfg.system.network_policy.clone();
 
     // Create streaming callback with run_id placeholder (will be updated after AgentLoop starts)
@@ -1741,6 +1897,9 @@ async fn start_stream_message_with_agent_loop(
         }
         if let Some(ref store) = agent_run_store_guard {
             action_ctx = action_ctx.with_agent_run_store(store);
+        }
+        if let Some(ref packet) = hs_packet {
+            action_ctx = action_ctx.with_hs_runtime_packet(packet);
         }
 
         agent_loop
@@ -2850,4 +3009,52 @@ pub fn run() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod hs_runtime_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
+        let state = crate::test_utils::test_app_state();
+        let mut life_model = LifeModel::default();
+        life_model.state.health_status.energy_level = 2;
+
+        let task = openlife_core::agent::AgentTask {
+            kind: openlife_core::agent::AgentTaskKind::Planning,
+            session_id: "session-chat-hs".into(),
+            user_text: "raw-health-secret-999 please write a plan".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: "raw-health-secret-999 please write a plan".into(),
+            }],
+            layer: Layer::L1,
+        };
+
+        let packet = build_chat_runtime_hs_packet(
+            &state,
+            &task,
+            &life_model,
+            "file.write(path, content)",
+            Some("run-chat-hs".into()),
+        )
+        .await
+        .unwrap()
+        .expect("planning health write task should select HS assets");
+
+        assert!(packet
+            .selected_policies
+            .iter()
+            .any(|policy| policy.route == Some(openlife_core::agent::ModelRoutePolicy::LocalOnly)));
+        assert!(packet
+            .audit
+            .selected_heuristic_ids
+            .contains(&openlife_core::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING.to_string()));
+        assert_eq!(packet.audit.agent_run_id.as_deref(), Some("run-chat-hs"));
+
+        let audit_json = serde_json::to_string(&packet.audit).unwrap();
+        assert!(!audit_json.contains("raw-health-secret-999"));
+        assert!(!audit_json.contains("Reduce planning intensity"));
+    }
 }

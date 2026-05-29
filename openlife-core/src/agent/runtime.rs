@@ -4,7 +4,9 @@ use crate::agent::reasoning::{
     ReasoningStrategy, ReasoningTrace,
 };
 use crate::agent::types::AgentTask;
-use crate::agent::{HSSelectionAudit, RuntimeHSPacket};
+use crate::agent::{
+    behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit, RuntimeHSPacket,
+};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -112,6 +114,52 @@ impl AgentRuntime {
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_task_with_hs_packet(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_task_inner(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         // 1. Build AssembleInput
         let input = AssembleInput {
             session_id: task.session_id.clone(),
@@ -172,6 +220,20 @@ impl AgentRuntime {
                 },
             );
         }
+        let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+        let hs_behavior_checks = hs_packet
+            .as_ref()
+            .map(behavior_checks_for_packet)
+            .unwrap_or_default();
+        if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+            final_messages.insert(
+                0,
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: prompt,
+                },
+            );
+        }
 
         Ok(AgentRuntimeOutput {
             final_messages,
@@ -179,7 +241,8 @@ impl AgentRuntime {
             suggested_tools: reasoning_output.suggested_tools,
             plan_steps: reasoning_output.plan_steps,
             context_summary: context.context_summary,
-            hs_selection_audit: None,
+            hs_selection_audit,
+            hs_behavior_checks,
         })
     }
 
@@ -257,6 +320,10 @@ impl AgentRuntime {
 
         let mut final_messages = context.desensitized_messages.to_vec();
         let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+        let hs_behavior_checks = hs_packet
+            .as_ref()
+            .map(behavior_checks_for_packet)
+            .unwrap_or_default();
         if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
             final_messages.insert(
                 0,
@@ -274,6 +341,7 @@ impl AgentRuntime {
             plan_steps: vec![],
             context_summary: context.context_summary,
             hs_selection_audit,
+            hs_behavior_checks,
         })
     }
 }
@@ -287,6 +355,7 @@ pub struct AgentRuntimeOutput {
     pub plan_steps: Vec<String>,
     pub context_summary: crate::agent::types::ContextSummary,
     pub hs_selection_audit: Option<HSSelectionAudit>,
+    pub hs_behavior_checks: Vec<HSBehaviorCheckSummary>,
 }
 
 fn build_hs_runtime_prompt(packet: &RuntimeHSPacket) -> Option<String> {

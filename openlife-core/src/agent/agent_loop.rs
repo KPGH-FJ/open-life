@@ -3,6 +3,7 @@ use crate::agent::action_executor::{
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
+use crate::agent::RuntimeHSPacket;
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -79,6 +80,7 @@ struct AgentLoopContext<'a> {
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
+    pub hs_runtime_packet: Option<RuntimeHSPacket>,
 }
 
 /// Boundary markers for prompt injection defense.
@@ -149,6 +151,7 @@ struct StepContext<'a> {
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
+    pub hs_runtime_packet: Option<RuntimeHSPacket>,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
     pub tool_call_count: u32,
@@ -226,6 +229,7 @@ impl AgentLoop {
             tools_prompt: actx.tools_prompt,
             memory_context: actx.memory_context.clone(),
             privacy_engine: actx.privacy_engine.clone(),
+            hs_runtime_packet: actx.hs_runtime_packet.clone(),
         };
 
         match self.generate_response(&repair_actx).await {
@@ -265,6 +269,14 @@ impl AgentLoop {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
+        let mut current_hs_packet = actx.hs_runtime_packet.clone();
+        if let Some(packet) = current_hs_packet.as_mut() {
+            if packet.audit.agent_run_id.is_none() {
+                packet.audit.agent_run_id = Some(run.id.clone());
+            }
+            run.hs_selection_audit = Some(packet.audit.clone());
+            run.behavior_checks = crate::agent::behavior_checks_for_packet(packet);
+        }
 
         let mut step_count: u32 = 0;
         let mut tool_call_count: u32 = 0;
@@ -355,6 +367,7 @@ impl AgentLoop {
                         tools_prompt: &current_tools_prompt,
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
+                        hs_runtime_packet: current_hs_packet.clone(),
                         action_ctx,
                         run: &mut run,
                         tool_call_count,
@@ -456,6 +469,7 @@ impl AgentLoop {
             tools_prompt,
             memory_context,
             privacy_engine,
+            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
         };
         self.run_loop_core(&actx, action_ctx, None).await
     }
@@ -479,6 +493,7 @@ impl AgentLoop {
             tools_prompt,
             memory_context,
             privacy_engine,
+            hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
         };
         self.run_loop_core(&actx, action_ctx, Some(callback)).await
     }
@@ -505,6 +520,7 @@ impl AgentLoop {
                 tools_prompt: ctx.tools_prompt,
                 memory_context: ctx.memory_context.clone(),
                 privacy_engine: ctx.privacy_engine.clone(),
+                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
             };
             if let Some(ref cb) = callback {
                 self.generate_response_streaming(&actx, cb.clone()).await
@@ -520,6 +536,12 @@ impl AgentLoop {
                 }
                 if ctx.run.reasoning_trace.is_none() {
                     ctx.run.reasoning_trace = Some(gen.runtime_output.reasoning_trace.clone());
+                }
+                if ctx.run.hs_selection_audit.is_none() {
+                    ctx.run.hs_selection_audit = gen.runtime_output.hs_selection_audit.clone();
+                }
+                if ctx.run.behavior_checks.is_empty() {
+                    ctx.run.behavior_checks = gen.runtime_output.hs_behavior_checks.clone();
                 }
 
                 let reply = gen.reply;
@@ -557,6 +579,7 @@ impl AgentLoop {
                                 tools_prompt: ctx.tools_prompt,
                                 memory_context: memory_ctx.clone(),
                                 privacy_engine: privacy.clone(),
+                                hs_runtime_packet: ctx.hs_runtime_packet.clone(),
                             },
                             ctx.action_ctx,
                             ctx.run,
@@ -669,13 +692,14 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task(
+            .execute_task_with_hs_packet(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
+                actx.hs_runtime_packet.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
@@ -685,15 +709,25 @@ impl AgentLoop {
         } else {
             Some(actx.tools_prompt)
         };
-        let reply = self
-            .scheduler
-            .generate(
-                runtime_output.final_messages.clone(),
-                actx.life_model,
-                tools_prompt,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
+        let reply = if let Some(ref packet) = actx.hs_runtime_packet {
+            self.scheduler
+                .generate_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| anyhow::anyhow!("model generation failed: {}", e))?;
 
         Ok(GeneratedAgentResponse {
             runtime_output,
@@ -711,13 +745,14 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task(
+            .execute_task_with_hs_packet(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
                 actx.memory_context.clone(),
                 memory_hits,
                 actx.privacy_engine.clone(),
+                actx.hs_runtime_packet.clone(),
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
@@ -728,15 +763,25 @@ impl AgentLoop {
             Some(actx.tools_prompt)
         };
 
-        let mut stream = self
-            .scheduler
-            .generate_stream(
-                runtime_output.final_messages.clone(),
-                actx.life_model,
-                tools_prompt,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
+        let mut stream = if let Some(ref packet) = actx.hs_runtime_packet {
+            self.scheduler
+                .generate_stream_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate_stream(
+                    runtime_output.final_messages.clone(),
+                    actx.life_model,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| anyhow::anyhow!("stream generation failed: {}", e))?;
 
         let mut reply = String::new();
         loop {

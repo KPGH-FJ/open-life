@@ -200,6 +200,68 @@ fn init_agent_run_store(
     }
 }
 
+fn init_evidence_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<openlife_core::agent::EvidenceStore, String> {
+    match openlife_core::agent::EvidenceStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("evidence.db");
+            startup_warnings.borrow_mut().push(format!(
+                "evidence.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::EvidenceStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 evidence.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::EvidenceStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 evidence store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_heuristic_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<openlife_core::agent::HeuristicStore, String> {
+    match openlife_core::agent::HeuristicStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("heuristics.db");
+            startup_warnings.borrow_mut().push(format!(
+                "heuristics.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match openlife_core::agent::HeuristicStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 heuristics.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    openlife_core::agent::HeuristicStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 heuristic store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 fn init_proposal_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -309,6 +371,36 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         log::warn!("[startup] Fatal: {}", e);
         std::process::exit(1);
     });
+
+    let evidence_db_path = data_dir.join("evidence.db");
+    let evidence_store = init_store(
+        || init_evidence_store(&evidence_db_path, &startup_warnings),
+        || openlife_core::agent::EvidenceStore::new_in_memory().map_err(|e| e.to_string()),
+        "EvidenceStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
+    let heuristics_db_path = data_dir.join("heuristics.db");
+    let heuristic_store = init_store(
+        || init_heuristic_store(&heuristics_db_path, &startup_warnings),
+        || openlife_core::agent::HeuristicStore::new_in_memory().map_err(|e| e.to_string()),
+        "HeuristicStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+    if let Err(e) = heuristic_store.seed_mvp_heuristics() {
+        startup_warnings
+            .borrow_mut()
+            .push(format!("MVP heuristics seed failed: {}", e));
+    }
+    let policy_store = openlife_core::agent::PolicyStore::mvp_builtin();
 
     let proposals_db_path = data_dir.join("proposals.db");
     let proposal_store = init_store(
@@ -429,6 +521,9 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
+        evidence_store: Arc::new(Mutex::new(evidence_store)),
+        heuristic_store: Arc::new(Mutex::new(heuristic_store)),
+        policy_store: Arc::new(policy_store),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
@@ -455,4 +550,41 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
     });
 
     BootstrapResult { state: app_state }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::agent::{
+        EvidenceQuery, HeuristicQuery, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
+    };
+
+    #[tokio::test]
+    async fn bootstrap_initializes_hs_stores_and_seeds_mvp_heuristics() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let result = bootstrap(temp_dir.path().to_path_buf());
+
+        result
+            .state
+            .evidence_store
+            .lock()
+            .await
+            .query(EvidenceQuery::default())
+            .unwrap();
+
+        let heuristic_store = result.state.heuristic_store.lock().await;
+        let heuristics = heuristic_store
+            .query(HeuristicQuery {
+                domain: Some("planning".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(heuristics
+            .iter()
+            .any(|heuristic| heuristic.id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+        assert!(result
+            .state
+            .policy_store
+            .is_hard_policy_id(openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY));
+    }
 }

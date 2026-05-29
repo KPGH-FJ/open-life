@@ -39,8 +39,9 @@ pub use heuristic_store::{
     HeuristicValidationState,
 };
 pub use hs_selector::{
-    HSAssetExclusion, HSAssetKind, HSExclusionReason, HSSelectionAudit, HSSelector,
-    HSSelectorInput, RuntimeHSPacket, SelectedHeuristic, SelectedPolicyRef,
+    behavior_checks_for_packet, build_runtime_hs_packet, HSAssetExclusion, HSAssetKind,
+    HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
+    RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};

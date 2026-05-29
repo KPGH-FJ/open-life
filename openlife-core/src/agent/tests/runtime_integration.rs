@@ -1,12 +1,15 @@
-use crate::agent::hs_selector::{HSSelector, HSSelectorInput, RuntimeHSPacket};
+use crate::agent::hs_selector::{
+    build_runtime_hs_packet, HSSelector, HSSelectorInput, RuntimeHSPacket,
+    RuntimeHSPacketBuildInput,
+};
 use crate::agent::policy_store::{
     PolicyStore, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
 };
 use crate::agent::{
-    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentActionRequest, AgentRuntime,
-    AgentRuntimeConfig, AgentTask, AgentTaskKind, HeuristicStore, ModelRouter,
-    ProviderAvailability, RiskLevel, TaskType,
+    ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentActionRequest, AgentRun,
+    AgentRunStore, AgentRuntime, AgentRuntimeConfig, AgentTask, AgentTaskKind,
+    HSBehaviorCheckSummary, HeuristicStore, ModelRouter, ProviderAvailability, RiskLevel, TaskType,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -41,6 +44,51 @@ fn seeded_packet(
             },
         )
         .unwrap()
+}
+
+#[test]
+fn hs_runtime_packet_builder_selects_metadata_safe_assets_for_real_task_inputs() {
+    let policy_store = PolicyStore::mvp_builtin();
+    let heuristic_store = HeuristicStore::new_in_memory().unwrap();
+    heuristic_store.seed_mvp_heuristics().unwrap();
+    let task = AgentTask {
+        kind: AgentTaskKind::Planning,
+        session_id: "session-builder".into(),
+        user_text: "raw-health-and-energy-note-456".into(),
+        messages: vec![],
+        layer: Layer::L1,
+    };
+
+    let packet = build_runtime_hs_packet(
+        &policy_store,
+        &heuristic_store,
+        RuntimeHSPacketBuildInput {
+            task: &task,
+            sanitized_intent_summary: "planning request with sensitive topic".into(),
+            privacy_topic: PolicyTopic::Health,
+            risk_level: RiskLevel::Medium,
+            tool_requirements: vec!["write".into()],
+            current_state_hints: serde_json::json!({ "energy": 2 }),
+            token_budget: 256,
+            agent_run_id: Some("run-builder".into()),
+        },
+    )
+    .unwrap()
+    .expect("sensitive planning task should select HS assets");
+
+    assert!(packet
+        .selected_policies
+        .iter()
+        .any(|policy| policy.route == Some(crate::agent::ModelRoutePolicy::LocalOnly)));
+    assert!(packet
+        .selected_heuristics
+        .iter()
+        .any(|heuristic| heuristic.heuristic_id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+    assert_eq!(packet.audit.agent_run_id.as_deref(), Some("run-builder"));
+
+    let audit_json = serde_json::to_string(&packet.audit).unwrap();
+    assert!(!audit_json.contains("raw-health-and-energy-note-456"));
+    assert!(!audit_json.contains("Reduce planning intensity"));
 }
 
 fn test_router(ollama_available: bool, cloud_available: bool) -> ModelRouter {
@@ -148,6 +196,96 @@ async fn hs_runtime_packet_adds_bounded_guidance_and_metadata_safe_audit() {
     let audit_json = serde_json::to_string(&output.hs_selection_audit).unwrap();
     assert!(!audit_json.contains("raw-private-planning-text-789"));
     assert!(!audit_json.contains("Reduce planning intensity"));
+}
+
+#[tokio::test]
+async fn agent_runtime_execute_task_can_receive_hs_packet_on_real_path() {
+    let packet = seeded_packet(
+        AgentTaskKind::Planning,
+        PolicyTopic::General,
+        serde_json::json!({ "energy": 2 }),
+        vec![],
+    );
+    let runtime = AgentRuntime::with_config(
+        LifeModel::default(),
+        InferenceScheduler::default(),
+        AgentRuntimeConfig::default(),
+    );
+    let task = AgentTask {
+        kind: AgentTaskKind::Planning,
+        session_id: "session-runtime-main".into(),
+        user_text: "raw-main-runtime-text-123".into(),
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: "Plan my day with low energy".into(),
+        }],
+        layer: Layer::L1,
+    };
+
+    let output = runtime
+        .execute_task_with_hs_packet(
+            &task,
+            &LifeModel::default(),
+            "",
+            None,
+            vec![],
+            PrivacyEngine::new(),
+            Some(packet),
+        )
+        .await
+        .unwrap();
+
+    let system_prompt = output
+        .final_messages
+        .iter()
+        .find(|message| message.role == "system")
+        .map(|message| message.content.as_str())
+        .unwrap_or("");
+    assert!(system_prompt.contains("Reduce planning intensity"));
+    assert!(output.hs_selection_audit.is_some());
+
+    let audit_json = serde_json::to_string(&output.hs_selection_audit).unwrap();
+    assert!(!audit_json.contains("raw-main-runtime-text-123"));
+}
+
+#[test]
+fn agent_run_store_persists_metadata_safe_hs_audit_and_behavior_checks() {
+    let packet = seeded_packet(
+        AgentTaskKind::ToolExecution,
+        PolicyTopic::General,
+        serde_json::json!({}),
+        vec!["write".into()],
+    );
+    let store = AgentRunStore::new_in_memory().unwrap();
+    let mut run = AgentRun::new_chat_run("session-hs-store", "raw user text stays out of audit");
+    run.hs_selection_audit = Some(packet.audit.clone());
+    run.behavior_checks = vec![HSBehaviorCheckSummary {
+        id: "regression.external_write_proposal_first".into(),
+        label: "External writes stay reviewable".into(),
+        passed: true,
+        summary: Some("Direct writes become proposals.".into()),
+    }];
+
+    store.create_run(&run).unwrap();
+    let fetched = store.get_run(&run.id).unwrap().unwrap();
+
+    let audit = fetched.hs_selection_audit.expect("audit should persist");
+    assert!(audit
+        .selected_policy_ids
+        .contains(&BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST.to_string()));
+    assert_eq!(fetched.behavior_checks.len(), 1);
+    assert_eq!(
+        fetched.behavior_checks[0].label,
+        "External writes stay reviewable"
+    );
+
+    let serialized = serde_json::to_string(&serde_json::json!({
+        "audit": audit,
+        "behaviorChecks": fetched.behavior_checks,
+    }))
+    .unwrap();
+    assert!(!serialized.contains("raw user text stays out of audit"));
+    assert!(!serialized.contains("external write action must create"));
 }
 
 #[test]

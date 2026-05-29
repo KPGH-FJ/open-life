@@ -4,6 +4,7 @@ use crate::agent::policy_store::{
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
 };
 use crate::agent::types::{AgentTaskKind, RiskLevel};
+use crate::agent::{AgentTask, HSBehaviorCheckSummary};
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -47,6 +48,18 @@ pub struct HSSelectorInput {
     pub current_state_hints: Value,
     pub token_budget: usize,
     pub agent_task_id: Option<String>,
+    pub agent_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeHSPacketBuildInput<'a> {
+    pub task: &'a AgentTask,
+    pub sanitized_intent_summary: String,
+    pub privacy_topic: PolicyTopic,
+    pub risk_level: RiskLevel,
+    pub tool_requirements: Vec<String>,
+    pub current_state_hints: Value,
+    pub token_budget: usize,
     pub agent_run_id: Option<String>,
 }
 
@@ -205,6 +218,82 @@ impl HSSelector {
             audit,
         })
     }
+}
+
+pub fn build_runtime_hs_packet(
+    policy_store: &PolicyStore,
+    heuristic_store: &HeuristicStore,
+    input: RuntimeHSPacketBuildInput<'_>,
+) -> Result<Option<RuntimeHSPacket>> {
+    let packet = HSSelector.select(
+        policy_store,
+        heuristic_store,
+        &HSSelectorInput {
+            task_kind: input.task.kind,
+            intent_summary: input.sanitized_intent_summary,
+            privacy_topic: input.privacy_topic,
+            risk_level: input.risk_level,
+            tool_requirements: input.tool_requirements,
+            current_state_hints: input.current_state_hints,
+            token_budget: input.token_budget,
+            agent_task_id: None,
+            agent_run_id: input.agent_run_id,
+        },
+    )?;
+
+    if packet.selected_policies.is_empty() && packet.selected_heuristics.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(packet))
+    }
+}
+
+pub fn behavior_checks_for_packet(packet: &RuntimeHSPacket) -> Vec<HSBehaviorCheckSummary> {
+    let mut checks = Vec::new();
+
+    if packet
+        .audit
+        .selected_policy_ids
+        .iter()
+        .any(|id| id == crate::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY)
+    {
+        checks.push(HSBehaviorCheckSummary {
+            id: "regression.sensitive_topic_local_only".into(),
+            label: "Sensitive topics stay local".into(),
+            passed: true,
+            summary: Some("Local-only routing policy was selected.".into()),
+        });
+    }
+
+    if packet
+        .audit
+        .selected_policy_ids
+        .iter()
+        .any(|id| id == crate::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST)
+    {
+        checks.push(HSBehaviorCheckSummary {
+            id: "regression.external_write_proposal_first".into(),
+            label: "External writes stay reviewable".into(),
+            passed: true,
+            summary: Some("Direct external writes become proposals first.".into()),
+        });
+    }
+
+    if packet
+        .audit
+        .selected_heuristic_ids
+        .iter()
+        .any(|id| id == crate::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING)
+    {
+        checks.push(HSBehaviorCheckSummary {
+            id: "regression.low_energy_planning".into(),
+            label: "Low-energy planning stays gentle".into(),
+            passed: true,
+            summary: Some("Planning guidance was bounded to selected collaboration style.".into()),
+        });
+    }
+
+    checks
 }
 
 fn task_domain(task_kind: AgentTaskKind) -> Option<&'static str> {

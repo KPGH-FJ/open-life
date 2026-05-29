@@ -1,4 +1,4 @@
-use crate::agent::ModelRouteTrace;
+use crate::agent::{ModelRouteTrace, RuntimeHSPacket};
 use crate::life_model::LifeModel;
 use crate::llm::{chat_with_openrouter, chat_with_openrouter_stream, ChatMessage, StreamResult};
 use crate::ollama::{chat_with_ollama, chat_with_ollama_raw_stream, resolve_ollama_model};
@@ -165,6 +165,35 @@ impl InferenceScheduler {
         }
     }
 
+    pub async fn generate_with_hs_packet(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+        hs_packet: &RuntimeHSPacket,
+    ) -> Result<String> {
+        if !hs_requires_local_only(hs_packet) {
+            return self.generate(messages, life_model, tools_prompt).await;
+        }
+
+        if let Some(ref router) = self.model_router {
+            router.route_with_hs_packet(
+                crate::agent::TaskType::Chat,
+                tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false),
+                hs_packet,
+            )?;
+        }
+
+        let resolved_local_model = resolve_ollama_model(&self.local_model)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LocalOnly HS policy requires a local model, but Ollama is not available or configured"
+                )
+            })?;
+        chat_with_ollama(&resolved_local_model, messages, life_model).await
+    }
+
     /// Generate a reply using a raw system prompt without injecting the life model.
     /// Falls back to OpenRouter if local model is not preferred or unavailable.
     pub async fn generate_raw(
@@ -263,6 +292,38 @@ impl InferenceScheduler {
                 .await
             }
         }
+    }
+
+    pub async fn generate_stream_with_hs_packet(
+        &self,
+        messages: Vec<ChatMessage>,
+        life_model: &LifeModel,
+        tools_prompt: Option<&str>,
+        hs_packet: &RuntimeHSPacket,
+    ) -> Result<StreamResult> {
+        if !hs_requires_local_only(hs_packet) {
+            return self
+                .generate_stream(messages, life_model, tools_prompt)
+                .await;
+        }
+
+        if let Some(ref router) = self.model_router {
+            router.route_with_hs_packet(
+                crate::agent::TaskType::Chat,
+                tools_prompt.map(|p| !p.trim().is_empty()).unwrap_or(false),
+                hs_packet,
+            )?;
+        }
+
+        let resolved_local_model = resolve_ollama_model(&self.local_model)
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "LocalOnly HS policy requires a local model, but Ollama is not available or configured"
+                )
+            })?;
+        let system_prompt = crate::llm::build_system_prompt(life_model, tools_prompt);
+        chat_with_ollama_raw_stream(&resolved_local_model, messages, Some(&system_prompt)).await
     }
 
     /// Generate a stream using a raw system prompt without injecting the life model.
@@ -375,9 +436,44 @@ impl InferenceScheduler {
     }
 }
 
+fn hs_requires_local_only(packet: &RuntimeHSPacket) -> bool {
+    packet
+        .selected_policies
+        .iter()
+        .any(|policy| policy.route == Some(crate::agent::ModelRoutePolicy::LocalOnly))
+}
+
 #[cfg(test)]
 mod tests {
     use super::InferenceScheduler;
+    use crate::agent::hs_selector::{HSSelectionAudit, RuntimeHSPacket, SelectedPolicyRef};
+    use crate::agent::{
+        ModelRoutePolicy, ModelRouter, ProviderAvailability,
+        BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
+    };
+
+    fn local_only_packet() -> RuntimeHSPacket {
+        RuntimeHSPacket {
+            selected_policies: vec![SelectedPolicyRef {
+                policy_id: BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
+                reason: "test_sensitive_topic".into(),
+                route: Some(ModelRoutePolicy::LocalOnly),
+                digest: "digest".into(),
+            }],
+            selected_heuristics: vec![],
+            estimated_tokens: 0,
+            audit: HSSelectionAudit {
+                agent_task_id: None,
+                agent_run_id: Some("run-scheduler-hs".into()),
+                input_digest: "input-digest".into(),
+                selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
+                selected_heuristic_ids: vec![],
+                excluded_assets: vec![],
+                estimated_tokens: 0,
+                token_budget: 128,
+            },
+        }
+    }
 
     #[test]
     fn local_chat_stays_enabled_without_remote_key_even_when_tools_are_available() {
@@ -437,5 +533,58 @@ mod tests {
             true,
         );
         assert!(scheduler.should_use_local_for_chat(None, true));
+    }
+
+    #[tokio::test]
+    async fn hs_local_only_policy_fails_closed_before_cloud_generation_without_local_provider() {
+        let mut router = ModelRouter::new();
+        router.providers.insert(
+            "ollama".into(),
+            ProviderAvailability {
+                provider: "ollama".into(),
+                available: false,
+                latency_ms: None,
+                models: vec![],
+                last_checked: chrono::Utc::now(),
+                last_error: Some("not running".into()),
+                health_is_estimated: false,
+            },
+        );
+        router.providers.insert(
+            "openai".into(),
+            ProviderAvailability {
+                provider: "openai".into(),
+                available: true,
+                latency_ms: Some(200),
+                models: vec!["gpt-4o-mini".into()],
+                last_checked: chrono::Utc::now(),
+                last_error: None,
+                health_is_estimated: false,
+            },
+        );
+        let scheduler = InferenceScheduler::new(
+            "qwen2.5".into(),
+            false,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "sk-test".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            true,
+        )
+        .with_model_router(router);
+
+        let err = scheduler
+            .generate_with_hs_packet(
+                vec![],
+                &crate::life_model::LifeModel::default(),
+                None,
+                &local_only_packet(),
+            )
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("LocalOnly") || message.contains("local"));
     }
 }

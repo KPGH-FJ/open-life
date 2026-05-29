@@ -1134,7 +1134,25 @@ pub(crate) async fn reject_proposal_with_state(
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     ensure_pending_or_postponed(&proposal)?;
     proposal.reject();
-    update_proposal_with_state(state, &proposal).await
+    update_proposal_with_state(state, &proposal).await?;
+    record_rejected_proactive_reminder_evidence(state, &proposal).await;
+    Ok(())
+}
+
+async fn record_rejected_proactive_reminder_evidence(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) {
+    let evidence_store = state.evidence_store.lock().await;
+    if let Err(e) = openlife_core::proactive::ProactiveEngine::default()
+        .record_rejected_reminder_proposal(&evidence_store, proposal)
+    {
+        log::warn!(
+            "[LifeModel-HS] failed to record rejected reminder evidence for proposal {}: {}",
+            proposal.id,
+            e
+        );
+    }
 }
 
 pub(crate) async fn edit_proposal_with_state(
@@ -1373,6 +1391,15 @@ mod tests {
                 temp_dir.path().join("mcp_audit.db"),
             ))),
             agent_run_store: None,
+            evidence_store: Arc::new(Mutex::new(
+                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
+            )),
+            heuristic_store: Arc::new(Mutex::new({
+                let store = openlife_core::agent::HeuristicStore::new_in_memory().unwrap();
+                store.seed_mvp_heuristics().unwrap();
+                store
+            })),
+            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),
@@ -1786,6 +1813,51 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("not in safe paths"));
         assert!(!file_path.exists());
+    }
+
+    #[tokio::test]
+    async fn rejecting_proactive_reminder_records_negative_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = AgentProposal::new(
+            ProposalType::ScheduledTask,
+            "proactive.reminder.pending_proposal",
+            serde_json::json!({
+                "proactive_reminder_category": "pending_proposal",
+                "prompt_digest": "digest-only",
+            }),
+            "raw reminder rejection text should not be stored as evidence",
+            0.7,
+            RiskLevel::Low,
+            ProposalSource::ProactiveAgent,
+        );
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = state
+            .evidence_store
+            .lock()
+            .await
+            .query(openlife_core::agent::EvidenceQuery {
+                affected_path: Some("proactive.reminder.pending_proposal".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].linked_proposal_ids.contains(&proposal_id));
+        let serialized = serde_json::to_string(&records[0]).unwrap();
+        assert!(!serialized.contains("raw reminder rejection text"));
     }
 
     #[test]
