@@ -6,6 +6,9 @@ The default mode is **solo developer + Agent**. GitHub should provide
 checkpoints, CI, and a durable project memory. It should not become the daily
 driver for every local edit.
 
+Issues are optional in this mode. Do not backfill an issue just because a task
+already happened locally or because a document has a task id.
+
 ## Default Flow
 
 Use this flow for normal OpenLife development:
@@ -22,7 +25,7 @@ pick one concrete outcome
 Small fixes, wording changes, focused refactors, and one-file maintenance work
 do not need a GitHub issue first.
 
-## When To Open An Issue
+## Optional Issues
 
 Open an issue when at least one of these is true:
 
@@ -33,8 +36,11 @@ Open an issue when at least one of these is true:
 - the task affects LifeModel, memory, privacy, permissions, tools, proposals,
   audit, model routing, or runtime authority.
 
-Use `Quick Task` for ordinary bounded work. Use the LifeModel-HS or ADR
-templates only when their governance checks are actually relevant.
+Use `Optional Quick Task` only for ordinary bounded work that needs a durable
+GitHub checkpoint. Use the ADR template only when a decision really affects a
+high-risk boundary. The old LifeModel-HS epic/task and engineering task forms
+are archived as `.disabled` files so they do not appear in the active GitHub
+issue picker during solo-mode development.
 
 ## When To Open A PR
 
@@ -55,7 +61,7 @@ Do not treat a PR as a ceremony. A good solo PR can be short:
 
 ## High-Risk Governance Mode
 
-Use the heavier issue and PR checks only for changes that touch:
+Use heavier issue and PR checks only for changes that touch:
 
 - LifeModel source-of-truth semantics,
 - memory or evidence persistence,
@@ -121,7 +127,10 @@ planned engineering task or close it with a note.
 
 ## Repository Files
 
-- Issue templates: `.github/ISSUE_TEMPLATE/`
+- Active issue templates: `.github/ISSUE_TEMPLATE/00_0_quick_task.yml`,
+  `.github/ISSUE_TEMPLATE/03_bug_report.yml`, and
+  `.github/ISSUE_TEMPLATE/04_adr_proposal.yml`
+- Archived issue-heavy templates: `.github/ISSUE_TEMPLATE/*.disabled`
 - PR template: `.github/PULL_REQUEST_TEMPLATE.md`
 - Label source of truth: `.github/labels.yml`
 - Code ownership: `.github/CODEOWNERS`

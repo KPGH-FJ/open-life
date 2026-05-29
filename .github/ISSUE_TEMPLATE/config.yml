@@ -2,10 +2,10 @@ blank_issues_enabled: true
 contact_links:
   - name: Solo + Agent GitHub Flow
     url: https://github.com/KPGH-FJ/open-life/blob/main/docs/github_repository_governance.md
-    about: Use the lightweight default flow unless the work is high-risk or multi-day.
+    about: Ordinary solo work should stay local; use issues only for high-risk, multi-day, or resumable checkpoints.
   - name: LifeModel-HS MVP Specs
     url: https://github.com/KPGH-FJ/open-life/blob/main/plans/lifemodel_hs_mvp_task_specs.md
-    about: Read the task specs before opening or implementing LMHS issues.
+    about: Use the specs directly for Codex work; heavy LMHS issue forms are archived in solo mode.
   - name: ADR 0013
     url: https://github.com/KPGH-FJ/open-life/blob/main/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
     about: Governance baseline for LifeModel-HS source of truth, policy, proposals, and MVP boundaries.

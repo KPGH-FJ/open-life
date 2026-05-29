@@ -1,3 +1,5 @@
+# Archived solo-mode template. Rename back to .yml only when engineering work
+# needs GitHub issue forms again.
 name: Engineering Task
 description: Track a bounded non-LMHS engineering task.
 title: "Task: "
