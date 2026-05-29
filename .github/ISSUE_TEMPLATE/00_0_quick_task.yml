@@ -1,16 +1,15 @@
-name: Quick Task
-description: Capture a small, bounded task without full governance ceremony.
+name: Optional Quick Task
+description: Use only when a small task needs a durable GitHub checkpoint.
 title: "Task: "
 labels:
   - task
-  - needs-triage
 body:
   - type: textarea
     id: goal
     attributes:
       label: Goal
       description: What should change, and why?
-      placeholder: "Keep this short. One task, one outcome."
+      placeholder: "Keep this short. One task, one outcome. Skip GitHub entirely for ordinary local work."
     validations:
       required: true
 
