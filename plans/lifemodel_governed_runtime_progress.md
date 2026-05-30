@@ -10,9 +10,9 @@ completion/status index.
 
 ## Current Position
 
-W1-W13 are complete. The project has reached a guarded Chat subpath where
-MultiStrategy Runtime can be explicitly previewed without replacing the default
-Chat stream path.
+W1-W14 are complete. The project now has a LifeModel Maturation V1 service that
+turns RuntimeOutput life-event candidates into governed evidence and proposals
+without directly mutating LifeModel or Memory.
 
 The key boundary is unchanged:
 
@@ -21,8 +21,8 @@ The key boundary is unchanged:
 - The default Chat path must not be replaced directly.
 - Chat now has an explicit write-disabled Governed Preview path for runtime
   inspection; normal Send still uses the existing stream path.
-- LifeModel-HS remains the protocol-layer direction, but the maturation loop is
-  not yet end-to-end.
+- LifeModel-HS remains the protocol-layer direction; Maturation V1 exists as an
+  explicit service entry, while automatic Chat application remains out of scope.
 - PlanExecute is a core MVP, not a productized weekly-planning workflow.
 - A formal `RuntimeStrategy` trait has not started and must not be introduced
   ahead of proven vertical slices.
@@ -44,12 +44,12 @@ The key boundary is unchanged:
 | W11 Documentation Status Sync | Done | README, AGENTS, plans | Entry docs synchronized with code status and premature Chat replacement blocked. |
 | W12 Non-Default MultiStrategy Preview UI / Debug Entry | Done | Settings experimental tab, preview form tests | Settings exposes a folded preview/beta panel that calls `run_multi_strategy_agent_preview`, displays metadata-safe strategy/payload/governance/warnings, and links to Runs trace without replacing Chat. |
 | W13 Guarded Chat Subpath Migration | Done | Chat governed preview panel, Chat tests | Chat exposes an explicit Governed Preview path that calls `run_multi_strategy_agent_preview` with `allowWrites=false`, displays metadata-safe runtime output, links to Runs trace, and leaves normal Send on the existing stream path. |
+| W14 LifeModel Maturation Loop V1 | Done | `maturation.rs`, evidence/proposal stores, maturation tests | `MaturationService::mature_runtime_output` converts RuntimeOutput candidates into proposal-first evidence/proposals, records structured drop reasons and governance audit, and keeps evidence/report metadata-safe. |
 
 ## Next Recommended Sequence
 
 ```text
-maturation loop V1
--> PlanExecute vertical slice
+PlanExecute vertical slice
 -> RuntimeStrategy trait
 ```
 
