@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import {
   checkControlledChatPilotEligibility,
+  checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   getControlledPilotPromotionEvidenceSummary,
   runMultiStrategyAgentPreview,
@@ -20,6 +21,7 @@ import {
 import type {
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
+  ControlledPilotPromotionReadinessReport,
   MultiStrategyAgentPreviewLayer,
   MultiStrategyAgentPreviewOutput,
   RuntimeMigrationGateReport,
@@ -90,6 +92,10 @@ export default function MultiStrategyPreviewSection() {
   const [promotionSummaryError, setPromotionSummaryError] = useState<string | null>(null);
   const [promotionSummary, setPromotionSummary] =
     useState<ControlledPilotPromotionEvidenceSummary | null>(null);
+  const [promotionReadinessChecking, setPromotionReadinessChecking] = useState(false);
+  const [promotionReadinessError, setPromotionReadinessError] = useState<string | null>(null);
+  const [promotionReadinessReport, setPromotionReadinessReport] =
+    useState<ControlledPilotPromotionReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -173,6 +179,20 @@ export default function MultiStrategyPreviewSection() {
       setPromotionSummaryError(`Promotion evidence summary failed: ${readableError(e)}`);
     } finally {
       setPromotionSummaryChecking(false);
+    }
+  };
+
+  const handlePromotionReadinessCheck = async () => {
+    setPromotionReadinessChecking(true);
+    setPromotionReadinessError(null);
+    setPromotionReadinessReport(null);
+    try {
+      const report = await checkControlledPilotPromotionReadiness();
+      setPromotionReadinessReport(report);
+    } catch (e) {
+      setPromotionReadinessError(`Promotion readiness check failed: ${readableError(e)}`);
+    } finally {
+      setPromotionReadinessChecking(false);
     }
   };
 
@@ -472,6 +492,155 @@ export default function MultiStrategyPreviewSection() {
           </div>
         ) : (
           <div className="mt-3 text-xs text-stone-500">No promotion evidence summary loaded.</div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Promotion readiness gate</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only gate based on existing promotion evidence only. Pass means ready to discuss
+              the next Chat migration step; it is not automatic migration permission.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handlePromotionReadinessCheck}
+            disabled={promotionReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              promotionReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={promotionReadinessChecking ? "animate-spin" : undefined}
+            />
+            {promotionReadinessChecking ? "Checking..." : "Check Promotion Readiness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          Session filtering is reserved for future EvidenceStore support; this check currently reads
+          the global metadata-safe promotion summary and never reads raw pilot responses or raw user
+          input.
+        </div>
+
+        {promotionReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {promotionReadinessError}
+          </div>
+        )}
+
+        {promotionReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  promotionReadinessReport.ready
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {promotionReadinessReport.ready ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {promotionReadinessReport.ready ? "Ready" : "Blocked"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                {promotionReadinessReport.promotedCount} /{" "}
+                {promotionReadinessReport.requiredPromotions} promotions
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  promotionReadinessReport.metadataSafeEvidenceReady
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                metadataSafeEvidenceReady:{" "}
+                {promotionReadinessReport.metadataSafeEvidenceReady ? "true" : "false"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  promotionReadinessReport.defaultChatUnchanged
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                defaultChatUnchanged:{" "}
+                {promotionReadinessReport.defaultChatUnchanged ? "true" : "false"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                Mismatch blocks: {promotionReadinessReport.sourceTargetMismatchBlockCount}
+              </span>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">
+                  Latest promotion timestamp
+                </div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {promotionReadinessReport.latestPromotionTimestamp ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Gate meaning</div>
+                <div className="mt-1 text-xs text-stone-700">discussion only</div>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">
+                Recent promoted pilot run ids
+              </div>
+              {promotionReadinessReport.recentPromotedPilotRunIds.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {promotionReadinessReport.recentPromotedPilotRunIds.map(runId => (
+                    <span
+                      key={runId}
+                      className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 font-mono text-xs text-stone-700"
+                    >
+                      {runId}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No promotion evidence recorded.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {promotionReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {promotionReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No promotion readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No promotion readiness report loaded.</div>
         )}
       </section>
 

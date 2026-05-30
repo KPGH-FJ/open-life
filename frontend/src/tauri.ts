@@ -12,6 +12,8 @@ import type {
   ControlledPilotPromotionEvidenceInput,
   ControlledPilotPromotionEvidenceResult,
   ControlledPilotPromotionEvidenceSummary,
+  ControlledPilotPromotionReadinessCheckInput,
+  ControlledPilotPromotionReadinessReport,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -260,6 +262,15 @@ export async function recordControlledPilotPromotionEvidence(
 export async function getControlledPilotPromotionEvidenceSummary(): Promise<ControlledPilotPromotionEvidenceSummary> {
   return safeInvoke<ControlledPilotPromotionEvidenceSummary>(
     "get_controlled_pilot_promotion_evidence_summary"
+  );
+}
+
+export async function checkControlledPilotPromotionReadiness(
+  input: ControlledPilotPromotionReadinessCheckInput = {}
+): Promise<ControlledPilotPromotionReadinessReport> {
+  return safeInvoke<ControlledPilotPromotionReadinessReport>(
+    "check_controlled_pilot_promotion_readiness",
+    { input }
   );
 }
 

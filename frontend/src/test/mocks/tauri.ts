@@ -455,6 +455,22 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         latestPromotionTimestamp: "2026-05-30T01:02:03Z",
         sourceTargetMismatchBlockCount: 1,
       } as T);
+    case "check_controlled_pilot_promotion_readiness":
+      return Promise.resolve({
+        ready: true,
+        requiredPromotions: 3,
+        promotedCount: 3,
+        recentPromotedPilotRunIds: [
+          "run-controlled-pilot-3",
+          "run-controlled-pilot-2",
+          "run-controlled-pilot-1",
+        ],
+        latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+        sourceTargetMismatchBlockCount: 0,
+        metadataSafeEvidenceReady: true,
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

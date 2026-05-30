@@ -9,6 +9,7 @@ import {
   getStateHistory,
   recordState,
   checkControlledChatPilotEligibility,
+  checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
@@ -216,5 +217,37 @@ describe("tauri command argument aliases", () => {
     });
     expect(result.eligible).toBe(true);
     expect(result.cleanRunCount).toBe(3);
+  });
+
+  it("invokes controlled pilot promotion readiness as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ready: true,
+      requiredPromotions: 3,
+      promotedCount: 3,
+      recentPromotedPilotRunIds: [
+        "run-controlled-pilot-3",
+        "run-controlled-pilot-2",
+        "run-controlled-pilot-1",
+      ],
+      latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+      sourceTargetMismatchBlockCount: 0,
+      metadataSafeEvidenceReady: true,
+      defaultChatUnchanged: true,
+      blockingReasons: [],
+    });
+
+    const result = await checkControlledPilotPromotionReadiness({
+      requiredPromotions: 3,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_controlled_pilot_promotion_readiness", {
+      input: {
+        requiredPromotions: 3,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.ready).toBe(true);
+    expect(result.promotedCount).toBe(3);
   });
 });

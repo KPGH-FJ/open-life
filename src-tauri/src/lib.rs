@@ -38,9 +38,9 @@ use commands::agent::{
     replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
-    check_controlled_chat_pilot_eligibility, check_runtime_migration_gate,
-    get_controlled_pilot_promotion_evidence_summary, record_controlled_pilot_promotion_evidence,
-    run_multi_strategy_agent_preview,
+    check_controlled_chat_pilot_eligibility, check_controlled_pilot_promotion_readiness,
+    check_runtime_migration_gate, get_controlled_pilot_promotion_evidence_summary,
+    record_controlled_pilot_promotion_evidence, run_multi_strategy_agent_preview,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -3046,6 +3046,7 @@ pub fn run() {
             run_multi_strategy_agent_preview,
             check_runtime_migration_gate,
             check_controlled_chat_pilot_eligibility,
+            check_controlled_pilot_promotion_readiness,
             record_controlled_pilot_promotion_evidence,
             get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,

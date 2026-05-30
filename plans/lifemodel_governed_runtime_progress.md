@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W23 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W24 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -18,7 +18,9 @@ without changing Chat behavior, and a read-only controlled Chat pilot
 eligibility check for sustained clean gate evidence. Chat also has a very small
 explicit Controlled Pilot entry with fallback plus reviewed pilot response
 promotion with source-bound post-promotion validation and metadata-safe
-promotion evidence recording.
+promotion evidence recording. W24 adds a read-only promotion evidence readiness
+gate that answers only whether the existing W23 evidence is sufficient to
+discuss the next Chat migration step.
 
 The key boundary is unchanged:
 
@@ -78,6 +80,16 @@ The key boundary is unchanged:
   tool results. Settings displays a read-only promotion evidence summary.
   Evidence failure leaves the promotion degraded and retrying records evidence
   only; it does not write the chat message again.
+- W24 Promotion Evidence Readiness Gate adds
+  `check_controlled_pilot_promotion_readiness`, a read-only command over
+  existing promotion evidence. It defaults to 3 required metadata-safe
+  promotions, returns ready/counts/recent pilot run ids/latest timestamp/source
+  mismatch block count/metadataSafeEvidenceReady/defaultChatUnchanged/blocking
+  reasons, and creates no AgentRun, Proposal, Action, Observation, LifeModel,
+  Memory, external tool write, or new evidence. `sessionId` is accepted for a
+  future filtered EvidenceStore path; current behavior is documented as a
+  global summary. A ready result means discussion eligibility only, not
+  automatic migration permission.
 
 ## Work Package Status
 
@@ -106,19 +118,21 @@ The key boundary is unchanged:
 | W21 Reviewed Pilot Response Promotion | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Adds explicit reviewed promotion for successful Controlled Pilot results with `userOutput`. Promotion requires user review/confirmation, writes one assistant chat message via `save_chat_message` with existing `run_id` metadata when available, prevents duplicate promotion for the same pilot response, and leaves normal Send / blocked / failed / no-output pilot paths unchanged. |
 | W22 Post-Promotion Validation And Source Binding | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Binds each Controlled Pilot result to its source chat session, displays source session / target session / runId / strategy / governance summary in promotion review, blocks promotion when the current target session differs from the source session, shows rerun fallback guidance, and prevents mismatch writes to a different chat session. |
 | W23 Controlled Pilot Promotion Evidence Recorder | Done | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Records metadata-safe promotion evidence only after reviewed promotion saves one assistant message. Evidence includes run/session/strategy/payload/governance/length/checksum/timestamp only, is idempotent by pilotRunId/checksum, exposes a read-only Settings summary, and keeps default Send / `send_message` / `start_stream_message` isolated from eligibility/gate/preview/promotion/evidence. |
+| W24 Promotion Evidence Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_pilot_promotion_readiness` as a read-only gate over existing W23 metadata-safe promotion evidence. It defaults to 3 required promotions, surfaces pass/block counts, recent run ids, latest timestamp, mismatch block count, metadata-safe/default-chat flags, and blocking reasons in Settings. It does not migrate Chat, does not create evidence/runs/proposals/actions/observations, and does not read raw pilot response or raw user input. |
 
 ## Next Recommended Sequence
 
 ```text
-further reviewed migration planning only after metadata-safe promotion evidence
+further reviewed migration planning only after promotion readiness passes
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
 added an explicit review-and-confirm promotion step for successful pilot output,
 W22 only added source binding plus target-session validation for that promotion
-step, and W23 only records/reads metadata-safe promotion evidence. Default
-`Send`, `send_message`, and `start_stream_message` remain unchanged until a
-later reviewed migration stage with separate evidence.
+step, W23 only records/reads metadata-safe promotion evidence, and W24 only
+checks readiness for discussing the next migration step. Default `Send`,
+`send_message`, and `start_stream_message` remain unchanged until a later
+reviewed migration stage with separate evidence.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

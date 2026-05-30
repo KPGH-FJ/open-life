@@ -323,6 +323,23 @@ export interface ControlledPilotPromotionEvidenceSummary {
   sourceTargetMismatchBlockCount: number;
 }
 
+export interface ControlledPilotPromotionReadinessCheckInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledPilotPromotionReadinessReport {
+  ready: boolean;
+  requiredPromotions: number;
+  promotedCount: number;
+  recentPromotedPilotRunIds: string[];
+  latestPromotionTimestamp?: string | null;
+  sourceTargetMismatchBlockCount: number;
+  metadataSafeEvidenceReady: boolean;
+  defaultChatUnchanged: boolean;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

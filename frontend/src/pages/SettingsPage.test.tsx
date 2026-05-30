@@ -510,6 +510,67 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
   });
 
+  it("renders controlled pilot promotion readiness pass/block details from the experimental panel", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Promotion readiness gate")).toBeInTheDocument();
+    expect(screen.getByText(/existing promotion evidence only/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Promotion Readiness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_pilot_promotion_readiness", {
+        input: {},
+      });
+    });
+
+    expect(await screen.findByText("Ready")).toBeInTheDocument();
+    expect(screen.getByText("3 / 3 promotions")).toBeInTheDocument();
+    expect(screen.getByText("metadataSafeEvidenceReady: true")).toBeInTheDocument();
+    expect(screen.getByText("defaultChatUnchanged: true")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-3")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-2")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-1")).toBeInTheDocument();
+    expect(screen.getByText("No promotion readiness blockers returned.")).toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
+  it("renders controlled pilot promotion readiness blocking reasons", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_pilot_promotion_readiness") {
+        return Promise.resolve({
+          ready: false,
+          requiredPromotions: 3,
+          promotedCount: 2,
+          recentPromotedPilotRunIds: ["run-controlled-pilot-2", "run-controlled-pilot-1"],
+          latestPromotionTimestamp: "2026-05-30T02:03:04Z",
+          sourceTargetMismatchBlockCount: 1,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [
+            "insufficient_promotion_evidence: required 3 promotions, found 2",
+            "source_target_mismatch_blocks_present",
+          ],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Check Promotion Readiness" }));
+
+    expect(await screen.findByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("2 / 3 promotions")).toBeInTheDocument();
+    expect(screen.getByText("Mismatch blocks: 1")).toBeInTheDocument();
+    expect(
+      screen.getByText("insufficient_promotion_evidence: required 3 promotions, found 2")
+    ).toBeInTheDocument();
+    expect(screen.getByText("source_target_mismatch_blocks_present")).toBeInTheDocument();
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {
