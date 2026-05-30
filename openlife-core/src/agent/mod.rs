@@ -98,7 +98,10 @@ pub use regression_suite::{
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput};
 pub use runtime_migration_gate::{
-    evaluate_runtime_migration_gate, RuntimeMigrationGateInput, RuntimeMigrationGateReport,
+    evaluate_controlled_chat_pilot_eligibility, evaluate_runtime_migration_gate,
+    ControlledChatPilotEligibilityInput, ControlledChatPilotEligibilityReport,
+    RuntimeMigrationGateInput, RuntimeMigrationGateReport,
+    DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
 pub use store::AgentRunStore;
 pub use strategy::{

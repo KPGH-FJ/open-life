@@ -521,6 +521,11 @@ describe("ChatPage", () => {
     expect(
       vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "check_runtime_migration_gate")
     ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_pilot_eligibility")
+    ).toBe(false);
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {

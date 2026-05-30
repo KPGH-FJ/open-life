@@ -1,7 +1,7 @@
 use crate::agent::ReasoningTrace;
 use crate::agent::{
-    evaluate_runtime_migration_gate, AgentAction, AgentRun, AgentRunStatus,
-    RuntimeMigrationGateInput,
+    evaluate_controlled_chat_pilot_eligibility, evaluate_runtime_migration_gate, AgentAction,
+    AgentRun, AgentRunStatus, ControlledChatPilotEligibilityInput, RuntimeMigrationGateInput,
 };
 use chrono::Utc;
 use serde_json::json;
@@ -39,6 +39,12 @@ fn gate_input(preview_run: Option<&AgentRun>) -> RuntimeMigrationGateInput<'_> {
         preview_run,
         fallback_available: true,
     }
+}
+
+fn healthy_preview_run_with_id(id: &str) -> AgentRun {
+    let mut run = healthy_preview_run();
+    run.id = id.to_string();
+    run
 }
 
 #[test]
@@ -174,4 +180,88 @@ fn runtime_migration_gate_output_is_metadata_safe() {
     assert!(!serialized.contains("alice@example.com"));
     assert!(!serialized.contains("rawMemoryContext"));
     assert!(!serialized.contains("raw prompt"));
+}
+
+#[test]
+fn controlled_chat_pilot_eligibility_passes_after_three_clean_preview_gates() {
+    let runs = vec![
+        healthy_preview_run_with_id("run-clean-3"),
+        healthy_preview_run_with_id("run-clean-2"),
+        healthy_preview_run_with_id("run-clean-1"),
+    ];
+
+    let report = evaluate_controlled_chat_pilot_eligibility(ControlledChatPilotEligibilityInput {
+        default_chat_uses_multi_strategy: false,
+        preview_runs: &runs,
+        required_clean_runs: 3,
+        fallback_available: true,
+    });
+
+    assert!(report.eligible);
+    assert_eq!(report.required_clean_runs, 3);
+    assert_eq!(report.clean_run_count, 3);
+    assert_eq!(
+        report.checked_run_ids,
+        vec!["run-clean-3", "run-clean-2", "run-clean-1"]
+    );
+    assert!(report.blocking_reasons.is_empty());
+    assert!(report.default_chat_unchanged);
+    assert!(report
+        .last_gate_report
+        .as_ref()
+        .is_some_and(|gate| gate.blocking_reasons.is_empty()));
+}
+
+#[test]
+fn controlled_chat_pilot_eligibility_blocks_without_enough_preview_evidence() {
+    let runs = vec![
+        healthy_preview_run_with_id("run-clean-2"),
+        healthy_preview_run_with_id("run-clean-1"),
+    ];
+
+    let report = evaluate_controlled_chat_pilot_eligibility(ControlledChatPilotEligibilityInput {
+        default_chat_uses_multi_strategy: false,
+        preview_runs: &runs,
+        required_clean_runs: 3,
+        fallback_available: true,
+    });
+
+    assert!(!report.eligible);
+    assert_eq!(report.required_clean_runs, 3);
+    assert_eq!(report.clean_run_count, 2);
+    assert_eq!(report.checked_run_ids, vec!["run-clean-2", "run-clean-1"]);
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("insufficient_preview_evidence")));
+}
+
+#[test]
+fn controlled_chat_pilot_eligibility_blocks_when_any_preview_gate_blocks() {
+    let mut blocked_run = healthy_preview_run_with_id("run-blocked-2");
+    blocked_run.tool_call_count = 1;
+    let runs = vec![
+        healthy_preview_run_with_id("run-clean-3"),
+        blocked_run,
+        healthy_preview_run_with_id("run-clean-1"),
+    ];
+
+    let report = evaluate_controlled_chat_pilot_eligibility(ControlledChatPilotEligibilityInput {
+        default_chat_uses_multi_strategy: false,
+        preview_runs: &runs,
+        required_clean_runs: 3,
+        fallback_available: true,
+    });
+
+    assert!(!report.eligible);
+    assert_eq!(report.required_clean_runs, 3);
+    assert_eq!(report.clean_run_count, 2);
+    assert_eq!(
+        report.checked_run_ids,
+        vec!["run-clean-3", "run-blocked-2", "run-clean-1"]
+    );
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("run-blocked-2:external_write_risk_detected")));
 }

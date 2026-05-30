@@ -2,10 +2,11 @@ use crate::AppState;
 use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::{
     behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunError, AgentRunStatus,
-    AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, GovernanceDecisionKind,
-    HSBehaviorCheckSummary, HSSelectionAudit, MultiStrategyRuntime, MultiStrategyRuntimeInput,
-    MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
-    RedactionLevel, RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
+    AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, ControlledChatPilotEligibilityReport,
+    GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit, MultiStrategyRuntime,
+    MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload,
+    PlanExecutionOutput, PlanStepStatus, RedactionLevel, RuntimeInput, RuntimeMigrationGateReport,
+    RuntimeStrategyKind, DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -68,6 +69,15 @@ pub struct RuntimeMigrationGateCheckInput {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatPilotEligibilityCheckInput {
+    #[serde(default)]
+    pub required_clean_runs: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -88,6 +98,37 @@ pub(crate) async fn check_runtime_migration_gate_with_state(
             fallback_available: true,
         },
     ))
+}
+
+#[tauri::command]
+pub async fn check_controlled_chat_pilot_eligibility(
+    input: ControlledChatPilotEligibilityCheckInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatPilotEligibilityReport, String> {
+    check_controlled_chat_pilot_eligibility_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn check_controlled_chat_pilot_eligibility_with_state(
+    input: ControlledChatPilotEligibilityCheckInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatPilotEligibilityReport, String> {
+    let required_clean_runs = input
+        .required_clean_runs
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS);
+    let preview_runs =
+        find_preview_runs_for_pilot_eligibility(&input, required_clean_runs, state).await?;
+
+    Ok(
+        openlife_core::agent::evaluate_controlled_chat_pilot_eligibility(
+            openlife_core::agent::ControlledChatPilotEligibilityInput {
+                default_chat_uses_multi_strategy: false,
+                preview_runs: &preview_runs,
+                required_clean_runs,
+                fallback_available: true,
+            },
+        ),
+    )
 }
 
 #[tauri::command]
@@ -136,6 +177,39 @@ async fn find_preview_run_for_gate(
     Ok(runs
         .into_iter()
         .find(|run| run.reasoning_strategy.as_deref() == Some("multi_strategy_preview")))
+}
+
+async fn find_preview_runs_for_pilot_eligibility(
+    input: &ControlledChatPilotEligibilityCheckInput,
+    required_clean_runs: usize,
+    state: &Arc<AppState>,
+) -> Result<Vec<AgentRun>, String> {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let store = store_arc.lock().await;
+    let read_limit = 50_i64.max(required_clean_runs as i64);
+
+    let runs = if let Some(session_id) = input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        store
+            .list_runs_for_session(session_id, read_limit)
+            .map_err(|e| format!("failed to list preview AgentRuns for pilot eligibility: {e}"))?
+    } else {
+        store
+            .list_runs(read_limit, 0)
+            .map_err(|e| format!("failed to list preview AgentRuns for pilot eligibility: {e}"))?
+    };
+
+    Ok(runs
+        .into_iter()
+        .filter(|run| run.reasoning_strategy.as_deref() == Some("multi_strategy_preview"))
+        .take(required_clean_runs)
+        .collect())
 }
 
 pub(crate) async fn run_multi_strategy_agent_preview_with_state(
@@ -788,6 +862,14 @@ mod tests {
         run
     }
 
+    fn healthy_gate_preview_run_with_id(session_id: &str, id: &str, age_seconds: i64) -> AgentRun {
+        let mut run = healthy_gate_preview_run(session_id);
+        run.id = id.to_string();
+        run.started_at = chrono::Utc::now() - chrono::Duration::seconds(age_seconds);
+        run.finished_at = Some(run.started_at + chrono::Duration::seconds(1));
+        run
+    }
+
     #[tokio::test]
     async fn runtime_migration_gate_command_reads_existing_preview_run_only() {
         let state = preview_state().await;
@@ -845,6 +927,160 @@ mod tests {
             before_pending_proposals.len(),
             after_pending_proposals.len()
         );
+    }
+
+    #[tokio::test]
+    async fn controlled_chat_pilot_eligibility_command_reads_existing_preview_runs_only() {
+        let state = preview_state().await;
+        let runs = vec![
+            healthy_gate_preview_run_with_id("session-pilot", "run-preview-clean-3", 0),
+            healthy_gate_preview_run_with_id("session-pilot", "run-preview-clean-2", 10),
+            healthy_gate_preview_run_with_id("session-pilot", "run-preview-clean-1", 20),
+        ];
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            for run in &runs {
+                store.create_run(run).unwrap();
+            }
+        }
+        let before_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let before_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+
+        let report = check_controlled_chat_pilot_eligibility_with_state(
+            ControlledChatPilotEligibilityCheckInput::default(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.eligible);
+        assert_eq!(report.required_clean_runs, 3);
+        assert_eq!(report.clean_run_count, 3);
+        assert_eq!(
+            report.checked_run_ids,
+            vec![
+                "run-preview-clean-3",
+                "run-preview-clean-2",
+                "run-preview-clean-1"
+            ]
+        );
+        assert!(report.blocking_reasons.is_empty());
+
+        let after_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let after_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        let stored_runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs_for_session("session-pilot", 10).unwrap()
+        };
+        assert_eq!(before_run_count, after_run_count);
+        assert_eq!(
+            before_pending_proposals.len(),
+            after_pending_proposals.len()
+        );
+        assert!(stored_runs.iter().all(|run| run.actions.is_empty()));
+        assert!(stored_runs.iter().all(|run| run.observations.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn controlled_chat_pilot_eligibility_command_blocks_without_enough_preview_evidence() {
+        let state = preview_state().await;
+        let runs = vec![
+            healthy_gate_preview_run_with_id("session-pilot-short", "run-preview-clean-2", 0),
+            healthy_gate_preview_run_with_id("session-pilot-short", "run-preview-clean-1", 10),
+        ];
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            for run in &runs {
+                store.create_run(run).unwrap();
+            }
+        }
+
+        let report = check_controlled_chat_pilot_eligibility_with_state(
+            ControlledChatPilotEligibilityCheckInput {
+                required_clean_runs: Some(3),
+                session_id: Some("session-pilot-short".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.eligible);
+        assert_eq!(report.required_clean_runs, 3);
+        assert_eq!(report.clean_run_count, 2);
+        assert_eq!(
+            report.checked_run_ids,
+            vec!["run-preview-clean-2", "run-preview-clean-1"]
+        );
+        assert!(report
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("insufficient_preview_evidence")));
+    }
+
+    #[tokio::test]
+    async fn controlled_chat_pilot_eligibility_command_blocks_when_recent_gate_blocks() {
+        let state = preview_state().await;
+        let mut blocked_run =
+            healthy_gate_preview_run_with_id("session-pilot-blocked", "run-preview-blocked-2", 10);
+        blocked_run.tool_call_count = 1;
+        let runs = vec![
+            healthy_gate_preview_run_with_id("session-pilot-blocked", "run-preview-clean-3", 0),
+            blocked_run,
+            healthy_gate_preview_run_with_id("session-pilot-blocked", "run-preview-clean-1", 20),
+        ];
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            for run in &runs {
+                store.create_run(run).unwrap();
+            }
+        }
+
+        let report = check_controlled_chat_pilot_eligibility_with_state(
+            ControlledChatPilotEligibilityCheckInput {
+                required_clean_runs: Some(3),
+                session_id: Some("session-pilot-blocked".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.eligible);
+        assert_eq!(report.required_clean_runs, 3);
+        assert_eq!(report.clean_run_count, 2);
+        assert_eq!(
+            report.checked_run_ids,
+            vec![
+                "run-preview-clean-3",
+                "run-preview-blocked-2",
+                "run-preview-clean-1"
+            ]
+        );
+        assert!(report
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("run-preview-blocked-2:external_write_risk_detected")));
     }
 
     #[tokio::test]

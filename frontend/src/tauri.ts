@@ -7,6 +7,8 @@ import type {
   StateAlert,
   MultiStrategyAgentPreviewInput,
   MultiStrategyAgentPreviewOutput,
+  ControlledChatPilotEligibilityCheckInput,
+  ControlledChatPilotEligibilityReport,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -232,6 +234,15 @@ export async function checkRuntimeMigrationGate(
   input: RuntimeMigrationGateCheckInput = {}
 ): Promise<RuntimeMigrationGateReport> {
   return safeInvoke<RuntimeMigrationGateReport>("check_runtime_migration_gate", { input });
+}
+
+export async function checkControlledChatPilotEligibility(
+  input: ControlledChatPilotEligibilityCheckInput = {}
+): Promise<ControlledChatPilotEligibilityReport> {
+  return safeInvoke<ControlledChatPilotEligibilityReport>(
+    "check_controlled_chat_pilot_eligibility",
+    { input }
+  );
 }
 
 export async function startStreamMessage(

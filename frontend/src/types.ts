@@ -282,6 +282,21 @@ export interface RuntimeMigrationGateReport {
   blockingReasons: string[];
 }
 
+export interface ControlledChatPilotEligibilityCheckInput {
+  requiredCleanRuns?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatPilotEligibilityReport {
+  eligible: boolean;
+  requiredCleanRuns: number;
+  cleanRunCount: number;
+  checkedRunIds: string[];
+  blockingReasons: string[];
+  lastGateReport?: RuntimeMigrationGateReport;
+  defaultChatUnchanged: boolean;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

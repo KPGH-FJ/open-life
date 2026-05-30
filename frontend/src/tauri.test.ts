@@ -8,6 +8,7 @@ import {
   editProposal,
   getStateHistory,
   recordState,
+  checkControlledChatPilotEligibility,
   checkRuntimeMigrationGate,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
@@ -187,5 +188,33 @@ describe("tauri command argument aliases", () => {
       },
     });
     expect(result.defaultChatUnchanged).toBe(true);
+  });
+
+  it("invokes controlled Chat pilot eligibility as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      eligible: true,
+      requiredCleanRuns: 3,
+      cleanRunCount: 3,
+      checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+      blockingReasons: [],
+      lastGateReport: {
+        defaultChatUnchanged: true,
+        previewPathHealthy: true,
+        metadataSafeTraceReady: true,
+        fallbackAvailable: true,
+        noExternalWrites: true,
+        proposalFirstPreserved: true,
+        blockingReasons: [],
+      },
+      defaultChatUnchanged: true,
+    });
+
+    const result = await checkControlledChatPilotEligibility();
+
+    expect(invoke).toHaveBeenCalledWith("check_controlled_chat_pilot_eligibility", {
+      input: {},
+    });
+    expect(result.eligible).toBe(true);
+    expect(result.cleanRunCount).toBe(3);
   });
 });

@@ -10,11 +10,12 @@ completion/status index.
 
 ## Current Position
 
-W1-W18 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W19 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
-diagnostics, and a Settings evidence surface that makes the gate result visible
-without changing Chat behavior.
+diagnostics, a Settings evidence surface that makes the gate result visible
+without changing Chat behavior, and a read-only controlled Chat pilot
+eligibility check for sustained clean gate evidence.
 
 The key boundary is unchanged:
 
@@ -35,6 +36,14 @@ The key boundary is unchanged:
 - The Settings Runtime Migration Gate panel only displays pass/block evidence
   and blocking reasons from `check_runtime_migration_gate`; it is not a Chat
   switching control and it does not auto-run preview.
+- `check_controlled_chat_pilot_eligibility` defaults to the latest 3
+  MultiStrategy preview AgentRuns, recomputes gate reports, and returns
+  eligibility, clean run count, checked run ids, blocking reasons, and the
+  latest gate report. It does not create AgentRuns, Proposals, Actions,
+  Observations, audit rows, or LifeModel/Memory writes.
+- The Settings Pilot eligibility panel displays controlled Chat migration pilot
+  qualification only. It is not a Chat switching control; even an eligible
+  result cannot automatically replace default Chat.
 
 ## Work Package Status
 
@@ -58,19 +67,21 @@ The key boundary is unchanged:
 | W16 RuntimeStrategy Trait Foundation | Done | `strategy_runtime.rs`, `multi_strategy_runtime.rs`, MultiStrategy tests | Defines the lightweight `RuntimeStrategy` trait, ReAct/PlanExecute adapters, and registry-backed MultiStrategy execution while preserving ReAct/PlanExecute/Blocked payload compatibility and metadata-safe summaries. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, Tauri wrapper/tests | Adds the read-only migration gate report: default Chat unchanged, preview path healthy, metadata-safe trace ready, fallback available, no external writes, proposal-first preserved, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings experimental panel, frontend tests, docs | Displays `check_runtime_migration_gate` pass/block fields and blocking reasons as a read-only evidence surface. Normal Chat Send still does not call the gate or `run_multi_strategy_agent_preview`. |
+| W19 Sustained Gate Evidence / Pilot Eligibility | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_pilot_eligibility`: read-only eligibility over the latest 3 preview gate reports with clean count, checked run ids, blockers, latest gate report, and default Chat unchanged. It creates no AgentRun/Proposal/Action/Observation and normal Chat Send does not call it. |
 
 ## Next Recommended Sequence
 
 ```text
-Controlled Chat migration pilot after sustained clean gate evidence
+W20 very small controlled Chat migration pilot with fallback
 ```
 
-The next phase still must not directly replace the default Chat path. Minimum
-entry criteria for any controlled Chat migration pilot: gate evidence stays
-clean across recent preview AgentRuns, fallback remains available, the outer
-preview AgentRun remains the primary trace, any inner ReAct run id is child
-metadata only, traces remain metadata-safe, no real external writes occur,
-proposal-first behavior is preserved, and `make ci` passes.
+The next phase still must not directly replace the default Chat path. W20 may
+only attempt a very small controlled Chat migration pilot if W19 pilot
+eligibility remains clean and a fallback is preserved. Minimum entry criteria:
+gate evidence stays clean across recent preview AgentRuns, fallback remains
+available, the outer preview AgentRun remains the primary trace, any inner ReAct
+run id is child metadata only, traces remain metadata-safe, no real external
+writes occur, proposal-first behavior is preserved, and `make ci` passes.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

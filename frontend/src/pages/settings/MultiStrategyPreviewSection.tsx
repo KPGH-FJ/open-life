@@ -11,8 +11,13 @@ import {
   ShieldCheck,
   XCircle,
 } from "lucide-react";
-import { checkRuntimeMigrationGate, runMultiStrategyAgentPreview } from "../../tauri";
+import {
+  checkControlledChatPilotEligibility,
+  checkRuntimeMigrationGate,
+  runMultiStrategyAgentPreview,
+} from "../../tauri";
 import type {
+  ControlledChatPilotEligibilityReport,
   MultiStrategyAgentPreviewLayer,
   MultiStrategyAgentPreviewOutput,
   RuntimeMigrationGateReport,
@@ -76,6 +81,9 @@ export default function MultiStrategyPreviewSection() {
   const [gateChecking, setGateChecking] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
   const [gateReport, setGateReport] = useState<RuntimeMigrationGateReport | null>(null);
+  const [pilotChecking, setPilotChecking] = useState(false);
+  const [pilotError, setPilotError] = useState<string | null>(null);
+  const [pilotReport, setPilotReport] = useState<ControlledChatPilotEligibilityReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -95,6 +103,8 @@ export default function MultiStrategyPreviewSection() {
     setResult(null);
     setGateError(null);
     setGateReport(null);
+    setPilotError(null);
+    setPilotReport(null);
 
     try {
       const output = await runMultiStrategyAgentPreview({
@@ -130,6 +140,20 @@ export default function MultiStrategyPreviewSection() {
       setGateError(`Gate check failed: ${readableError(e)}`);
     } finally {
       setGateChecking(false);
+    }
+  };
+
+  const handlePilotEligibilityCheck = async () => {
+    setPilotChecking(true);
+    setPilotError(null);
+    setPilotReport(null);
+    try {
+      const report = await checkControlledChatPilotEligibility();
+      setPilotReport(report);
+    } catch (e) {
+      setPilotError(`Pilot eligibility check failed: ${readableError(e)}`);
+    } finally {
+      setPilotChecking(false);
     }
   };
 
@@ -227,6 +251,114 @@ export default function MultiStrategyPreviewSection() {
                 </div>
               ) : (
                 <div className="mt-1 text-xs text-stone-500">No blocking reasons returned.</div>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Pilot eligibility</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only qualification check for a controlled Chat migration pilot. This is not a
+              Chat switching control. Even when eligible, default Chat is not replaced automatically
+              and the normal Chat path keeps its fallback.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handlePilotEligibilityCheck}
+            disabled={pilotChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              pilotChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={pilotChecking ? "animate-spin" : undefined} />
+            {pilotChecking ? "Checking..." : "Check Pilot Eligibility"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          Reads recent existing MultiStrategy preview AgentRun evidence only. It does not run
+          preview, ReAct, PlanExecute, tools, proposal apply, LifeModel/Memory writes, or audit
+          writes.
+        </div>
+
+        {pilotError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {pilotError}
+          </div>
+        )}
+
+        {pilotReport && (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  pilotReport.eligible
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {pilotReport.eligible ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                {pilotReport.eligible ? "Eligible" : "Blocked"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                {pilotReport.cleanRunCount} / {pilotReport.requiredCleanRuns} clean runs
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  pilotReport.defaultChatUnchanged
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                defaultChatUnchanged: {pilotReport.defaultChatUnchanged ? "true" : "false"}
+              </span>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Checked run ids</div>
+              {pilotReport.checkedRunIds.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {pilotReport.checkedRunIds.map(runId => (
+                    <span
+                      key={runId}
+                      className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 font-mono text-xs text-stone-700"
+                    >
+                      {runId}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No preview runs checked.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {pilotReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {pilotReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No pilot eligibility blockers returned.
+                </div>
               )}
             </div>
           </div>

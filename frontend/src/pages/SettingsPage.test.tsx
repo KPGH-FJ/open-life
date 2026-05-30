@@ -417,6 +417,70 @@ describe("SettingsPage", () => {
     expect(screen.getByText("preview audit indicates external writes")).toBeInTheDocument();
   });
 
+  it("renders controlled Chat pilot eligibility as eligible from the experimental panel", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Pilot eligibility")).toBeInTheDocument();
+    expect(screen.getByText(/controlled Chat migration pilot/)).toBeInTheDocument();
+    expect(screen.getAllByText(/not a Chat switching control/).length).toBeGreaterThanOrEqual(1);
+    fireEvent.click(screen.getByRole("button", { name: "Check Pilot Eligibility" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_pilot_eligibility", {
+        input: {},
+      });
+    });
+
+    expect(await screen.findByText("Eligible")).toBeInTheDocument();
+    expect(screen.getByText("3 / 3 clean runs")).toBeInTheDocument();
+    expect(screen.getByText("run-preview-clean-3")).toBeInTheDocument();
+    expect(screen.getByText("run-preview-clean-2")).toBeInTheDocument();
+    expect(screen.getByText("run-preview-clean-1")).toBeInTheDocument();
+    expect(screen.getByText("No pilot eligibility blockers returned.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Even when eligible, default Chat is not replaced automatically/)
+    ).toBeInTheDocument();
+  });
+
+  it("renders controlled Chat pilot eligibility blocking reasons", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: false,
+          requiredCleanRuns: 3,
+          cleanRunCount: 2,
+          checkedRunIds: ["run-preview-clean-3", "run-preview-blocked-2", "run-preview-clean-1"],
+          blockingReasons: ["run-preview-blocked-2:external_write_risk_detected"],
+          lastGateReport: {
+            defaultChatUnchanged: true,
+            previewPathHealthy: true,
+            metadataSafeTraceReady: true,
+            fallbackAvailable: true,
+            noExternalWrites: true,
+            proposalFirstPreserved: true,
+            blockingReasons: [],
+          },
+          defaultChatUnchanged: true,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Check Pilot Eligibility" }));
+
+    expect(await screen.findByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("2 / 3 clean runs")).toBeInTheDocument();
+    expect(screen.getByText("run-preview-blocked-2")).toBeInTheDocument();
+    expect(
+      screen.getByText("run-preview-blocked-2:external_write_risk_detected")
+    ).toBeInTheDocument();
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {

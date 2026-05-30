@@ -9,6 +9,16 @@ pub struct RuntimeMigrationGateInput<'a> {
     pub fallback_available: bool,
 }
 
+pub const DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS: usize = 3;
+
+#[derive(Debug, Clone)]
+pub struct ControlledChatPilotEligibilityInput<'a> {
+    pub default_chat_uses_multi_strategy: bool,
+    pub preview_runs: &'a [AgentRun],
+    pub required_clean_runs: usize,
+    pub fallback_available: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeMigrationGateReport {
@@ -19,6 +29,19 @@ pub struct RuntimeMigrationGateReport {
     pub no_external_writes: bool,
     pub proposal_first_preserved: bool,
     pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatPilotEligibilityReport {
+    pub eligible: bool,
+    pub required_clean_runs: usize,
+    pub clean_run_count: usize,
+    pub checked_run_ids: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_gate_report: Option<RuntimeMigrationGateReport>,
+    pub default_chat_unchanged: bool,
 }
 
 pub fn evaluate_runtime_migration_gate(
@@ -123,6 +146,63 @@ pub fn evaluate_runtime_migration_gate(
     report
 }
 
+pub fn evaluate_controlled_chat_pilot_eligibility(
+    input: ControlledChatPilotEligibilityInput<'_>,
+) -> ControlledChatPilotEligibilityReport {
+    let required_clean_runs = if input.required_clean_runs == 0 {
+        DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS
+    } else {
+        input.required_clean_runs
+    };
+    let mut report = ControlledChatPilotEligibilityReport {
+        eligible: false,
+        required_clean_runs,
+        clean_run_count: 0,
+        checked_run_ids: Vec::new(),
+        blocking_reasons: Vec::new(),
+        last_gate_report: None,
+        default_chat_unchanged: !input.default_chat_uses_multi_strategy,
+    };
+
+    for preview_run in input.preview_runs.iter().take(required_clean_runs) {
+        report.checked_run_ids.push(preview_run.id.clone());
+        let gate_report = evaluate_runtime_migration_gate(RuntimeMigrationGateInput {
+            default_chat_uses_multi_strategy: input.default_chat_uses_multi_strategy,
+            preview_run: Some(preview_run),
+            fallback_available: input.fallback_available,
+        });
+
+        if report.last_gate_report.is_none() {
+            report.last_gate_report = Some(gate_report.clone());
+        }
+
+        if gate_report.blocking_reasons.is_empty() {
+            report.clean_run_count += 1;
+        } else {
+            for reason in &gate_report.blocking_reasons {
+                push_pilot_reason(&mut report, format!("{}:{}", preview_run.id, reason));
+            }
+        }
+    }
+
+    if report.checked_run_ids.len() < required_clean_runs {
+        let checked_count = report.checked_run_ids.len();
+        push_pilot_reason(
+            &mut report,
+            format!(
+                "insufficient_preview_evidence: required {required_clean_runs} clean runs, found {}",
+                checked_count
+            ),
+        );
+    }
+
+    report.eligible = report.default_chat_unchanged
+        && report.checked_run_ids.len() >= required_clean_runs
+        && report.clean_run_count >= required_clean_runs
+        && report.blocking_reasons.is_empty();
+    report
+}
+
 fn push_reason(report: &mut RuntimeMigrationGateReport, reason: &str) {
     if !report
         .blocking_reasons
@@ -130,6 +210,16 @@ fn push_reason(report: &mut RuntimeMigrationGateReport, reason: &str) {
         .any(|existing| existing == reason)
     {
         report.blocking_reasons.push(reason.to_string());
+    }
+}
+
+fn push_pilot_reason(report: &mut ControlledChatPilotEligibilityReport, reason: String) {
+    if !report
+        .blocking_reasons
+        .iter()
+        .any(|existing| existing == &reason)
+    {
+        report.blocking_reasons.push(reason);
     }
 }
 

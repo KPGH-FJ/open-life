@@ -1,15 +1,16 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-05-30
-> Status: W18 Runtime Migration Gate evidence surface complete; next requires sustained clean gate evidence before any controlled Chat migration pilot
+> Status: W19 Sustained Gate Evidence / Pilot Eligibility complete; W20 may only attempt a very small controlled Chat migration pilot with fallback
 > Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W18, it records that MultiStrategy work is preview/audit-ready with a
+As of W19, it records that MultiStrategy work is preview/audit-ready with a
 lightweight fixed RuntimeStrategy adapter boundary, a read-only Chat migration
-gate, and a Settings evidence surface, not the default Chat runtime.
+gate, a Settings evidence surface, and a sustained gate evidence / pilot
+eligibility check, not the default Chat runtime.
 
 It updates the project framing from:
 
@@ -106,7 +107,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W18 status table and preview/not-default/gate evidence boundary.
+   - Compact W1-W19 status table and preview/not-default/gate evidence/pilot eligibility boundary.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -128,6 +129,7 @@ As of this preparation document, the project already has meaningful primitives:
 | Preview command | `src-tauri/src/commands/agent_runtime.rs::run_multi_strategy_agent_preview` | Non-default preview/beta command. W10 persists a metadata-safe outer AgentRun audit. |
 | Runtime Migration Gate | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_runtime_migration_gate` | Read-only diagnostic over existing preview AgentRun audit. Does not execute ReAct, PlanExecute, tools, or external writes. |
 | Gate evidence surface | `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | Settings-only Runtime Migration Gate panel that displays pass/block fields and blocking reasons. It is not a Chat switching control and does not run preview automatically. |
+| Pilot Eligibility | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_controlled_chat_pilot_eligibility`, Settings Pilot eligibility panel | W19 read-only sustained evidence check over the latest 3 preview gate reports. It returns eligibility, clean count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation and is not a Chat switch. |
 | Preview trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, payload, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
 | Proposal apply | `src-tauri/src/commands/proposal.rs` | Main convergence target for LifeModel, memory, tool permission, scheduled task, data export, and external write application. |
@@ -154,7 +156,8 @@ tool/proposal hygiene
 The implementation has moved ahead of the original work-package text in a few
 places:
 
-- W1-W18 are complete through Runtime Migration Gate evidence surface.
+- W1-W19 are complete through Runtime Migration Gate evidence surface and Pilot
+  Eligibility.
 - StrategySelector, MultiStrategyRuntime orchestrator, and
   `run_multi_strategy_agent_preview` exist earlier than the original plan
   expected.
@@ -165,6 +168,10 @@ places:
 - Settings now exposes this gate as a read-only evidence surface so developers
   and product can inspect pass/block state and blocking reasons without
   migrating default Chat.
+- `check_controlled_chat_pilot_eligibility` now checks whether recent preview
+  gate evidence has been continuously clean enough for the minimum controlled
+  Chat migration pilot qualification. It is read-only and does not write
+  AgentRun, Proposal, Action, Observation, audit, LifeModel, or Memory records.
 
 These early pieces do not change the boundary:
 
@@ -175,8 +182,9 @@ These early pieces do not change the boundary:
 - PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
 - `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
   boundary; it remains fixed to those adapters and is not plugin loading.
-- The next step is not direct default Chat replacement. A smaller controlled
-  Chat migration pilot requires sustained clean gate evidence first.
+- The next step is not direct default Chat replacement. W20 may only attempt a
+  very small controlled Chat migration pilot if W19 eligibility remains clean
+  and a fallback is preserved.
 
 ## 5. Target Spine
 
@@ -619,7 +627,7 @@ Run:
 make ci
 ```
 
-### Completed W1-W18
+### Completed W1-W19
 
 | Work Package | Status | Completion boundary |
 | --- | --- | --- |
@@ -641,6 +649,7 @@ make ci
 | W16 RuntimeStrategy Trait | Done | ReAct and PlanExecute execute through lightweight fixed adapters and registry. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | Read-only gate reports default Chat unchanged, preview health, metadata-safe trace, fallback, no external writes, proposal-first, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings exposes the gate report as a read-only pass/block evidence panel with visible blocking reasons; normal Chat Send still does not call gate or preview. |
+| W19 Sustained Gate Evidence / Pilot Eligibility | Done | Read-only eligibility checks the latest 3 preview gate reports, clean run count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation. |
 
 ### W11: Documentation Status Sync
 
@@ -698,7 +707,8 @@ Status: Done.
 used by MultiStrategyRuntime. This is an adapter boundary, not plugin loading,
 and it does not replace the default Chat path.
 
-Runtime migration evidence surfacing continues in W18 below.
+Runtime migration evidence surfacing continued in W18, and sustained evidence
+qualification is captured in W19 below.
 
 ### W17: Runtime Integration Hardening / Chat Migration Gate
 
@@ -723,9 +733,29 @@ MultiStrategy preview/debug entry. The panel explicitly calls
 field, and keeps `blockingReasons` visible. It is an evidence surface only: it
 does not auto-run preview, does not execute ReAct, PlanExecute, tools, proposal
 apply, external writes, or LifeModel/Memory writes, and does not replace
-`send_message` / `start_stream_message`. The next step is only a smaller
-controlled Chat migration pilot after gate evidence stays clean across preview
-runs.
+`send_message` / `start_stream_message`. W19 adds the sustained clean evidence
+qualification before any pilot can be considered.
+
+### W19: Sustained Gate Evidence / Pilot Eligibility
+
+Status: Done.
+
+`openlife-core/src/agent/runtime_migration_gate.rs` now also defines
+`evaluate_controlled_chat_pilot_eligibility`, and Tauri exposes it through
+`check_controlled_chat_pilot_eligibility`. The command defaults to the latest 3
+MultiStrategy preview AgentRuns, recomputes each gate report, and returns
+`eligible`, `requiredCleanRuns`, `cleanRunCount`, `checkedRunIds`,
+`blockingReasons`, `lastGateReport`, and `defaultChatUnchanged`.
+
+This is read-only qualification for a controlled Chat migration pilot. It does
+not execute ReAct, PlanExecute, tool calls, proposal apply, external writes, or
+LifeModel/Memory writes, and it does not create AgentRun, Proposal, Action,
+Observation, or audit records. Settings displays the result as "Pilot
+eligibility" and explicitly states that it is not a Chat switching control. Even
+when eligible, it cannot automatically replace default Chat.
+
+W20 may only attempt a very small controlled Chat migration pilot if W19
+eligibility remains clean and a fallback is preserved.
 
 ## 10. What Not To Do Next
 
@@ -734,6 +764,8 @@ Do not:
 - Replace default Chat with MultiStrategy Runtime just because the preview
   command works.
 - Treat the Runtime Migration Gate panel as a Chat switching control.
+- Treat Pilot eligibility as a Chat switching control or automatic migration
+  trigger.
 - Present `run_multi_strategy_agent_preview` as a production Chat path.
 - Treat W10 outer AgentRun audit as permission to skip metadata-safe review;
   ReAct inner run id remains child metadata, not the product trace's primary id.

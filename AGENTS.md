@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：W18 Runtime Migration Gate evidence surface 已完成。MultiStrategy Runtime 当前是 adapter/registry 化的 preview/audit-ready 路径，不是默认 Chat 主链路；Settings 的 Runtime Migration Gate 面板只是 `check_runtime_migration_gate` 的只读 evidence surface，不是 Chat 切换开关。ReAct 执行闭环、Tool Registry、Permission/Proposal/Replay、ModelRouter、Tool Taxonomy 仍是当前稳定基础。`make ci` 为发布门控。
+- **当前阶段**：W19 Sustained Gate Evidence / Pilot Eligibility 已完成。MultiStrategy Runtime 当前是 adapter/registry 化的 preview/audit-ready 路径，不是默认 Chat 主链路；Settings 的 Runtime Migration Gate 和 Pilot eligibility 面板只是只读 evidence surface，不是 Chat 切换开关。ReAct 执行闭环、Tool Registry、Permission/Proposal/Replay、ModelRouter、Tool Taxonomy 仍是当前稳定基础。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -19,7 +19,7 @@
 
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
-3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W18 完成度与当前 non-default preview / migration gate evidence surface 状态索引；不是第二套路线图。
+3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W19 完成度与当前 non-default preview / migration gate / pilot eligibility evidence surface 状态索引；不是第二套路线图。
 4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
 5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
 6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
@@ -36,10 +36,12 @@
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
 - ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
-- 当前分支已完成 W1-W18；下一步只能在 gate evidence 连续干净后进入更小范围 controlled Chat migration pilot，不能直接替换默认 Chat 主路径。
+- 当前分支已完成 W1-W19；`check_controlled_chat_pilot_eligibility` 可只读判断最近 preview gate evidence 是否连续干净。W20 才可能进入 very small controlled Chat migration pilot，且必须保留 fallback，不能直接替换默认 Chat 主路径。
 - `run_multi_strategy_agent_preview` 是 preview/beta command。它可用于非默认调试和审计验证，不代表 MultiStrategy Runtime 已产品化。
 - `check_runtime_migration_gate` 只读检查既有 preview AgentRun / audit；不得在 gate 中执行 ReAct、PlanExecute、工具调用或外部写入。
 - Settings 的 Runtime Migration Gate 面板只是 evidence surface：它可显式调用 `check_runtime_migration_gate` 并显示 pass/block 与 blocking reasons，不会自动运行 preview，也不会切换默认 Chat。
+- `check_controlled_chat_pilot_eligibility` 是 W19 只读资格检查：默认检查最近 3 条 MultiStrategy preview AgentRun 的 gate report，返回 clean count、checked run ids、blocking reasons 和 last gate report；它不创建 AgentRun、Proposal、Action、Observation，不执行 runtime/tool/proposal apply/LifeModel/Memory 写入。
+- Settings 的 Pilot eligibility 面板只回答“是否满足进入 controlled Chat migration pilot 的最低资格”。它不是 Chat 切换开关；即使 eligible，也不能自动替换默认 Chat。
 - W10 的 preview AgentRun audit 是 metadata-safe 外层 run。ReAct payload 里的 inner run id 只能作为 child metadata 存在，不是 Runs 查询和产品 trace 的主 id。
 - 后续 Agent 不得默认替换 `send_message`、`start_stream_message` 或 Chat 主流程；任何迁移必须先从非默认 preview/debug 入口或受控子路径开始，并保留稳定 fallback。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
@@ -182,6 +184,7 @@
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
 | **MultiStrategyRuntime** | [`openlife-core/src/agent/multi_strategy_runtime.rs`](openlife-core/src/agent/multi_strategy_runtime.rs) | Preview/core orchestrator：用 StrategySelector 在 ReAct、PlanExecute、Blocked payload 间选择，并输出 warnings | 仅通过 `run_multi_strategy_agent_preview` 非默认命令暴露；尚未接管 Chat |
 | **Preview Audit** | [`src-tauri/src/commands/agent_runtime.rs`](src-tauri/src/commands/agent_runtime.rs) + [`frontend/src/utils/previewAudit.ts`](frontend/src/utils/previewAudit.ts) | W10 metadata-safe 外层 AgentRun audit；Runs / Trace 识别 preview strategy/payload/governance/warnings | ReAct inner run id 只作为 child metadata，不作为主查询 id |
+| **Pilot Eligibility** | [`openlife-core/src/agent/runtime_migration_gate.rs`](openlife-core/src/agent/runtime_migration_gate.rs) + [`src-tauri/src/commands/agent_runtime.rs`](src-tauri/src/commands/agent_runtime.rs) | W19 sustained gate evidence evaluator：只读检查最近 preview AgentRun 的 gate report 是否连续干净 | Settings 显示 controlled Chat migration pilot 资格；不是 Chat 开关，不写入任何新 audit/run/proposal |
 | **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 30+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断 | 依赖 openlife-core 全部模块 |
 | **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
 
@@ -759,6 +762,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-30 | **W16: RuntimeStrategy Trait Foundation**：W1-W16 标记完成；MultiStrategy Runtime 通过固定 ReAct / PlanExecute adapter registry 执行；该阶段不允许直接替换默认 Chat | AI Agent |
 | 2026-05-30 | **W17: Runtime integration hardening / Chat migration gate**：新增只读 `check_runtime_migration_gate`，诊断默认 Chat 未替换、preview audit 健康、metadata-safe trace、fallback、无外部写入和 proposal-first 边界；下一步仍不能直接替换默认 Chat | AI Agent |
 | 2026-05-30 | **W18: Runtime Migration Gate evidence surface**：Settings experimental 区域新增只读 Runtime Migration Gate 面板，显式展示 gate pass/block 字段与 blocking reasons；普通 Chat 发送路径仍不调用 gate 或 MultiStrategy preview；下一步只能在 gate evidence 连续干净后进入更小范围 controlled Chat migration pilot | AI Agent |
+| 2026-05-30 | **W19: Sustained Gate Evidence / Pilot Eligibility**：新增只读 `check_controlled_chat_pilot_eligibility`，默认检查最近 3 条 preview gate report 是否连续干净；Settings 显示 clean run count、checked run ids、blocking reasons；不创建 AgentRun/Proposal/Action/Observation；W20 才可能进入 very small controlled Chat migration pilot 且必须保留 fallback | AI Agent |
 
 ---
 

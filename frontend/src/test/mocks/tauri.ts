@@ -423,6 +423,24 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         proposalFirstPreserved: true,
         blockingReasons: [],
       } as T);
+    case "check_controlled_chat_pilot_eligibility":
+      return Promise.resolve({
+        eligible: true,
+        requiredCleanRuns: 3,
+        cleanRunCount: 3,
+        checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+        blockingReasons: [],
+        lastGateReport: {
+          defaultChatUnchanged: true,
+          previewPathHealthy: true,
+          metadataSafeTraceReady: true,
+          fallbackAvailable: true,
+          noExternalWrites: true,
+          proposalFirstPreserved: true,
+          blockingReasons: [],
+        },
+        defaultChatUnchanged: true,
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
