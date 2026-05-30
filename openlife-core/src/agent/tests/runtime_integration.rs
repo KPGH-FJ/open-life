@@ -384,6 +384,346 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
 }
 
 #[test]
+fn calendar_propose_event_creates_scheduled_task_never_external_write_action() {
+    let registry = crate::mcp::McpRegistry::new();
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_proposal_store(&proposal_store);
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "calendar.propose_event".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "title": "Doctor follow-up",
+                        "scheduled_at": "2026-06-05T09:00:00Z",
+                        "description": "Review results"
+                    }
+                }),
+                source_run_id: Some("run-calendar-proposal".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::Succeeded
+    );
+    let scheduled = proposal_store
+        .list_proposals_filtered(
+            None,
+            Some(crate::agent::ProposalType::ScheduledTask),
+            None,
+            10,
+        )
+        .unwrap();
+    assert_eq!(scheduled.len(), 1);
+    assert_eq!(
+        scheduled[0].after["tool"],
+        serde_json::json!("calendar.propose_event")
+    );
+    assert_eq!(
+        scheduled[0].after["title"],
+        serde_json::json!("Doctor follow-up")
+    );
+
+    let external = proposal_store
+        .list_proposals_filtered(
+            None,
+            Some(crate::agent::ProposalType::ExternalWriteAction),
+            None,
+            10,
+        )
+        .unwrap();
+    assert!(external.is_empty());
+}
+
+#[test]
+fn email_propose_draft_creates_data_export_never_external_write_action() {
+    let registry = crate::mcp::McpRegistry::new();
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    )
+    .with_proposal_store(&proposal_store);
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "email.propose_draft".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "to": "team@example.com",
+                        "subject": "Weekly notes",
+                        "body": "Draft body"
+                    }
+                }),
+                source_run_id: Some("run-email-proposal".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.status,
+        crate::agent::ActionExecutionStatus::Succeeded
+    );
+    let data_exports = proposal_store
+        .list_proposals_filtered(None, Some(crate::agent::ProposalType::DataExport), None, 10)
+        .unwrap();
+    assert_eq!(data_exports.len(), 1);
+    assert_eq!(
+        data_exports[0].after["tool"],
+        serde_json::json!("email.propose_draft")
+    );
+    assert_eq!(
+        data_exports[0].after["body"],
+        serde_json::json!("Draft body")
+    );
+
+    let external = proposal_store
+        .list_proposals_filtered(
+            None,
+            Some(crate::agent::ProposalType::ExternalWriteAction),
+            None,
+            10,
+        )
+        .unwrap();
+    assert!(external.is_empty());
+}
+
+#[test]
+fn file_write_proposal_rejects_oversized_content_before_proposal_insertion() {
+    let registry = crate::mcp::McpRegistry::new();
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let safe_paths = vec![safe_path];
+    let file_path = safe_dir.path().join("too-large.txt");
+    let oversized_content = "x".repeat(100 * 1024 + 1);
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &safe_paths,
+    )
+    .with_proposal_store(&proposal_store);
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "file.write_proposal".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "path": file_path.to_string_lossy().to_string(),
+                        "content": oversized_content
+                    }
+                }),
+                source_run_id: Some("run-oversized-file-proposal".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
+    assert!(result
+        .action
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("exceeds maximum allowed")));
+    assert_eq!(proposal_store.pending_count().unwrap(), 0);
+}
+
+#[test]
+fn hs_direct_external_write_rejects_oversized_content_before_proposal_insertion() {
+    let packet = seeded_packet(
+        AgentTaskKind::ToolExecution,
+        PolicyTopic::General,
+        serde_json::json!({}),
+        vec!["write".into()],
+    );
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_builtin(
+        ToolManifest {
+            id: "file.write".into(),
+            name: "file.write".into(),
+            description: "Direct file write test executor".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "high".into(),
+            risk_level: "high".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities: vec!["filesystem".into(), "write".into()],
+            requires_confirmation: true,
+            enabled: true,
+            declarative_only: false,
+            action_type: "write".into(),
+            tags: vec!["execution".into()],
+        },
+        Box::new(|_| Ok("direct write should not run".into())),
+    );
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let safe_paths = vec![safe_path];
+    let oversized_content = "x".repeat(100 * 1024 + 1);
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &safe_paths,
+    )
+    .with_proposal_store(&proposal_store)
+    .with_hs_runtime_packet(&packet);
+
+    let err = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "file.write".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "path": safe_dir.path().join("too-large-direct.txt").to_string_lossy().to_string(),
+                        "content": oversized_content
+                    }
+                }),
+                source_run_id: Some("run-oversized-direct-write".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap_err();
+
+    assert!(err.to_string().contains("exceeds maximum allowed"));
+    assert_eq!(proposal_store.pending_count().unwrap(), 0);
+}
+
+#[test]
+fn hs_wrapped_mcp_external_write_rejects_oversized_content_before_proposal_insertion() {
+    let packet = seeded_packet(
+        AgentTaskKind::ToolExecution,
+        PolicyTopic::General,
+        serde_json::json!({}),
+        vec!["write".into()],
+    );
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_builtin(
+        ToolManifest {
+            id: "wrapped.file.write".into(),
+            name: "wrapped.file.write".into(),
+            description: "Wrapped direct file write test executor".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "high".into(),
+            risk_level: "high".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::BuiltIn,
+            capabilities: vec!["filesystem".into(), "write".into()],
+            requires_confirmation: true,
+            enabled: true,
+            declarative_only: false,
+            action_type: "write".into(),
+            tags: vec![],
+        },
+        Box::new(|_| Ok("wrapped direct write should not run".into())),
+    );
+
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    permission_store
+        .grant(
+            "mcp.call_tool",
+            "builtin",
+            "medium",
+            "external_side_effect",
+            ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let proposal_store = crate::agent::ProposalStore::new_in_memory().unwrap();
+    let safe_dir = tempfile::TempDir::new().unwrap();
+    let safe_path = safe_dir.path().to_str().unwrap().to_string();
+    let safe_paths = vec![safe_path];
+    let oversized_content = "x".repeat(100 * 1024 + 1);
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &safe_paths,
+    )
+    .with_proposal_store(&proposal_store)
+    .with_hs_runtime_packet(&packet);
+
+    let result = ActionExecutor::new(ActionExecutorConfig::default())
+        .execute(
+            AgentActionRequest {
+                action_type: "mcp_tool".into(),
+                target: "mcp.call_tool".into(),
+                input: serde_json::json!({
+                    "arguments": {
+                        "tool_name": "wrapped.file.write",
+                        "arguments": {
+                            "path": safe_dir.path().join("too-large-wrapped.txt").to_string_lossy().to_string(),
+                            "content": oversized_content
+                        }
+                    }
+                }),
+                source_run_id: Some("run-oversized-wrapped-write".into()),
+                step_index: 0,
+            },
+            &ctx,
+        )
+        .unwrap();
+
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Failed);
+    assert!(result
+        .action
+        .error
+        .as_deref()
+        .is_some_and(|error| error.contains("exceeds maximum allowed")));
+    assert_eq!(proposal_store.pending_count().unwrap(), 0);
+}
+
+#[test]
 fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
     let packet = seeded_packet(
         AgentTaskKind::ToolExecution,
@@ -585,7 +925,9 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
                         "tool_name": "wrapped.file.write",
                         "arguments": {
                             "path": file_path.to_string_lossy().to_string(),
-                            "content": content
+                            "content": content,
+                            "body": "raw body should not be duplicated",
+                            "data": "raw data should not be duplicated"
                         }
                     }
                 }),
@@ -620,7 +962,9 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
     assert_eq!(after["tool_name"], serde_json::json!("wrapped.file.write"));
     assert_eq!(after["source"], serde_json::json!("builtin"));
     assert_eq!(after["server"], serde_json::Value::Null);
-    assert_eq!(after["arguments"]["content"], serde_json::json!(content));
+    assert!(after["arguments"].get("content").is_none());
+    assert!(after["arguments"].get("body").is_none());
+    assert!(after["arguments"].get("data").is_none());
     assert_eq!(after["content"], serde_json::json!(content));
     assert_eq!(after["risk_level"], serde_json::json!("high"));
     assert_eq!(after["action_type"], serde_json::json!("write"));

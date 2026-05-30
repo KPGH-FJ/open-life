@@ -98,9 +98,9 @@ These tools let the agent act outside the LifeModel. They are required for Beta 
 | `web.search` | Search the web or configured search provider | Network capability declared; privacy routed; source citations retained |
 | `web.fetch` | Fetch a specific URL/document | Network capability declared; privacy routed; content summarized/audited |
 | `calendar.read` | Read configured calendar context | Read-only connector; explicit account/source scope |
-| `calendar.propose_event` | Propose event creation/update | Governance calibration item: must create `ScheduledTask` Proposal only, or be disabled/declarative-only; no silent write and no `ExternalWriteAction` fallback |
+| `calendar.propose_event` | Propose event creation/update | P1 proposal-only governed executor: creates `ScheduledTask` Proposal only; no direct calendar write and no `ExternalWriteAction` fallback |
 | `email.read` | Read configured email context | Read-only connector; explicit account/source scope; privacy filtered |
-| `email.propose_draft` | Draft email without sending | Governance calibration item: must create `DataExport`/email-draft Proposal only, or be disabled/declarative-only; must not be misclassified as `ExternalWriteAction`; send is out of Beta unless explicitly governed |
+| `email.propose_draft` | Draft email without sending | P1 proposal-only governed executor: creates `DataExport`/email-draft Proposal only; no send and no `ExternalWriteAction` fallback |
 | `task.create_proposal` | Propose a task/reminder/action item | Creates ScheduledTask or Goal/Task Proposal |
 
 Beta does not require every provider integration to be production-grade. It does require the tool contracts, permission model, audit trail, and at least one useful implementation path for each execution class:
@@ -110,14 +110,13 @@ Beta does not require every provider integration to be production-grade. It does
 - Web tools may start with search/fetch adapters behind explicit network capability.
 - Calendar/email may start as connector stubs that can read configured data or create proposals, but must not pretend to send/write if no executor exists.
 
-Current calibration note:
+Current proposal hygiene note:
 
-- `calendar.propose_event` and `email.propose_draft` must not be treated as
-  completed P1 until code behavior, proposal payloads, integration tests, and
-  Tool Taxonomy agree.
-- `ExternalWriteAction` proposal creation must enforce pre-insert size limits
-  and payload minimization. This is a hard acceptance gate, not a follow-up
-  suggestion.
+- `calendar.propose_event` and `email.propose_draft` are P1 proposal-only
+  governed executors. They create typed proposals and do not perform real
+  calendar writes, email sends, or `ExternalWriteAction` fallback.
+- `ExternalWriteAction` proposal creation enforces pre-insert size limits and
+  payload minimization. This remains a hard acceptance gate.
 
 If an execution tool is not implemented, it must be disabled or clearly marked as `declarative_only`; it must not appear as an executable enabled tool.
 
@@ -182,9 +181,8 @@ Required outcomes:
 
 - Built-in, MCP, A2A, and plugin-declared tools normalize into one `ToolManifest`.
 - Execution tools include the Beta set: `mcp.call_tool`, `a2a.call_agent`, `file.read`, `file.write_proposal`, `web.search`, `web.fetch`, `calendar.read`, `calendar.propose_event`, `email.read`, `email.propose_draft`, and `task.create_proposal`.
-- `calendar.propose_event` and `email.propose_draft` remain governance
-  calibration items until W1 Tool Proposal Hygiene verifies their proposal
-  semantics and taxonomy status.
+- `calendar.propose_event` and `email.propose_draft` are proposal-only governed
+  executors with typed proposal semantics and taxonomy coverage.
 - Unknown or disabled tools are blocked, not "needs confirmation".
 - Allowed tools execute through `execute_manifest`, not bypass paths.
 - Plugin tools are declarative-only unless a real executor exists.

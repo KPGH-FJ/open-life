@@ -7,8 +7,9 @@ use anyhow::Result;
 use serde_json::Value;
 
 use super::helpers::{
-    canonical_tool_source, filesystem_access_error, hs_requires_external_write_proposal,
-    is_direct_external_write_tool, is_path_in_safe_paths, is_proposal_generation_tool,
+    canonical_tool_source, ensure_external_write_content_size, external_write_content_preview,
+    filesystem_access_error, hs_requires_external_write_proposal, is_direct_external_write_tool,
+    is_path_in_safe_paths, is_proposal_generation_tool, minimized_external_write_arguments,
     normalize_tool_name, should_mark_needs_confirmation, ToolCallInternalResult,
 };
 use super::ActionExecutionContext;
@@ -152,7 +153,8 @@ impl super::ActionExecutor {
 
         let permission_blocks =
             !is_proposal_tool && (decision.requires_confirmation || !decision.allowed);
-        let inspection_blocks = inspection.requires_confirmation && inspection.pii_found;
+        let inspection_blocks =
+            !is_proposal_tool && inspection.requires_confirmation && inspection.pii_found;
         let blocked = manifest
             .as_ref()
             .is_none_or(|m| !m.enabled || m.declarative_only)
@@ -788,16 +790,12 @@ impl super::ActionExecutor {
         let hash = digest(&SHA256, content_text.as_bytes());
         let content_hash: String = hash.as_ref().iter().map(|b| format!("{:02x}", b)).collect();
         let size_bytes = content_text.len();
-        let content_preview = if content_text.len() > 4000 {
-            let preview: String = content_text.chars().take(4000).collect();
-            format!(
-                "{}... [truncated {} bytes]",
-                preview,
-                content_text.len() - preview.len()
-            )
-        } else {
-            content_text.clone()
-        };
+        if let Err(e) = ensure_external_write_content_size(&content_text) {
+            return Some(Err(e));
+        }
+        let content_preview = external_write_content_preview(&content_text);
+        let minimized_arguments =
+            minimized_external_write_arguments(args, &content_hash, size_bytes, &content_preview);
         let operation = if !path.is_empty() && std::path::Path::new(path).exists() {
             "overwrite"
         } else {
@@ -812,7 +810,7 @@ impl super::ActionExecutor {
                 "tool_id": manifest.id,
                 "source": source,
                 "server": server,
-                "arguments": args,
+                "arguments": minimized_arguments,
                 "path": path,
                 "content": content_text,
                 "content_preview": content_preview,

@@ -504,10 +504,10 @@ impl McpRegistry {
             "read",
         );
 
-        // Execution Tools: P1 (real executors)
+        // Execution Tools: P1 proposal-only governed executors.
         self.register_execution_tool(
             "calendar.propose_event",
-            "提议创建日历事件并生成 ICS 文件",
+            "提议日历事件（仅生成 ScheduledTask Proposal，不直接写入日历）",
             "medium",
             vec!["write".into()],
             "write",
@@ -521,7 +521,7 @@ impl McpRegistry {
 
         self.register_execution_tool(
             "email.propose_draft",
-            "提议邮件草稿并通过系统邮件客户端打开",
+            "提议邮件草稿（仅生成 DataExport/email-draft Proposal，不发送邮件）",
             "medium",
             vec!["write".into()],
             "write",

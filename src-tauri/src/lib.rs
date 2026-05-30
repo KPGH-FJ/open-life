@@ -1598,9 +1598,9 @@ async fn build_chat_runtime_hs_packet(
 
 fn classify_hs_policy_topic(
     user_text: &str,
-    tools_prompt: &str,
+    _tools_prompt: &str,
 ) -> openlife_core::agent::PolicyTopic {
-    let text = format!("{} {}", user_text, tools_prompt).to_lowercase();
+    let text = user_text.to_lowercase();
     let privacy_engine = PrivacyEngine::new();
     let privacy_findings = privacy_engine.detect(&text);
     if privacy_findings
@@ -1753,8 +1753,8 @@ fn classify_hs_policy_topic(
     }
 }
 
-fn hs_tool_requirements(user_text: &str, tools_prompt: &str) -> Vec<String> {
-    let text = format!("{} {}", user_text, tools_prompt).to_lowercase();
+fn hs_tool_requirements(user_text: &str, _tools_prompt: &str) -> Vec<String> {
+    let text = user_text.to_lowercase();
     let mut requirements = Vec::new();
     if contains_any(
         &text,
@@ -3239,6 +3239,50 @@ mod hs_runtime_tests {
         let audit_json = serde_json::to_string(&packet.audit).unwrap();
         assert!(!audit_json.contains("raw-health-secret-999"));
         assert!(!audit_json.contains("Reduce planning intensity"));
+    }
+
+    #[tokio::test]
+    async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_policy() {
+        let state = crate::test_utils::test_app_state();
+        let life_model = LifeModel::default();
+        let task = openlife_core::agent::AgentTask {
+            kind: openlife_core::agent::AgentTaskKind::Conversation,
+            session_id: "session-read-only-tools-catalog".into(),
+            user_text: "Summarize what you know about my current goals without changing anything."
+                .into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content:
+                    "Summarize what you know about my current goals without changing anything."
+                        .into(),
+            }],
+            layer: Layer::L1,
+        };
+        let tools_prompt = r#"
+            Tools:
+            file.write_proposal(path, content)
+            email.propose_draft(to, subject, body)
+            calendar.propose_event(title, scheduled_at)
+            write external_side_effect
+        "#;
+
+        let requirements = hs_tool_requirements(&task.user_text, tools_prompt);
+        assert!(!requirements
+            .iter()
+            .any(|requirement| requirement == "write"));
+        assert!(!requirements
+            .iter()
+            .any(|requirement| requirement == "external_side_effect"));
+
+        let packet = build_chat_runtime_hs_packet(&state, &task, &life_model, tools_prompt, None)
+            .await
+            .unwrap();
+        if let Some(packet) = packet {
+            assert!(!packet.selected_policies.iter().any(|policy| {
+                policy.policy_id
+                    == openlife_core::agent::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST
+            }));
+        }
     }
 
     #[tokio::test]

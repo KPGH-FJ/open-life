@@ -5,12 +5,15 @@ use crate::mcp::McpRegistry;
 use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
+use serde_json::Value;
 use std::net::ToSocketAddrs;
 use std::sync::Mutex;
 use std::time::Instant;
 
 /// Cooldown between web.search calls (5 seconds) to avoid rate limiting.
 static LAST_SEARCH_AT: Mutex<Option<Instant>> = Mutex::new(None);
+pub const EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES: usize = 100 * 1024;
+pub const EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS: usize = 4000;
 
 /// Search provider configuration (set at startup from SystemConfig).
 pub struct SearchProviderConfig {
@@ -107,6 +110,87 @@ pub fn is_proposal_generation_tool(name: &str) -> bool {
         || name.ends_with(".propose_patch")
         || name.ends_with(".propose_update")
         || name.ends_with(".propose_event")
+        || name.ends_with(".propose_draft")
+}
+
+pub fn ensure_external_write_content_size(content_text: &str) -> Result<()> {
+    let size_bytes = content_text.len();
+    if size_bytes > EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES {
+        return Err(anyhow::anyhow!(
+            "External write content size ({} bytes) exceeds maximum allowed ({} bytes)",
+            size_bytes,
+            EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES
+        ));
+    }
+    Ok(())
+}
+
+pub fn external_write_content_preview(content_text: &str) -> String {
+    if content_text.chars().count() > EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS {
+        let preview: String = content_text
+            .chars()
+            .take(EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS)
+            .collect();
+        format!(
+            "{}... [truncated {} bytes]",
+            preview,
+            content_text.len().saturating_sub(preview.len())
+        )
+    } else {
+        content_text.to_string()
+    }
+}
+
+pub fn minimized_external_write_arguments(
+    args: &Value,
+    content_hash: &str,
+    size_bytes: usize,
+    content_preview: &str,
+) -> Value {
+    let Some(args_object) = args.as_object() else {
+        return serde_json::json!({
+            "argument_shape": "non_object",
+            "content_hash": content_hash,
+            "size_bytes": size_bytes,
+            "content_preview": content_preview,
+        });
+    };
+
+    let mut minimized = serde_json::Map::new();
+    for field in [
+        "path",
+        "file_path",
+        "destination",
+        "operation",
+        "encoding",
+        "mime_type",
+        "content_type",
+    ] {
+        if let Some(value) = args_object.get(field) {
+            minimized.insert(field.to_string(), value.clone());
+        }
+    }
+
+    let omitted_fields: Vec<String> = ["content", "body", "data"]
+        .iter()
+        .filter(|field| args_object.contains_key(**field))
+        .map(|field| (*field).to_string())
+        .collect();
+
+    if !omitted_fields.is_empty() {
+        minimized.insert(
+            "omitted_payload_fields".to_string(),
+            serde_json::json!(omitted_fields),
+        );
+    }
+    minimized.insert("content_hash".to_string(), serde_json::json!(content_hash));
+    minimized.insert("size_bytes".to_string(), serde_json::json!(size_bytes));
+    minimized.insert(
+        "content_preview".to_string(),
+        serde_json::json!(content_preview),
+    );
+
+    Value::Object(minimized)
 }
 
 pub fn hs_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {

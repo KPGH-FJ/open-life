@@ -21,7 +21,7 @@ LifeModel-HS Protocol Layer
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
 - **ReAct 是当前默认 RuntimeStrategy**：后续会预留 Plan-Execute、Workflow、Proactive 等多策略执行形态，但不会在协议主干成熟前提前大抽象。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **Execution Tools 分层落地**：P1 工具必须有真实 executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前是治理待校准项，不能当作已完成 P1。
+- **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
 - **下一步顺序固定**：tool/proposal hygiene -> thin runtime spine -> ReAct convergence -> maturation loop -> governor -> Plan-Execute -> strategy abstraction。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。

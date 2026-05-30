@@ -74,9 +74,10 @@ These files are useful context, but they are not current execution authority:
 
 ## 5. Tool Status Guardrail
 
-`calendar.propose_event` and `email.propose_draft` are governance calibration
-items. They must not be treated as completed P1 until code behavior,
-integration tests, proposal payloads, and `AGENTS.md` Tool Taxonomy agree.
+`calendar.propose_event` and `email.propose_draft` are P1 proposal-only
+governed executors. They create `ScheduledTask` / `DataExport` proposals and
+must not perform real calendar writes, email sends, or `ExternalWriteAction`
+fallback unless a future governed provider executor and tests are added.
 
 `ExternalWriteAction` proposal creation must enforce pre-insert size limits and
 payload minimization. This is a hard acceptance gate.

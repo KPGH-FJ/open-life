@@ -227,16 +227,12 @@ Goal:
 
 Remove known tool-governance inconsistencies before adding new runtime layers.
 
-Immediate known items:
+W1 proposal hygiene baseline:
 
-- `calendar.propose_event` and `email.propose_draft` are governance
-  inconsistency items. They must not be treated as completed P1 anywhere until
-  taxonomy, code behavior, and tests agree.
-- `calendar.propose_event` must create a `ScheduledTask` proposal or be marked
-  disabled/declarative-only if no product executor exists.
-- `email.propose_draft` must create a `DataExport`/email-draft proposal or be
-  marked disabled/declarative-only. It must not be misclassified into
-  `ExternalWriteAction` file writes.
+- `calendar.propose_event` and `email.propose_draft` are P1 proposal-only
+  governed executors. They must create `ScheduledTask` / `DataExport`
+  proposals only, with no real calendar write, email send, or
+  `ExternalWriteAction` fallback.
 - ExternalWriteAction proposal creation must enforce content size limits before
   proposal storage.
 - ExternalWriteAction proposal payloads must minimize stored payload before
@@ -253,8 +249,9 @@ Acceptance:
 - ExternalWriteAction rejects oversized payloads before insertion.
 - ExternalWriteAction stores only the minimized proposal payload needed for
   review, hash validation, and apply/replay.
-- No document or taxonomy table labels `calendar.propose_event` or
-  `email.propose_draft` as completed P1 until those tests pass.
+- Documents and taxonomy label `calendar.propose_event` and
+  `email.propose_draft` only as P1 proposal-only governed executors unless a
+  future governed provider executor and tests are added.
 - `make ci` passes.
 
 ### Phase 2: Thin LifeModel-Governed Runtime Spine
@@ -560,10 +557,12 @@ make ci
 
 ### W1: Tool Proposal Hygiene
 
-Fix:
+Completed baseline:
 
-- `calendar.propose_event` governance classification and proposal semantics.
-- `email.propose_draft` governance classification and proposal semantics.
+- `calendar.propose_event` governance classification and proposal semantics:
+  P1 proposal-only `ScheduledTask`.
+- `email.propose_draft` governance classification and proposal semantics:
+  P1 proposal-only `DataExport`/email-draft.
 - ExternalWriteAction hard pre-insert size limit.
 - ExternalWriteAction hard pre-insert payload minimization.
 - Documentation entry points and Tool Taxonomy status sync.
@@ -571,8 +570,8 @@ Fix:
 Verify:
 
 - Rust integration tests.
-- No docs mark `calendar.propose_event` or `email.propose_draft` as completed
-  P1 before the tests and taxonomy agree.
+- No docs present `calendar.propose_event` or `email.propose_draft` as real
+  provider write executors.
 - `make ci`.
 
 ### W2: Runtime Spine Contract Draft
@@ -636,8 +635,8 @@ Do not:
 - Treat current YAML as the canonical HS database.
 - Let extracted signals auto-write identity/values/goals.
 - Add new tool manifests that appear executable without real executors.
-- Mark `calendar.propose_event` or `email.propose_draft` as completed P1 before
-  governance semantics, tests, and taxonomy are synchronized.
+- Treat `calendar.propose_event` or `email.propose_draft` as real provider write
+  executors; they are currently P1 proposal-only governed executors.
 - Build a large LifeModel management UI before the backend governance path is
   real.
 - Use cloud extraction on raw sensitive LifeModel/memory/file data as a required
