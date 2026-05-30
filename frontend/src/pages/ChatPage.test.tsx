@@ -600,6 +600,160 @@ describe("ChatPage", () => {
     expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-chat-preview-1");
   });
 
+  it("blocks controlled pilot when eligibility fails and does not call preview", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: false,
+          requiredCleanRuns: 3,
+          cleanRunCount: 1,
+          checkedRunIds: ["run-preview-1"],
+          blockingReasons: ["only 1 clean preview run found"],
+          defaultChatUnchanged: true,
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.reject(new Error("preview must not run when pilot is blocked"));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Try controlled pilot" } });
+    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_pilot_eligibility", {
+        input: {},
+      });
+    });
+
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+    expect(await screen.findByText(/Controlled Pilot blocked/)).toBeInTheDocument();
+    expect(screen.getByText("only 1 clean preview run found")).toBeInTheDocument();
+    expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
+  });
+
+  it("runs controlled pilot after eligibility passes and renders pilot response separately", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: true,
+          requiredCleanRuns: 3,
+          cleanRunCount: 3,
+          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+          blockingReasons: [],
+          defaultChatUnchanged: true,
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.resolve({
+          runId: "run-controlled-pilot-1",
+          strategyKind: "react",
+          payloadKind: "react",
+          userOutput: "Pilot-only answer",
+          proposalIds: [],
+          warnings: [],
+          metadataSafeSummary: {
+            taskKind: "conversation",
+            reasonCode: "default_react",
+            riskLevel: "low",
+            hasHsPacket: false,
+            governanceDecisionKind: "allow",
+          },
+          governanceDecisionKind: "allow",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Run one controlled pilot turn" } });
+    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
+        input: expect.objectContaining({
+          sessionId: expect.stringMatching(/^chat-controlled-pilot-/),
+          userText: "Run one controlled pilot turn",
+          toolsPrompt: "No developer tools catalog supplied for this chat preview.",
+          allowPlanning: false,
+          localModelAvailable: false,
+          layer: "L2",
+          executionBudget: expect.objectContaining({ allowWrites: false }),
+        }),
+      });
+    });
+
+    const calls = vi.mocked(invoke).mock.calls;
+    const eligibilityIndex = calls.findIndex(
+      ([cmd]) => cmd === "check_controlled_chat_pilot_eligibility"
+    );
+    const previewIndex = calls.findIndex(([cmd]) => cmd === "run_multi_strategy_agent_preview");
+    expect(eligibilityIndex).toBeGreaterThanOrEqual(0);
+    expect(previewIndex).toBeGreaterThan(eligibilityIndex);
+    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
+    expect(screen.getByText("Pilot-only answer")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-1")).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
+  });
+
+  it("shows controlled pilot fallback when preview fails without writing chat history", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: true,
+          requiredCleanRuns: 3,
+          cleanRunCount: 3,
+          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+          blockingReasons: [],
+          defaultChatUnchanged: true,
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.reject(new Error("preview runtime unavailable"));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Pilot failure path" } });
+    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
+
+    expect(await screen.findByText(/Controlled Pilot failed/)).toBeInTheDocument();
+    expect(screen.getByText(/preview runtime unavailable/)).toBeInTheDocument();
+    expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
+  });
+
   it("ignores a delayed AgentRun fetch after switching away from the originating session", async () => {
     type StreamListener = (event: { payload: any }) => void | Promise<void>;
     const listeners = new Map<string, StreamListener>();

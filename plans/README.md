@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W19 completion/status index. This is not a second roadmap.
+   - Compact W1-W20 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,12 +43,12 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W19 through sustained Runtime Migration
-Gate evidence and controlled Chat pilot eligibility. The next practical
-sequence is:
+Current implementation has completed W1-W20 through sustained Runtime Migration
+Gate evidence, controlled Chat pilot eligibility, and a very small explicit
+Chat Controlled Pilot with fallback. The next practical sequence is:
 
 ```text
-W20 very small controlled Chat migration pilot with fallback
+reviewed pilot response promotion
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -57,7 +57,7 @@ W20 very small controlled Chat migration pilot with fallback
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W19 completion/status index and preview/not-default/migration-gate/pilot-eligibility boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W20 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -110,9 +110,15 @@ panel are also read-only. They default to the latest 3 MultiStrategy preview
 AgentRuns, recompute gate reports, and expose `eligible`, clean run count,
 checked run ids, blocking reasons, and the latest gate report. They must not
 create AgentRuns, Proposals, Actions, Observations, audit rows, LifeModel/Memory
-writes, or run any runtime/tool/proposal-apply path. Even when `eligible=true`,
-default Chat is not migrated automatically; W20 is only allowed to attempt a
-very small controlled Chat migration pilot with fallback.
+writes, or run any runtime/tool/proposal-apply path.
+
+W20 adds only a very small Chat-page Controlled Pilot. It is explicit, single
+turn, and fallback-preserving: normal Send does not call eligibility/gate/preview;
+the pilot calls eligibility first, does not call preview when blocked, runs
+`run_multi_strategy_agent_preview` only after eligibility passes, forces
+`allowWrites=false`, and displays success as “Pilot response” outside normal
+assistant history. Default Chat is still not migrated. Reviewed pilot response
+promotion is a later phase, not part of W20.
 
 ## 6. Agent Rules
 

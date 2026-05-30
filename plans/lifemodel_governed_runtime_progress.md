@@ -10,12 +10,13 @@ completion/status index.
 
 ## Current Position
 
-W1-W19 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W20 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
 without changing Chat behavior, and a read-only controlled Chat pilot
-eligibility check for sustained clean gate evidence.
+eligibility check for sustained clean gate evidence. Chat also has a very small
+explicit Controlled Pilot entry with fallback.
 
 The key boundary is unchanged:
 
@@ -44,6 +45,11 @@ The key boundary is unchanged:
 - The Settings Pilot eligibility panel displays controlled Chat migration pilot
   qualification only. It is not a Chat switching control; even an eligible
   result cannot automatically replace default Chat.
+- W20 Controlled Pilot is explicit, single turn, and fallback-preserving. Normal
+  Send still does not call eligibility/gate/preview. The pilot checks
+  eligibility first, does not run preview when blocked, forces `allowWrites=false`
+  when eligible, and renders success as “Pilot response” outside normal assistant
+  history. Reviewed pilot response promotion is a later phase.
 
 ## Work Package Status
 
@@ -68,20 +74,19 @@ The key boundary is unchanged:
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, Tauri wrapper/tests | Adds the read-only migration gate report: default Chat unchanged, preview path healthy, metadata-safe trace ready, fallback available, no external writes, proposal-first preserved, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings experimental panel, frontend tests, docs | Displays `check_runtime_migration_gate` pass/block fields and blocking reasons as a read-only evidence surface. Normal Chat Send still does not call the gate or `run_multi_strategy_agent_preview`. |
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_pilot_eligibility`: read-only eligibility over the latest 3 preview gate reports with clean count, checked run ids, blockers, latest gate report, and default Chat unchanged. It creates no AgentRun/Proposal/Action/Observation and normal Chat Send does not call it. |
+| W20 Very Small Controlled Chat Migration Pilot With Fallback | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Adds explicit `Run Controlled Pilot` in Chat. It calls eligibility before preview, blocks without preview when ineligible, runs single-turn `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, shows “Pilot response” separately, keeps normal Send unchanged, and writes no ordinary assistant chat history. |
 
 ## Next Recommended Sequence
 
 ```text
-W20 very small controlled Chat migration pilot with fallback
+reviewed pilot response promotion
 ```
 
-The next phase still must not directly replace the default Chat path. W20 may
-only attempt a very small controlled Chat migration pilot if W19 pilot
-eligibility remains clean and a fallback is preserved. Minimum entry criteria:
-gate evidence stays clean across recent preview AgentRuns, fallback remains
-available, the outer preview AgentRun remains the primary trace, any inner ReAct
-run id is child metadata only, traces remain metadata-safe, no real external
-writes occur, proposal-first behavior is preserved, and `make ci` passes.
+The next phase still must not directly replace the default Chat path. Reviewed
+pilot response promotion may only be considered after the W20 pilot response has
+been reviewed as a separate pilot artifact; promotion must remain explicit,
+auditable, fallback-preserving, and proposal/write-safe. The default Chat path
+remains unchanged until a later reviewed migration stage.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

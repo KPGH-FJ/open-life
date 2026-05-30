@@ -47,6 +47,7 @@ import {
   getAgentRun,
   getPendingProposals,
   runMultiStrategyAgentPreview,
+  checkControlledChatPilotEligibility,
 } from "../tauri";
 import type {
   AgentRun,
@@ -58,7 +59,11 @@ import type {
   SystemDiagnostics,
   ToolCallResult,
 } from "../tauri";
-import type { MultiStrategyAgentPreviewLayer, MultiStrategyAgentPreviewOutput } from "../types";
+import type {
+  ControlledChatPilotEligibilityReport,
+  MultiStrategyAgentPreviewLayer,
+  MultiStrategyAgentPreviewOutput,
+} from "../types";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
@@ -231,6 +236,8 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
 }
 
 const CHAT_PREVIEW_NO_TOOLS_PROMPT = "No developer tools catalog supplied for this chat preview.";
+const CONTROLLED_PILOT_FALLBACK_COPY =
+  "Use normal Send for the stable Chat path. The pilot will not retry automatically.";
 const CHAT_PREVIEW_SAFE_SUMMARY_KEYS = [
   "taskKind",
   "reasonCode",
@@ -301,6 +308,13 @@ export default function ChatPage() {
   const [governedPreviewSubmitting, setGovernedPreviewSubmitting] = useState(false);
   const [governedPreviewError, setGovernedPreviewError] = useState<string | null>(null);
   const [governedPreviewResult, setGovernedPreviewResult] =
+    useState<MultiStrategyAgentPreviewOutput | null>(null);
+  const [controlledPilotSubmitting, setControlledPilotSubmitting] = useState(false);
+  const [controlledPilotError, setControlledPilotError] = useState<string | null>(null);
+  const [controlledPilotFallback, setControlledPilotFallback] = useState<string | null>(null);
+  const [controlledPilotEligibility, setControlledPilotEligibility] =
+    useState<ControlledChatPilotEligibilityReport | null>(null);
+  const [controlledPilotResult, setControlledPilotResult] =
     useState<MultiStrategyAgentPreviewOutput | null>(null);
 
   // Throttle streaming updates to reduce React re-render pressure
@@ -876,6 +890,10 @@ export default function ChatPage() {
     () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
     [governedPreviewResult]
   );
+  const controlledPilotSummaryEntries = useMemo(
+    () => safeSummaryEntries(controlledPilotResult?.metadataSafeSummary ?? {}),
+    [controlledPilotResult]
+  );
   const readinessClass =
     readiness.tone === "ready"
       ? "bg-emerald-50 border-emerald-100 text-emerald-800"
@@ -1053,6 +1071,50 @@ export default function ChatPage() {
     governedPreviewLocalModelAvailable,
     input,
   ]);
+
+  const handleRunControlledPilot = useCallback(async () => {
+    const trimmedInput = input.trim();
+    if (!trimmedInput) {
+      setControlledPilotError("Enter a chat draft before running controlled pilot.");
+      setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
+      return;
+    }
+
+    setControlledPilotSubmitting(true);
+    setControlledPilotError(null);
+    setControlledPilotFallback(null);
+    setControlledPilotEligibility(null);
+    setControlledPilotResult(null);
+
+    try {
+      const eligibility = await checkControlledChatPilotEligibility();
+      setControlledPilotEligibility(eligibility);
+
+      if (!eligibility.eligible) {
+        setControlledPilotError("Controlled Pilot blocked.");
+        setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
+        return;
+      }
+
+      const output = await runMultiStrategyAgentPreview({
+        sessionId: `chat-controlled-pilot-${Date.now()}`,
+        userText: trimmedInput,
+        toolsPrompt: CHAT_PREVIEW_NO_TOOLS_PROMPT,
+        allowPlanning: false,
+        localModelAvailable: false,
+        layer: "L2",
+        executionBudget: {
+          allowWrites: false,
+        },
+      });
+      setControlledPilotResult(output);
+    } catch (e) {
+      setControlledPilotError(`Controlled Pilot failed: ${readablePreviewError(e)}`);
+      setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
+    } finally {
+      setControlledPilotSubmitting(false);
+    }
+  }, [input]);
 
   const handleIndexMemory = useCallback(
     async (content: string) => {
@@ -1314,6 +1376,126 @@ export default function ChatPage() {
                     {governedPreviewSubmitting && <Loader2 size={13} className="animate-spin" />}
                     Run Governed Preview
                   </button>
+                </div>
+
+                <div className="space-y-2 rounded-md border border-sky-100 bg-sky-50 px-3 py-2 text-xs text-sky-950">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      <ShieldCheck size={14} className="shrink-0 text-sky-700" />
+                      <div>
+                        <div className="font-semibold">Controlled Pilot</div>
+                        <div className="text-[11px] leading-4 text-sky-800">
+                          Eligibility-gated single turn. Normal Send remains unchanged.
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRunControlledPilot}
+                      disabled={controlledPilotSubmitting || !input.trim()}
+                      className={classNames(
+                        "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
+                        controlledPilotSubmitting || !input.trim()
+                          ? "bg-sky-100 text-sky-400"
+                          : "bg-sky-900 text-white hover:bg-sky-800"
+                      )}
+                    >
+                      {controlledPilotSubmitting && <Loader2 size={13} className="animate-spin" />}
+                      Run Controlled Pilot
+                    </button>
+                  </div>
+
+                  {controlledPilotEligibility && (
+                    <div className="rounded-md border border-sky-100 bg-white px-3 py-2 text-sky-900">
+                      Eligibility: {controlledPilotEligibility.cleanRunCount}/
+                      {controlledPilotEligibility.requiredCleanRuns} clean preview runs
+                    </div>
+                  )}
+
+                  {controlledPilotError && (
+                    <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-red-700">
+                      {controlledPilotError}
+                    </div>
+                  )}
+
+                  {controlledPilotEligibility &&
+                    !controlledPilotEligibility.eligible &&
+                    controlledPilotEligibility.blockingReasons.length > 0 && (
+                      <div className="rounded-md border border-amber-100 bg-amber-50 px-3 py-2 text-amber-900">
+                        <div className="font-medium">Blocking reasons</div>
+                        <ul className="mt-1 list-disc space-y-1 pl-4">
+                          {controlledPilotEligibility.blockingReasons.map(reason => (
+                            <li key={reason}>{reason}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                  {controlledPilotFallback && (
+                    <div className="rounded-md border border-stone-200 bg-white px-3 py-2 text-stone-700">
+                      {controlledPilotFallback}
+                    </div>
+                  )}
+
+                  {controlledPilotResult && (
+                    <div
+                      data-testid="controlled-pilot-response"
+                      className="space-y-3 rounded-lg border border-sky-200 bg-white p-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-xs font-semibold text-stone-900">Pilot response</div>
+                          <div className="mt-0.5 text-[11px] text-stone-500">
+                            Separate pilot output. It is not saved as a normal assistant message.
+                          </div>
+                        </div>
+                        {controlledPilotResult.runId && (
+                          <Link
+                            to={`/runs/${controlledPilotResult.runId}`}
+                            className="inline-flex items-center gap-1.5 rounded-md bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800 ring-1 ring-sky-100 hover:bg-sky-100"
+                          >
+                            <ExternalLink size={13} />
+                            View Run Trace
+                          </Link>
+                        )}
+                      </div>
+
+                      <div className="whitespace-pre-wrap rounded-md bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
+                        {controlledPilotResult.userOutput ?? "No pilot response returned."}
+                      </div>
+
+                      <div className="grid gap-2 text-xs md:grid-cols-2">
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          <div className="text-[10px] uppercase text-stone-400">runId</div>
+                          <div className="mt-1 font-mono text-stone-900">
+                            {controlledPilotResult.runId ?? "not returned"}
+                          </div>
+                        </div>
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          Strategy: {controlledPilotResult.strategyKind}
+                        </div>
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          Payload: {controlledPilotResult.payloadKind}
+                        </div>
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          Governance: {controlledPilotResult.governanceDecisionKind ?? "unknown"}
+                        </div>
+                      </div>
+
+                      {controlledPilotSummaryEntries.length > 0 && (
+                        <div className="flex flex-wrap gap-2 text-xs">
+                          {controlledPilotSummaryEntries.map(([key, value]) => (
+                            <span
+                              key={key}
+                              className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                            >
+                              {key}: {value}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {governedPreviewError && (
