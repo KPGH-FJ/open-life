@@ -8,7 +8,7 @@
 
 - **项目类型**：本地优先的个人 Agent 框架 / 个人 AI 操作系统（Tauri 桌面壳 + React 前端 + Rust 核心引擎）
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
-- **核心范式**：`LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop`
+- **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
 - **当前阶段**：Agent Framework Beta。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。Execution Tools 以 P1（真实）/ P2（declarative-only stub）分层落地。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
@@ -17,27 +17,33 @@
 
 后续 Agent 进入项目时，优先阅读：
 
-1. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：新的架构基准，优先级最高。
-2. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate。
-3. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
-4. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
-5. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013 和 MVP specs 接管实现入口。
-6. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：新的产品定义与需求基准。
-7. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
-8. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-9. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
+2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
+3. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
+4. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
+5. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
+6. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
+7. [`plans/lifemodel_hs_legacy_write_path_audit.md`](plans/lifemodel_hs_legacy_write_path_audit.md)：Legacy direct-write 收口地图，后续治理化开发必须参考。
+8. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013、MVP specs 和总纲接管实现入口。
+9. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准；实现顺序不得覆盖 LifeModel-Governed 总纲。
+10. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+11. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+12. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
-- ReAct 是执行架构基准：后续核心能力必须收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`。
+- ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
 - Beta 的 Execution Tools 至少要覆盖 MCP、A2A、file、web、calendar、email、task proposal 等类别；未实现真实 executor 的工具必须 disabled/declarative-only，不能伪装成可执行。
+- `calendar.propose_event` / `email.propose_draft` 当前是治理待校准项，不能在任何入口文档或 Tool Taxonomy 中被当作已完成 P1，直到代码行为、集成测试和 taxonomy 同步。
+- 文档入口和工具 taxonomy 必须与代码状态同步；过期 P1/P2 标签会误导后续 Agent，视为架构阻塞项。
 - 新功能必须能挂到 `AgentTask`、`AgentRun`、`AgentAction`、`AgentProposal`、`LifeModel`、`Memory`、`ModelRouter` 或 `Workspace` 中。
 - Chat、Builder、Calibration、Dashboard 都只是 Agent Framework 的不同表面，不是彼此孤立的产品中心。
 - 高风险 LifeModel 更新、外部工具写操作、敏感数据上云必须可解释、可确认、可回滚。
 - LifeModel-HS 开发必须遵守 ADR 0013：增量落地、Proposal-first、privacy as hard Policy、metadata-safe audit、YAML 仅作为 compatibility materialized view。
+- LifeModel-HS 不是孤立功能区，而是跨 Chat、Builder、Calibration、Memory、Tools、ModelRouter、AgentRun、Proposal 的协议层；后续成熟化开发必须沿着 `LifeEvent -> Signal -> Evidence -> Governor -> Proposal -> Materialized View` 收敛。
 - 插件在 Beta 阶段默认是本地 Manifest / declarative-only；除非存在真实安全 executor，否则 plugin-declared tool 不能显示为可执行能力。
 
 ---
@@ -429,7 +435,7 @@ VectorStore.search(query_embedding, top_k=5)
 
 ### Tool Taxonomy（Beta 工具分类）
 
-OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P2（declarative-only stub）**。未实现真实 executor 的工具必须标记为 `declarative_only`，不得伪装为可执行。
+OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）**、**P2（declarative-only stub）** 和 **治理待校准**。未实现真实 executor 或治理语义未闭合的工具不得伪装为完成 P1。入口文档与本 taxonomy 必须随代码状态同步更新。
 
 #### Core OS Tools（P1 — 真实可执行）
 
@@ -463,12 +469,12 @@ OpenLife Beta 将工具按执行能力分为 **P1（真实可执行）** 和 **P
 | `mcp.call_tool` | 调用 MCP 工具 | 取决于目标 | ✅ P1（wrapper，权限落在目标 tool scope） |
 | `a2a.call_agent` | 调用 A2A Agent | medium | ✅ P1（30s超时+私网拦截） |
 | `calendar.read` | 读取日历 | low | ✅ P1（ICS parser） |
-| `calendar.propose_event` | 提议日历事件 | medium | ✅ P1（ScheduledTask Proposal + ICS 文件写入） |
+| `calendar.propose_event` | 提议日历事件 | medium | ⚠️ 治理待校准，不能标为完成 P1；必须生成 `ScheduledTask` proposal 或降级为 disabled/declarative-only |
 | `email.read` | 读取邮件 | low | ⚠️ P2（declarative-only，需配置 IMAP account） |
-| `email.propose_draft` | 提议邮件草稿 | medium | ✅ P1（生成 Proposal + mailto: 链接） |
+| `email.propose_draft` | 提议邮件草稿 | medium | ⚠️ 治理待校准，不能标为完成 P1；必须生成 `DataExport`/email-draft proposal，不能误归入 `ExternalWriteAction` |
 | `task.create_proposal` | 提议创建任务 | medium | ✅ P1（ScheduledTask Proposal + TaskStore） |
 
-> **P1 / P2 判定标准**：P1 工具具备真实 executor 并通过集成测试；P2 工具仅有 manifest 声明，无真实执行能力，标记为 `declarative_only: true`。P2 工具不会进入模型的 tools prompt，前端 Tool Registry 中显示为 "⚠️ 声明-only"。
+> **P1 / P2 判定标准**：P1 工具必须具备真实 executor、治理语义、proposal/apply/replay 路径和集成测试；P2 工具仅有 manifest 声明，无真实执行能力，标记为 `declarative_only: true`。P2 工具不会进入模型的 tools prompt，前端 Tool Registry 中显示为 "⚠️ 声明-only"。治理待校准工具必须先进入 W1 Tool Proposal Hygiene，不能被未来 Agent 当成已完成 P1。
 
 ---
 
@@ -685,10 +691,12 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 
 | 文档 | 路径 | 说明 |
 |------|------|------|
-| 架构基准 | [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md) | 当前最高优先级文档，定义 OpenLife 作为 Agent Framework 的目标架构 |
-| 产品需求 v2 | [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md) | 当前产品定义与需求基准 |
-| 开发计划 | [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md) | 当前开发路线图，按 Agent Runtime 迁移路线维护 |
-| 执行手册 | [`plans/openlife_codex_execution_playbook.md`](plans/openlife_codex_execution_playbook.md) | 详细执行方案 |
+| 文档权威地图 | [`plans/README.md`](plans/README.md) | 解决旧计划/新计划冲突的最高优先级索引 |
+| 下一阶段总纲 | [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md) | LifeModel-Governed Runtime、Maturation Loop、多策略 Runtime 的当前开发顺序 |
+| 架构基准 | [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md) | Agent Framework 架构基准，需与总纲合读 |
+| 产品需求 v2 | [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md) | 产品定义与需求基准；不覆盖当前实现顺序 |
+| 开发计划 | [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md) | 当前开发路线图，按 LifeModel-Governed Runtime 迁移路线维护 |
+| 执行手册 | [`plans/openlife_codex_execution_playbook.md`](plans/openlife_codex_execution_playbook.md) | 单轮任务切分与验证方式 |
 | 前端重构计划 | [`plans/frontend_experience_rebuild_plan.md`](plans/frontend_experience_rebuild_plan.md) | 历史前端体验重构计划，后续需按 Agent Workspace 更新 |
 | 工程治理笔记 | [`plans/engineering_structure_notes.md`](plans/engineering_structure_notes.md) | 工程拆分和治理记录 |
 | 用户文档 | [`README.md`](README.md) | 面向用户的快速开始指南 |
@@ -733,7 +741,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-08 | **Week 8: 收口回归**：文档更新；连续 8 周 `make ci` 通过 | AI Agent |
 | 2026-05-03 | **Sprint 9: 架构优化**：action_executor.rs 拆分为 8 个模块 (core_os_tools/execution_tools/memory_ops/life_model_ops/declarative_stubs/helpers/tool_executor/mod.rs)；AgentLoop 实现真实 token 级流式输出（StreamingCallback trait + run_streaming + TauriStreamingCallback 适配）；P2 工具升级：calendar.read 从 P2→P1（ICS 文件解析器），task.create_proposal 从 P2→P1（TaskStore + ScheduledTask 本地持久化）；移除 sentence-based 伪流式（split_into_sentences）；config.rs 新增 calendar_ics_paths | AI Agent |
 | 2026-05-05 | **Sprint 10: CI修复 + 技术债务**：P0 clippy 修复（AgentLoopContext 重构消除 too_many_arguments、privacy.rs manual_is_multiple_of、dead_code test_app_state）；web.search DuckDuckGo 双正则 fallback + 5s rate limit；AgentLoop 参数配置化（max_steps/tool_calls/timeout 进 SystemConfig）；lib.rs bootstrap 提取到 src-tauri/src/bootstrap.rs（3234→2821 行） | AI Agent |
-| 2026-05-05 | **Sprint 11: 执行工具闭环**：email.propose_draft P2→P1（mailto: 打开系统邮件客户端，依赖 open crate）；a2a.call_agent P2→P1（30s超时+私网拦截+真实 A2AClient 调用）；calendar.propose_event P2→P1（接受后生成 .ics 文件写入 safe_paths）；ChatProposalGenerator LLM 升级（Ollama 信号提取优先，静默降级关键词匹配） | AI Agent |
+| 2026-05-05 | **Sprint 11: 执行工具闭环**：a2a.call_agent P2→P1（30s超时+私网拦截+真实 A2AClient 调用）；calendar.propose_event / email.propose_draft 曾尝试升级，但当前需回到 W1 复核治理语义、proposal 类型、测试与 taxonomy 同步，不能视为完成 P1；ChatProposalGenerator LLM 升级（Ollama 信号提取优先，静默降级关键词匹配） | AI Agent |
 | 2026-05-05 | **Sprint 12: Agent 深度能力**：AgentRole（Generalist/Planner）+ role_system_instruction 注入 tools prompt；scheduler_runner.rs（60s 轮询 scheduled_tasks.json + AgentLoop 自动执行）；E2E integration tests（AgentRole config 验证）；LifeModel 字段 GoalItem.updated_at、State.last_updated | AI Agent |
 | 2026-05-05 | **Sprint 13: Proactive Agent MVP（Phase 6）**：ProactiveEngine（每日简报、每周复盘、目标陈旧检测、提案提醒、状态签到）；ProactiveConfig 集成 SystemConfig；Tauri 命令 get_proactive_suggestions；record_state 自动更新 last_updated；toolset_allowlist 过滤 AgentLoop 执行 | AI Agent |
 | 2026-05-05 | **Sprint 14: Dashboard + 搜索增强**：Dashboard 主动建议卡片前端集成；web.search 多Provider支持（DuckDuckGo 默认/Brave API/SearXNG）；web.fetch 新增 summarize 参数 → Ollama 中文摘要；search_provider 配置入 SystemConfig | AI Agent |

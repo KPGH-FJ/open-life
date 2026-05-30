@@ -2,28 +2,37 @@
 
 OpenLife 是一个**本地优先的个人 Agent 框架**。它不是单纯的聊天应用，也不是普通的目标管理工具，而是围绕用户私人数据构建的个人 AI 操作系统雏形。
 
-OpenLife 的核心范式是：
+OpenLife 的核心范式正在从单一 ReAct 叙述升级为：
 
 ```text
-LifeModel + Local/Cloud Model Router + ReAct Agent Runtime + Tool/Skill Execution + Memory/Feedback Loop
+LifeModel-HS Protocol Layer
+  + Governed Agent Runtime
+  + ReAct Default Strategy
+  + Tool/Skill Execution
+  + Memory/Feedback/Maturation Loop
 ```
 
-用户先构建自己的 LifeModel，包括身份、目标、能力、状态、偏好和关系等私人上下文。之后，OpenLife 会让本地模型或云端模型在这个人生模型的约束下完成对话、规划、写作、复盘、工具调用、状态更新和长期反馈。系统不只是回答问题，还应该逐步理解用户，并在用户确认下持续更新 LifeModel。
+用户先构建自己的 LifeModel，包括身份、目标、能力、状态、偏好和关系等私人上下文。之后，OpenLife 会让本地模型或云端模型在这个人生模型的约束下完成对话、规划、写作、复盘、工具调用、状态更新和长期反馈。系统不只是回答问题，还应该通过 LifeEvent、Signal、Evidence、Governor、Proposal 和用户确认持续打磨 LifeModel，并让不同 RuntimeStrategy 在同一套 LifeModel-HS 协议约束下执行。
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Beta** 阶段：
+当前项目处于 **Agent Framework Beta / LifeModel-HS MVP convergence** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
+- **ReAct 是当前默认 RuntimeStrategy**：后续会预留 Plan-Execute、Workflow、Proactive 等多策略执行形态，但不会在协议主干成熟前提前大抽象。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
-- **Execution Tools 分层落地**：P1（file.read、web.fetch）真实注册，P2（calendar、email）declarative-only stub。
+- **Execution Tools 分层落地**：P1 工具必须有真实 executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前是治理待校准项，不能当作已完成 P1。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
+- **下一步顺序固定**：tool/proposal hygiene -> thin runtime spine -> ReAct convergence -> maturation loop -> governor -> Plan-Execute -> strategy abstraction。
+- **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
 - **`make ci` 为发布门控**：258 测试全绿，前端生产构建通过。
 
-新的架构基准文档见：
+下一阶段总纲和架构基准文档见：
 
+- [Plans Document Governance](/Users/fujing/Desktop/偶来福/plans/README.md)
+- [OpenLife LifeModel-Governed Agent Runtime Program](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 - [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 - [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
@@ -99,15 +108,18 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 
 ## 推荐阅读顺序
 
-1. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
-2. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
-3. [LifeModel-HS MVP Task Specifications](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_mvp_task_specs.md)
-4. [ADR 0013: LifeModel-HS Source Of Truth And Governance](/Users/fujing/Desktop/偶来福/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)
-5. [LifeModel-HS Architecture Plan](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_architecture_plan.md)
-6. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
-7. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
-8. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
-9. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
+1. [Plans Document Governance](/Users/fujing/Desktop/偶来福/plans/README.md)
+2. [OpenLife LifeModel-Governed Agent Runtime Program](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
+3. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+4. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
+5. [LifeModel-HS MVP Task Specifications](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_mvp_task_specs.md)
+6. [ADR 0013: LifeModel-HS Source Of Truth And Governance](/Users/fujing/Desktop/偶来福/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)
+7. [LifeModel-HS Legacy Write Path Audit](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_legacy_write_path_audit.md)
+8. [LifeModel-HS Architecture Plan](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_architecture_plan.md)
+9. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
+10. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+11. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
+12. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
 
 ## 快速开始
 

@@ -2,6 +2,11 @@
 
 This document defines the GitHub operating model for OpenLife.
 
+Current Agent development order and document precedence are governed by
+`AGENTS.md`, `plans/README.md`, and
+`plans/openlife_lifemodel_governed_agent_runtime.md`. GitHub issues, PRs, and
+old planning files must not override those entry points.
+
 The default mode is **solo developer + Agent**. GitHub should provide
 checkpoints, CI, and a durable project memory. It should not become the daily
 driver for every local edit.
@@ -73,6 +78,9 @@ Use heavier issue and PR checks only for changes that touch:
 
 For those changes, keep these invariants:
 
+- Documentation authority must remain synchronized: update `AGENTS.md`,
+  `plans/README.md`, and any affected roadmap/taxonomy document in the same PR
+  when tool/runtime/proposal/model-routing status changes.
 - Current YAML LifeModel remains a compatibility materialized view until a
   dedicated migration is accepted.
 - Risky LifeModel-HS mutation remains Proposal-first.

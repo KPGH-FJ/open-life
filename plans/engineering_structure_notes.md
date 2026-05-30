@@ -1,6 +1,10 @@
 # OpenLife 工程结构治理记录
 
 > 目标：在开始试用前，让后端命令边界更清楚，降低后续 Debug 和 Agent 接手成本。
+>
+> Engineering history/reference. Current Agent development order is governed by
+> `plans/README.md` and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
 
 ## 当前拆分状态
 

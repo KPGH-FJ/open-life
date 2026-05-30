@@ -1,5 +1,9 @@
 # OpenLife Alpha → Beta 产品化收口计划
 
+> Historical plan. Do not use as current Agent development authority.
+> Current order is defined by `plans/README.md` and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
 > 周期目标：从「开发者能看出潜力的复杂系统」变成「普通用户可以连续试用 7 天，并愿意继续打开的个人成长伙伴」
 > 
 > 关键词：**可用、可信、可持续使用**

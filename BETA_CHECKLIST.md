@@ -1,5 +1,10 @@
 # OpenLife Beta 发布检查清单
 
+> Historical checklist. Do not use this file as current Beta/tool status
+> authority. Current Agent development order and Tool Taxonomy are governed by
+> `AGENTS.md`, `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
 ## 核心功能验证
 
 ### Agent Runtime

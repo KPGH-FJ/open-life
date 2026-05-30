@@ -1,13 +1,40 @@
 # OpenLife Development Plan
 
 > Version: 2026-05-01
-> Current direction: From Alpha+ framework skeleton to ReAct Beta execution kernel
+> Current direction: LifeModel-Governed Runtime convergence after ReAct Beta and LifeModel-HS MVP
+> Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 > Beta roadmap: [`openlife_react_beta_roadmap.md`](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
 ## 1. Current Strategic Reset
 
-OpenLife is now defined as a **local-first, ReAct-driven personal Agent framework**, not a conventional desktop app.
+OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
+
+ReAct remains the current default execution strategy and Beta execution kernel,
+but the long-term architecture is not "ReAct only." The next development cycle
+should prepare OpenLife as a LifeModel-Governed Agent Runtime where Direct,
+Layered, ReAct, Plan-Execute, Workflow, Proactive, and Reflective strategies can
+eventually share the same LifeModel-HS protocol layer.
+
+The immediate order is defined in
+[`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md):
+
+```text
+tool/proposal hygiene
+-> thin runtime spine
+-> ReAct convergence
+-> maturation loop
+-> governor
+-> Plan-Execute
+-> strategy abstraction
+```
+
+`calendar.propose_event` and `email.propose_draft` are current governance
+calibration items, not completed P1 guarantees. They must not be presented as
+finished P1 until code behavior, integration tests, and Tool Taxonomy agree.
+Documentation entry points and tool taxonomy must be updated in the same work
+package as any tool status change; stale status labels are treated as blockers
+because they mislead future development Agents.
 
 The existing project already contains many working or partially working modules: LifeModel, Builder, Chat, Memory, MCP, A2A, Calibration, VersionControl, Diagnostics, and model scheduling. The next stage should not add more isolated features. The next stage should introduce the missing architectural spine:
 
@@ -15,10 +42,11 @@ The existing project already contains many working or partially working modules:
 AgentTask -> ContextAssembler -> ModelRouter -> AgentLoop -> Tool/Skill Action -> Observation -> Proposal/Permission -> Apply/Replay -> AgentRun Trace
 ```
 
-All future development should be judged by one question:
+All future development should be judged by two questions:
 
 ```text
 Does this make OpenLife more like a trustworthy ReAct personal Agent OS?
+Does this make LifeModel-HS more like the shared personal protocol layer for all runtime strategies?
 ```
 
 Beta must not be declared because one blocker is fixed. Beta requires the Beta Gates in `openlife_react_beta_roadmap.md` to pass, especially ReAct execution, tool registry/action execution, permission replay, LifeModel/Memory governance, skill runtime, ModelRouter privacy, and Runs traceability.
@@ -337,14 +365,15 @@ Every major development round should verify:
 | Sprint | 内容 | 状态 |
 |--------|------|------|
 | **10: CI修复 + 技术债务** | P0 clippy修复, AgentLoopContext重构, web.search加固+rate limit, AgentLoop参数配置化 (SystemConfig), lib.rs bootstrap提取 (3234→2821行) | ✅ |
-| **11: 执行工具闭环** | email.propose_draft P2→P1 (mailto:), a2a.call_agent P2→P1 (真实A2A执行器), calendar ICS写入, ChatProposalGenerator LLM升级 (Ollama信号提取) | ✅ |
+| **11: 执行工具闭环** | a2a.call_agent 真实 A2A 执行器；calendar/email proposal 工具曾尝试升级，但当前需重新校准治理语义和 taxonomy，不能视为完成 P1；ChatProposalGenerator LLM升级 (Ollama信号提取) | ⚠️ 部分需复核 |
 | **12: Agent深度能力** | AgentRole (Generalist/Planner) + role_system_instruction, scheduler_runner (定时任务执行器), E2E integration tests | ✅ |
 
 ### Beta Execution Tools 落地（更新）
 
-- **P1 真实可执行**: `file.read`, `file.write_proposal`, `web.fetch`, `web.search` (DuckDuckGo+fallback), `calendar.read` (ICS parser), `calendar.propose_event` (ICS写入), `mcp.call_tool`, `a2a.call_agent` (30s超时+私网拦截), `email.propose_draft` (mailto:), `task.create_proposal`, `permission.*`, Core OS Tools
+- **P1 真实可执行**: `file.read`, `file.write_proposal`, `web.fetch`, `web.search` (DuckDuckGo+fallback), `calendar.read` (ICS parser), `mcp.call_tool`, `a2a.call_agent` (30s超时+私网拦截), `task.create_proposal`, `permission.*`, Core OS Tools
+- **治理待校准，不能标为完成 P1**: `calendar.propose_event`, `email.propose_draft`
 - **P2 declarative-only**: `email.read` (需IMAP配置)
-- **安全加固**: safe_paths strict canonical parent, web.fetch DNS 私网拦截, ExternalWriteAction 二次校验, web.search 5秒rate limit
+- **安全加固**: safe_paths strict canonical parent, web.fetch DNS 私网拦截, ExternalWriteAction 二次校验；ExternalWriteAction 入库前 size limit + payload minimization 是硬验收；web.search 5秒rate limit
 - **权限闭环**: peek() + check(), replay 预检查, ToolPermission Proposal, Review Center 授权
 
 ### 测试覆盖

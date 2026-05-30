@@ -1,8 +1,12 @@
 # OpenLife Stabilization and Spine Consolidation Plan
 
 > Date: 2026-04-29
-> Status: Active stabilization plan
+> Status: Historical stabilization plan
 > Scope: Fix review findings, reduce layered complexity, and consolidate the Agent Framework spine.
+>
+> Current Agent development authority is `plans/README.md` and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`. Use this file only as
+> historical context unless a task explicitly revives it.
 
 ## 1. Current Stage
 
@@ -174,4 +178,3 @@ cargo test -q
 cd frontend && npm test -- --run
 cd frontend && npm run build
 ```
-

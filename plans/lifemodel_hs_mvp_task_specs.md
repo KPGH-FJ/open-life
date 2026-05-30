@@ -2,7 +2,8 @@
 
 Date: 2026-05-28
 
-Status: next
+Status: scoped task specifications; implementation order is governed by
+`plans/openlife_lifemodel_governed_agent_runtime.md`
 
 Package:
 

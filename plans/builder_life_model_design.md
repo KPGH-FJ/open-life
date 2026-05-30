@@ -1,5 +1,10 @@
 # OpenLife Builder 人生模型构建设计方案
 
+> Scoped reference. Use for Builder UX/domain context only. Current LifeModel-HS
+> governance, proposal-first rules, and development order are defined by
+> `plans/README.md`, `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`,
+> and `plans/openlife_lifemodel_governed_agent_runtime.md`.
+
 > 目标：设计 OpenLife 初次使用时的人生模型构建体验，让用户通过「快速构建 / 渐进构建 / 苏格拉底式对话」三种方式建立 Identity / Goals / Capabilities / State 四维人生模型。
 
 ---
@@ -1667,4 +1672,3 @@ Dashboard 推荐进入 Chat 验证
 - cd frontend && npm test -- --run BuilderPage
 - cd frontend && npm run build
 ```
-

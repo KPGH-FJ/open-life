@@ -18,6 +18,7 @@
 
 与其他文档的关系：
 
+- 下一阶段总纲：见 [plans/openlife_lifemodel_governed_agent_runtime.md](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 - 长期目标和产品哲学：见 [OpenLife_Final_PRD.md](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)
 - 当前阶段主计划：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
 - 本文档：规定 Codex 的日常执行方式
@@ -28,17 +29,29 @@
 
 当前阶段，OpenLife 的目标已经从“做出 Alpha 底座”进一步切换到：
 
-- 把现有 Alpha 收口成 **可稳定试用版本**
-- 让用户可以自己走完 `设置 → 构建 → 对话 → 仪表盘 → 校准/回滚`
-- 为接下来的“边试用边修改”建立一条可重复验证的主基线
+- 把 LifeModel-HS 作为 Agent Framework 的核心协议层
+- 让 ReAct 作为当前默认执行策略完成治理化收敛
+- 为后续 LifeModel Maturation Loop、Plan-Execute 和多策略 Runtime 打好骨架
+
+当前版本优先按这条顺序推进：
+
+```text
+tool/proposal hygiene
+-> thin runtime spine
+-> ReAct convergence
+-> maturation loop
+-> governor
+-> Plan-Execute
+-> strategy abstraction
+```
 
 当前版本优先围绕五个闭环推进：
 
-1. 对话闭环
-2. 人生模型闭环
-3. 校准/进化闭环
-4. 工具审批/执行闭环
-5. 恢复/治理闭环
+1. 工具 Proposal 治理闭环
+2. ReAct AgentRun / Action / Observation 闭环
+3. LifeModel-HS 协议选择闭环
+4. LifeEvent / Signal / Evidence / Governor 成熟化闭环
+5. Review Center / Apply / Replay / Audit 恢复治理闭环
 
 如果一项需求不能明显强化这五个闭环，就默认不进入当前迭代。
 
@@ -46,16 +59,19 @@
 
 当前更适合 Codex 做的，不是继续铺大功能，而是：
 
-- 收口跨页面说明
-- 补试用主链路中的断点
-- 强化错误可见性和恢复路径
-- 建立更真实的 smoke 验证
+- 先完成 W1 Tool Proposal Hygiene
+- 校准 `calendar.propose_event` / `email.propose_draft` 的 proposal 语义和 taxonomy
+- 给 ExternalWriteAction 增加入库前 size limit 与 payload minimization 硬验收
+- 抽取薄 runtime spine，而不是提前做大 RuntimeStrategy 抽象
+- 补充能防止 `tools_prompt` 工具清单误判任务意图的契约测试
 
 当前不建议优先做的：
 
 - 再开远期产品线
 - 大规模重构为“更优雅的架构”
 - 脱离试用主链新增复杂生态能力
+- 在 Plan-Execute 垂直切片前抽象完整 Multi-Strategy Runtime
+- 在 evidence/governor 路径成熟前扩充大量 LifeModel 字段
 
 ---
 
@@ -86,7 +102,14 @@ Codex 单轮最适合处理以下粒度的任务：
 3. 先补或修正契约，再改实现
 4. 实现最小可用闭环
 5. 跑测试或补测试
-6. 更新文档中的状态或执行说明
+6. 更新文档中的状态或执行说明，尤其是 AGENTS.md Tool Taxonomy
+
+任何改变工具执行状态的任务，都必须同步检查：
+
+- [AGENTS.md](/Users/fujing/Desktop/偶来福/AGENTS.md)
+- [README.md](/Users/fujing/Desktop/偶来福/README.md)
+- [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+- [plans/openlife_react_beta_roadmap.md](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
 ### 3.3 单轮输出要求
 
@@ -316,9 +339,11 @@ Codex 做任何新增功能时，都应显式回答：
 优先级如下：
 
 1. 当前真实代码行为
-2. 当前阶段主计划
-3. Codex 执行手册
-4. 大 PRD
+2. `AGENTS.md` 与 `plans/README.md`
+3. `plans/openlife_lifemodel_governed_agent_runtime.md`
+4. 当前阶段主计划
+5. Codex 执行手册
+6. 大 PRD
 
 如果大 PRD 和当前实现明显冲突，先修正文档，不要强行让代码迎合过期叙述。
 

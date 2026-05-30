@@ -4,7 +4,7 @@ Date: 2026-05-27
 Status: design-only architecture plan
 Scope: next-generation OpenLife LifeModel as a local-first, user-governed Personal Heuristic System
 
-This plan has been superseded as an implementation entry by `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` and `plans/lifemodel_hs_mvp_task_specs.md`. It remains the design baseline and does not itself require or include production code changes, migrations, runtime changes, or feature implementation.
+This plan has been superseded as an implementation entry by `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`, `plans/lifemodel_hs_mvp_task_specs.md`, and `plans/openlife_lifemodel_governed_agent_runtime.md`. It remains the design baseline and does not itself require or include production code changes, migrations, runtime changes, or feature implementation.
 
 ## 1. Executive Design
 
