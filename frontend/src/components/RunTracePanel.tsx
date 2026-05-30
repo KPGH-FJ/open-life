@@ -1,5 +1,6 @@
 import { CheckCircle2, CircleAlert, ShieldCheck, Sparkles } from "lucide-react";
 import type { AgentRun, HSBehaviorCheckSummary, HSSelectionAudit, ReasoningTrace } from "../tauri";
+import { getMultiStrategyPreviewAudit } from "../utils/previewAudit";
 
 interface Props {
   run?: AgentRun | null;
@@ -56,7 +57,9 @@ export default function RunTracePanel({ run, trace }: Props) {
   const policies = selectedPolicies(audit);
   const styles = selectedStyles(audit);
   const checks = collectBehaviorChecks(run, trace);
-  const hasContent = policies.length > 0 || styles.length > 0 || checks.length > 0;
+  const previewAudit = getMultiStrategyPreviewAudit(run);
+  const hasCollaborationContent = policies.length > 0 || styles.length > 0 || checks.length > 0;
+  const hasContent = hasCollaborationContent || !!previewAudit;
 
   if (!hasContent) {
     return (
@@ -68,74 +71,138 @@ export default function RunTracePanel({ run, trace }: Props) {
 
   return (
     <section className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2 font-semibold">
-          <ShieldCheck size={16} />
-          AI collaboration rules used
+      {previewAudit && (
+        <div className="rounded-lg bg-white/80 p-3 text-stone-800">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold text-stone-900">Multi-strategy preview trace</div>
+            {previewAudit.metadataSafe && (
+              <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">
+                metadata-safe
+              </span>
+            )}
+          </div>
+          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            {previewAudit.strategyKind && (
+              <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700">
+                Strategy: {previewAudit.strategyKind}
+              </span>
+            )}
+            {previewAudit.payloadKind && (
+              <span className="rounded border border-teal-100 bg-teal-50 px-2 py-0.5 text-teal-700">
+                Payload: {previewAudit.payloadKind}
+              </span>
+            )}
+            {previewAudit.governanceDecisionKind && (
+              <span className="rounded border border-amber-100 bg-amber-50 px-2 py-0.5 text-amber-700">
+                Governance: {previewAudit.governanceDecisionKind}
+              </span>
+            )}
+            {previewAudit.reasonCode && (
+              <span className="rounded border border-stone-200 bg-stone-50 px-2 py-0.5 text-stone-700">
+                {previewAudit.reasonCode}
+              </span>
+            )}
+          </div>
+          {previewAudit.planStepStatuses && previewAudit.planStepStatuses.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2 text-xs">
+              {previewAudit.planStepStatuses.map(status => (
+                <span
+                  key={status}
+                  className="rounded border border-stone-200 bg-stone-50 px-2 py-0.5 text-stone-700"
+                >
+                  {status}
+                </span>
+              ))}
+            </div>
+          )}
+          {previewAudit.warnings && previewAudit.warnings.length > 0 && (
+            <div className="mt-2 space-y-1 text-xs text-amber-700">
+              {previewAudit.warnings.map(warning => (
+                <div key={warning}>{warning}</div>
+              ))}
+            </div>
+          )}
         </div>
-        {tokenText(audit) && (
-          <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-emerald-700">
-            {tokenText(audit)}
-          </span>
-        )}
-      </div>
+      )}
 
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        {policies.length > 0 && (
-          <div className="rounded-lg bg-white/80 p-3">
-            <div className="text-[11px] font-medium text-emerald-700">collaboration rule</div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {policies.map(id => (
-                <span
-                  key={id}
-                  className="rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800"
-                >
-                  {policyLabel(id)}
-                </span>
-              ))}
+      {hasCollaborationContent && (
+        <>
+          <div
+            className={`flex flex-wrap items-center justify-between gap-2 ${
+              previewAudit ? "mt-3" : ""
+            }`}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              <ShieldCheck size={16} />
+              AI collaboration rules used
             </div>
+            {tokenText(audit) && (
+              <span className="rounded-full bg-white px-2 py-0.5 text-[10px] text-emerald-700">
+                {tokenText(audit)}
+              </span>
+            )}
           </div>
-        )}
 
-        {styles.length > 0 && (
-          <div className="rounded-lg bg-white/80 p-3">
-            <div className="flex items-center gap-1 text-[11px] font-medium text-teal-700">
-              <Sparkles size={12} />
-              AI collaboration style
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {styles.map(id => (
-                <span
-                  key={id}
-                  className="rounded-full border border-teal-100 bg-teal-50 px-2 py-0.5 text-xs text-teal-800"
-                >
-                  {styleLabel(id)}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {checks.length > 0 && (
-        <div className="mt-3 rounded-lg bg-white/80 p-3">
-          <div className="text-[11px] font-medium text-stone-700">behavior check</div>
-          <div className="mt-2 space-y-2">
-            {checks.map(check => (
-              <div key={check.id} className="flex items-start gap-2 text-xs text-stone-700">
-                {check.passed ? (
-                  <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
-                ) : (
-                  <CircleAlert size={14} className="mt-0.5 shrink-0 text-amber-600" />
-                )}
-                <div>
-                  <div className="font-medium">{check.label}</div>
-                  {check.summary && <div className="mt-0.5 text-stone-500">{check.summary}</div>}
+          <div className="mt-3 grid gap-3 md:grid-cols-2">
+            {policies.length > 0 && (
+              <div className="rounded-lg bg-white/80 p-3">
+                <div className="text-[11px] font-medium text-emerald-700">collaboration rule</div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {policies.map(id => (
+                    <span
+                      key={id}
+                      className="rounded-full border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-xs text-emerald-800"
+                    >
+                      {policyLabel(id)}
+                    </span>
+                  ))}
                 </div>
               </div>
-            ))}
+            )}
+
+            {styles.length > 0 && (
+              <div className="rounded-lg bg-white/80 p-3">
+                <div className="flex items-center gap-1 text-[11px] font-medium text-teal-700">
+                  <Sparkles size={12} />
+                  AI collaboration style
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {styles.map(id => (
+                    <span
+                      key={id}
+                      className="rounded-full border border-teal-100 bg-teal-50 px-2 py-0.5 text-xs text-teal-800"
+                    >
+                      {styleLabel(id)}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
-        </div>
+
+          {checks.length > 0 && (
+            <div className="mt-3 rounded-lg bg-white/80 p-3">
+              <div className="text-[11px] font-medium text-stone-700">behavior check</div>
+              <div className="mt-2 space-y-2">
+                {checks.map(check => (
+                  <div key={check.id} className="flex items-start gap-2 text-xs text-stone-700">
+                    {check.passed ? (
+                      <CheckCircle2 size={14} className="mt-0.5 shrink-0 text-emerald-600" />
+                    ) : (
+                      <CircleAlert size={14} className="mt-0.5 shrink-0 text-amber-600" />
+                    )}
+                    <div>
+                      <div className="font-medium">{check.label}</div>
+                      {check.summary && (
+                        <div className="mt-0.5 text-stone-500">{check.summary}</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );

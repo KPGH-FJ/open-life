@@ -135,6 +135,7 @@ describe("tauri command argument aliases", () => {
 
   it("invokes multi-strategy preview command behind explicit wrapper", async () => {
     vi.mocked(invoke).mockResolvedValue({
+      runId: "run-preview-1",
       strategyKind: "react",
       payloadKind: "react",
       proposalIds: [],
@@ -142,7 +143,7 @@ describe("tauri command argument aliases", () => {
       metadataSafeSummary: {},
     });
 
-    await runMultiStrategyAgentPreview({
+    const result = await runMultiStrategyAgentPreview({
       sessionId: "session-preview",
       userText: "What should I focus on today?",
       toolsPrompt: "Available tools: memory.search",
@@ -159,5 +160,6 @@ describe("tauri command argument aliases", () => {
         localModelAvailable: true,
       }),
     });
+    expect(result.runId).toBe("run-preview-1");
   });
 });

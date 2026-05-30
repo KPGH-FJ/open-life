@@ -40,6 +40,30 @@ describe("RunsPage contract", () => {
             deletedAt: new Date().toISOString(),
             startedAt: new Date().toISOString(),
           },
+          {
+            id: "run-preview-1",
+            taskId: "task-preview-1",
+            sessionId: "session-preview",
+            status: "completed",
+            kind: "conversation",
+            generatedProposals: [],
+            actions: [],
+            observations: [],
+            reasoningStrategy: "multi_strategy_preview",
+            reasoningTrace: {
+              strategy_result: {
+                previewRuntime: "multi_strategy",
+                strategyKind: "planExecute",
+                payloadKind: "planExecute",
+                governanceDecisionKind: "warn",
+                riskLevel: "medium",
+                reasonCode: "write_like_intent",
+                warnings: ["preview runtime forces allowWrites=false"],
+              },
+            },
+            outputPreview: "Multi-strategy preview: planExecute / warn",
+            startedAt: new Date().toISOString(),
+          },
         ]);
       }
       return mockInvoke(cmd, args);
@@ -59,6 +83,10 @@ describe("RunsPage contract", () => {
 
     expect(await screen.findByText("camel case output preview")).toBeInTheDocument();
     expect(screen.getByText("1 个提案")).toBeInTheDocument();
+    expect(screen.getByText("Multi-Strategy Preview")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Governance: warn")).toBeInTheDocument();
+    expect(screen.getByText("1 warning")).toBeInTheDocument();
     expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {

@@ -1,8 +1,11 @@
 use crate::AppState;
+use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::{
-    AgentExecutionBudget, AgentRuntime, AgentTask, AgentTaskKind, GovernanceDecisionKind,
-    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimePayload,
-    PlanExecutionOutput, RuntimeInput, RuntimeStrategyKind,
+    behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunError, AgentRunStatus,
+    AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, GovernanceDecisionKind,
+    HSBehaviorCheckSummary, HSSelectionAudit, MultiStrategyRuntime, MultiStrategyRuntimeInput,
+    MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
+    RedactionLevel, RuntimeInput, RuntimeStrategyKind,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -68,6 +71,64 @@ pub(crate) async fn run_multi_strategy_agent_preview_with_state(
     input: MultiStrategyAgentPreviewInput,
     state: &Arc<AppState>,
 ) -> Result<MultiStrategyAgentPreviewOutput, String> {
+    let mut preview_run = new_preview_agent_run(&input.session_id);
+    let preview_run_id = preview_run.id.clone();
+    create_preview_run(state, &preview_run).await?;
+
+    let result = execute_multi_strategy_agent_preview(input, state, &preview_run_id).await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            fail_preview_run(state, &mut preview_run, &error).await;
+            return Err(metadata_safe_preview_error(&error));
+        }
+    };
+
+    let final_warnings = preview_output_warnings(&result.output, &result.warnings);
+    let audit = preview_audit_summary(&result.output, &final_warnings);
+    let mut output = map_preview_output(result.output, result.warnings);
+    output.run_id = Some(preview_run_id);
+
+    complete_preview_run(
+        state,
+        &mut preview_run,
+        PreviewRunCompletion {
+            audit,
+            warnings: final_warnings,
+            proposal_ids: output.proposal_ids.clone(),
+            context_summary: result.context_summary,
+            hs_selection_audit: result.hs_selection_audit,
+            behavior_checks: result.behavior_checks,
+        },
+    )
+    .await?;
+
+    Ok(output)
+}
+
+struct PreviewExecutionResult {
+    output: MultiStrategyRuntimeOutput,
+    warnings: Vec<String>,
+    context_summary: ContextSummary,
+    hs_selection_audit: Option<HSSelectionAudit>,
+    behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
+struct PreviewRunCompletion {
+    audit: Value,
+    warnings: Vec<String>,
+    proposal_ids: Vec<String>,
+    context_summary: ContextSummary,
+    hs_selection_audit: Option<HSSelectionAudit>,
+    behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
+async fn execute_multi_strategy_agent_preview(
+    input: MultiStrategyAgentPreviewInput,
+    state: &Arc<AppState>,
+    preview_run_id: &str,
+) -> Result<PreviewExecutionResult, String> {
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager
@@ -85,6 +146,8 @@ pub(crate) async fn run_multi_strategy_agent_preview_with_state(
     };
     let (execution_budget, mut adapter_warnings) =
         preview_execution_budget(input.execution_budget.as_ref());
+    let life_model_empty = life_model.is_effectively_empty();
+    let used_tools_prompt = !tools_prompt.trim().is_empty();
 
     let task = AgentTask {
         kind: AgentTaskKind::Conversation,
@@ -96,8 +159,19 @@ pub(crate) async fn run_multi_strategy_agent_preview_with_state(
         }],
         layer,
     };
-    let hs_packet =
-        crate::build_chat_runtime_hs_packet(state, &task, &life_model, &tools_prompt, None).await?;
+    let hs_packet = crate::build_chat_runtime_hs_packet(
+        state,
+        &task,
+        &life_model,
+        &tools_prompt,
+        Some(preview_run_id.to_string()),
+    )
+    .await?;
+    let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+    let behavior_checks = hs_packet
+        .as_ref()
+        .map(behavior_checks_for_packet)
+        .unwrap_or_default();
     let runtime_input = RuntimeInput::from_agent_task(
         task,
         life_model.clone(),
@@ -118,7 +192,21 @@ pub(crate) async fn run_multi_strategy_agent_preview_with_state(
         .map_err(|e| format!("multi-strategy preview runtime failed: {e}"))?;
 
     adapter_warnings.extend(output.warnings.clone());
-    Ok(map_preview_output(output, adapter_warnings))
+    Ok(PreviewExecutionResult {
+        output,
+        warnings: adapter_warnings,
+        context_summary: ContextSummary {
+            life_model_empty,
+            included_life_model_sections: Vec::new(),
+            memory_hit_count: 0,
+            memory_sources: Vec::new(),
+            used_tools_prompt,
+            redaction_applied: true,
+            redaction_level: RedactionLevel::Strict,
+        },
+        hs_selection_audit,
+        behavior_checks,
+    })
 }
 
 fn preview_execution_budget(
@@ -147,6 +235,145 @@ fn preview_execution_budget(
 
     budget.allow_writes = false;
     (budget, warnings)
+}
+
+fn new_preview_agent_run(session_id: &str) -> AgentRun {
+    let mut run = AgentRun::new_chat_run(session_id, "");
+    run.user_input = None;
+    run.reasoning_strategy = Some("multi_strategy_preview".into());
+    run.output_preview = Some("Multi-strategy preview started".into());
+    run.context_summary = Some(ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: true,
+        redaction_level: RedactionLevel::Strict,
+    });
+    run
+}
+
+async fn create_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for preview runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .create_run(run)
+        .map_err(|e| format!("failed to create preview AgentRun: {e}"))
+}
+
+async fn complete_preview_run(
+    state: &Arc<AppState>,
+    run: &mut AgentRun,
+    completion: PreviewRunCompletion,
+) -> Result<(), String> {
+    run.status = AgentRunStatus::Completed;
+    run.finished_at = Some(chrono::Utc::now());
+    run.generated_proposals = completion.proposal_ids;
+    run.warnings = completion.warnings;
+    run.hs_selection_audit = completion.hs_selection_audit;
+    run.behavior_checks = completion.behavior_checks;
+    run.output_preview = Some(preview_output_label(&completion.audit));
+    run.step_count = completion
+        .audit
+        .get("planStepCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default() as u32;
+    run.tool_call_count = 0;
+    run.context_summary = Some(completion.context_summary);
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(completion.audit),
+        output: Some("multi_strategy_preview".into()),
+        stable_steps: vec![
+            "strategy_selection".into(),
+            "governance_check".into(),
+            "preview_payload".into(),
+        ],
+        ..ReasoningTrace::default()
+    });
+
+    update_preview_run(state, run).await
+}
+
+async fn fail_preview_run(state: &Arc<AppState>, run: &mut AgentRun, error: &str) {
+    run.fail(AgentRunError {
+        message: metadata_safe_preview_error(error),
+        phase: "preview_runtime_failed".into(),
+        recoverable: false,
+    });
+    run.user_input = None;
+    run.reasoning_strategy = Some("multi_strategy_preview".into());
+    let audit = json!({
+        "previewRuntime": "multi_strategy",
+        "status": "failed",
+        "errorCode": preview_error_code(error),
+        "metadataSafe": true,
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(audit),
+        output: Some("multi_strategy_preview_failed".into()),
+        ..ReasoningTrace::default()
+    });
+    run.output_preview = Some("Multi-strategy preview failed".into());
+
+    if let Err(e) = update_preview_run(state, run).await {
+        log::warn!("[AgentRun] failed to update preview run after error: {}", e);
+    }
+}
+
+async fn update_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for preview runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .update_run(run)
+        .map_err(|e| format!("failed to update preview AgentRun: {e}"))
+}
+
+fn metadata_safe_preview_error(error: &str) -> String {
+    format!(
+        "multi-strategy preview runtime failed: {}",
+        preview_error_code(error)
+    )
+}
+
+fn preview_error_code(error: &str) -> &'static str {
+    if error.contains("unsupported preview runtime layer") {
+        "invalid_preview_layer"
+    } else if error.contains("failed to load LifeModel") {
+        "lifemodel_load_failed"
+    } else if error.contains("HS runtime packet build failed") {
+        "hs_packet_build_failed"
+    } else if error.contains("multi-strategy preview runtime failed") {
+        "multi_strategy_runtime_failed"
+    } else {
+        "preview_runtime_failed"
+    }
+}
+
+fn preview_output_label(audit: &Value) -> String {
+    let strategy = audit
+        .get("strategyKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let governance = audit
+        .get("governanceDecisionKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    if audit
+        .get("blocked")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        format!("Multi-strategy preview blocked: {strategy} / {governance}")
+    } else {
+        format!("Multi-strategy preview: {strategy} / {governance}")
+    }
 }
 
 fn map_preview_output(
@@ -230,6 +457,155 @@ fn metadata_safe_plan(plan_output: &PlanExecutionOutput) -> Value {
     })
 }
 
+fn preview_output_warnings(
+    output: &MultiStrategyRuntimeOutput,
+    adapter_warnings: &[String],
+) -> Vec<String> {
+    let mut warnings = adapter_warnings.to_vec();
+    if let MultiStrategyRuntimePayload::ReAct(runtime_output) = &output.payload {
+        warnings.extend(runtime_output.warnings.clone());
+    }
+    warnings
+}
+
+fn preview_audit_summary(output: &MultiStrategyRuntimeOutput, warnings: &[String]) -> Value {
+    let strategy_kind = preview_strategy_kind(output.selection.kind);
+    let payload_kind = preview_payload_kind(&output.payload);
+    let metadata = &output.selection.metadata_safe_summary;
+    let task_kind = metadata
+        .get("taskKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let reason_code = metadata
+        .get("reasonCode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let risk_level = metadata
+        .get("riskLevel")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let has_hs_packet = metadata
+        .get("hasHsPacket")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let governance_policy_kind = output
+        .selection
+        .governance_decision
+        .as_ref()
+        .map(|decision| preview_governance_policy_kind(decision.kind))
+        .unwrap_or("unknown");
+    let governance_decision_kind = output
+        .selection
+        .governance_decision
+        .as_ref()
+        .map(|decision| preview_governance_decision_kind(decision.kind))
+        .unwrap_or("unknown");
+    let proposal_ids = preview_proposal_ids(&output.payload);
+    let inner_run_id = match &output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output) => runtime_output.run_id.clone(),
+        MultiStrategyRuntimePayload::PlanExecute(_) | MultiStrategyRuntimePayload::Blocked => None,
+    };
+    let plan_step_count = preview_plan_step_count(&output.payload);
+    let plan_step_statuses = preview_plan_step_statuses(&output.payload);
+    let write_control = preview_write_control(&output.payload);
+    let blocked = matches!(output.payload, MultiStrategyRuntimePayload::Blocked);
+
+    json!({
+        "previewRuntime": "multi_strategy",
+        "taskKind": task_kind,
+        "strategyKind": strategy_kind,
+        "payloadKind": payload_kind,
+        "governanceDecisionKind": governance_decision_kind,
+        "governancePolicyKind": governance_policy_kind,
+        "reasonCode": reason_code,
+        "riskLevel": risk_level,
+        "hasHsPacket": has_hs_packet,
+        "warnings": warnings,
+        "proposalIds": proposal_ids,
+        "planStepCount": plan_step_count,
+        "planStepStatuses": plan_step_statuses,
+        "blocked": blocked,
+        "metadataSafe": true,
+        "innerRunId": inner_run_id,
+        "writeControl": write_control,
+    })
+}
+
+fn preview_payload_kind(payload: &MultiStrategyRuntimePayload) -> &'static str {
+    match payload {
+        MultiStrategyRuntimePayload::ReAct(_) => "react",
+        MultiStrategyRuntimePayload::PlanExecute(_) => "planExecute",
+        MultiStrategyRuntimePayload::Blocked => "blocked",
+    }
+}
+
+fn preview_proposal_ids(payload: &MultiStrategyRuntimePayload) -> Vec<String> {
+    match payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output) => runtime_output.proposal_ids.clone(),
+        MultiStrategyRuntimePayload::PlanExecute(_) | MultiStrategyRuntimePayload::Blocked => {
+            Vec::new()
+        }
+    }
+}
+
+fn preview_plan_step_count(payload: &MultiStrategyRuntimePayload) -> usize {
+    match payload {
+        MultiStrategyRuntimePayload::PlanExecute(plan_output) => plan_output.plan.steps.len(),
+        MultiStrategyRuntimePayload::ReAct(_) | MultiStrategyRuntimePayload::Blocked => 0,
+    }
+}
+
+fn preview_plan_step_statuses(payload: &MultiStrategyRuntimePayload) -> Vec<String> {
+    match payload {
+        MultiStrategyRuntimePayload::PlanExecute(plan_output) => plan_output
+            .traces
+            .iter()
+            .map(|trace| preview_plan_step_status(trace.status))
+            .collect(),
+        MultiStrategyRuntimePayload::ReAct(_) | MultiStrategyRuntimePayload::Blocked => Vec::new(),
+    }
+}
+
+fn preview_write_control(payload: &MultiStrategyRuntimePayload) -> Value {
+    match payload {
+        MultiStrategyRuntimePayload::PlanExecute(plan_output) => {
+            let declared_write_step_count = plan_output
+                .plan
+                .steps
+                .iter()
+                .filter(|step| step.declared_write)
+                .count();
+            let proposal_required_step_count = plan_output
+                .traces
+                .iter()
+                .filter(|trace| trace.status == PlanStepStatus::RequiresProposal)
+                .count();
+            let blocked_step_count = plan_output
+                .traces
+                .iter()
+                .filter(|trace| trace.status == PlanStepStatus::Blocked)
+                .count();
+            json!({
+                "declaredWriteStepCount": declared_write_step_count,
+                "proposalRequiredStepCount": proposal_required_step_count,
+                "blockedStepCount": blocked_step_count,
+            })
+        }
+        MultiStrategyRuntimePayload::ReAct(_) | MultiStrategyRuntimePayload::Blocked => json!({
+            "declaredWriteStepCount": 0,
+            "proposalRequiredStepCount": 0,
+            "blockedStepCount": 0,
+        }),
+    }
+}
+
+fn preview_plan_step_status(status: PlanStepStatus) -> String {
+    serde_json::to_value(status)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_else(|| "unknown".into())
+}
+
 fn merge_warnings(mut left: Vec<String>, right: Vec<String>) -> Vec<String> {
     left.extend(right);
     left
@@ -262,10 +638,20 @@ fn preview_governance_decision_kind(kind: GovernanceDecisionKind) -> &'static st
     }
 }
 
+fn preview_governance_policy_kind(kind: GovernanceDecisionKind) -> &'static str {
+    match kind {
+        GovernanceDecisionKind::Allow => "allow",
+        GovernanceDecisionKind::RequireProposal => "require_proposal",
+        GovernanceDecisionKind::RequireConfirmation => "require_confirmation",
+        GovernanceDecisionKind::RequireLocalOnly => "require_local_only",
+        GovernanceDecisionKind::Block => "block",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::agent::ProposalStore;
+    use openlife_core::agent::{AgentRun, AgentRunStatus, ProposalStore};
     use openlife_core::life_model::LifeModel;
 
     async fn preview_state() -> std::sync::Arc<crate::AppState> {
@@ -289,6 +675,21 @@ mod tests {
         }
     }
 
+    async fn stored_preview_run(state: &Arc<crate::AppState>, run_id: &str) -> AgentRun {
+        let store = state.agent_run_store.as_ref().unwrap().lock().await;
+        store
+            .get_run(run_id)
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing preview run {run_id}"))
+    }
+
+    fn preview_audit(run: &AgentRun) -> &Value {
+        run.reasoning_trace
+            .as_ref()
+            .and_then(|trace| trace.strategy_result.as_ref())
+            .expect("preview run should persist metadata-safe audit")
+    }
+
     #[tokio::test]
     async fn multi_strategy_preview_command_executes_react_path() {
         let state = preview_state().await;
@@ -306,6 +707,19 @@ mod tests {
         assert!(output.user_output.is_some());
         assert!(output.proposal_ids.is_empty());
         assert_eq!(output.governance_decision_kind.as_deref(), Some("allow"));
+
+        let run = stored_preview_run(&state, output.run_id.as_deref().unwrap()).await;
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.user_input, None);
+        assert_eq!(
+            run.reasoning_strategy.as_deref(),
+            Some("multi_strategy_preview")
+        );
+        let audit = preview_audit(&run);
+        assert_eq!(audit["strategyKind"], "react");
+        assert_eq!(audit["payloadKind"], "react");
+        assert_eq!(audit["blocked"], false);
+        assert_eq!(audit["metadataSafe"], true);
     }
 
     #[tokio::test]
@@ -321,10 +735,19 @@ mod tests {
 
         assert_eq!(output.strategy_kind, "planExecute");
         assert_eq!(output.payload_kind, "planExecute");
-        assert!(output.run_id.is_none());
+        assert!(output.run_id.is_some());
         assert!(output.user_output.is_none());
         assert!(output.plan.is_some());
         assert!(output.proposal_ids.is_empty());
+
+        let run = stored_preview_run(&state, output.run_id.as_deref().unwrap()).await;
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.user_input, None);
+        let audit = preview_audit(&run);
+        assert_eq!(audit["strategyKind"], "planExecute");
+        assert_eq!(audit["payloadKind"], "planExecute");
+        assert_eq!(audit["planStepCount"], 1);
+        assert_eq!(audit["planStepStatuses"][0], "executed");
     }
 
     #[tokio::test]
@@ -339,9 +762,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.payload_kind, "blocked");
-        assert!(output.run_id.is_none());
+        assert!(output.run_id.is_some());
         assert!(output.user_output.is_none());
         assert_eq!(output.governance_decision_kind.as_deref(), Some("block"));
+
+        let run = stored_preview_run(&state, output.run_id.as_deref().unwrap()).await;
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.user_input, None);
+        let audit = preview_audit(&run);
+        assert_eq!(audit["payloadKind"], "blocked");
+        assert_eq!(audit["governanceDecisionKind"], "block");
+        assert_eq!(audit["blocked"], true);
     }
 
     #[tokio::test]
@@ -362,6 +793,11 @@ mod tests {
             .metadata_safe_summary
             .to_string()
             .contains("calendar.create_event"));
+
+        let run = stored_preview_run(&state, output.run_id.as_deref().unwrap()).await;
+        let persisted = serde_json::to_string(&run).unwrap();
+        assert!(!persisted.contains("calendar.create_event"));
+        assert!(!persisted.contains("email.send"));
     }
 
     #[tokio::test]
@@ -381,6 +817,42 @@ mod tests {
         assert!(!serialized.contains("full draft"));
         assert!(!serialized.contains("email.send"));
         assert!(!serialized.contains("file.update"));
+
+        let run = stored_preview_run(&state, output.run_id.as_deref().unwrap()).await;
+        let persisted = serde_json::to_string(&run).unwrap();
+        assert!(!persisted.contains("Alice"));
+        assert!(!persisted.contains("alice@example.com"));
+        assert!(!persisted.contains("full draft"));
+        assert!(!persisted.contains("email.send"));
+        assert!(!persisted.contains("file.update"));
+        assert_eq!(run.user_input, None);
+    }
+
+    #[tokio::test]
+    async fn multi_strategy_preview_command_persists_failed_run_with_sanitized_error() {
+        let state = preview_state().await;
+        let mut input = base_input("raw user text for Alice alice@example.com");
+        input.layer = Some("not-a-layer".into());
+
+        let err = run_multi_strategy_agent_preview_with_state(input, &state)
+            .await
+            .unwrap_err();
+
+        assert!(!err.contains("Alice"));
+        assert!(!err.contains("alice@example.com"));
+
+        let runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs_for_session("session-preview", 10).unwrap()
+        };
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.status, AgentRunStatus::Failed);
+        assert_eq!(run.user_input, None);
+        let persisted = serde_json::to_string(run).unwrap();
+        assert!(!persisted.contains("Alice"));
+        assert!(!persisted.contains("alice@example.com"));
+        assert!(persisted.contains("preview_runtime_failed"));
     }
 
     #[tokio::test]

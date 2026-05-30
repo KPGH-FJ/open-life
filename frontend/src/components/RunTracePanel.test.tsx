@@ -57,4 +57,42 @@ describe("RunTracePanel", () => {
     expect(screen.getByText("No collaboration rules affected this run.")).toBeInTheDocument();
     expect(screen.queryByText("AI collaboration style")).not.toBeInTheDocument();
   });
+
+  it("renders metadata-safe multi-strategy preview audit", () => {
+    render(
+      <RunTracePanel
+        run={{
+          ...baseRun,
+          reasoningStrategy: "multi_strategy_preview",
+          reasoningTrace: {
+            strategy_result: {
+              previewRuntime: "multi_strategy",
+              strategyKind: "planExecute",
+              payloadKind: "planExecute",
+              governanceDecisionKind: "warn",
+              riskLevel: "medium",
+              reasonCode: "write_like_intent",
+              hasHsPacket: true,
+              planStepCount: 1,
+              planStepStatuses: ["requires_proposal"],
+              warnings: ["preview runtime forces allowWrites=false"],
+              blocked: false,
+              metadataSafe: true,
+            },
+          },
+          outputPreview: "raw-sensitive-payload-should-not-drive-trace",
+        }}
+      />
+    );
+
+    expect(screen.getByText("Multi-strategy preview trace")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Governance: warn")).toBeInTheDocument();
+    expect(screen.getByText("write_like_intent")).toBeInTheDocument();
+    expect(screen.getByText("requires_proposal")).toBeInTheDocument();
+    expect(screen.getByText("preview runtime forces allowWrites=false")).toBeInTheDocument();
+    expect(
+      screen.queryByText("raw-sensitive-payload-should-not-drive-trace")
+    ).not.toBeInTheDocument();
+  });
 });

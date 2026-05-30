@@ -232,6 +232,37 @@ export const mockChatMessages: ChatMessage[] = [
   { role: "assistant", content: "你好！我是 OpenLife。" },
 ];
 
+export const mockPreviewAgentRun = {
+  id: "run-preview-1",
+  taskId: "task-preview-1",
+  sessionId: "session-preview",
+  status: "completed",
+  kind: "conversation",
+  generatedProposals: [],
+  actions: [],
+  observations: [],
+  reasoningStrategy: "multi_strategy_preview",
+  reasoningTrace: {
+    strategy_result: {
+      previewRuntime: "multi_strategy",
+      strategyKind: "react",
+      payloadKind: "react",
+      governanceDecisionKind: "allow",
+      riskLevel: "low",
+      reasonCode: "default_react",
+      hasHsPacket: false,
+      warnings: [],
+      proposalIds: [],
+      planStepCount: 0,
+      planStepStatuses: [],
+      blocked: false,
+      metadataSafe: true,
+    },
+  },
+  outputPreview: "Multi-strategy preview: react / allow",
+  startedAt: new Date().toISOString(),
+};
+
 export const mockLifeModelVersions: LifeModelVersion[] = [
   {
     version: "0.1.0",
@@ -385,6 +416,9 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
+      if (_args?.runId === "run-preview-1") {
+        return Promise.resolve(mockPreviewAgentRun as T);
+      }
       return Promise.resolve(null as T);
     case "list_agent_runs":
       return Promise.resolve([] as T);

@@ -15,7 +15,7 @@ use tokio::sync::Mutex;
 #[allow(dead_code)]
 pub(crate) fn test_app_state() -> Arc<AppState> {
     let config = AppConfig::default();
-    let base = std::env::temp_dir().join("test-openlife");
+    let base = std::env::temp_dir().join(format!("test-openlife-{}", uuid::Uuid::new_v4()));
     Arc::new(AppState {
         config: Arc::new(Mutex::new(config.clone())),
         life_model_manager: Arc::new(Mutex::new(
