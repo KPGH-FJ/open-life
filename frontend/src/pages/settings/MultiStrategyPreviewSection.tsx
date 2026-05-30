@@ -14,10 +14,12 @@ import {
 import {
   checkControlledChatPilotEligibility,
   checkRuntimeMigrationGate,
+  getControlledPilotPromotionEvidenceSummary,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
   ControlledChatPilotEligibilityReport,
+  ControlledPilotPromotionEvidenceSummary,
   MultiStrategyAgentPreviewLayer,
   MultiStrategyAgentPreviewOutput,
   RuntimeMigrationGateReport,
@@ -84,6 +86,10 @@ export default function MultiStrategyPreviewSection() {
   const [pilotChecking, setPilotChecking] = useState(false);
   const [pilotError, setPilotError] = useState<string | null>(null);
   const [pilotReport, setPilotReport] = useState<ControlledChatPilotEligibilityReport | null>(null);
+  const [promotionSummaryChecking, setPromotionSummaryChecking] = useState(false);
+  const [promotionSummaryError, setPromotionSummaryError] = useState<string | null>(null);
+  const [promotionSummary, setPromotionSummary] =
+    useState<ControlledPilotPromotionEvidenceSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -154,6 +160,19 @@ export default function MultiStrategyPreviewSection() {
       setPilotError(`Pilot eligibility check failed: ${readableError(e)}`);
     } finally {
       setPilotChecking(false);
+    }
+  };
+
+  const handlePromotionSummaryRefresh = async () => {
+    setPromotionSummaryChecking(true);
+    setPromotionSummaryError(null);
+    try {
+      const summary = await getControlledPilotPromotionEvidenceSummary();
+      setPromotionSummary(summary);
+    } catch (e) {
+      setPromotionSummaryError(`Promotion evidence summary failed: ${readableError(e)}`);
+    } finally {
+      setPromotionSummaryChecking(false);
     }
   };
 
@@ -362,6 +381,97 @@ export default function MultiStrategyPreviewSection() {
               )}
             </div>
           </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Promotion evidence summary</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only metadata-safe evidence recorded after reviewed promotion. It shows counts,
+              run ids, and timestamps only; raw prompts and raw pilot responses are not displayed.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handlePromotionSummaryRefresh}
+            disabled={promotionSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              promotionSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={promotionSummaryChecking ? "animate-spin" : undefined}
+            />
+            {promotionSummaryChecking ? "Refreshing..." : "Refresh Promotion Evidence"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          This summary reads existing EvidenceStore records only. It does not run preview, promote a
+          message, or write LifeModel, Memory, Proposal, Action, Observation, or tool results.
+        </div>
+
+        {promotionSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {promotionSummaryError}
+          </div>
+        )}
+
+        {promotionSummary ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Promoted count</div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {promotionSummary.promotedCount}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">
+                  Latest promotion timestamp
+                </div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {promotionSummary.latestPromotionTimestamp ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">
+                  Source/target mismatch blocks
+                </div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {promotionSummary.sourceTargetMismatchBlockCount}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">
+                Recent promoted pilot run ids
+              </div>
+              {promotionSummary.recentPromotedPilotRunIds.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1.5">
+                  {promotionSummary.recentPromotedPilotRunIds.map(runId => (
+                    <span
+                      key={runId}
+                      className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 font-mono text-xs text-stone-700"
+                    >
+                      {runId}
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No promotion evidence recorded.</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No promotion evidence summary loaded.</div>
         )}
       </section>
 

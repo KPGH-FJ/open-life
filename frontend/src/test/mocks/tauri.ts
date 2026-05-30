@@ -441,6 +441,20 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         },
         defaultChatUnchanged: true,
       } as T);
+    case "record_controlled_pilot_promotion_evidence":
+      return Promise.resolve({
+        evidenceId: "ev_promotion_1",
+        created: true,
+        pilotRunId: _args?.input?.pilotRunId ?? "run-controlled-pilot-1",
+        promotedAt: _args?.input?.promotedAt ?? new Date().toISOString(),
+      } as T);
+    case "get_controlled_pilot_promotion_evidence_summary":
+      return Promise.resolve({
+        promotedCount: 2,
+        recentPromotedPilotRunIds: ["run-controlled-pilot-2", "run-controlled-pilot-1"],
+        latestPromotionTimestamp: "2026-05-30T01:02:03Z",
+        sourceTargetMismatchBlockCount: 1,
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

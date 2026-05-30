@@ -3,10 +3,12 @@ use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::{
     behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunError, AgentRunStatus,
     AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, ControlledChatPilotEligibilityReport,
-    GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit, MultiStrategyRuntime,
-    MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload,
-    PlanExecutionOutput, PlanStepStatus, RedactionLevel, RuntimeInput, RuntimeMigrationGateReport,
-    RuntimeStrategyKind, DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
+    EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceSourceRef, EvidenceSourceType,
+    EvidenceType, GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit,
+    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput,
+    MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus, RedactionLevel, RiskLevel,
+    RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
+    DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -14,6 +16,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tauri::State;
+
+const CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH: &str = "runtime.controlled_pilot.promotion";
+const CONTROLLED_PILOT_PROMOTION_BLOCK_PATH: &str = "runtime.controlled_pilot.promotion_block";
+const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -78,6 +84,40 @@ pub struct ControlledChatPilotEligibilityCheckInput {
     pub session_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledPilotPromotionEvidenceInput {
+    pub pilot_run_id: String,
+    pub source_session_id: String,
+    pub target_session_id: String,
+    pub strategy_kind: String,
+    pub payload_kind: String,
+    #[serde(default)]
+    pub governance_decision_kind: Option<String>,
+    pub promoted_message_length: usize,
+    pub promoted_message_hash: String,
+    #[serde(default)]
+    pub promoted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledPilotPromotionEvidenceResult {
+    pub evidence_id: String,
+    pub created: bool,
+    pub pilot_run_id: String,
+    pub promoted_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledPilotPromotionEvidenceSummary {
+    pub promoted_count: usize,
+    pub recent_promoted_pilot_run_ids: Vec<String>,
+    pub latest_promotion_timestamp: Option<String>,
+    pub source_target_mismatch_block_count: usize,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -129,6 +169,267 @@ pub(crate) async fn check_controlled_chat_pilot_eligibility_with_state(
             },
         ),
     )
+}
+
+#[tauri::command]
+pub async fn record_controlled_pilot_promotion_evidence(
+    input: ControlledPilotPromotionEvidenceInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledPilotPromotionEvidenceResult, String> {
+    record_controlled_pilot_promotion_evidence_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn record_controlled_pilot_promotion_evidence_with_state(
+    input: ControlledPilotPromotionEvidenceInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledPilotPromotionEvidenceResult, String> {
+    let evidence = normalize_promotion_evidence_input(input)?;
+    let store = state.evidence_store.lock().await;
+    let existing = store
+        .query(EvidenceQuery {
+            affected_path: Some(CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH.into()),
+            evidence_type: Some(EvidenceType::RuntimeBehavior),
+            linked_agent_run_id: Some(evidence.pilot_run_id.clone()),
+            ..EvidenceQuery::default()
+        })
+        .map_err(|e| format!("failed to query controlled pilot promotion evidence: {e}"))?;
+
+    if let Some(record) = existing.first() {
+        let existing_hash = record
+            .run_metadata
+            .get("promotedMessageHash")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if existing_hash != evidence.promoted_message_hash {
+            return Err(
+                "promotion evidence already exists for pilotRunId with a different checksum".into(),
+            );
+        }
+        let promoted_at = record
+            .run_metadata
+            .get("promotedAt")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339());
+        return Ok(ControlledPilotPromotionEvidenceResult {
+            evidence_id: record.id.clone(),
+            created: false,
+            pilot_run_id: evidence.pilot_run_id,
+            promoted_at,
+        });
+    }
+
+    let metadata = json!({
+        "evidenceKind": "controlled_pilot_promotion",
+        "pilotRunId": evidence.pilot_run_id.clone(),
+        "sourceSessionId": evidence.source_session_id.clone(),
+        "targetSessionId": evidence.target_session_id.clone(),
+        "strategyKind": evidence.strategy_kind.clone(),
+        "payloadKind": evidence.payload_kind.clone(),
+        "governanceDecisionKind": evidence.governance_decision_kind.clone(),
+        "promotedMessageLength": evidence.promoted_message_length,
+        "promotedMessageHash": evidence.promoted_message_hash.clone(),
+        "promotedAt": evidence.promoted_at.clone(),
+        "metadataSafe": true,
+        "contentStorage": "checksum_only",
+        "toolStorage": "none"
+    });
+    let draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    )
+    .with_summary("Controlled pilot response promoted to chat history")
+    .with_source_ref(EvidenceSourceRef::from_digest(
+        EvidenceSourceType::AgentRun,
+        &evidence.pilot_run_id,
+        Some("controlled_pilot_promotion"),
+        &evidence.promoted_message_hash,
+    ))
+    .with_linked_agent_run(evidence.pilot_run_id.clone());
+    let mut draft = draft;
+    draft.run_metadata = metadata;
+
+    let record = store
+        .create_evidence(draft)
+        .map_err(|e| format!("failed to record controlled pilot promotion evidence: {e}"))?;
+
+    Ok(ControlledPilotPromotionEvidenceResult {
+        evidence_id: record.id,
+        created: true,
+        pilot_run_id: evidence.pilot_run_id,
+        promoted_at: evidence.promoted_at,
+    })
+}
+
+#[tauri::command]
+pub async fn get_controlled_pilot_promotion_evidence_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledPilotPromotionEvidenceSummary, String> {
+    get_controlled_pilot_promotion_evidence_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_controlled_pilot_promotion_evidence_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<ControlledPilotPromotionEvidenceSummary, String> {
+    let store = state.evidence_store.lock().await;
+    let promotions = store
+        .query(EvidenceQuery {
+            affected_path: Some(CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH.into()),
+            evidence_type: Some(EvidenceType::RuntimeBehavior),
+            ..EvidenceQuery::default()
+        })
+        .map_err(|e| format!("failed to read controlled pilot promotion evidence: {e}"))?;
+    let mismatch_blocks = store
+        .query(EvidenceQuery {
+            affected_path: Some(CONTROLLED_PILOT_PROMOTION_BLOCK_PATH.into()),
+            evidence_type: Some(EvidenceType::RuntimeBehavior),
+            ..EvidenceQuery::default()
+        })
+        .map_err(|e| format!("failed to read controlled pilot promotion block evidence: {e}"))?;
+
+    let recent_promoted_pilot_run_ids = promotions
+        .iter()
+        .filter_map(promotion_evidence_pilot_run_id)
+        .take(RECENT_PROMOTION_EVIDENCE_LIMIT)
+        .collect();
+    let latest_promotion_timestamp = promotions.first().map(promotion_evidence_timestamp);
+
+    Ok(ControlledPilotPromotionEvidenceSummary {
+        promoted_count: promotions.len(),
+        recent_promoted_pilot_run_ids,
+        latest_promotion_timestamp,
+        source_target_mismatch_block_count: mismatch_blocks.len(),
+    })
+}
+
+struct NormalizedPromotionEvidenceInput {
+    pilot_run_id: String,
+    source_session_id: String,
+    target_session_id: String,
+    strategy_kind: String,
+    payload_kind: String,
+    governance_decision_kind: String,
+    promoted_message_length: usize,
+    promoted_message_hash: String,
+    promoted_at: String,
+}
+
+fn normalize_promotion_evidence_input(
+    input: ControlledPilotPromotionEvidenceInput,
+) -> Result<NormalizedPromotionEvidenceInput, String> {
+    let pilot_run_id = safe_internal_id(&input.pilot_run_id, "pilotRunId")?;
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let target_session_id = safe_internal_id(&input.target_session_id, "targetSessionId")?;
+    if source_session_id != target_session_id {
+        return Err("sourceSessionId must match targetSessionId for promotion evidence".into());
+    }
+    let strategy_kind = safe_enum_value(
+        &input.strategy_kind,
+        "strategyKind",
+        &["react", "planExecute"],
+    )?;
+    let payload_kind = safe_enum_value(
+        &input.payload_kind,
+        "payloadKind",
+        &["react", "planExecute", "blocked"],
+    )?;
+    let governance_decision_kind = safe_enum_value(
+        input
+            .governance_decision_kind
+            .as_deref()
+            .unwrap_or("unknown"),
+        "governanceDecisionKind",
+        &["allow", "warn", "block", "unknown"],
+    )?;
+    if input.promoted_message_length == 0 {
+        return Err("promotedMessageLength must be greater than zero".into());
+    }
+    let promoted_message_hash = safe_checksum(&input.promoted_message_hash)?;
+    let promoted_at = match input.promoted_at.as_deref().map(str::trim) {
+        Some(value) if !value.is_empty() => {
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| "promotedAt must be an RFC3339 timestamp".to_string())?;
+            value.to_string()
+        }
+        _ => chrono::Utc::now().to_rfc3339(),
+    };
+
+    Ok(NormalizedPromotionEvidenceInput {
+        pilot_run_id,
+        source_session_id,
+        target_session_id,
+        strategy_kind,
+        payload_kind,
+        governance_decision_kind,
+        promoted_message_length: input.promoted_message_length,
+        promoted_message_hash,
+        promoted_at,
+    })
+}
+
+fn safe_internal_id(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} is required"));
+    }
+    if trimmed.len() > 160 || !trimmed.chars().all(is_safe_metadata_token_char) {
+        return Err(format!("{field} must be an internal metadata id"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn safe_enum_value(value: &str, field: &str, allowed: &[&str]) -> Result<String, String> {
+    let trimmed = value.trim();
+    if allowed
+        .iter()
+        .any(|allowed_value| allowed_value == &trimmed)
+    {
+        Ok(trimmed.to_string())
+    } else {
+        Err(format!("{field} is not an allowed metadata value"))
+    }
+}
+
+fn safe_checksum(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("promotedMessageHash is required".into());
+    }
+    if trimmed.len() > 160 || !trimmed.chars().all(is_safe_checksum_char) {
+        return Err("promotedMessageHash must be a metadata-safe checksum".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn is_safe_metadata_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.')
+}
+
+fn is_safe_checksum_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.')
+}
+
+fn promotion_evidence_pilot_run_id(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<String> {
+    record
+        .run_metadata
+        .get("pilotRunId")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .or_else(|| record.linked_agent_run_ids.first().cloned())
+}
+
+fn promotion_evidence_timestamp(record: &openlife_core::agent::EvidenceRecord) -> String {
+    record
+        .run_metadata
+        .get("promotedAt")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| record.created_at.to_rfc3339())
 }
 
 #[tauri::command]
@@ -796,7 +1097,9 @@ fn preview_governance_policy_kind(kind: GovernanceDecisionKind) -> &'static str 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::agent::{AgentRun, AgentRunStatus, ProposalStore};
+    use openlife_core::agent::{
+        AgentRun, AgentRunStatus, EvidenceQuery, EvidenceType, ProposalStore,
+    };
     use openlife_core::life_model::LifeModel;
 
     async fn preview_state() -> std::sync::Arc<crate::AppState> {
@@ -1081,6 +1384,141 @@ mod tests {
             .blocking_reasons
             .iter()
             .any(|reason| reason.contains("run-preview-blocked-2:external_write_risk_detected")));
+    }
+
+    #[tokio::test]
+    async fn promotion_evidence_command_records_metadata_safe_idempotent_evidence() {
+        let state = preview_state().await;
+        let raw_pilot_response = "Pilot-only answer with private@example.com";
+        let input = ControlledPilotPromotionEvidenceInput {
+            pilot_run_id: "run-controlled-pilot-1".into(),
+            source_session_id: "session-1".into(),
+            target_session_id: "session-1".into(),
+            strategy_kind: "react".into(),
+            payload_kind: "react".into(),
+            governance_decision_kind: Some("allow".into()),
+            promoted_message_length: raw_pilot_response.len(),
+            promoted_message_hash: "checksum:test-safe-digest".into(),
+            promoted_at: Some("2026-05-30T01:02:03Z".into()),
+        };
+
+        let first = record_controlled_pilot_promotion_evidence_with_state(input.clone(), &state)
+            .await
+            .unwrap();
+        let second = record_controlled_pilot_promotion_evidence_with_state(input, &state)
+            .await
+            .unwrap();
+
+        assert!(first.created);
+        assert!(!second.created);
+        assert_eq!(first.evidence_id, second.evidence_id);
+
+        let evidence = {
+            let store = state.evidence_store.lock().await;
+            store
+                .query(EvidenceQuery {
+                    affected_path: Some("runtime.controlled_pilot.promotion".into()),
+                    evidence_type: Some(EvidenceType::RuntimeBehavior),
+                    ..EvidenceQuery::default()
+                })
+                .unwrap()
+        };
+        assert_eq!(evidence.len(), 1);
+        let record = &evidence[0];
+        assert_eq!(record.linked_agent_run_ids, vec!["run-controlled-pilot-1"]);
+        assert_eq!(record.run_metadata["pilotRunId"], "run-controlled-pilot-1");
+        assert_eq!(record.run_metadata["sourceSessionId"], "session-1");
+        assert_eq!(record.run_metadata["targetSessionId"], "session-1");
+        assert_eq!(record.run_metadata["strategyKind"], "react");
+        assert_eq!(record.run_metadata["payloadKind"], "react");
+        assert_eq!(record.run_metadata["governanceDecisionKind"], "allow");
+        assert_eq!(
+            record.run_metadata["promotedMessageHash"],
+            "checksum:test-safe-digest"
+        );
+        assert_eq!(record.run_metadata["promotedAt"], "2026-05-30T01:02:03Z");
+
+        let serialized = serde_json::to_string(record).unwrap();
+        assert!(!serialized.contains(raw_pilot_response));
+        assert!(!serialized.contains("private@example.com"));
+        assert!(!serialized.contains("rawUserInput"));
+        assert!(!serialized.contains("rawAssistantResponse"));
+        assert!(!serialized.contains("toolPayload"));
+    }
+
+    #[tokio::test]
+    async fn promotion_evidence_command_rejects_source_target_mismatch() {
+        let state = preview_state().await;
+        let err = record_controlled_pilot_promotion_evidence_with_state(
+            ControlledPilotPromotionEvidenceInput {
+                pilot_run_id: "run-controlled-pilot-1".into(),
+                source_session_id: "session-1".into(),
+                target_session_id: "session-2".into(),
+                strategy_kind: "react".into(),
+                payload_kind: "react".into(),
+                governance_decision_kind: Some("allow".into()),
+                promoted_message_length: 17,
+                promoted_message_hash: "checksum:test-safe-digest".into(),
+                promoted_at: Some("2026-05-30T01:02:03Z".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("sourceSessionId must match targetSessionId"));
+        let evidence = {
+            let store = state.evidence_store.lock().await;
+            store
+                .query(EvidenceQuery {
+                    affected_path: Some("runtime.controlled_pilot.promotion".into()),
+                    evidence_type: Some(EvidenceType::RuntimeBehavior),
+                    ..EvidenceQuery::default()
+                })
+                .unwrap()
+        };
+        assert!(evidence.is_empty());
+    }
+
+    #[tokio::test]
+    async fn promotion_evidence_summary_returns_read_only_metadata() {
+        let state = preview_state().await;
+        for (run_id, promoted_at) in [
+            ("run-controlled-pilot-1", "2026-05-30T01:02:03Z"),
+            ("run-controlled-pilot-2", "2026-05-30T02:03:04Z"),
+        ] {
+            record_controlled_pilot_promotion_evidence_with_state(
+                ControlledPilotPromotionEvidenceInput {
+                    pilot_run_id: run_id.into(),
+                    source_session_id: "session-1".into(),
+                    target_session_id: "session-1".into(),
+                    strategy_kind: "react".into(),
+                    payload_kind: "react".into(),
+                    governance_decision_kind: Some("allow".into()),
+                    promoted_message_length: 17,
+                    promoted_message_hash: format!("checksum:{run_id}"),
+                    promoted_at: Some(promoted_at.into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+        }
+
+        let summary = get_controlled_pilot_promotion_evidence_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.promoted_count, 2);
+        assert_eq!(
+            summary.recent_promoted_pilot_run_ids,
+            vec!["run-controlled-pilot-2", "run-controlled-pilot-1"]
+        );
+        assert_eq!(
+            summary.latest_promotion_timestamp.as_deref(),
+            Some("2026-05-30T02:03:04Z")
+        );
+        assert_eq!(summary.source_target_mismatch_block_count, 0);
     }
 
     #[tokio::test]

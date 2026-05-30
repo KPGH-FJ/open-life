@@ -48,6 +48,7 @@ import {
   getPendingProposals,
   runMultiStrategyAgentPreview,
   checkControlledChatPilotEligibility,
+  recordControlledPilotPromotionEvidence,
 } from "../tauri";
 import type {
   AgentRun,
@@ -60,6 +61,7 @@ import type {
   ToolCallResult,
 } from "../tauri";
 import type {
+  ControlledPilotPromotionEvidenceInput,
   ControlledChatPilotEligibilityReport,
   MultiStrategyAgentPreviewLayer,
   MultiStrategyAgentPreviewOutput,
@@ -277,7 +279,16 @@ function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, st
 
 function getPilotPromotionKey(result: MultiStrategyAgentPreviewOutput | null): string {
   if (!result) return "";
-  return result.runId || `${result.strategyKind}:${result.payloadKind}:${result.userOutput ?? ""}`;
+  return result.runId ?? "";
+}
+
+function checksumText(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `checksum:${hash.toString(16).padStart(8, "0")}`;
 }
 
 function buildControlledPilotSourceMismatchMessage(
@@ -289,8 +300,9 @@ function buildControlledPilotSourceMismatchMessage(
 
 function hasPromotablePilotResponse(
   result: MultiStrategyAgentPreviewOutput | null
-): result is MultiStrategyAgentPreviewOutput & { userOutput: string } {
+): result is MultiStrategyAgentPreviewOutput & { userOutput: string; runId: string } {
   if (!result?.userOutput?.trim()) return false;
+  if (!result.runId?.trim()) return false;
   return result.payloadKind !== "blocked" && result.governanceDecisionKind !== "block";
 }
 
@@ -349,6 +361,9 @@ export default function ChatPage() {
   const [promotedControlledPilotKeys, setPromotedControlledPilotKeys] = useState<
     Record<string, boolean>
   >({});
+  const [savedControlledPilotPromotionKeys, setSavedControlledPilotPromotionKeys] = useState<
+    Record<string, boolean>
+  >({});
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -358,6 +373,7 @@ export default function ChatPage() {
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
+  const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
   const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -367,6 +383,10 @@ export default function ChatPage() {
   useEffect(() => {
     promotedControlledPilotKeysRef.current = promotedControlledPilotKeys;
   }, [promotedControlledPilotKeys]);
+
+  useEffect(() => {
+    savedControlledPilotPromotionKeysRef.current = savedControlledPilotPromotionKeys;
+  }, [savedControlledPilotPromotionKeys]);
 
   const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
     try {
@@ -938,6 +958,9 @@ export default function ChatPage() {
   const controlledPilotPromoted = Boolean(
     controlledPilotPromotionKey && promotedControlledPilotKeys[controlledPilotPromotionKey]
   );
+  const controlledPilotPromotionMessageSaved = Boolean(
+    controlledPilotPromotionKey && savedControlledPilotPromotionKeys[controlledPilotPromotionKey]
+  );
   const controlledPilotTargetSessionId = currentSessionId || null;
   const controlledPilotSessionMismatch = Boolean(
     controlledPilotResult &&
@@ -1223,16 +1246,38 @@ export default function ChatPage() {
       content: controlledPilotResult.userOutput.trim(),
       ...(controlledPilotResult.runId ? { run_id: controlledPilotResult.runId } : {}),
     };
+    const evidenceInput: ControlledPilotPromotionEvidenceInput = {
+      pilotRunId: controlledPilotResult.runId,
+      sourceSessionId: controlledPilotSourceSessionId,
+      targetSessionId,
+      strategyKind: controlledPilotResult.strategyKind,
+      payloadKind: controlledPilotResult.payloadKind,
+      governanceDecisionKind: controlledPilotResult.governanceDecisionKind ?? "unknown",
+      promotedMessageLength: assistantMsg.content.length,
+      promotedMessageHash: checksumText(assistantMsg.content),
+      promotedAt: new Date().toISOString(),
+    };
 
     inFlightControlledPilotPromotionKeysRef.current.add(promotionKey);
     setControlledPilotPromoting(true);
     setControlledPilotPromotionError(null);
     setControlledPilotFallback(null);
     try {
-      await saveChatMessage(targetSessionId, assistantMsg);
-      if (currentSessionIdRef.current === targetSessionId) {
-        setMessages(prev => [...prev, assistantMsg]);
+      const messageAlreadySaved = Boolean(
+        savedControlledPilotPromotionKeysRef.current[promotionKey]
+      );
+      if (!messageAlreadySaved) {
+        await saveChatMessage(targetSessionId, assistantMsg);
+        if (currentSessionIdRef.current === targetSessionId) {
+          setMessages(prev => [...prev, assistantMsg]);
+        }
+        setSavedControlledPilotPromotionKeys(prev => {
+          const next = { ...prev, [promotionKey]: true };
+          savedControlledPilotPromotionKeysRef.current = next;
+          return next;
+        });
       }
+      await recordControlledPilotPromotionEvidence(evidenceInput);
       setPromotedControlledPilotKeys(prev => {
         const next = { ...prev, [promotionKey]: true };
         promotedControlledPilotKeysRef.current = next;
@@ -1241,7 +1286,13 @@ export default function ChatPage() {
       setControlledPilotPromotionReviewOpen(false);
       await loadSessions();
     } catch (e) {
-      setControlledPilotPromotionError(`Promotion failed: ${readablePreviewError(e)}`);
+      if (savedControlledPilotPromotionKeysRef.current[promotionKey]) {
+        setControlledPilotPromotionError(
+          `Promotion evidence recording failed: ${readablePreviewError(e)}. Retry will only record evidence; it will not save another chat message.`
+        );
+      } else {
+        setControlledPilotPromotionError(`Promotion failed: ${readablePreviewError(e)}`);
+      }
     } finally {
       inFlightControlledPilotPromotionKeysRef.current.delete(promotionKey);
       setControlledPilotPromoting(false);
@@ -1584,8 +1635,10 @@ export default function ChatPage() {
                           <div className="text-xs font-semibold text-stone-900">Pilot response</div>
                           <div className="mt-0.5 text-[11px] text-stone-500">
                             {controlledPilotPromoted
-                              ? "Promoted to chat history as a normal assistant message."
-                              : "Separate pilot output. It is not saved as a normal assistant message."}
+                              ? "Promoted to chat history as a normal assistant message with metadata-safe evidence."
+                              : controlledPilotPromotionMessageSaved
+                                ? "Message saved. Promotion evidence is degraded until the recorder succeeds."
+                                : "Separate pilot output. It is not saved as a normal assistant message."}
                           </div>
                         </div>
                         <div className="flex flex-wrap items-center gap-2">

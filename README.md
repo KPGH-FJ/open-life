@@ -16,10 +16,10 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-当前项目处于 **W22 Post-Promotion Validation And Source Binding** 阶段：
+当前项目处于 **W23 Controlled Pilot Promotion Evidence Recorder** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
-- **W1-W22 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层、Settings evidence surface、controlled Chat migration pilot eligibility 只读资格检查、Chat 页面显式单轮 Controlled Pilot、reviewed pilot response promotion，以及 promotion 后的 source/target session 验证；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
+- **W1-W23 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层、Settings evidence surface、controlled Chat migration pilot eligibility 只读资格检查、Chat 页面显式单轮 Controlled Pilot、reviewed pilot response promotion、promotion 后的 source/target session 验证，以及 metadata-safe promotion evidence 记录与只读 summary；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
 - **ReAct 仍是当前默认 Chat 主链路**：MultiStrategy Runtime 已有 preview command 和 audit-ready 路径，但尚未接管默认 `send_message` / Chat 主流程。
 - **MultiStrategy preview 已可审计**：`run_multi_strategy_agent_preview` 已存在，preview run 会写入 metadata-safe 外层 AgentRun audit；Runs / Trace 已能展示 preview strategy、payload、governance 和 warnings。
 - **Runtime Migration Gate 已建立**：`check_runtime_migration_gate` 只读取既有 preview AgentRun / audit，输出 `defaultChatUnchanged`、`previewPathHealthy`、`metadataSafeTraceReady`、`fallbackAvailable`、`noExternalWrites`、`proposalFirstPreserved` 和 `blockingReasons`；它不执行 ReAct、PlanExecute、工具调用或外部写入。
@@ -28,13 +28,14 @@ LifeModel-HS Protocol Layer
 - **Controlled Pilot 已进入 Chat 页面**：用户必须显式点击 `Run Controlled Pilot`；执行前先调用 `check_controlled_chat_pilot_eligibility`，blocked 时只展示 blocking reasons 和 fallback，不调用 preview；eligible 时才调用 `run_multi_strategy_agent_preview`，并强制 `allowWrites=false`。成功结果默认仍以独立 “Pilot response” 展示，不自动作为普通 assistant message，不自动写入普通 chat history。
 - **Reviewed Pilot Response Promotion 已完成**：只有成功且包含 `userOutput` 的 pilot response 才显示 `Promote Pilot Response`。用户点击后会进入 review/confirmation 状态，展示 response 文本、runId、selected strategy、governance summary、payload summary 和“确认后将写入当前聊天历史”的提示；确认后仅通过现有 chat message 保存机制写入一条 ordinary assistant message，并在可用时保留 `run_id` trace。取消、blocked、failed、no-output 和重复 promotion 都不会写入。
 - **Post-Promotion Validation 已完成**：Controlled Pilot 成功后会绑定发起时的 source chat session；promotion review 展示 source session、target session、runId、strategy 和 governance summary。确认前必须校验当前 target session 与 source session 一致；若用户切换 session 后尝试 promotion，会阻止写入新 session，显示 blocking/fallback 文案，并提示在当前 session 重新运行 Controlled Pilot。
+- **Promotion Evidence Recorder 已完成**：promotion confirm 在成功保存 ordinary assistant message 后，会通过 `EvidenceStore` 记录一条 metadata-safe runtime evidence，包含 pilotRunId、source/target session、strategy/payload/governance、promoted message length、checksum 和 promotedAt；不持久化 raw pilot response、raw user prompt 或 full tool payload。Settings / 实验区域提供只读 summary，显示 promoted count、recent promoted pilot run ids、latest timestamp 和 mismatch block count。若 evidence 记录失败，UI 显示 degraded/error，重试只补 evidence，不重复写 chat message。
 - **PlanExecute V1 是受治理 runtime slice**：当前可通过 MultiStrategy preview 产生 planExecute payload/report，但不是产品化周计划流程。
 - **LifeModel-HS 仍是协议层方向**：Maturation V1 service、Evidence/Governor 等基础能力已存在，但 Chat 自动成熟化和产品化反馈闭环仍需 gate。
 - **RuntimeStrategy trait 已成型**：MultiStrategy Runtime 通过固定 ReAct / PlanExecute adapter registry 执行；这不是插件化加载，也不是默认 Chat 替换。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
 - **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **下一步仍不能直接替换默认 Chat**：W22 只是 promotion 后的安全验证与来源绑定。默认 Chat 仍未迁移；默认 `Send` / `send_message` / `start_stream_message` 路径保持现状。
+- **下一步仍不能直接替换默认 Chat**：W23 只是 promotion evidence 记录与只读展示。默认 Chat 仍未迁移；默认 `Send` / `send_message` / `start_stream_message` 路径保持现状，且不得调用 eligibility、gate、preview、promotion 或 evidence recorder。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
@@ -61,7 +62,7 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
 | Builder | 已支持快速、渐进、苏格拉底式构建；默认只创建 Proposal | 通过 Review Center 确认后安全写入 LifeModel |
 | Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal；默认主链路尚未切到 MultiStrategy Runtime | 继续稳定迁移受控子路径，展示上下文、模型路由和运行轨迹 |
-| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit；Settings Runtime Migration Gate 和 Pilot eligibility 只读展示 gate evidence / pilot 资格；Chat 有 W20 显式 Controlled Pilot 单轮入口、W21 reviewed promotion 和 W22 source-bound promotion validation | 继续保持默认 Chat 不迁移；promotion 只是用户确认且 source/target session 一致后写入 assistant message 的受控台阶 |
+| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit；Settings Runtime Migration Gate、Pilot eligibility 和 Promotion evidence summary 只读展示 gate/promotion evidence；Chat 有 W20 显式 Controlled Pilot 单轮入口、W21 reviewed promotion、W22 source-bound validation 和 W23 metadata-safe promotion evidence recorder | 继续保持默认 Chat 不迁移；promotion 只是用户确认且 source/target session 一致后写入 assistant message，并记录 metadata-safe evidence 的受控台阶 |
 | Runs / Trace | 已能展示 MultiStrategy preview strategy / payload / governance / warnings | 成为所有 runtime strategy 的统一 metadata-safe trace viewer |
 | **ModelRouter** | ✅ **任务/隐私感知路由已毕业，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
@@ -251,7 +252,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
-### W1-W22: LifeModel-Governed Runtime Preview, Gate Evidence, Controlled Pilot, And Promotion Validation
+### W1-W23: LifeModel-Governed Runtime Preview, Gate Evidence, Controlled Pilot, And Promotion Evidence
 - ✅ Tool / Proposal Hygiene、Thin Runtime Spine、ReAct Runtime Contract Convergence。
 - ✅ LifeModel Maturation Loop Foundation、LifeModel Governor MVP、PlanExecute Core MVP。
 - ✅ StrategySelector、MultiStrategy Runtime Orchestrator、Preview Command。
@@ -263,6 +264,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Very Small Controlled Chat Migration Pilot With Fallback：Chat 页面新增显式 `Run Controlled Pilot` 单轮入口；先查 eligibility，blocked 不调用 preview；eligible 后才运行 `allowWrites=false` preview；成功默认只显示 “Pilot response”，不自动写普通 chat history，默认 Send 不变。
 - ✅ Reviewed Pilot Response Promotion：成功且包含 `userOutput` 的 pilot response 可由用户显式 review/confirm 后提升为一条 ordinary assistant message；取消、blocked、failed、no-output、重复 promotion 均不写入，promotion 不写 LifeModel/Memory/Proposal/外部工具结果。
 - ✅ Post-Promotion Validation And Source Binding：Controlled Pilot 结果绑定 source session；review 展示 source/target session、runId、strategy 和 governance summary；确认前校验 source/target 一致，session mismatch 时不调用 `save_chat_message`，显示 blocking/fallback 和重新运行 pilot 提示。
+- ✅ Controlled Pilot Promotion Evidence Recorder：确认 promotion 且 assistant message 保存成功后，写入一条 metadata-safe runtime evidence；只保存 pilotRunId、source/target session、strategy/payload/governance、message length、checksum 和 promotedAt。Settings 实验区只读 summary 展示 promoted count、recent pilot run ids、latest timestamp 和 mismatch block count；evidence 失败显示 degraded/error，重试不重复写 chat message。
 
 ## 当前重要开发方向
 
@@ -270,7 +272,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 2. 用 Settings Runtime Migration Gate 或 `check_runtime_migration_gate` 对最近 preview AgentRun 做只读迁移诊断。
 3. 用 Settings Pilot eligibility 或 `check_controlled_chat_pilot_eligibility` 对最近 3 条 preview gate evidence 做只读资格检查；普通 Chat Send 不调用该 command。
 4. Chat 页面 Controlled Pilot 只能由用户显式点击触发；blocked/failed 时显示 fallback，不自动重试；普通 Send 保持可用且不调用 eligibility/gate/preview。
-5. Pilot response 默认隔离；只有用户显式点击 `Promote Pilot Response`、确认 review，且当前 target session 与 pilot source session 一致后，才写入一条 ordinary assistant message。不得自动 promotion，不得把 promotion 当成默认 Chat 迁移。
+5. Pilot response 默认隔离；只有用户显式点击 `Promote Pilot Response`、确认 review，且当前 target session 与 pilot source session 一致后，才写入一条 ordinary assistant message，并记录 metadata-safe promotion evidence。不得自动 promotion，不得把 promotion 当成默认 Chat 迁移；默认 Send 路径不得调用 evidence recorder。
 
 ## 常见问题
 

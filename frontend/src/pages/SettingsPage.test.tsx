@@ -481,6 +481,35 @@ describe("SettingsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders metadata-safe promotion evidence summary from the experimental panel", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Promotion evidence summary")).toBeInTheDocument();
+    expect(
+      screen.getByText(/metadata-safe evidence recorded after reviewed promotion/)
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Promotion Evidence" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_controlled_pilot_promotion_evidence_summary",
+        undefined
+      );
+    });
+
+    expect(await screen.findByText("Promoted count")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-2")).toBeInTheDocument();
+    expect(screen.getByText("run-controlled-pilot-1")).toBeInTheDocument();
+    expect(screen.getByText("Latest promotion timestamp")).toBeInTheDocument();
+    expect(screen.getByText("2026-05-30T01:02:03Z")).toBeInTheDocument();
+    expect(screen.getByText("Source/target mismatch blocks")).toBeInTheDocument();
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {

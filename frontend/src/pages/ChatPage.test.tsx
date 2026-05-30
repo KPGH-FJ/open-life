@@ -526,6 +526,11 @@ describe("ChatPage", () => {
         .mocked(invoke)
         .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_pilot_eligibility")
     ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence")
+    ).toBe(false);
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {
@@ -696,6 +701,10 @@ describe("ChatPage", () => {
     expect(
       screen.queryByRole("button", { name: "Promote Pilot Response" })
     ).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "record_controlled_pilot_promotion_evidence",
+      expect.anything()
+    );
   });
 
   it("runs controlled pilot after eligibility passes and renders pilot response separately without auto-saving", async () => {
@@ -791,6 +800,10 @@ describe("ChatPage", () => {
       screen.queryByRole("button", { name: "Promote Pilot Response" })
     ).not.toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith(
+      "record_controlled_pilot_promotion_evidence",
+      expect.anything()
+    );
   });
 
   it("cancels pilot promotion review without writing chat history", async () => {
@@ -838,6 +851,25 @@ describe("ChatPage", () => {
       },
     });
     expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
+
+    const evidenceCalls = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
+    expect(evidenceCalls).toHaveLength(1);
+    expect(evidenceCalls[0][1]).toMatchObject({
+      input: {
+        pilotRunId: "run-controlled-pilot-1",
+        sourceSessionId: "session-1",
+        targetSessionId: "session-1",
+        strategyKind: "react",
+        payloadKind: "react",
+        governanceDecisionKind: "allow",
+        promotedMessageLength: "Pilot-only answer".length,
+        promotedMessageHash: expect.any(String),
+        promotedAt: expect.any(String),
+      },
+    });
+    expect(JSON.stringify(evidenceCalls[0][1])).not.toContain("Pilot-only answer");
   });
 
   it("blocks pilot promotion after switching sessions and asks the user to rerun the pilot", async () => {
@@ -854,6 +886,10 @@ describe("ChatPage", () => {
     expect(screen.getAllByText(/Rerun Controlled Pilot in this session/).length).toBeGreaterThan(0);
     const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
     expect(saveCalls).toHaveLength(0);
+    const evidenceCalls = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
+    expect(evidenceCalls).toHaveLength(0);
   });
 
   it("does not allow repeating promotion for the same pilot response", async () => {
@@ -874,6 +910,78 @@ describe("ChatPage", () => {
     expect(screen.queryByRole("button", { name: "Confirm Promotion" })).not.toBeInTheDocument();
     const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
     expect(saveCalls).toHaveLength(1);
+    const evidenceCalls = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
+    expect(evidenceCalls).toHaveLength(1);
+  });
+
+  it("does not duplicate the promoted assistant message when evidence recording is retried", async () => {
+    let evidenceAttempts = 0;
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: true,
+          requiredCleanRuns: 3,
+          cleanRunCount: 3,
+          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+          blockingReasons: [],
+          defaultChatUnchanged: true,
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.resolve({
+          runId: "run-controlled-pilot-1",
+          strategyKind: "react",
+          payloadKind: "react",
+          userOutput: "Pilot-only answer",
+          proposalIds: [],
+          warnings: [],
+          metadataSafeSummary: {
+            taskKind: "conversation",
+            reasonCode: "default_react",
+            riskLevel: "low",
+            hasHsPacket: false,
+            governanceDecisionKind: "allow",
+          },
+          governanceDecisionKind: "allow",
+        });
+      }
+      if (cmd === "record_controlled_pilot_promotion_evidence") {
+        evidenceAttempts += 1;
+        if (evidenceAttempts === 1) {
+          return Promise.reject(new Error("evidence db unavailable"));
+        }
+        return Promise.resolve({
+          evidenceId: "ev_promotion_1",
+          created: true,
+          pilotRunId: "run-controlled-pilot-1",
+          promotedAt: "2026-05-30T00:00:00Z",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    await runControlledPilotFromChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
+
+    expect(await screen.findByText(/Promotion evidence recording failed/)).toBeInTheDocument();
+    expect(screen.getByText(/Retry will only record evidence/)).toBeInTheDocument();
+    let saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+    expect(saveCalls).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
+
+    await waitFor(() => {
+      const evidenceCalls = vi
+        .mocked(invoke)
+        .mock.calls.filter(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence");
+      expect(evidenceCalls).toHaveLength(2);
+    });
+    saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+    expect(saveCalls).toHaveLength(1);
+    expect(await screen.findByText("Promoted to chat history")).toBeInTheDocument();
   });
 
   it("shows controlled pilot fallback when preview fails without writing chat history", async () => {
@@ -914,6 +1022,10 @@ describe("ChatPage", () => {
     expect(
       screen.queryByRole("button", { name: "Promote Pilot Response" })
     ).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith(
+      "record_controlled_pilot_promotion_evidence",
+      expect.anything()
+    );
   });
 
   it("ignores a delayed AgentRun fetch after switching away from the originating session", async () => {

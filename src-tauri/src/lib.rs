@@ -39,6 +39,7 @@ use commands::agent::{
 };
 use commands::agent_runtime::{
     check_controlled_chat_pilot_eligibility, check_runtime_migration_gate,
+    get_controlled_pilot_promotion_evidence_summary, record_controlled_pilot_promotion_evidence,
     run_multi_strategy_agent_preview,
 };
 use commands::builder::{
@@ -3045,6 +3046,8 @@ pub fn run() {
             run_multi_strategy_agent_preview,
             check_runtime_migration_gate,
             check_controlled_chat_pilot_eligibility,
+            record_controlled_pilot_promotion_evidence,
+            get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

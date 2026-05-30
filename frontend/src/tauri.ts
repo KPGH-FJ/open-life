@@ -9,6 +9,9 @@ import type {
   MultiStrategyAgentPreviewOutput,
   ControlledChatPilotEligibilityCheckInput,
   ControlledChatPilotEligibilityReport,
+  ControlledPilotPromotionEvidenceInput,
+  ControlledPilotPromotionEvidenceResult,
+  ControlledPilotPromotionEvidenceSummary,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -242,6 +245,21 @@ export async function checkControlledChatPilotEligibility(
   return safeInvoke<ControlledChatPilotEligibilityReport>(
     "check_controlled_chat_pilot_eligibility",
     { input }
+  );
+}
+
+export async function recordControlledPilotPromotionEvidence(
+  input: ControlledPilotPromotionEvidenceInput
+): Promise<ControlledPilotPromotionEvidenceResult> {
+  return safeInvoke<ControlledPilotPromotionEvidenceResult>(
+    "record_controlled_pilot_promotion_evidence",
+    { input }
+  );
+}
+
+export async function getControlledPilotPromotionEvidenceSummary(): Promise<ControlledPilotPromotionEvidenceSummary> {
+  return safeInvoke<ControlledPilotPromotionEvidenceSummary>(
+    "get_controlled_pilot_promotion_evidence_summary"
   );
 }
 

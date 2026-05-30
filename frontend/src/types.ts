@@ -297,6 +297,32 @@ export interface ControlledChatPilotEligibilityReport {
   defaultChatUnchanged: boolean;
 }
 
+export interface ControlledPilotPromotionEvidenceInput {
+  pilotRunId: string;
+  sourceSessionId: string;
+  targetSessionId: string;
+  strategyKind: MultiStrategyAgentPreviewStrategyKind;
+  payloadKind: MultiStrategyAgentPreviewPayloadKind;
+  governanceDecisionKind: MultiStrategyAgentPreviewGovernanceDecisionKind | "unknown";
+  promotedMessageLength: number;
+  promotedMessageHash: string;
+  promotedAt: string;
+}
+
+export interface ControlledPilotPromotionEvidenceResult {
+  evidenceId: string;
+  created: boolean;
+  pilotRunId: string;
+  promotedAt: string;
+}
+
+export interface ControlledPilotPromotionEvidenceSummary {
+  promotedCount: number;
+  recentPromotedPilotRunIds: string[];
+  latestPromotionTimestamp?: string | null;
+  sourceTargetMismatchBlockCount: number;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;
