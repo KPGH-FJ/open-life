@@ -19,6 +19,7 @@ pub mod regression_suite;
 pub mod runtime;
 pub mod runtime_contract;
 pub mod store;
+pub mod strategy;
 pub mod types;
 
 #[cfg(test)]
@@ -88,4 +89,7 @@ pub use regression_suite::{
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput};
 pub use store::AgentRunStore;
+pub use strategy::{
+    RuntimeStrategyKind, StrategySelection, StrategySelectionInput, StrategySelector,
+};
 pub use types::*;
