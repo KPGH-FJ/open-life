@@ -10,7 +10,11 @@ import {
   MessageSquare,
   Target,
   Activity,
+  AlertTriangle,
   Compass,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
   Sparkles,
   Heart,
   CheckCircle2,
@@ -42,6 +46,7 @@ import {
   listAgentRunsForSession,
   getAgentRun,
   getPendingProposals,
+  runMultiStrategyAgentPreview,
 } from "../tauri";
 import type {
   AgentRun,
@@ -53,6 +58,7 @@ import type {
   SystemDiagnostics,
   ToolCallResult,
 } from "../tauri";
+import type { MultiStrategyAgentPreviewLayer, MultiStrategyAgentPreviewOutput } from "../types";
 import { getModelEmptyState } from "../utils/modelEmpty";
 import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
@@ -224,6 +230,42 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
   return `${hint}\n\n请去设置页查看“试用就绪检查”。`;
 }
 
+const CHAT_PREVIEW_NO_TOOLS_PROMPT = "No developer tools catalog supplied for this chat preview.";
+const CHAT_PREVIEW_SAFE_SUMMARY_KEYS = [
+  "taskKind",
+  "reasonCode",
+  "riskLevel",
+  "hasHsPacket",
+  "policyReasonCode",
+  "governanceDecisionKind",
+];
+
+function classNames(...classes: (string | false | undefined)[]) {
+  return classes.filter(Boolean).join(" ");
+}
+
+function readablePreviewError(error: unknown): string {
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    if ("message" in error && typeof (error as any).message === "string") {
+      return (error as any).message;
+    }
+    if ("error" in error && typeof (error as any).error === "string") {
+      return (error as any).error;
+    }
+  }
+  return String(error);
+}
+
+function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, string]> {
+  return CHAT_PREVIEW_SAFE_SUMMARY_KEYS.flatMap(key => {
+    const value = summary[key];
+    if (value === undefined || value === null) return [];
+    if (!["string", "number", "boolean"].includes(typeof value)) return [];
+    return [[key, String(value)]];
+  });
+}
+
 export default function ChatPage() {
   const location = useLocation();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -250,6 +292,16 @@ export default function ChatPage() {
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
+  const [governedPreviewOpen, setGovernedPreviewOpen] = useState(false);
+  const [governedPreviewAllowPlanning, setGovernedPreviewAllowPlanning] = useState(false);
+  const [governedPreviewLocalModelAvailable, setGovernedPreviewLocalModelAvailable] =
+    useState(false);
+  const [governedPreviewLayer, setGovernedPreviewLayer] =
+    useState<MultiStrategyAgentPreviewLayer>("L2");
+  const [governedPreviewSubmitting, setGovernedPreviewSubmitting] = useState(false);
+  const [governedPreviewError, setGovernedPreviewError] = useState<string | null>(null);
+  const [governedPreviewResult, setGovernedPreviewResult] =
+    useState<MultiStrategyAgentPreviewOutput | null>(null);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -820,6 +872,10 @@ export default function ChatPage() {
   }, [currentSessionId, messages, sending]);
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
+  const governedPreviewSummaryEntries = useMemo(
+    () => safeSummaryEntries(governedPreviewResult?.metadataSafeSummary ?? {}),
+    [governedPreviewResult]
+  );
   const readinessClass =
     readiness.tone === "ready"
       ? "bg-emerald-50 border-emerald-100 text-emerald-800"
@@ -961,6 +1017,42 @@ export default function ChatPage() {
       console.error("保存今日目标失败", e);
     }
   }, []);
+
+  const handleRunGovernedPreview = useCallback(async () => {
+    const trimmedInput = input.trim();
+    if (!trimmedInput) {
+      setGovernedPreviewError("Enter a chat draft before running governed preview.");
+      return;
+    }
+
+    setGovernedPreviewSubmitting(true);
+    setGovernedPreviewError(null);
+    setGovernedPreviewResult(null);
+
+    try {
+      const output = await runMultiStrategyAgentPreview({
+        sessionId: `chat-governed-preview-${Date.now()}`,
+        userText: trimmedInput,
+        toolsPrompt: CHAT_PREVIEW_NO_TOOLS_PROMPT,
+        allowPlanning: governedPreviewAllowPlanning,
+        localModelAvailable: governedPreviewLocalModelAvailable,
+        layer: governedPreviewLayer,
+        executionBudget: {
+          allowWrites: false,
+        },
+      });
+      setGovernedPreviewResult(output);
+    } catch (e) {
+      setGovernedPreviewError(`Preview failed: ${readablePreviewError(e)}`);
+    } finally {
+      setGovernedPreviewSubmitting(false);
+    }
+  }, [
+    governedPreviewAllowPlanning,
+    governedPreviewLayer,
+    governedPreviewLocalModelAvailable,
+    input,
+  ]);
 
   const handleIndexMemory = useCallback(
     async (content: string) => {
@@ -1122,6 +1214,187 @@ export default function ChatPage() {
                 {m.label}
               </button>
             ))}
+          </div>
+        </div>
+        <div className="border-b border-amber-100 bg-amber-50/60 px-6 py-2">
+          <div className="max-w-4xl space-y-3">
+            <button
+              type="button"
+              onClick={() => setGovernedPreviewOpen(value => !value)}
+              aria-expanded={governedPreviewOpen}
+              className="flex w-full items-center justify-between gap-3 text-left"
+            >
+              <span className="flex min-w-0 items-center gap-2">
+                {governedPreviewOpen ? (
+                  <ChevronDown size={15} className="shrink-0 text-amber-700" />
+                ) : (
+                  <ChevronRight size={15} className="shrink-0 text-amber-700" />
+                )}
+                <span className="min-w-0">
+                  <span className="block text-xs font-semibold text-amber-950">
+                    Governed Preview
+                  </span>
+                  <span className="block text-[11px] leading-4 text-amber-800">
+                    Preview/Beta · write-disabled runtime check, separate from normal Chat
+                  </span>
+                </span>
+              </span>
+              <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[10px] font-medium text-amber-800 ring-1 ring-amber-200">
+                Preview/Beta
+              </span>
+            </button>
+
+            {governedPreviewOpen && (
+              <div className="space-y-3 rounded-lg border border-amber-200 bg-white p-3">
+                <div className="flex items-start gap-2 text-xs leading-5 text-amber-900">
+                  <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                  <div>
+                    This preview uses the current chat draft only after explicit trigger. It forces
+                    external writes off and shows metadata-safe governance output only.
+                  </div>
+                </div>
+
+                <div className="grid gap-2 md:grid-cols-3">
+                  <label className="block">
+                    <span className="text-[11px] font-medium text-stone-600">Layer</span>
+                    <select
+                      value={governedPreviewLayer}
+                      onChange={event =>
+                        setGovernedPreviewLayer(
+                          event.target.value as MultiStrategyAgentPreviewLayer
+                        )
+                      }
+                      className="mt-1 w-full rounded-md border border-stone-200 px-2 py-1.5 text-xs text-stone-800 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
+                    >
+                      <option value="L1">L1</option>
+                      <option value="L2">L2</option>
+                      <option value="L3">L3</option>
+                    </select>
+                  </label>
+
+                  <label className="flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-xs text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={governedPreviewAllowPlanning}
+                      onChange={event => setGovernedPreviewAllowPlanning(event.target.checked)}
+                      className="rounded border-stone-300"
+                    />
+                    <span>Allow planning</span>
+                  </label>
+
+                  <label className="flex items-center gap-2 rounded-md border border-stone-200 px-3 py-2 text-xs text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={governedPreviewLocalModelAvailable}
+                      onChange={event =>
+                        setGovernedPreviewLocalModelAvailable(event.target.checked)
+                      }
+                      className="rounded border-stone-300"
+                    />
+                    <span>Local model available</span>
+                  </label>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck size={14} />
+                    <span>No external write operations. No default full tools catalog.</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleRunGovernedPreview}
+                    disabled={governedPreviewSubmitting || !input.trim()}
+                    className={classNames(
+                      "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium",
+                      governedPreviewSubmitting || !input.trim()
+                        ? "bg-stone-200 text-stone-500"
+                        : "bg-stone-900 text-white hover:bg-stone-800"
+                    )}
+                  >
+                    {governedPreviewSubmitting && <Loader2 size={13} className="animate-spin" />}
+                    Run Governed Preview
+                  </button>
+                </div>
+
+                {governedPreviewError && (
+                  <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
+                    {governedPreviewError}
+                  </div>
+                )}
+
+                {governedPreviewResult && (
+                  <div className="space-y-3 rounded-lg border border-stone-200 bg-stone-50 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <div className="text-xs font-semibold text-stone-900">Preview result</div>
+                        <div className="mt-0.5 text-[11px] text-stone-500">
+                          Metadata-safe fields only. Raw prompts, memory context, PII, mail bodies,
+                          and file content are not rendered here.
+                        </div>
+                      </div>
+                      {governedPreviewResult.runId && (
+                        <Link
+                          to={`/runs/${governedPreviewResult.runId}`}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-stone-700 ring-1 ring-stone-200 hover:bg-stone-100"
+                        >
+                          <ExternalLink size={13} />
+                          View Run Trace
+                        </Link>
+                      )}
+                    </div>
+
+                    <div className="grid gap-2 text-xs md:grid-cols-2">
+                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
+                        <div className="text-[10px] uppercase text-stone-400">runId</div>
+                        <div className="mt-1 font-mono text-stone-900">
+                          {governedPreviewResult.runId ?? "not returned"}
+                        </div>
+                      </div>
+                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
+                        Strategy: {governedPreviewResult.strategyKind}
+                      </div>
+                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
+                        Payload: {governedPreviewResult.payloadKind}
+                      </div>
+                      <div className="rounded-md bg-white px-3 py-2 text-stone-700 ring-1 ring-stone-100">
+                        Governance: {governedPreviewResult.governanceDecisionKind ?? "unknown"}
+                      </div>
+                    </div>
+
+                    {governedPreviewSummaryEntries.length > 0 && (
+                      <div className="flex flex-wrap gap-2 text-xs">
+                        {governedPreviewSummaryEntries.map(([key, value]) => (
+                          <span
+                            key={key}
+                            className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                          >
+                            {key}: {value}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    <div>
+                      <div className="text-xs font-medium text-stone-700">Warnings</div>
+                      {governedPreviewResult.warnings.length > 0 ? (
+                        <div className="mt-1 space-y-1">
+                          {governedPreviewResult.warnings.map(warning => (
+                            <div
+                              key={warning}
+                              className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-800"
+                            >
+                              {warning}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-1 text-xs text-stone-500">No warnings returned.</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
         <div className="flex-1 overflow-auto px-6 py-4 space-y-4">

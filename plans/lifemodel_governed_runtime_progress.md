@@ -10,14 +10,17 @@ completion/status index.
 
 ## Current Position
 
-W1-W12 are complete. The project has reached a non-default MultiStrategy
-Preview UI / debug entry.
+W1-W13 are complete. The project has reached a guarded Chat subpath where
+MultiStrategy Runtime can be explicitly previewed without replacing the default
+Chat stream path.
 
 The key boundary is unchanged:
 
 - MultiStrategy Runtime is preview/audit-ready, not the default Chat runtime.
 - `run_multi_strategy_agent_preview` is a preview/beta command.
 - The default Chat path must not be replaced directly.
+- Chat now has an explicit write-disabled Governed Preview path for runtime
+  inspection; normal Send still uses the existing stream path.
 - LifeModel-HS remains the protocol-layer direction, but the maturation loop is
   not yet end-to-end.
 - PlanExecute is a core MVP, not a productized weekly-planning workflow.
@@ -40,12 +43,12 @@ The key boundary is unchanged:
 | W10 MultiStrategy Preview AgentRun Audit Persistence | Done | `agent_runtime.rs`, `previewAudit.ts`, Runs/Trace UI | Writes metadata-safe outer AgentRun audit with strategy, payload, governance, warnings; ReAct inner run id is child metadata only. |
 | W11 Documentation Status Sync | Done | README, AGENTS, plans | Entry docs synchronized with code status and premature Chat replacement blocked. |
 | W12 Non-Default MultiStrategy Preview UI / Debug Entry | Done | Settings experimental tab, preview form tests | Settings exposes a folded preview/beta panel that calls `run_multi_strategy_agent_preview`, displays metadata-safe strategy/payload/governance/warnings, and links to Runs trace without replacing Chat. |
+| W13 Guarded Chat Subpath Migration | Done | Chat governed preview panel, Chat tests | Chat exposes an explicit Governed Preview path that calls `run_multi_strategy_agent_preview` with `allowWrites=false`, displays metadata-safe runtime output, links to Runs trace, and leaves normal Send on the existing stream path. |
 
 ## Next Recommended Sequence
 
 ```text
-guarded Chat subpath migration
--> maturation loop V1
+maturation loop V1
 -> PlanExecute vertical slice
 -> RuntimeStrategy trait
 ```

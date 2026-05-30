@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
-import { BrowserRouter, MemoryRouter } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, useLocation } from "react-router-dom";
 import ChatPage from "./ChatPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -491,6 +491,105 @@ describe("ChatPage", () => {
     });
     const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
     expect(saveCalls).toHaveLength(0);
+  });
+
+  it("keeps Send on the existing chat stream path without calling governed preview", async () => {
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "默认发送仍然走普通聊天" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+  });
+
+  it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.resolve({
+          runId: "run-chat-preview-1",
+          strategyKind: "react",
+          payloadKind: "react",
+          userOutput: "PRIVATE PREVIEW USER OUTPUT",
+          proposalIds: [],
+          warnings: ["preview runtime forces allowWrites=false"],
+          metadataSafeSummary: {
+            taskKind: "conversation",
+            reasonCode: "default_react",
+            riskLevel: "low",
+            hasHsPacket: false,
+            governanceDecisionKind: "allow",
+            rawMemoryContext: "must not render",
+          },
+          governanceDecisionKind: "allow",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    function ChatWithLocation() {
+      const location = useLocation();
+      return (
+        <>
+          <ChatPage />
+          <div data-testid="location-path">{location.pathname}</div>
+        </>
+      );
+    }
+
+    render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <ChatWithLocation />
+      </MemoryRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Preview this guarded chat input" } });
+    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Run Governed Preview" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
+        input: expect.objectContaining({
+          sessionId: expect.stringMatching(/^chat-governed-preview-/),
+          userText: "Preview this guarded chat input",
+          toolsPrompt: "No developer tools catalog supplied for this chat preview.",
+          allowPlanning: false,
+          localModelAvailable: false,
+          executionBudget: expect.objectContaining({ allowWrites: false }),
+        }),
+      });
+    });
+
+    expect(await screen.findByText("run-chat-preview-1")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: react")).toBeInTheDocument();
+    expect(screen.getByText("preview runtime forces allowWrites=false")).toBeInTheDocument();
+    expect(screen.getByText("reasonCode: default_react")).toBeInTheDocument();
+    expect(screen.queryByText("PRIVATE PREVIEW USER OUTPUT")).not.toBeInTheDocument();
+    expect(screen.queryByText("rawMemoryContext: must not render")).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
+
+    fireEvent.click(screen.getByRole("link", { name: "View Run Trace" }));
+    expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-chat-preview-1");
   });
 
   it("ignores a delayed AgentRun fetch after switching away from the originating session", async () => {
