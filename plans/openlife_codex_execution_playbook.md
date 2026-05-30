@@ -46,15 +46,16 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-W1-W16 已完成到 RuntimeStrategy Trait Foundation。下一步实际执行顺序是：
+W1-W17 已完成到 Runtime integration hardening / Chat migration gate。下一步实际执行顺序是：
 
 ```text
-Runtime integration hardening / Chat migration gate
+Controlled Chat migration follow-up after gate evidence
 ```
 
 注意：`run_multi_strategy_agent_preview` 是 preview/beta command。它写入
 metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接管
-默认 Chat。
+默认 Chat。`check_runtime_migration_gate` 只是只读诊断，不执行 ReAct、
+PlanExecute、工具调用或外部写入。
 
 当前版本优先围绕五个闭环推进：
 
@@ -70,11 +71,12 @@ metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接�
 
 当前更适合 Codex 做的，不是继续铺大功能，而是：
 
-- 进入 Runtime integration hardening / Chat migration gate，先定义默认 Chat 迁移门槛
+- 使用 Runtime Migration Gate 对既有 preview AgentRun / audit 做只读迁移诊断
 - 保持 `calendar.propose_event` / `email.propose_draft` 的 proposal-only taxonomy 与测试覆盖
 - 维护 ExternalWriteAction 入库前 size limit 与 payload minimization 硬验收
 - 保持 MultiStrategy preview / guarded Chat preview 的非默认边界
 - 硬化 RuntimeStrategy adapter/registry 的 metadata-safe 输出、fallback 和 blocked 行为
+- 后续 Chat migration 最低准入：gate 无 blocking reason、fallback 可用、metadata-safe trace、无真实外部写入、proposal-first 保持、`make ci` 通过
 
 当前不建议优先做的：
 

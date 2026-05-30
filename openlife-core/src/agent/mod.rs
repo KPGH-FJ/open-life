@@ -19,6 +19,7 @@ pub mod reasoning;
 pub mod regression_suite;
 pub mod runtime;
 pub mod runtime_contract;
+pub mod runtime_migration_gate;
 pub mod store;
 pub mod strategy;
 pub mod strategy_runtime;
@@ -96,6 +97,9 @@ pub use regression_suite::{
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
 pub use runtime_contract::{AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput};
+pub use runtime_migration_gate::{
+    evaluate_runtime_migration_gate, RuntimeMigrationGateInput, RuntimeMigrationGateReport,
+};
 pub use store::AgentRunStore;
 pub use strategy::{
     RuntimeStrategyKind, StrategySelection, StrategySelectionInput, StrategySelector,

@@ -37,7 +37,7 @@ use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
     replay_agent_action, restore_agent_run,
 };
-use commands::agent_runtime::run_multi_strategy_agent_preview;
+use commands::agent_runtime::{check_runtime_migration_gate, run_multi_strategy_agent_preview};
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -3040,6 +3040,7 @@ pub fn run() {
             restore_agent_run,
             replay_agent_action,
             run_multi_strategy_agent_preview,
+            check_runtime_migration_gate,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

@@ -8,6 +8,7 @@ import {
   editProposal,
   getStateHistory,
   recordState,
+  checkRuntimeMigrationGate,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
   saveChatMessage,
@@ -161,5 +162,30 @@ describe("tauri command argument aliases", () => {
       }),
     });
     expect(result.runId).toBe("run-preview-1");
+  });
+
+  it("invokes runtime migration gate as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      defaultChatUnchanged: true,
+      previewPathHealthy: true,
+      metadataSafeTraceReady: true,
+      fallbackAvailable: true,
+      noExternalWrites: true,
+      proposalFirstPreserved: true,
+      blockingReasons: [],
+    });
+
+    const result = await checkRuntimeMigrationGate({
+      previewRunId: "run-preview-1",
+      sessionId: "session-preview",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_runtime_migration_gate", {
+      input: {
+        previewRunId: "run-preview-1",
+        sessionId: "session-preview",
+      },
+    });
+    expect(result.defaultChatUnchanged).toBe(true);
   });
 });

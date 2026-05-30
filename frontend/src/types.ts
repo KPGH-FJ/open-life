@@ -267,6 +267,21 @@ export interface MultiStrategyAgentPreviewOutput {
   governanceDecisionKind?: MultiStrategyAgentPreviewGovernanceDecisionKind;
 }
 
+export interface RuntimeMigrationGateCheckInput {
+  previewRunId?: string;
+  sessionId?: string;
+}
+
+export interface RuntimeMigrationGateReport {
+  defaultChatUnchanged: boolean;
+  previewPathHealthy: boolean;
+  metadataSafeTraceReady: boolean;
+  fallbackAvailable: boolean;
+  noExternalWrites: boolean;
+  proposalFirstPreserved: boolean;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

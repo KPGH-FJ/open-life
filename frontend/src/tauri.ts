@@ -7,6 +7,8 @@ import type {
   StateAlert,
   MultiStrategyAgentPreviewInput,
   MultiStrategyAgentPreviewOutput,
+  RuntimeMigrationGateCheckInput,
+  RuntimeMigrationGateReport,
 } from "./types";
 
 function isTauriEnv(): boolean {
@@ -224,6 +226,12 @@ export async function runMultiStrategyAgentPreview(
   input: MultiStrategyAgentPreviewInput
 ): Promise<MultiStrategyAgentPreviewOutput> {
   return safeInvoke<MultiStrategyAgentPreviewOutput>("run_multi_strategy_agent_preview", { input });
+}
+
+export async function checkRuntimeMigrationGate(
+  input: RuntimeMigrationGateCheckInput = {}
+): Promise<RuntimeMigrationGateReport> {
+  return safeInvoke<RuntimeMigrationGateReport>("check_runtime_migration_gate", { input });
 }
 
 export async function startStreamMessage(

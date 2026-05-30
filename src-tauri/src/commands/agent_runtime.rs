@@ -5,7 +5,7 @@ use openlife_core::agent::{
     AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, GovernanceDecisionKind,
     HSBehaviorCheckSummary, HSSelectionAudit, MultiStrategyRuntime, MultiStrategyRuntimeInput,
     MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
-    RedactionLevel, RuntimeInput, RuntimeStrategyKind,
+    RedactionLevel, RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -59,12 +59,83 @@ pub struct MultiStrategyAgentPreviewOutput {
     pub governance_decision_kind: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMigrationGateCheckInput {
+    #[serde(default)]
+    pub preview_run_id: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn check_runtime_migration_gate(
+    input: RuntimeMigrationGateCheckInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RuntimeMigrationGateReport, String> {
+    check_runtime_migration_gate_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn check_runtime_migration_gate_with_state(
+    input: RuntimeMigrationGateCheckInput,
+    state: &Arc<AppState>,
+) -> Result<RuntimeMigrationGateReport, String> {
+    let preview_run = find_preview_run_for_gate(input, state).await?;
+    Ok(openlife_core::agent::evaluate_runtime_migration_gate(
+        openlife_core::agent::RuntimeMigrationGateInput {
+            default_chat_uses_multi_strategy: false,
+            preview_run: preview_run.as_ref(),
+            fallback_available: true,
+        },
+    ))
+}
+
 #[tauri::command]
 pub async fn run_multi_strategy_agent_preview(
     input: MultiStrategyAgentPreviewInput,
     state: State<'_, Arc<AppState>>,
 ) -> Result<MultiStrategyAgentPreviewOutput, String> {
     run_multi_strategy_agent_preview_with_state(input, &state.inner().clone()).await
+}
+
+async fn find_preview_run_for_gate(
+    input: RuntimeMigrationGateCheckInput,
+    state: &Arc<AppState>,
+) -> Result<Option<AgentRun>, String> {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return Ok(None);
+    };
+    let store = store_arc.lock().await;
+
+    if let Some(preview_run_id) = input
+        .preview_run_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return store
+            .get_run(preview_run_id)
+            .map_err(|e| format!("failed to read preview AgentRun for migration gate: {e}"));
+    }
+
+    let runs = if let Some(session_id) = input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        store
+            .list_runs_for_session(session_id, 50)
+            .map_err(|e| format!("failed to list preview AgentRuns for migration gate: {e}"))?
+    } else {
+        store
+            .list_runs(50, 0)
+            .map_err(|e| format!("failed to list preview AgentRuns for migration gate: {e}"))?
+    };
+
+    Ok(runs
+        .into_iter()
+        .find(|run| run.reasoning_strategy.as_deref() == Some("multi_strategy_preview")))
 }
 
 pub(crate) async fn run_multi_strategy_agent_preview_with_state(
@@ -688,6 +759,111 @@ mod tests {
             .as_ref()
             .and_then(|trace| trace.strategy_result.as_ref())
             .expect("preview run should persist metadata-safe audit")
+    }
+
+    fn healthy_gate_preview_run(session_id: &str) -> AgentRun {
+        let mut run = AgentRun::new_chat_run(session_id, "raw text should be cleared");
+        run.status = AgentRunStatus::Completed;
+        run.user_input = None;
+        run.reasoning_strategy = Some("multi_strategy_preview".into());
+        run.output_preview = Some("Multi-strategy preview: react / allow".into());
+        run.reasoning_trace = Some(ReasoningTrace {
+            strategy_result: Some(json!({
+                "previewRuntime": "multi_strategy",
+                "strategyKind": "react",
+                "payloadKind": "react",
+                "governanceDecisionKind": "allow",
+                "metadataSafe": true,
+                "innerRunId": "inner-react-run",
+                "writeControl": {
+                    "declaredWriteStepCount": 0,
+                    "proposalRequiredStepCount": 0,
+                    "blockedStepCount": 0
+                }
+            })),
+            output: Some("multi_strategy_preview".into()),
+            ..ReasoningTrace::default()
+        });
+        run.finished_at = Some(chrono::Utc::now());
+        run
+    }
+
+    #[tokio::test]
+    async fn runtime_migration_gate_command_reads_existing_preview_run_only() {
+        let state = preview_state().await;
+        let run = healthy_gate_preview_run("session-gate-command");
+        let run_id = run.id.clone();
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.create_run(&run).unwrap();
+        }
+        let before_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let before_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+
+        let report = check_runtime_migration_gate_with_state(
+            RuntimeMigrationGateCheckInput {
+                preview_run_id: Some(run_id),
+                session_id: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.default_chat_unchanged);
+        assert!(report.preview_path_healthy);
+        assert!(report.metadata_safe_trace_ready);
+        assert!(report.fallback_available);
+        assert!(report.no_external_writes);
+        assert!(report.proposal_first_preserved);
+        assert!(report.blocking_reasons.is_empty());
+
+        let after_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let after_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap();
+        assert_eq!(before_run_count, after_run_count);
+        assert_eq!(
+            before_pending_proposals.len(),
+            after_pending_proposals.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_migration_gate_command_blocks_without_preview_audit() {
+        let state = preview_state().await;
+
+        let report = check_runtime_migration_gate_with_state(
+            RuntimeMigrationGateCheckInput::default(),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.default_chat_unchanged);
+        assert!(!report.preview_path_healthy);
+        assert!(!report.metadata_safe_trace_ready);
+        assert!(report
+            .blocking_reasons
+            .contains(&"preview_audit_missing".to_string()));
     }
 
     #[tokio::test]

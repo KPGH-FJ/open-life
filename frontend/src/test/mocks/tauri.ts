@@ -413,6 +413,16 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         },
         governanceDecisionKind: "allow",
       } as T);
+    case "check_runtime_migration_gate":
+      return Promise.resolve({
+        defaultChatUnchanged: true,
+        previewPathHealthy: true,
+        metadataSafeTraceReady: true,
+        fallbackAvailable: true,
+        noExternalWrites: true,
+        proposalFirstPreserved: true,
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
