@@ -14,6 +14,7 @@ pub mod proposal_store;
 pub mod reasoning;
 pub mod regression_suite;
 pub mod runtime;
+pub mod runtime_contract;
 pub mod store;
 pub mod types;
 
@@ -71,5 +72,6 @@ pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
+pub use runtime_contract::{AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput};
 pub use store::AgentRunStore;
 pub use types::*;
