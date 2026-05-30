@@ -8,6 +8,7 @@ import {
   editProposal,
   getStateHistory,
   recordState,
+  runMultiStrategyAgentPreview,
   restoreArchivedChunks,
   saveChatMessage,
   startStreamMessage,
@@ -130,5 +131,33 @@ describe("tauri command argument aliases", () => {
         mode: "proposal",
       })
     );
+  });
+
+  it("invokes multi-strategy preview command behind explicit wrapper", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      strategyKind: "react",
+      payloadKind: "react",
+      proposalIds: [],
+      warnings: [],
+      metadataSafeSummary: {},
+    });
+
+    await runMultiStrategyAgentPreview({
+      sessionId: "session-preview",
+      userText: "What should I focus on today?",
+      toolsPrompt: "Available tools: memory.search",
+      allowPlanning: true,
+      localModelAvailable: true,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
+      input: expect.objectContaining({
+        sessionId: "session-preview",
+        userText: "What should I focus on today?",
+        toolsPrompt: "Available tools: memory.search",
+        allowPlanning: true,
+        localModelAvailable: true,
+      }),
+    });
   });
 });

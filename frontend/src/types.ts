@@ -231,6 +231,42 @@ export interface ChatMessage {
   run_id?: string;
 }
 
+export type MultiStrategyAgentPreviewLayer = "L1" | "L2" | "L3" | "l1" | "l2" | "l3";
+
+export interface MultiStrategyAgentPreviewExecutionBudget {
+  maxSteps?: number;
+  maxToolCalls?: number;
+  timeoutSeconds?: number;
+  allowCloud?: boolean;
+  allowWrites?: boolean;
+}
+
+export interface MultiStrategyAgentPreviewInput {
+  sessionId: string;
+  userText: string;
+  toolsPrompt?: string;
+  allowPlanning: boolean;
+  localModelAvailable: boolean;
+  layer?: MultiStrategyAgentPreviewLayer;
+  executionBudget?: MultiStrategyAgentPreviewExecutionBudget;
+}
+
+export type MultiStrategyAgentPreviewStrategyKind = "react" | "planExecute";
+export type MultiStrategyAgentPreviewPayloadKind = "react" | "planExecute" | "blocked";
+export type MultiStrategyAgentPreviewGovernanceDecisionKind = "allow" | "warn" | "block";
+
+export interface MultiStrategyAgentPreviewOutput {
+  runId?: string;
+  strategyKind: MultiStrategyAgentPreviewStrategyKind;
+  payloadKind: MultiStrategyAgentPreviewPayloadKind;
+  userOutput?: string;
+  plan?: unknown;
+  proposalIds: string[];
+  warnings: string[];
+  metadataSafeSummary: Record<string, unknown>;
+  governanceDecisionKind?: MultiStrategyAgentPreviewGovernanceDecisionKind;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "./types";
+import type {
+  LifeModel,
+  ChatMessage,
+  DailyGoal,
+  StateHistoryEntry,
+  StateAlert,
+  MultiStrategyAgentPreviewInput,
+  MultiStrategyAgentPreviewOutput,
+} from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -210,6 +218,12 @@ export async function sendMessageV2(
   messages: ChatMessage[]
 ): Promise<SendMessageResult> {
   return safeInvoke<SendMessageResult>("send_message", { ...sessionArgs(sessionId), messages });
+}
+
+export async function runMultiStrategyAgentPreview(
+  input: MultiStrategyAgentPreviewInput
+): Promise<MultiStrategyAgentPreviewOutput> {
+  return safeInvoke<MultiStrategyAgentPreviewOutput>("run_multi_strategy_agent_preview", { input });
 }
 
 export async function startStreamMessage(

@@ -37,6 +37,7 @@ use commands::agent::{
     delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
     replay_agent_action, restore_agent_run,
 };
+use commands::agent_runtime::run_multi_strategy_agent_preview;
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -1562,7 +1563,7 @@ fn agent_actions_to_tool_call_results(
         .collect()
 }
 
-async fn build_chat_runtime_hs_packet(
+pub(crate) async fn build_chat_runtime_hs_packet(
     state: &Arc<AppState>,
     task: &openlife_core::agent::AgentTask,
     life_model: &LifeModel,
@@ -3038,6 +3039,7 @@ pub fn run() {
             delete_agent_run,
             restore_agent_run,
             replay_agent_action,
+            run_multi_strategy_agent_preview,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

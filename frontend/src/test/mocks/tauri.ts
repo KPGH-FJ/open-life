@@ -364,6 +364,24 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
       ] as T);
     case "get_chat_history":
       return Promise.resolve(mockChatMessages as T);
+    case "run_multi_strategy_agent_preview":
+      return Promise.resolve({
+        runId: "run-preview-1",
+        strategyKind: "react",
+        payloadKind: "react",
+        userOutput: "Preview response",
+        proposalIds: [],
+        warnings: [],
+        metadataSafeSummary: {
+          selectedStrategyKind: "react",
+          taskKind: "conversation",
+          riskLevel: "low",
+          hasHsPacket: false,
+          governanceDecisionKind: "allow",
+          reasonCode: "default_react",
+        },
+        governanceDecisionKind: "allow",
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":
