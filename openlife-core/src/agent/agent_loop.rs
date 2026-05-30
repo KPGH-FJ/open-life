@@ -3,7 +3,7 @@ use crate::agent::action_executor::{
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
-use crate::agent::RuntimeHSPacket;
+use crate::agent::{RuntimeHSPacket, RuntimeInput, RuntimeOutput};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -265,6 +265,7 @@ impl AgentLoop {
         actx: &AgentLoopContext<'_>,
         action_ctx: &ActionExecutionContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
+        config: &AgentLoopConfig,
     ) -> Result<AgentLoopResult> {
         let start_time = Instant::now();
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
@@ -285,7 +286,7 @@ impl AgentLoop {
         wrap_user_content(&mut current_task);
         let mut current_tools_prompt = actx.tools_prompt.to_string();
         // Append role-specific instruction if applicable
-        if let Some(role_instruction) = self.config.role_system_instruction() {
+        if let Some(role_instruction) = config.role_system_instruction() {
             if !current_tools_prompt.is_empty() {
                 current_tools_prompt.push_str("\n\n");
             }
@@ -319,19 +320,19 @@ impl AgentLoop {
             );
 
             // Check step budget
-            if step_count >= self.config.max_steps {
+            if step_count >= config.max_steps {
                 stop_reason = "max_steps_reached".into();
                 if final_response.is_empty() {
                     final_response = format!(
                         "已达到最大执行步数 ({})。当前结果：{}",
-                        self.config.max_steps, final_response
+                        config.max_steps, final_response
                     );
                 }
                 break;
             }
 
             // Check timeout
-            if start_time.elapsed().as_secs() >= self.config.timeout_seconds {
+            if start_time.elapsed().as_secs() >= config.timeout_seconds {
                 run.status = AgentRunStatus::Failed;
                 run.error = Some(AgentRunError {
                     message: "Agent loop timeout exceeded".into(),
@@ -373,6 +374,7 @@ impl AgentLoop {
                         tool_call_count,
                     },
                     callback.clone(),
+                    config,
                 )
                 .await
             {
@@ -471,7 +473,70 @@ impl AgentLoop {
             privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
         };
-        self.run_loop_core(&actx, action_ctx, None).await
+        self.run_loop_core(&actx, action_ctx, None, &self.config)
+            .await
+    }
+
+    fn config_with_runtime_budget(&self, input: &RuntimeInput) -> AgentLoopConfig {
+        let mut config = self.config.clone();
+        let runtime_config = input.agent_loop_config();
+        config.max_steps = runtime_config.max_steps;
+        config.max_tool_calls = runtime_config.max_tool_calls;
+        config.timeout_seconds = runtime_config.timeout_seconds;
+        config.allow_writes = runtime_config.allow_writes;
+        config.allow_cloud = runtime_config.allow_cloud;
+        config
+    }
+
+    /// Run the iterative loop through the RuntimeInput contract while preserving
+    /// the existing AgentLoopResult surface for legacy callers.
+    pub async fn run_with_runtime_input(
+        &self,
+        input: &RuntimeInput,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+    ) -> Result<AgentLoopResult> {
+        let hs_runtime_packet = input.hs_packet.as_ref().or(action_ctx.hs_runtime_packet);
+        let runtime_action_ctx = ActionExecutionContext {
+            registry: action_ctx.registry,
+            permission_store: action_ctx.permission_store,
+            audit_store: action_ctx.audit_store,
+            privacy_engine: action_ctx.privacy_engine,
+            safe_paths: action_ctx.safe_paths,
+            life_model: action_ctx.life_model,
+            memory_store: action_ctx.memory_store,
+            proposal_store: action_ctx.proposal_store,
+            agent_run_store: action_ctx.agent_run_store,
+            network_policy: action_ctx.network_policy,
+            hs_runtime_packet,
+            calendar_ics_paths: action_ctx.calendar_ics_paths,
+        };
+        let actx = AgentLoopContext {
+            task: &input.task,
+            life_model: &input.life_model_compat,
+            tools_prompt: &input.tools_prompt,
+            memory_context: input.memory_context.clone(),
+            privacy_engine,
+            hs_runtime_packet: runtime_action_ctx.hs_runtime_packet.cloned(),
+        };
+        let config = self.config_with_runtime_budget(input);
+
+        self.run_loop_core(&actx, &runtime_action_ctx, None, &config)
+            .await
+    }
+
+    /// Run the iterative loop through RuntimeInput and return the converged
+    /// RuntimeOutput contract.
+    pub async fn run_runtime_input(
+        &self,
+        input: RuntimeInput,
+        privacy_engine: PrivacyEngine,
+        action_ctx: &ActionExecutionContext<'_>,
+    ) -> Result<RuntimeOutput> {
+        let result = self
+            .run_with_runtime_input(&input, privacy_engine, action_ctx)
+            .await?;
+        Ok(RuntimeOutput::from_agent_loop_result(result))
     }
 
     /// Streaming variant of run(). Same logic but forwards token chunks
@@ -495,7 +560,8 @@ impl AgentLoop {
             privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
         };
-        self.run_loop_core(&actx, action_ctx, Some(callback)).await
+        self.run_loop_core(&actx, action_ctx, Some(callback), &self.config)
+            .await
     }
 
     /// Execute a single step of the agent loop.
@@ -504,6 +570,7 @@ impl AgentLoop {
         &self,
         mut ctx: StepContext<'_>,
         callback: Option<Arc<dyn StreamingCallback>>,
+        config: &AgentLoopConfig,
     ) -> Result<StepResult> {
         let mut status_updates: Vec<crate::agent::types::AgentLoopStatusUpdate> = Vec::new();
 
@@ -589,7 +656,7 @@ impl AgentLoop {
                 }
 
                 let final_text = parsed.final_text;
-                let tool_actions = self.filter_tools_by_allowlist(parsed.actions);
+                let tool_actions = self.filter_tools_by_allowlist(parsed.actions, config);
 
                 if tool_actions.is_empty() {
                     self.emit_status(
@@ -642,6 +709,7 @@ impl AgentLoop {
                         &mut ctx.tool_call_count,
                         &callback,
                         &mut status_updates,
+                        config,
                     )
                     .await?;
 
@@ -653,6 +721,7 @@ impl AgentLoop {
                     final_text,
                     ctx.run,
                     &mut status_updates,
+                    config,
                 ))
             }
             Err(e) => {
@@ -1000,14 +1069,15 @@ impl AgentLoop {
     fn filter_tools_by_allowlist(
         &self,
         actions: Vec<AgentActionRequest>,
+        config: &AgentLoopConfig,
     ) -> Vec<AgentActionRequest> {
-        if self.config.toolset_allowlist.is_empty() {
+        if config.toolset_allowlist.is_empty() {
             return actions;
         }
         actions
             .into_iter()
             .filter(|a| {
-                self.config.toolset_allowlist.iter().any(|allowed| {
+                config.toolset_allowlist.iter().any(|allowed| {
                     a.target == *allowed || a.target.starts_with(&format!("{}.", allowed))
                 })
             })
@@ -1025,6 +1095,7 @@ impl AgentLoop {
         tool_call_count: &mut u32,
         callback: &Option<Arc<dyn StreamingCallback>>,
         status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+        config: &AgentLoopConfig,
     ) -> Result<(bool, u32, bool, Vec<AgentObservation>)> {
         let mut observations = Vec::new();
         let mut all_succeeded = true;
@@ -1032,8 +1103,12 @@ impl AgentLoop {
         let mut budget_exceeded = false;
 
         for (idx, action_request) in tool_actions.iter().enumerate() {
-            if *tool_call_count + executed_this_step >= self.config.max_tool_calls {
-                let obs = self.create_budget_exceeded_observation(run, *tool_call_count);
+            if *tool_call_count + executed_this_step >= config.max_tool_calls {
+                let obs = self.create_budget_exceeded_observation(
+                    run,
+                    *tool_call_count,
+                    config.max_tool_calls,
+                );
                 observations.push(obs.clone());
                 run.observations.push(obs);
                 all_succeeded = false;
@@ -1201,11 +1276,12 @@ impl AgentLoop {
         final_text: String,
         run: &mut AgentRun,
         status_updates: &mut Vec<crate::agent::types::AgentLoopStatusUpdate>,
+        config: &AgentLoopConfig,
     ) -> StepResult {
         if budget_exceeded {
             let final_response = format!(
                 "已达到最大工具调用次数 ({})。已完成的观察结果：\n{}",
-                self.config.max_tool_calls,
+                config.max_tool_calls,
                 observations
                     .iter()
                     .map(|o| format!("- {}", o.content))
@@ -1281,6 +1357,7 @@ impl AgentLoop {
         &self,
         _run: &AgentRun,
         tool_call_count: u32,
+        max_tool_calls: u32,
     ) -> AgentObservation {
         let now = chrono::Utc::now();
         AgentObservation {
@@ -1289,14 +1366,11 @@ impl AgentLoop {
                 now.timestamp_nanos_opt().unwrap_or_default()
             ),
             action_id: None,
-            content: format!(
-                "工具调用预算已耗尽 (max_tool_calls={})",
-                self.config.max_tool_calls
-            ),
+            content: format!("工具调用预算已耗尽 (max_tool_calls={})", max_tool_calls),
             source: "agent_loop".into(),
             structured_result: Some(serde_json::json!({
                 "error": "max_tool_calls exceeded",
-                "max_tool_calls": self.config.max_tool_calls,
+                "max_tool_calls": max_tool_calls,
                 "current_count": tool_call_count,
             })),
             timestamp: now,

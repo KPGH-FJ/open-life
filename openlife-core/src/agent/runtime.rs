@@ -6,6 +6,7 @@ use crate::agent::reasoning::{
 use crate::agent::types::AgentTask;
 use crate::agent::{
     behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit, RuntimeHSPacket,
+    RuntimeInput, RuntimeOutput,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -40,6 +41,7 @@ impl Default for AgentRuntimeConfig {
 pub struct AgentRuntime {
     context_assembler: CompositeAssembler,
     reasoning_strategies: HashMap<String, Box<dyn ReasoningStrategy>>,
+    scheduler: InferenceScheduler,
     config: AgentRuntimeConfig,
 }
 
@@ -75,6 +77,7 @@ impl AgentRuntime {
                 .with(Box::new(crate::agent::MemoryAssembler))
                 .with(Box::new(crate::agent::ToolsAssembler)),
             reasoning_strategies: strategies,
+            scheduler,
             config: AgentRuntimeConfig {
                 default_strategy: app_config.reasoning.default_strategy.clone(),
                 meaning_timeout_ms: app_config.reasoning.meaning_timeout_ms,
@@ -124,6 +127,63 @@ impl AgentRuntime {
             None,
         )
         .await
+    }
+
+    /// Execute the current runtime through the RuntimeInput/RuntimeOutput contract.
+    ///
+    /// This is intentionally a thin adapter over the existing task execution and
+    /// scheduler generation path. ReAct tool execution remains owned by AgentLoop.
+    pub async fn execute_runtime_input(
+        &self,
+        input: RuntimeInput,
+    ) -> Result<RuntimeOutput, AgentRuntimeError> {
+        let params = input.agent_runtime_params();
+        let runtime_output = self
+            .execute_task_with_hs_packet(
+                params.task,
+                params.life_model,
+                params.tools_prompt,
+                params.memory_context,
+                vec![],
+                crate::privacy::PrivacyEngine::new(),
+                params.hs_packet,
+            )
+            .await?;
+
+        let tools_prompt = if input.tools_prompt.trim().is_empty() {
+            None
+        } else {
+            Some(input.tools_prompt.as_str())
+        };
+        let user_output = if let Some(ref packet) = input.hs_packet {
+            self.scheduler
+                .generate_with_hs_packet(
+                    runtime_output.final_messages.clone(),
+                    &input.life_model_compat,
+                    tools_prompt,
+                    packet,
+                )
+                .await
+        } else {
+            self.scheduler
+                .generate(
+                    runtime_output.final_messages.clone(),
+                    &input.life_model_compat,
+                    tools_prompt,
+                )
+                .await
+        }
+        .map_err(|e| AgentRuntimeError::Generation(e.to_string()))?;
+
+        Ok(RuntimeOutput {
+            run_id: Some(runtime_output.run_id),
+            user_output,
+            actions: Vec::new(),
+            observations: Vec::new(),
+            proposal_ids: Vec::new(),
+            life_event_candidates: Vec::new(),
+            warnings: Vec::new(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -236,6 +296,7 @@ impl AgentRuntime {
         }
 
         Ok(AgentRuntimeOutput {
+            run_id,
             final_messages,
             reasoning_trace: reasoning_output.trace,
             suggested_tools: reasoning_output.suggested_tools,
@@ -318,6 +379,7 @@ impl AgentRuntime {
             .assemble(&input)
             .map_err(|e| AgentRuntimeError::ContextAssembly(e.to_string()))?;
 
+        let run_id = Uuid::new_v4().to_string();
         let mut final_messages = context.desensitized_messages.to_vec();
         let hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
         let hs_behavior_checks = hs_packet
@@ -335,6 +397,7 @@ impl AgentRuntime {
         }
 
         Ok(AgentRuntimeOutput {
+            run_id,
             final_messages,
             reasoning_trace: ReasoningTrace::default(),
             suggested_tools: vec![],
@@ -349,6 +412,7 @@ impl AgentRuntime {
 /// Output from AgentRuntime execution.
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeOutput {
+    pub run_id: String,
     pub final_messages: Vec<ChatMessage>,
     pub reasoning_trace: ReasoningTrace,
     pub suggested_tools: Vec<String>,
@@ -381,6 +445,7 @@ pub enum AgentRuntimeError {
     ContextAssembly(String),
     StrategyNotFound(String),
     Reasoning(ReasoningError),
+    Generation(String),
 }
 
 impl std::fmt::Display for AgentRuntimeError {
@@ -389,6 +454,7 @@ impl std::fmt::Display for AgentRuntimeError {
             AgentRuntimeError::ContextAssembly(e) => write!(f, "Context assembly failed: {}", e),
             AgentRuntimeError::StrategyNotFound(s) => write!(f, "Strategy not found: {}", s),
             AgentRuntimeError::Reasoning(e) => write!(f, "Reasoning failed: {}", e),
+            AgentRuntimeError::Generation(e) => write!(f, "Generation failed: {}", e),
         }
     }
 }
