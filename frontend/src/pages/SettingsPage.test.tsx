@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import SettingsPage from "./SettingsPage";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
@@ -35,6 +35,19 @@ describe("SettingsPage", () => {
     render(
       <MemoryRouter>
         <SettingsPage />
+      </MemoryRouter>
+    );
+
+  function LocationProbe() {
+    const location = useLocation();
+    return <div data-testid="location-path">{location.pathname}</div>;
+  }
+
+  const renderSettingsWithLocation = () =>
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+        <LocationProbe />
       </MemoryRouter>
     );
 
@@ -290,6 +303,64 @@ describe("SettingsPage", () => {
     expect(screen.getByText("2. 完成人生模型构建")).toBeInTheDocument();
     expect(screen.getByText("3. 跑通第一次对话")).toBeInTheDocument();
     expect(screen.getByText("4. 查看校准或版本回滚")).toBeInTheDocument();
+  });
+
+  it("runs multi-strategy preview from the experimental panel and links to the run trace", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.resolve({
+          runId: "run-preview-ui-1",
+          strategyKind: "planExecute",
+          payloadKind: "planExecute",
+          proposalIds: [],
+          warnings: ["preview runtime forces allowWrites=false"],
+          metadataSafeSummary: {
+            taskKind: "conversation",
+            reasonCode: "write_like_intent",
+            riskLevel: "medium",
+            hasHsPacket: true,
+          },
+          governanceDecisionKind: "warn",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettingsWithLocation();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: /MultiStrategy Preview/ }));
+
+    fireEvent.change(screen.getByLabelText("userText"), {
+      target: { value: "Draft a safe preview plan for tomorrow" },
+    });
+    fireEvent.click(screen.getByLabelText("allowPlanning"));
+    fireEvent.click(screen.getByLabelText("localModelAvailable"));
+    fireEvent.click(screen.getByRole("button", { name: "Run Preview" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_multi_strategy_agent_preview", {
+        input: expect.objectContaining({
+          sessionId: expect.stringMatching(/^runtime-preview-/),
+          userText: "Draft a safe preview plan for tomorrow",
+          toolsPrompt: "No developer tools catalog supplied for this preview.",
+          allowPlanning: true,
+          localModelAvailable: true,
+          layer: "L2",
+          executionBudget: expect.objectContaining({ allowWrites: false }),
+        }),
+      });
+    });
+
+    expect(await screen.findByText("run-preview-ui-1")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Payload: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Governance: warn")).toBeInTheDocument();
+    expect(screen.getByText("preview runtime forces allowWrites=false")).toBeInTheDocument();
+    expect(screen.getByLabelText("userText")).toHaveValue("");
+
+    fireEvent.click(screen.getByRole("button", { name: "View Run Trace" }));
+    expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-preview-ui-1");
   });
 
   it("prioritizes continuing Builder when unfinished builder sessions exist", async () => {

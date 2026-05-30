@@ -10,8 +10,8 @@ completion/status index.
 
 ## Current Position
 
-W1-W10 are complete. The project has reached MultiStrategy Preview AgentRun
-Audit Persistence.
+W1-W12 are complete. The project has reached a non-default MultiStrategy
+Preview UI / debug entry.
 
 The key boundary is unchanged:
 
@@ -39,13 +39,12 @@ The key boundary is unchanged:
 | W9 MultiStrategy Preview Command | Done | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/tauri.ts` | `run_multi_strategy_agent_preview` exists as non-default preview/beta command. |
 | W10 MultiStrategy Preview AgentRun Audit Persistence | Done | `agent_runtime.rs`, `previewAudit.ts`, Runs/Trace UI | Writes metadata-safe outer AgentRun audit with strategy, payload, governance, warnings; ReAct inner run id is child metadata only. |
 | W11 Documentation Status Sync | Done | README, AGENTS, plans | Entry docs synchronized with code status and premature Chat replacement blocked. |
+| W12 Non-Default MultiStrategy Preview UI / Debug Entry | Done | Settings experimental tab, preview form tests | Settings exposes a folded preview/beta panel that calls `run_multi_strategy_agent_preview`, displays metadata-safe strategy/payload/governance/warnings, and links to Runs trace without replacing Chat. |
 
 ## Next Recommended Sequence
 
 ```text
-docs/status sync
--> non-default preview UI/debug entry
--> guarded Chat subpath migration
+guarded Chat subpath migration
 -> maturation loop V1
 -> PlanExecute vertical slice
 -> RuntimeStrategy trait

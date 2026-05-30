@@ -28,7 +28,7 @@ import {
   type PluginRecord,
   type ToolManifest,
 } from "../tauri";
-import { LayoutDashboard, Cpu, Shield, Database, Puzzle } from "lucide-react";
+import { LayoutDashboard, Cpu, Shield, Database, Puzzle, FlaskConical } from "lucide-react";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -39,6 +39,7 @@ import OverviewTab from "./settings/tabs/OverviewTab";
 import ProviderTab from "./settings/tabs/ProviderTab";
 import PrivacyTab from "./settings/tabs/PrivacyTab";
 import DataTab from "./settings/tabs/DataTab";
+import MultiStrategyPreviewSection from "./settings/MultiStrategyPreviewSection";
 
 function defaultConfig(): AppConfig {
   return {
@@ -364,6 +365,7 @@ export default function SettingsPage() {
             { id: "privacy", label: "隐私安全", icon: Shield },
             { id: "data", label: "数据", icon: Database },
             { id: "plugins", label: "插件", icon: Puzzle },
+            { id: "experimental", label: "实验", icon: FlaskConical },
           ].map(tab => (
             <button
               key={tab.id}
@@ -463,6 +465,9 @@ export default function SettingsPage() {
             onRefreshDiagnostics={refreshAllDiagnostics}
           />
         )}
+
+        {/* Experimental Tab */}
+        {activeTab === "experimental" && <MultiStrategyPreviewSection />}
 
         {/* Save button - always visible */}
         <div className="flex justify-end pt-4 border-t">
