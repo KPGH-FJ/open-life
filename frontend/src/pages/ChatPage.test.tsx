@@ -600,6 +600,57 @@ describe("ChatPage", () => {
     expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-chat-preview-1");
   });
 
+  const mockSuccessfulControlledPilot = (overrides: Record<string, any> = {}) => {
+    const metadataSafeSummary = {
+      taskKind: "conversation",
+      reasonCode: "default_react",
+      riskLevel: "low",
+      hasHsPacket: false,
+      governanceDecisionKind: "allow",
+      ...(overrides.metadataSafeSummary ?? {}),
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_pilot_eligibility") {
+        return Promise.resolve({
+          eligible: true,
+          requiredCleanRuns: 3,
+          cleanRunCount: 3,
+          checkedRunIds: ["run-preview-clean-3", "run-preview-clean-2", "run-preview-clean-1"],
+          blockingReasons: [],
+          defaultChatUnchanged: true,
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.resolve({
+          runId: "run-controlled-pilot-1",
+          strategyKind: "react",
+          payloadKind: "react",
+          userOutput: "Pilot-only answer",
+          proposalIds: [],
+          warnings: [],
+          governanceDecisionKind: "allow",
+          ...overrides,
+          metadataSafeSummary,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+  };
+
+  const runControlledPilotFromChat = async (draft = "Run one controlled pilot turn") => {
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: draft } });
+    fireEvent.click(screen.getByRole("button", { name: /Governed Preview/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Run Controlled Pilot" }));
+  };
+
   it("blocks controlled pilot when eligibility fails and does not call preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_controlled_chat_pilot_eligibility") {
@@ -642,9 +693,12 @@ describe("ChatPage", () => {
     expect(await screen.findByText(/Controlled Pilot blocked/)).toBeInTheDocument();
     expect(screen.getByText("only 1 clean preview run found")).toBeInTheDocument();
     expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Promote Pilot Response" })
+    ).not.toBeInTheDocument();
   });
 
-  it("runs controlled pilot after eligibility passes and renders pilot response separately", async () => {
+  it("runs controlled pilot after eligibility passes and renders pilot response separately without auto-saving", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_controlled_chat_pilot_eligibility") {
         return Promise.resolve({
@@ -717,6 +771,93 @@ describe("ChatPage", () => {
     expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
   });
 
+  it("shows promote operation only for successful controlled pilot responses with userOutput", async () => {
+    mockSuccessfulControlledPilot();
+
+    await runControlledPilotFromChat();
+
+    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+  });
+
+  it("does not show promote operation when successful controlled pilot omits userOutput", async () => {
+    mockSuccessfulControlledPilot({ userOutput: undefined });
+
+    await runControlledPilotFromChat("Pilot returns metadata only");
+
+    expect(await screen.findByText("Pilot response")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Promote Pilot Response" })
+    ).not.toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+  });
+
+  it("cancels pilot promotion review without writing chat history", async () => {
+    mockSuccessfulControlledPilot();
+
+    await runControlledPilotFromChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
+
+    expect(screen.getByText("Review pilot promotion")).toBeInTheDocument();
+    expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
+    expect(screen.getAllByText("run-controlled-pilot-1")).toHaveLength(2);
+    expect(screen.getByText("Selected strategy")).toBeInTheDocument();
+    expect(screen.getByText("Governance summary")).toBeInTheDocument();
+    expect(screen.getByText("Payload summary")).toBeInTheDocument();
+    expect(screen.getByText(/确认后将写入当前聊天历史/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel Promotion" }));
+
+    expect(screen.queryByText("Review pilot promotion")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Promote Pilot Response" })).toBeInTheDocument();
+    expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
+  });
+
+  it("confirms pilot promotion by saving one assistant chat message", async () => {
+    mockSuccessfulControlledPilot();
+
+    await runControlledPilotFromChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
+
+    await waitFor(() => {
+      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+      expect(saveCalls).toHaveLength(1);
+    });
+    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+    expect(saveCalls[0][1]).toMatchObject({
+      sessionId: "session-1",
+      session_id: "session-1",
+      message: {
+        role: "assistant",
+        content: "Pilot-only answer",
+        run_id: "run-controlled-pilot-1",
+      },
+    });
+    expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
+  });
+
+  it("does not allow repeating promotion for the same pilot response", async () => {
+    mockSuccessfulControlledPilot();
+
+    await runControlledPilotFromChat();
+    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
+
+    await waitFor(() => {
+      const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+      expect(saveCalls).toHaveLength(1);
+    });
+    expect(screen.getByText("Promoted to chat history")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Promote Pilot Response" })
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm Promotion" })).not.toBeInTheDocument();
+    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+    expect(saveCalls).toHaveLength(1);
+  });
+
   it("shows controlled pilot fallback when preview fails without writing chat history", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_controlled_chat_pilot_eligibility") {
@@ -752,6 +893,9 @@ describe("ChatPage", () => {
     expect(screen.getByText(/Use normal Send for the stable Chat path/)).toBeInTheDocument();
     expect(invoke).not.toHaveBeenCalledWith("save_chat_message", expect.anything());
     expect(invoke).not.toHaveBeenCalledWith("start_stream_message", expect.anything());
+    expect(
+      screen.queryByRole("button", { name: "Promote Pilot Response" })
+    ).not.toBeInTheDocument();
   });
 
   it("ignores a delayed AgentRun fetch after switching away from the originating session", async () => {

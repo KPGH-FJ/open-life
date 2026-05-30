@@ -273,6 +273,18 @@ function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, st
   });
 }
 
+function getPilotPromotionKey(result: MultiStrategyAgentPreviewOutput | null): string {
+  if (!result) return "";
+  return result.runId || `${result.strategyKind}:${result.payloadKind}:${result.userOutput ?? ""}`;
+}
+
+function hasPromotablePilotResponse(
+  result: MultiStrategyAgentPreviewOutput | null
+): result is MultiStrategyAgentPreviewOutput & { userOutput: string } {
+  if (!result?.userOutput?.trim()) return false;
+  return result.payloadKind !== "blocked" && result.governanceDecisionKind !== "block";
+}
+
 export default function ChatPage() {
   const location = useLocation();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
@@ -316,6 +328,15 @@ export default function ChatPage() {
     useState<ControlledChatPilotEligibilityReport | null>(null);
   const [controlledPilotResult, setControlledPilotResult] =
     useState<MultiStrategyAgentPreviewOutput | null>(null);
+  const [controlledPilotPromotionReviewOpen, setControlledPilotPromotionReviewOpen] =
+    useState(false);
+  const [controlledPilotPromoting, setControlledPilotPromoting] = useState(false);
+  const [controlledPilotPromotionError, setControlledPilotPromotionError] = useState<string | null>(
+    null
+  );
+  const [promotedControlledPilotKeys, setPromotedControlledPilotKeys] = useState<
+    Record<string, true>
+  >({});
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
@@ -894,6 +915,24 @@ export default function ChatPage() {
     () => safeSummaryEntries(controlledPilotResult?.metadataSafeSummary ?? {}),
     [controlledPilotResult]
   );
+  const controlledPilotCanPromote = hasPromotablePilotResponse(controlledPilotResult);
+  const controlledPilotPromotionKey = getPilotPromotionKey(controlledPilotResult);
+  const controlledPilotPromoted = Boolean(
+    controlledPilotPromotionKey && promotedControlledPilotKeys[controlledPilotPromotionKey]
+  );
+  const controlledPilotGovernanceSummary = controlledPilotResult
+    ? [
+        `decision=${controlledPilotResult.governanceDecisionKind ?? "unknown"}`,
+        ...controlledPilotSummaryEntries.map(([key, value]) => `${key}=${value}`),
+      ].join(" · ")
+    : "";
+  const controlledPilotPayloadSummary = controlledPilotResult
+    ? [
+        `payloadKind=${controlledPilotResult.payloadKind}`,
+        `proposalIds=${controlledPilotResult.proposalIds.length}`,
+        `warnings=${controlledPilotResult.warnings.length}`,
+      ].join(" · ")
+    : "";
   const readinessClass =
     readiness.tone === "ready"
       ? "bg-emerald-50 border-emerald-100 text-emerald-800"
@@ -1085,6 +1124,8 @@ export default function ChatPage() {
     setControlledPilotFallback(null);
     setControlledPilotEligibility(null);
     setControlledPilotResult(null);
+    setControlledPilotPromotionReviewOpen(false);
+    setControlledPilotPromotionError(null);
 
     try {
       const eligibility = await checkControlledChatPilotEligibility();
@@ -1115,6 +1156,43 @@ export default function ChatPage() {
       setControlledPilotSubmitting(false);
     }
   }, [input]);
+
+  const handleConfirmControlledPilotPromotion = useCallback(async () => {
+    if (
+      !hasPromotablePilotResponse(controlledPilotResult) ||
+      !currentSessionId ||
+      controlledPilotPromoting
+    ) {
+      return;
+    }
+    const promotionKey = getPilotPromotionKey(controlledPilotResult);
+    if (!promotionKey || promotedControlledPilotKeys[promotionKey]) return;
+
+    const assistantMsg: ChatMessage = {
+      role: "assistant",
+      content: controlledPilotResult.userOutput.trim(),
+      ...(controlledPilotResult.runId ? { run_id: controlledPilotResult.runId } : {}),
+    };
+
+    setControlledPilotPromoting(true);
+    setControlledPilotPromotionError(null);
+    try {
+      await saveChatMessage(currentSessionId, assistantMsg);
+      setMessages(prev => [...prev, assistantMsg]);
+      setPromotedControlledPilotKeys(prev => ({ ...prev, [promotionKey]: true }));
+      setControlledPilotPromotionReviewOpen(false);
+      await loadSessions();
+    } catch (e) {
+      setControlledPilotPromotionError(`Promotion failed: ${readablePreviewError(e)}`);
+    } finally {
+      setControlledPilotPromoting(false);
+    }
+  }, [
+    controlledPilotPromoting,
+    controlledPilotResult,
+    currentSessionId,
+    promotedControlledPilotKeys,
+  ]);
 
   const handleIndexMemory = useCallback(
     async (content: string) => {
@@ -1446,18 +1524,41 @@ export default function ChatPage() {
                         <div>
                           <div className="text-xs font-semibold text-stone-900">Pilot response</div>
                           <div className="mt-0.5 text-[11px] text-stone-500">
-                            Separate pilot output. It is not saved as a normal assistant message.
+                            {controlledPilotPromoted
+                              ? "Promoted to chat history as a normal assistant message."
+                              : "Separate pilot output. It is not saved as a normal assistant message."}
                           </div>
                         </div>
-                        {controlledPilotResult.runId && (
-                          <Link
-                            to={`/runs/${controlledPilotResult.runId}`}
-                            className="inline-flex items-center gap-1.5 rounded-md bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800 ring-1 ring-sky-100 hover:bg-sky-100"
-                          >
-                            <ExternalLink size={13} />
-                            View Run Trace
-                          </Link>
-                        )}
+                        <div className="flex flex-wrap items-center gap-2">
+                          {controlledPilotPromoted && (
+                            <span className="inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-3 py-1.5 text-xs font-medium text-emerald-800 ring-1 ring-emerald-100">
+                              <CheckCircle2 size={13} />
+                              Promoted to chat history
+                            </span>
+                          )}
+                          {!controlledPilotPromoted && controlledPilotCanPromote && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setControlledPilotPromotionReviewOpen(true);
+                                setControlledPilotPromotionError(null);
+                              }}
+                              className="inline-flex items-center gap-1.5 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800"
+                            >
+                              <CheckCircle2 size={13} />
+                              Promote Pilot Response
+                            </button>
+                          )}
+                          {controlledPilotResult.runId && (
+                            <Link
+                              to={`/runs/${controlledPilotResult.runId}`}
+                              className="inline-flex items-center gap-1.5 rounded-md bg-sky-50 px-3 py-1.5 text-xs font-medium text-sky-800 ring-1 ring-sky-100 hover:bg-sky-100"
+                            >
+                              <ExternalLink size={13} />
+                              View Run Trace
+                            </Link>
+                          )}
+                        </div>
                       </div>
 
                       <div className="whitespace-pre-wrap rounded-md bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-900">
@@ -1494,6 +1595,92 @@ export default function ChatPage() {
                           ))}
                         </div>
                       )}
+
+                      {controlledPilotPromotionError && (
+                        <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs text-red-700">
+                          {controlledPilotPromotionError}
+                        </div>
+                      )}
+
+                      {controlledPilotPromotionReviewOpen &&
+                        controlledPilotCanPromote &&
+                        !controlledPilotPromoted && (
+                          <div className="space-y-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-xs text-emerald-950">
+                            <div>
+                              <div className="font-semibold">Review pilot promotion</div>
+                              <div className="mt-0.5 text-emerald-800">
+                                确认后将写入当前聊天历史，成为普通 assistant message。
+                              </div>
+                            </div>
+
+                            <div>
+                              <div className="text-[10px] uppercase text-emerald-700">
+                                Pilot response text
+                              </div>
+                              <div className="mt-1 whitespace-pre-wrap rounded-md bg-white px-3 py-2 text-sm leading-6 text-stone-900">
+                                {controlledPilotResult.userOutput?.trim()}
+                              </div>
+                            </div>
+
+                            <div className="grid gap-2 md:grid-cols-2">
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">runId</div>
+                                <div className="mt-1 font-mono text-stone-900">
+                                  {controlledPilotResult.runId ?? "not returned"}
+                                </div>
+                              </div>
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">
+                                  Selected strategy
+                                </div>
+                                <div className="mt-1 text-stone-900">
+                                  {controlledPilotResult.strategyKind}
+                                </div>
+                              </div>
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">
+                                  Governance summary
+                                </div>
+                                <div className="mt-1 text-stone-900">
+                                  {controlledPilotGovernanceSummary}
+                                </div>
+                              </div>
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">
+                                  Payload summary
+                                </div>
+                                <div className="mt-1 text-stone-900">
+                                  {controlledPilotPayloadSummary}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setControlledPilotPromotionReviewOpen(false);
+                                  setControlledPilotPromotionError(null);
+                                }}
+                                disabled={controlledPilotPromoting}
+                                className="rounded-md border border-emerald-200 bg-white px-3 py-1.5 text-xs font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50"
+                              >
+                                Cancel Promotion
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleConfirmControlledPilotPromotion}
+                                disabled={controlledPilotPromoting}
+                                className="inline-flex items-center gap-1.5 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800 disabled:opacity-50"
+                              >
+                                {controlledPilotPromoting && (
+                                  <Loader2 size={13} className="animate-spin" />
+                                )}
+                                Confirm Promotion
+                              </button>
+                            </div>
+                          </div>
+                        )}
                     </div>
                   )}
                 </div>

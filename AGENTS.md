@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：W20 Very Small Controlled Chat Migration Pilot With Fallback 已完成。MultiStrategy Runtime 仍不是默认 Chat 主链路；Chat 页面现在只有一个用户显式点击的 Controlled Pilot 单轮入口，会先调用 `check_controlled_chat_pilot_eligibility`，通过后才以 `allowWrites=false` 调用 `run_multi_strategy_agent_preview`。默认 `Send` / `send_message` / `start_stream_message` 保持现状。下一阶段才能考虑 reviewed pilot response promotion。`make ci` 为发布门控。
+- **当前阶段**：W21 Reviewed Pilot Response Promotion 已完成。MultiStrategy Runtime 仍不是默认 Chat 主链路；Chat 页面现在有用户显式点击的 Controlled Pilot 单轮入口，会先调用 `check_controlled_chat_pilot_eligibility`，通过后才以 `allowWrites=false` 调用 `run_multi_strategy_agent_preview`。成功且包含 `userOutput` 的 Pilot response 可由用户显式 review/confirm 后提升为一条 ordinary assistant message。默认 `Send` / `send_message` / `start_stream_message` 保持现状。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -19,7 +19,7 @@
 
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
-3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W20 完成度与当前 non-default preview / migration gate / pilot eligibility / controlled pilot 状态索引；不是第二套路线图。
+3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W21 完成度与当前 non-default preview / migration gate / pilot eligibility / controlled pilot / reviewed promotion 状态索引；不是第二套路线图。
 4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
 5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
 6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
@@ -36,13 +36,13 @@
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
 - ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
-- 当前分支已完成 W1-W20；`check_controlled_chat_pilot_eligibility` 可只读判断最近 preview gate evidence 是否连续干净。Chat 页面新增 very small Controlled Pilot：必须用户显式点击，先检查 eligibility，blocked 时只展示 blocking reasons/fallback，不调用 preview；eligible 时才运行单次 preview，且强制 `allowWrites=false`。默认 Chat 主路径仍不能替换。
+- 当前分支已完成 W1-W21；`check_controlled_chat_pilot_eligibility` 可只读判断最近 preview gate evidence 是否连续干净。Chat 页面有 very small Controlled Pilot：必须用户显式点击，先检查 eligibility，blocked 时只展示 blocking reasons/fallback，不调用 preview；eligible 时才运行单次 preview，且强制 `allowWrites=false`。成功 pilot 默认仍隔离；只有用户显式 review/confirm promotion 后，才写入一条 ordinary assistant message。默认 Chat 主路径仍不能替换。
 - `run_multi_strategy_agent_preview` 是 preview/beta command。它可用于非默认调试和审计验证，不代表 MultiStrategy Runtime 已产品化。
 - `check_runtime_migration_gate` 只读检查既有 preview AgentRun / audit；不得在 gate 中执行 ReAct、PlanExecute、工具调用或外部写入。
 - Settings 的 Runtime Migration Gate 面板只是 evidence surface：它可显式调用 `check_runtime_migration_gate` 并显示 pass/block 与 blocking reasons，不会自动运行 preview，也不会切换默认 Chat。
 - `check_controlled_chat_pilot_eligibility` 是 W19 只读资格检查：默认检查最近 3 条 MultiStrategy preview AgentRun 的 gate report，返回 clean count、checked run ids、blocking reasons 和 last gate report；它不创建 AgentRun、Proposal、Action、Observation，不执行 runtime/tool/proposal apply/LifeModel/Memory 写入。
 - Settings 的 Pilot eligibility 面板只回答“是否满足进入 controlled Chat migration pilot 的最低资格”。它不是 Chat 切换开关；即使 eligible，也不能自动替换默认 Chat。
-- W20 Controlled Pilot 是 Chat 页面上的显式、单次、可回退路径：普通 Send 不调用 eligibility/gate/preview；pilot 成功只显示为 “Pilot response”，不伪装成普通 assistant message，不写入普通 chat history；pilot blocked/failed 时显示 fallback，不自动重试。下一阶段才允许讨论 reviewed pilot response promotion。
+- W20 Controlled Pilot 是 Chat 页面上的显式、单次、可回退路径：普通 Send 不调用 eligibility/gate/preview；pilot blocked/failed 时显示 fallback，不自动重试。W21 Reviewed Pilot Response Promotion 只对成功且包含 `userOutput` 的 pilot 显示操作，必须用户确认后才通过现有 chat message save path 写入一条 assistant message；取消、blocked、failed、no-output、重复 promotion 均不写入，不写 LifeModel/Memory/Proposal/外部工具结果。
 - W10 的 preview AgentRun audit 是 metadata-safe 外层 run。ReAct payload 里的 inner run id 只能作为 child metadata 存在，不是 Runs 查询和产品 trace 的主 id。
 - 后续 Agent 不得默认替换 `send_message`、`start_stream_message` 或 Chat 主流程；任何迁移必须先从非默认 preview/debug 入口或受控子路径开始，并保留稳定 fallback。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
@@ -186,7 +186,7 @@
 | **MultiStrategyRuntime** | [`openlife-core/src/agent/multi_strategy_runtime.rs`](openlife-core/src/agent/multi_strategy_runtime.rs) | Preview/core orchestrator：用 StrategySelector 在 ReAct、PlanExecute、Blocked payload 间选择，并输出 warnings | 仅通过 `run_multi_strategy_agent_preview` 非默认命令暴露；尚未接管 Chat |
 | **Preview Audit** | [`src-tauri/src/commands/agent_runtime.rs`](src-tauri/src/commands/agent_runtime.rs) + [`frontend/src/utils/previewAudit.ts`](frontend/src/utils/previewAudit.ts) | W10 metadata-safe 外层 AgentRun audit；Runs / Trace 识别 preview strategy/payload/governance/warnings | ReAct inner run id 只作为 child metadata，不作为主查询 id |
 | **Pilot Eligibility** | [`openlife-core/src/agent/runtime_migration_gate.rs`](openlife-core/src/agent/runtime_migration_gate.rs) + [`src-tauri/src/commands/agent_runtime.rs`](src-tauri/src/commands/agent_runtime.rs) | W19 sustained gate evidence evaluator：只读检查最近 preview AgentRun 的 gate report 是否连续干净 | Settings 显示 controlled Chat migration pilot 资格；不是 Chat 开关，不写入任何新 audit/run/proposal |
-| **Controlled Chat Pilot** | [`frontend/src/pages/ChatPage.tsx`](frontend/src/pages/ChatPage.tsx) | W20 very small controlled pilot：Chat 页面显式按钮先查 eligibility，eligible 后运行单次 write-disabled preview | 默认 Send 不变；blocked/failed 只显示 fallback；成功显示 “Pilot response”，不写普通 chat history；下一阶段才考虑 reviewed promotion |
+| **Controlled Chat Pilot / Promotion** | [`frontend/src/pages/ChatPage.tsx`](frontend/src/pages/ChatPage.tsx) | W20 very small controlled pilot + W21 reviewed promotion：Chat 页面显式按钮先查 eligibility，eligible 后运行单次 write-disabled preview；成功 `userOutput` 可 review/confirm promotion | 默认 Send 不变；blocked/failed/no-output/cancel/repeat 不写入；确认后只写一条 ordinary assistant message，可带 `run_id` trace |
 | **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 30+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断 | 依赖 openlife-core 全部模块 |
 | **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
 
@@ -765,7 +765,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-30 | **W17: Runtime integration hardening / Chat migration gate**：新增只读 `check_runtime_migration_gate`，诊断默认 Chat 未替换、preview audit 健康、metadata-safe trace、fallback、无外部写入和 proposal-first 边界；下一步仍不能直接替换默认 Chat | AI Agent |
 | 2026-05-30 | **W18: Runtime Migration Gate evidence surface**：Settings experimental 区域新增只读 Runtime Migration Gate 面板，显式展示 gate pass/block 字段与 blocking reasons；普通 Chat 发送路径仍不调用 gate 或 MultiStrategy preview；下一步只能在 gate evidence 连续干净后进入更小范围 controlled Chat migration pilot | AI Agent |
 | 2026-05-30 | **W19: Sustained Gate Evidence / Pilot Eligibility**：新增只读 `check_controlled_chat_pilot_eligibility`，默认检查最近 3 条 preview gate report 是否连续干净；Settings 显示 clean run count、checked run ids、blocking reasons；不创建 AgentRun/Proposal/Action/Observation；作为 W20 very small controlled Chat migration pilot 的准入门槛 | AI Agent |
-| 2026-05-30 | **W20: Very Small Controlled Chat Migration Pilot With Fallback**：Chat 页面新增显式 `Run Controlled Pilot` 单轮入口；先调用 `check_controlled_chat_pilot_eligibility`，blocked 不调用 preview；eligible 后才调用 `run_multi_strategy_agent_preview` 且 `allowWrites=false`；结果以 “Pilot response” 显示，不写普通 assistant message/history；默认 Send 仍未迁移；下一阶段才考虑 reviewed pilot response promotion | AI Agent |
+| 2026-05-30 | **W20: Very Small Controlled Chat Migration Pilot With Fallback**：Chat 页面新增显式 `Run Controlled Pilot` 单轮入口；先调用 `check_controlled_chat_pilot_eligibility`，blocked 不调用 preview；eligible 后才调用 `run_multi_strategy_agent_preview` 且 `allowWrites=false`；结果以 “Pilot response” 显示，不自动写普通 assistant message/history；默认 Send 仍未迁移 | AI Agent |
+| 2026-05-30 | **W21: Reviewed Pilot Response Promotion**：Chat 页面成功 pilot response 默认继续隔离；只有成功且包含 `userOutput` 时显示 `Promote Pilot Response`，用户 review/confirm 后才通过现有 chat message save path 写入一条 assistant message，并保留可用 `run_id` trace；cancel/blocked/failed/no-output/repeat 不写入；默认 Send 仍未迁移 | AI Agent |
 
 ---
 

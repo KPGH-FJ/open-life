@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-05-30 W20 Very Small Controlled Chat Migration Pilot With Fallback
-> Current direction: reviewed pilot response promotion can only be considered in the next phase
+> Version: 2026-05-30 W21 Reviewed Pilot Response Promotion
+> Current direction: post-promotion validation only; default Chat remains unchanged
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -12,13 +12,13 @@
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
 ReAct remains the current default Chat execution strategy and Beta execution
-kernel, but the long-term architecture is not "ReAct only." W1-W20 have already
+kernel, but the long-term architecture is not "ReAct only." W1-W21 have already
 implemented the thin runtime contract, LifeModel governance foundations,
 PlanExecute core/vertical slices, StrategySelector, MultiStrategy preview/audit,
 the lightweight RuntimeStrategy adapter foundation, the read-only Runtime
 Migration Gate with a visible Settings evidence surface, W19 sustained gate
 evidence / pilot eligibility, and W20 explicit single-turn Chat Controlled Pilot
-with fallback.
+with fallback plus W21 reviewed pilot response promotion.
 
 The important current boundary is that MultiStrategy Runtime is
 preview/audit-ready, not productized as the default Chat path. Future work must
@@ -38,7 +38,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-The realized W11-W20 sequence after W10 is:
+The realized W11-W21 sequence after W10 is:
 
 ```text
 docs/status sync
@@ -51,12 +51,13 @@ docs/status sync
 -> Runtime Migration Gate evidence surface
 -> sustained gate evidence / pilot eligibility
 -> very small controlled Chat migration pilot with fallback
+-> reviewed pilot response promotion
 ```
 
-The next practical sequence after W20 is:
+The next practical sequence after W21 is:
 
 ```text
-reviewed pilot response promotion
+post-promotion validation before any default Chat migration
 ```
 
 `calendar.propose_event` and `email.propose_draft` are now P1 proposal-only
@@ -110,9 +111,9 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | MultiStrategy preview | `run_multi_strategy_agent_preview` persists metadata-safe outer AgentRun audit and Runs/Trace can display it | Preview/beta only; not default Chat |
 | Runtime Migration Gate evidence surface | Settings experimental panel can explicitly display `check_runtime_migration_gate` pass/block evidence and blocking reasons | Read-only diagnostic surface; not a Chat switch and not a preview runner |
 | Pilot eligibility | `check_controlled_chat_pilot_eligibility` and Settings Pilot eligibility check recent preview gate evidence for sustained clean runs | Read-only qualification only; not a Chat switch, not a migration trigger, and creates no AgentRun/Proposal/Action/Observation |
-| Controlled Chat Pilot | Chat page exposes explicit `Run Controlled Pilot`; it checks eligibility first, blocks without preview when ineligible, runs one write-disabled preview when eligible, and renders “Pilot response” separately | W20 very small controlled pilot only; default Chat is still not migrated and promotion is deferred |
+| Controlled Chat Pilot / Promotion | Chat page exposes explicit `Run Controlled Pilot`; it checks eligibility first, blocks without preview when ineligible, runs one write-disabled preview when eligible, and renders “Pilot response” separately. Successful output with `userOutput` can be reviewed and explicitly promoted into one assistant chat message with `run_id` trace metadata when available | W21 promotion is user-confirmed only; default Chat is still not migrated |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
-| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths; Settings also exposes read-only gate evidence, pilot eligibility, and W20 controlled pilot | Next phase can only consider reviewed pilot response promotion |
+| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths; Settings also exposes read-only gate evidence, pilot eligibility, W20 controlled pilot, and W21 reviewed pilot response promotion | Next phase can only validate promotion evidence; default Chat stays unchanged |
 
 ## 3. Current Gaps
 
@@ -128,11 +129,11 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - ~~No Runtime Migration Gate.~~ ✅ 已完成（W17：read-only gate for preview audit, fallback, metadata-safe trace, external-write, and proposal-first boundaries）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **Current boundary: W20 very small controlled Chat migration pilot with fallback.** Do not treat W19 eligibility or W20 pilot success as permission to replace default Chat directly.
+- **Current boundary: W21 reviewed pilot response promotion.** Do not treat W19 eligibility, W20 pilot success, or W21 promotion as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
-- MultiStrategy preview is still not the default Chat path; the migration gate evidence surface, pilot eligibility check, and W20 controlled pilot exist, but broader Chat migration still requires a later reviewed promotion phase.
+- MultiStrategy preview is still not the default Chat path; the migration gate evidence surface, pilot eligibility check, W20 controlled pilot, and W21 reviewed promotion exist, but broader Chat migration still requires later validation and a separate reviewed migration phase.
 - Users cannot yet use a productized LifeModel-governed weekly planning flow.
 - LifeModel maturation V1 exists as a service, but is not yet a visible end-to-end product loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
@@ -432,7 +433,7 @@ Every major development round should verify:
 - Do not hardcode test counts in planning docs; they drift quickly.
 - `make ci` is the release gate and includes format-check, Rust tests, frontend tests, and frontend build/typecheck.
 
-### W1-W20 LifeModel-Governed Runtime Progress (2026-05-30)
+### W1-W21 LifeModel-Governed Runtime Progress (2026-05-30)
 
 | Work Package | 状态 | 边界 |
 | --- | --- | --- |
@@ -447,6 +448,7 @@ Every major development round should verify:
 | W18 | ✅ Done | Settings Runtime Migration Gate exposes pass/block evidence and blocking reasons without running preview or changing default Chat. |
 | W19 | ✅ Done | Sustained Gate Evidence / Pilot Eligibility checks the latest 3 preview gate reports read-only and exposes pilot qualification without creating AgentRun/Proposal/Action/Observation. |
 | W20 | ✅ Done | Very small Chat Controlled Pilot adds explicit single-turn `Run Controlled Pilot`: eligibility first, blocked means no preview, eligible means `allowWrites=false` preview, success renders “Pilot response”, normal Send unchanged. |
+| W21 | ✅ Done | Reviewed Pilot Response Promotion adds explicit review/confirmation for successful pilot `userOutput`, writes one assistant chat message with existing `run_id` metadata when available, prevents duplicate promotion, and keeps blocked/failed/canceled/no-output/default Send paths unchanged. |
 
 ## 8. Current Next Step
 
@@ -456,12 +458,13 @@ The latest completed development tasks are:
 W18: Runtime Migration Gate evidence surface
 W19: Sustained Gate Evidence / Pilot Eligibility
 W20: Very small controlled Chat migration pilot with fallback
+W21: Reviewed pilot response promotion
 ```
 
-After W20, the next possible step is:
+After W21, the next possible step is:
 
 ```text
-reviewed pilot response promotion
+post-promotion validation before any default Chat migration
 ```
 
 Guardrails:
@@ -483,9 +486,13 @@ Guardrails:
 - W20 Controlled Pilot is explicit, single-turn, and fallback-preserving: normal
   Send does not call eligibility/gate/preview; blocked does not call preview;
   eligible preview forces `allowWrites=false`; success is shown as “Pilot
-  response” and is not written as a normal assistant message/history entry.
-- Reviewed pilot response promotion is a later phase. It must not be folded into
-  W20, and default Chat must remain unchanged until a reviewed migration stage.
+  response” and is not automatically written as a normal assistant
+  message/history entry.
+- W21 Reviewed Pilot Response Promotion is explicit user review only: cancel,
+  blocked, failed, no-output, and repeated promotion paths write nothing; confirm
+  writes only one ordinary assistant chat message and does not write LifeModel,
+  Memory, Proposal, or external tool results.
+- Default Chat must remain unchanged until a later reviewed migration stage.
 - `make ci` remains the publication gate.
 
 ## 9. Historical Plans
