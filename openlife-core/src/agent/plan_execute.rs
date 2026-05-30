@@ -1,9 +1,12 @@
 use crate::agent::governor::{
-    GovernanceDecision, GovernanceDecisionKind, LifeModelGovernor, ToolGovernanceInput,
+    GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
+    ToolGovernanceInput,
 };
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::types::RiskLevel;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct PlanExecuteInput {
@@ -79,9 +82,42 @@ pub enum PlanStepStatus {
     Executed,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanGovernanceDecisionSummary {
+    pub step_id: String,
+    pub subject: String,
+    pub decision_kind: GovernanceDecisionKind,
+    pub risk_level: RiskLevel,
+    pub policy_reason_code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanObservationSummary {
+    pub step_id: String,
+    pub source: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanExecuteReport {
+    pub plan_id: String,
+    pub source_run_id: Option<String>,
+    pub step_count: usize,
+    pub executed_read_only_step_count: usize,
+    pub blocked_or_proposal_required_step_count: usize,
+    pub governance_decisions: Vec<PlanGovernanceDecisionSummary>,
+    pub observation_summaries: Vec<PlanObservationSummary>,
+    pub warnings: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecutionOutput {
+    pub report: PlanExecuteReport,
     pub plan: PlanDraft,
     pub traces: Vec<PlanStepTrace>,
     pub runtime_outputs: Vec<RuntimeOutput>,
@@ -152,8 +188,12 @@ impl PlanExecuteService {
         input: PlanExecuteInput,
         governor: &LifeModelGovernor,
     ) -> PlanExecutionOutput {
+        let source_run_id = source_run_id(&input.runtime_input);
         let plan = self.draft_plan(&input);
+        let plan_id = format!("plan-{}", Uuid::new_v4());
         let mut traces = Vec::with_capacity(plan.steps.len());
+        let mut governance_decisions = Vec::with_capacity(plan.steps.len());
+        let mut observation_summaries = Vec::new();
         let mut warnings = Vec::new();
 
         if input.max_steps == 0 {
@@ -163,15 +203,36 @@ impl PlanExecuteService {
         for step in &plan.steps {
             let decision = governor.govern_tool_action(step.to_tool_governance_input());
             let status = step_status(step, decision.kind);
+            let output_summary = if status == PlanStepStatus::Executed {
+                let observation = execute_internal_read_only_step(step);
+                let summary = observation.summary.clone();
+                observation_summaries.push(observation);
+                Some(summary)
+            } else {
+                Some(metadata_safe_step_summary(step, &decision))
+            };
+
+            governance_decisions.push(metadata_safe_governance_summary(step, &decision));
+            warnings.extend(decision.warnings.iter().cloned());
             traces.push(PlanStepTrace {
                 step_id: step.id.clone(),
-                output_summary: Some(metadata_safe_step_summary(step, &decision)),
+                output_summary,
                 decision,
                 status,
             });
         }
 
+        let report = PlanExecuteReport::new(
+            plan_id,
+            source_run_id,
+            &traces,
+            governance_decisions,
+            observation_summaries,
+            warnings.clone(),
+        );
+
         PlanExecutionOutput {
+            report,
             plan,
             traces,
             runtime_outputs: Vec::new(),
@@ -244,12 +305,95 @@ fn step_status(step: &PlanStep, kind: GovernanceDecisionKind) -> PlanStepStatus 
     }
 }
 
+impl PlanExecuteReport {
+    fn new(
+        plan_id: String,
+        source_run_id: Option<String>,
+        traces: &[PlanStepTrace],
+        governance_decisions: Vec<PlanGovernanceDecisionSummary>,
+        observation_summaries: Vec<PlanObservationSummary>,
+        warnings: Vec<String>,
+    ) -> Self {
+        let step_count = traces.len();
+        let executed_read_only_step_count = traces
+            .iter()
+            .filter(|trace| trace.status == PlanStepStatus::Executed)
+            .count();
+        let blocked_or_proposal_required_step_count = traces
+            .iter()
+            .filter(|trace| {
+                matches!(
+                    trace.status,
+                    PlanStepStatus::Blocked | PlanStepStatus::RequiresProposal
+                )
+            })
+            .count();
+        let metadata_safe_summary = json!({
+            "reportKind": "plan_execute_v1",
+            "planId": plan_id,
+            "sourceRunId": source_run_id,
+            "stepCount": step_count,
+            "executedReadOnlyStepCount": executed_read_only_step_count,
+            "blockedOrProposalRequiredStepCount": blocked_or_proposal_required_step_count,
+            "governanceDecisionCount": governance_decisions.len(),
+            "observationSummaryCount": observation_summaries.len(),
+            "warningCount": warnings.len(),
+        });
+
+        Self {
+            plan_id,
+            source_run_id,
+            step_count,
+            executed_read_only_step_count,
+            blocked_or_proposal_required_step_count,
+            governance_decisions,
+            observation_summaries,
+            warnings,
+            metadata_safe_summary,
+        }
+    }
+}
+
+fn source_run_id(input: &RuntimeInput) -> Option<String> {
+    input
+        .hs_packet
+        .as_ref()
+        .and_then(|packet| packet.audit.agent_run_id.clone())
+}
+
+fn execute_internal_read_only_step(step: &PlanStep) -> PlanObservationSummary {
+    let summary = match step.intent.as_str() {
+        "read_only_search" => {
+            "read-only context lookup completed; raw query, memory content, and PII omitted"
+        }
+        "read_only_reasoning" => {
+            "read-only internal reasoning completed; raw prompt and memory content omitted"
+        }
+        _ => "read-only internal step completed; raw inputs and content omitted",
+    };
+
+    PlanObservationSummary {
+        step_id: step.id.clone(),
+        source: "internal_read_only".into(),
+        summary: summary.into(),
+    }
+}
+
+fn metadata_safe_governance_summary(
+    step: &PlanStep,
+    decision: &GovernanceDecision,
+) -> PlanGovernanceDecisionSummary {
+    PlanGovernanceDecisionSummary {
+        step_id: step.id.clone(),
+        subject: governance_subject_kind(decision.subject).into(),
+        decision_kind: decision.kind,
+        risk_level: decision.risk_level,
+        policy_reason_code: policy_reason_code(decision).into(),
+    }
+}
+
 fn metadata_safe_step_summary(step: &PlanStep, decision: &GovernanceDecision) -> String {
-    let reason_code = decision
-        .metadata_safe_summary
-        .get("policyReasonCode")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
+    let reason_code = policy_reason_code(decision);
 
     format!(
         "step_id={} action_kind={} risk_level={} decision={:?} policy_reason_code={} tool_name={}",
@@ -260,4 +404,21 @@ fn metadata_safe_step_summary(step: &PlanStep, decision: &GovernanceDecision) ->
         reason_code,
         step.tool_name.as_deref().unwrap_or("runtime.reasoning")
     )
+}
+
+fn policy_reason_code(decision: &GovernanceDecision) -> &str {
+    decision
+        .metadata_safe_summary
+        .get("policyReasonCode")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+}
+
+fn governance_subject_kind(subject: GovernanceSubject) -> &'static str {
+    match subject {
+        GovernanceSubject::RuntimeInput => "runtime_input",
+        GovernanceSubject::ToolAction => "tool_action",
+        GovernanceSubject::MaturationCandidate => "maturation_candidate",
+        GovernanceSubject::ModelRoute => "model_route",
+    }
 }

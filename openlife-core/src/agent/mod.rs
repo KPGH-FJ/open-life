@@ -69,8 +69,8 @@ pub use multi_strategy_runtime::{
     MultiStrategyRuntimePayload,
 };
 pub use plan_execute::{
-    PlanDraft, PlanExecuteInput, PlanExecuteService, PlanExecutionOutput, PlanStep, PlanStepStatus,
-    PlanStepTrace,
+    PlanDraft, PlanExecuteInput, PlanExecuteReport, PlanExecuteService, PlanExecutionOutput,
+    PlanGovernanceDecisionSummary, PlanObservationSummary, PlanStep, PlanStepStatus, PlanStepTrace,
 };
 pub use policy_store::{
     ContextPolicyDecision, HeuristicPolicyEffect, ModelRoutePolicy, PolicyConflictAudit,

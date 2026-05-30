@@ -10,9 +10,9 @@ completion/status index.
 
 ## Current Position
 
-W1-W14 are complete. The project now has a LifeModel Maturation V1 service that
-turns RuntimeOutput life-event candidates into governed evidence and proposals
-without directly mutating LifeModel or Memory.
+W1-W15 are complete. The project now has a governed PlanExecute V1 vertical
+slice with metadata-safe reports, internal read-only observations, and
+Governor-enforced write interception.
 
 The key boundary is unchanged:
 
@@ -23,7 +23,8 @@ The key boundary is unchanged:
   inspection; normal Send still uses the existing stream path.
 - LifeModel-HS remains the protocol-layer direction; Maturation V1 exists as an
   explicit service entry, while automatic Chat application remains out of scope.
-- PlanExecute is a core MVP, not a productized weekly-planning workflow.
+- PlanExecute V1 is a governed runtime slice, not a productized weekly-planning
+  workflow.
 - A formal `RuntimeStrategy` trait has not started and must not be introduced
   ahead of proven vertical slices.
 
@@ -45,12 +46,12 @@ The key boundary is unchanged:
 | W12 Non-Default MultiStrategy Preview UI / Debug Entry | Done | Settings experimental tab, preview form tests | Settings exposes a folded preview/beta panel that calls `run_multi_strategy_agent_preview`, displays metadata-safe strategy/payload/governance/warnings, and links to Runs trace without replacing Chat. |
 | W13 Guarded Chat Subpath Migration | Done | Chat governed preview panel, Chat tests | Chat exposes an explicit Governed Preview path that calls `run_multi_strategy_agent_preview` with `allowWrites=false`, displays metadata-safe runtime output, links to Runs trace, and leaves normal Send on the existing stream path. |
 | W14 LifeModel Maturation Loop V1 | Done | `maturation.rs`, evidence/proposal stores, maturation tests | `MaturationService::mature_runtime_output` converts RuntimeOutput candidates into proposal-first evidence/proposals, records structured drop reasons and governance audit, and keeps evidence/report metadata-safe. |
+| W15 PlanExecute Governed Vertical Slice | Done | `plan_execute.rs`, MultiStrategy PlanExecute payload, PlanExecute tests | `PlanExecuteReport` records plan id, source run id, step counts, governance summaries, read-only observations, warnings, and metadata-safe summary; write-like steps require proposal and are not executed. |
 
 ## Next Recommended Sequence
 
 ```text
-PlanExecute vertical slice
--> RuntimeStrategy trait
+RuntimeStrategy trait
 ```
 
 `make ci` remains the release gate for every implementation task, including

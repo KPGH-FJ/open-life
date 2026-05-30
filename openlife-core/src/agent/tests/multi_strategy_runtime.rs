@@ -154,6 +154,12 @@ async fn planning_intent_orchestrates_plan_execute_path() {
             assert_eq!(plan_output.plan.steps.len(), 1);
             assert_eq!(plan_output.traces.len(), 1);
             assert_eq!(plan_output.traces[0].status, PlanStepStatus::Executed);
+            assert_eq!(plan_output.report.step_count, 1);
+            assert_eq!(plan_output.report.executed_read_only_step_count, 1);
+            assert_eq!(
+                plan_output.report.metadata_safe_summary["reportKind"],
+                "plan_execute_v1"
+            );
             assert!(plan_output.runtime_outputs.is_empty());
         }
         other => panic!("expected PlanExecute payload, got {other:?}"),
