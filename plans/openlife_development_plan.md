@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-05-30 W17 Runtime integration hardening / Chat migration gate
-> Current direction: controlled Chat migration follow-up only after clean gate evidence
+> Version: 2026-05-30 W18 Runtime Migration Gate evidence surface
+> Current direction: controlled Chat migration pilot only after sustained clean gate evidence
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -12,11 +12,11 @@
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
 ReAct remains the current default Chat execution strategy and Beta execution
-kernel, but the long-term architecture is not "ReAct only." W1-W17 have already
+kernel, but the long-term architecture is not "ReAct only." W1-W18 have already
 implemented the thin runtime contract, LifeModel governance foundations,
 PlanExecute core/vertical slices, StrategySelector, MultiStrategy preview/audit,
 the lightweight RuntimeStrategy adapter foundation, and the read-only Runtime
-Migration Gate.
+Migration Gate with a visible Settings evidence surface.
 
 The important current boundary is that MultiStrategy Runtime is
 preview/audit-ready, not productized as the default Chat path. Future work must
@@ -48,10 +48,10 @@ docs/status sync
 -> Runtime integration hardening / Chat migration gate
 ```
 
-The next practical sequence after W17 is:
+The next practical sequence after W18 is:
 
 ```text
-Controlled Chat migration follow-up after clean gate evidence
+Controlled Chat migration pilot after sustained clean gate evidence
 ```
 
 `calendar.propose_event` and `email.propose_draft` are now P1 proposal-only
@@ -103,8 +103,9 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | LifeModel-HS foundations | RuntimeHSPacket, PolicyStore, EvidenceStore, HeuristicStore, RegressionSuite, Governor MVP exist | Still needs end-to-end LifeEvent/Signal/Evidence/Governor/Proposal loop |
 | PlanExecute | Governed V1 runtime slice exists and can appear as a MultiStrategy preview payload/report | Not yet a productized weekly planning vertical slice |
 | MultiStrategy preview | `run_multi_strategy_agent_preview` persists metadata-safe outer AgentRun audit and Runs/Trace can display it | Preview/beta only; not default Chat |
+| Runtime Migration Gate evidence surface | Settings experimental panel can explicitly display `check_runtime_migration_gate` pass/block evidence and blocking reasons | Read-only diagnostic surface; not a Chat switch and not a preview runner |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
-| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths | Next Chat migration must pass an explicit gate and preserve fallback |
+| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths; Settings also exposes read-only gate evidence | Next Chat migration must show sustained clean gate evidence and preserve fallback |
 
 ## 3. Current Gaps
 
@@ -120,11 +121,11 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - ~~No Runtime Migration Gate.~~ ✅ 已完成（W17：read-only gate for preview audit, fallback, metadata-safe trace, external-write, and proposal-first boundaries）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **Next boundary: controlled Chat migration follow-up after clean gate evidence.** Do not treat W17 as permission to replace default Chat directly.
+- **Next boundary: controlled Chat migration pilot after sustained clean gate evidence.** Do not treat W18 as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
-- MultiStrategy preview is still not the default Chat path; the migration gate exists, but broader Chat migration still requires clean gate evidence.
+- MultiStrategy preview is still not the default Chat path; the migration gate evidence surface exists, but broader Chat migration still requires sustained clean gate evidence.
 - Users cannot yet use a productized LifeModel-governed weekly planning flow.
 - LifeModel maturation V1 exists as a service, but is not yet a visible end-to-end product loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
@@ -424,7 +425,7 @@ Every major development round should verify:
 - Do not hardcode test counts in planning docs; they drift quickly.
 - `make ci` is the release gate and includes format-check, Rust tests, frontend tests, and frontend build/typecheck.
 
-### W1-W17 LifeModel-Governed Runtime Progress (2026-05-30)
+### W1-W18 LifeModel-Governed Runtime Progress (2026-05-30)
 
 | Work Package | 状态 | 边界 |
 | --- | --- | --- |
@@ -436,32 +437,35 @@ Every major development round should verify:
 | W11-W13 | ✅ Done | Docs/status sync, non-default preview UI, and guarded Chat preview subpath exist. |
 | W14-W16 | ✅ Done | Maturation V1 service, PlanExecute governed V1 report, and RuntimeStrategy adapter/registry foundation exist. |
 | W17 | ✅ Done | Runtime Migration Gate provides read-only diagnostics for default Chat unchanged, preview health, metadata-safe trace, fallback, no external writes, proposal-first, and blocking reasons. |
+| W18 | ✅ Done | Settings Runtime Migration Gate exposes pass/block evidence and blocking reasons without running preview or changing default Chat. |
 
 ## 8. Current Next Step
 
 The latest completed development task is:
 
 ```text
-W17: Runtime integration hardening / Chat migration gate
+W18: Runtime Migration Gate evidence surface
 ```
 
-After W17, continue only when gate evidence is clean:
+After W18, continue only when gate evidence is continuously clean:
 
 ```text
-Controlled Chat migration follow-up after gate evidence
+Controlled Chat migration pilot after sustained clean gate evidence
 ```
 
 Guardrails:
 
 - `run_multi_strategy_agent_preview` remains preview/beta.
 - The default Chat path must not be replaced directly.
+- Settings Runtime Migration Gate is an evidence surface, not a Chat switching
+  control and not a preview runner.
 - W10 AgentRun audit is a metadata-safe outer run; any inner ReAct run id is
   child metadata only.
 - `check_runtime_migration_gate` is read-only and must not execute ReAct,
   PlanExecute, tools, or external writes.
-- Minimum Chat migration entry: no gate blocking reason, fallback available,
-  metadata-safe trace, no external writes, proposal-first preserved, and
-  `make ci` passing.
+- Minimum controlled Chat migration pilot entry: sustained gate evidence with no
+  blocking reason, fallback available, metadata-safe trace, no external writes,
+  proposal-first preserved, and `make ci` passing.
 - `make ci` remains the publication gate.
 
 ## 9. Historical Plans

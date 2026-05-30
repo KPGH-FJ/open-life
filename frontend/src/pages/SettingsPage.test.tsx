@@ -363,6 +363,113 @@ describe("SettingsPage", () => {
     expect(screen.getByTestId("location-path")).toHaveTextContent("/runs/run-preview-ui-1");
   });
 
+  it("renders runtime migration gate pass status from the experimental panel", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Runtime Migration Gate")).toBeInTheDocument();
+    expect(screen.getByText(/Read-only migration diagnostic/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Runtime Migration Gate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_runtime_migration_gate", { input: {} });
+    });
+
+    expect(await screen.findByText("defaultChatUnchanged")).toBeInTheDocument();
+    expect(screen.getByText("previewPathHealthy")).toBeInTheDocument();
+    expect(screen.getByText("metadataSafeTraceReady")).toBeInTheDocument();
+    expect(screen.getByText("fallbackAvailable")).toBeInTheDocument();
+    expect(screen.getByText("noExternalWrites")).toBeInTheDocument();
+    expect(screen.getByText("proposalFirstPreserved")).toBeInTheDocument();
+    expect(screen.getAllByText("Pass")).toHaveLength(6);
+    expect(screen.getByText("No blocking reasons returned.")).toBeInTheDocument();
+  });
+
+  it("renders runtime migration gate blocking reasons", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_runtime_migration_gate") {
+        return Promise.resolve({
+          defaultChatUnchanged: true,
+          previewPathHealthy: false,
+          metadataSafeTraceReady: true,
+          fallbackAvailable: true,
+          noExternalWrites: false,
+          proposalFirstPreserved: true,
+          blockingReasons: [
+            "latest preview run is missing metadata-safe audit",
+            "preview audit indicates external writes",
+          ],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Check Runtime Migration Gate" }));
+
+    expect(await screen.findAllByText("Block")).toHaveLength(2);
+    expect(
+      screen.getByText("latest preview run is missing metadata-safe audit")
+    ).toBeInTheDocument();
+    expect(screen.getByText("preview audit indicates external writes")).toBeInTheDocument();
+  });
+
+  it("clears stale runtime migration gate evidence when starting a new preview", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_runtime_migration_gate") {
+        return Promise.resolve({
+          defaultChatUnchanged: true,
+          previewPathHealthy: false,
+          metadataSafeTraceReady: true,
+          fallbackAvailable: true,
+          noExternalWrites: true,
+          proposalFirstPreserved: true,
+          blockingReasons: ["stale preview evidence"],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Check Runtime Migration Gate" }));
+    expect(await screen.findByText("stale preview evidence")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByRole("button", { name: /MultiStrategy Preview/ }));
+    fireEvent.change(screen.getByLabelText("userText"), {
+      target: { value: "Start a new preview after checking stale gate evidence" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run Preview" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("stale preview evidence")).not.toBeInTheDocument();
+    });
+  });
+
+  it("checks runtime migration gate against the latest explicit preview result when available", async () => {
+    renderSettingsWithLocation();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: /MultiStrategy Preview/ }));
+    fireEvent.change(screen.getByLabelText("userText"), {
+      target: { value: "Create a preview run before checking the gate" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run Preview" }));
+
+    expect(await screen.findByText("run-preview-1")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Runtime Migration Gate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_runtime_migration_gate", {
+        input: { previewRunId: "run-preview-1" },
+      });
+    });
+  });
+
   it("prioritizes continuing Builder when unfinished builder sessions exist", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {

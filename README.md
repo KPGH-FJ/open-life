@@ -16,20 +16,21 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-当前项目处于 **W17 Runtime integration hardening / Chat migration gate** 阶段：
+当前项目处于 **W18 Runtime Migration Gate evidence surface** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
-- **W1-W17 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
+- **W1-W18 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层和 Settings evidence surface；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
 - **ReAct 仍是当前默认 Chat 主链路**：MultiStrategy Runtime 已有 preview command 和 audit-ready 路径，但尚未接管默认 `send_message` / Chat 主流程。
 - **MultiStrategy preview 已可审计**：`run_multi_strategy_agent_preview` 已存在，preview run 会写入 metadata-safe 外层 AgentRun audit；Runs / Trace 已能展示 preview strategy、payload、governance 和 warnings。
 - **Runtime Migration Gate 已建立**：`check_runtime_migration_gate` 只读取既有 preview AgentRun / audit，输出 `defaultChatUnchanged`、`previewPathHealthy`、`metadataSafeTraceReady`、`fallbackAvailable`、`noExternalWrites`、`proposalFirstPreserved` 和 `blockingReasons`；它不执行 ReAct、PlanExecute、工具调用或外部写入。
+- **Gate evidence surface 已可见**：Settings / 实验区域的 Runtime Migration Gate 面板可显式调用 `check_runtime_migration_gate`，展示 pass/block 与 blocking reasons；它不是 Chat 切换开关，也不会自动运行 preview。
 - **PlanExecute V1 是受治理 runtime slice**：当前可通过 MultiStrategy preview 产生 planExecute payload/report，但不是产品化周计划流程。
 - **LifeModel-HS 仍是协议层方向**：Maturation V1 service、Evidence/Governor 等基础能力已存在，但 Chat 自动成熟化和产品化反馈闭环仍需 gate。
 - **RuntimeStrategy trait 已成型**：MultiStrategy Runtime 通过固定 ReAct / PlanExecute adapter registry 执行；这不是插件化加载，也不是默认 Chat 替换。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
 - **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **下一步仍不能直接替换默认 Chat**：只有当最近 preview audit 通过 gate、fallback 可用、trace metadata-safe、无外部写入、proposal-first 保持、`make ci` 通过后，才允许继续扩大受控 Chat 子路径迁移范围。
+- **下一步仍不能直接替换默认 Chat**：只有当 gate evidence 连续干净、fallback 可用、trace metadata-safe、无外部写入、proposal-first 保持、`make ci` 通过后，才允许进入更小范围的 controlled Chat migration pilot。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
@@ -56,7 +57,7 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
 | Builder | 已支持快速、渐进、苏格拉底式构建；默认只创建 Proposal | 通过 Review Center 确认后安全写入 LifeModel |
 | Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal；默认主链路尚未切到 MultiStrategy Runtime | 继续稳定迁移受控子路径，展示上下文、模型路由和运行轨迹 |
-| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit | 先作为非默认 debug/preview 入口验证，再逐步迁移受控 Chat 子路径 |
+| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit；Settings Runtime Migration Gate 只读展示 gate evidence | 先作为非默认 debug/preview 入口验证；只有 gate evidence 连续干净后才进入更小范围 controlled Chat migration pilot |
 | Runs / Trace | 已能展示 MultiStrategy preview strategy / payload / governance / warnings | 成为所有 runtime strategy 的统一 metadata-safe trace viewer |
 | **ModelRouter** | ✅ **任务/隐私感知路由已毕业，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
@@ -246,21 +247,21 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
-### W1-W17: LifeModel-Governed Runtime Preview And Strategy Foundation
+### W1-W18: LifeModel-Governed Runtime Preview And Gate Evidence Surface
 - ✅ Tool / Proposal Hygiene、Thin Runtime Spine、ReAct Runtime Contract Convergence。
 - ✅ LifeModel Maturation Loop Foundation、LifeModel Governor MVP、PlanExecute Core MVP。
 - ✅ StrategySelector、MultiStrategy Runtime Orchestrator、Preview Command。
 - ✅ MultiStrategy Preview AgentRun Audit Persistence：metadata-safe 外层 run 可在 Runs / Trace 展示。
 - ✅ Non-default Settings preview、guarded Chat preview subpath、Maturation V1 service。
 - ✅ PlanExecute governed V1 report、RuntimeStrategy trait、ReAct / PlanExecute adapter registry。
-- ✅ Runtime Migration Gate：只读诊断默认 Chat 未替换、preview 健康、metadata-safe trace、fallback、无外部写入和 proposal-first 边界。
+- ✅ Runtime Migration Gate：只读诊断默认 Chat 未替换、preview 健康、metadata-safe trace、fallback、无外部写入和 proposal-first 边界，并在 Settings 显式展示 evidence。
 
 ## 当前重要开发方向
 
 1. 保持 `send_message` / `start_stream_message` 默认 Chat 主路径稳定，不能直接替换。
-2. 用 `check_runtime_migration_gate` 对最近 preview AgentRun 做只读迁移诊断。
-3. 后续 Chat migration 的最低准入条件：gate 无 blocking reason、fallback 可用、preview outer AgentRun 是主 trace、inner ReAct run id 仅作 child metadata、无真实外部写入、proposal-first 未破坏、`make ci` 通过。
-4. 只有在上述条件连续满足后，才继续扩大受控 Chat 子路径迁移范围。
+2. 用 Settings Runtime Migration Gate 或 `check_runtime_migration_gate` 对最近 preview AgentRun 做只读迁移诊断。
+3. 后续 Chat migration 的最低准入条件：gate evidence 连续干净、fallback 可用、preview outer AgentRun 是主 trace、inner ReAct run id 仅作 child metadata、无真实外部写入、proposal-first 未破坏、`make ci` 通过。
+4. 只有在上述条件连续满足后，才进入更小范围 controlled Chat migration pilot。
 
 ## 常见问题
 

@@ -493,7 +493,7 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
-  it("keeps Send on the existing chat stream path without calling governed preview", async () => {
+  it("keeps Send on the existing chat stream path without calling governed preview or gate check", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -517,6 +517,9 @@ describe("ChatPage", () => {
 
     expect(
       vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "check_runtime_migration_gate")
     ).toBe(false);
   });
 

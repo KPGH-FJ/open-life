@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W17 completion/status index. This is not a second roadmap.
+   - Compact W1-W18 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,11 +43,11 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W17 through Runtime integration
-hardening / Chat migration gate. The next practical sequence is:
+Current implementation has completed W1-W18 through Runtime Migration Gate
+evidence surface. The next practical sequence is:
 
 ```text
-Controlled Chat migration follow-up after gate evidence
+Controlled Chat migration pilot after sustained clean gate evidence
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -56,7 +56,7 @@ Controlled Chat migration follow-up after gate evidence
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W17 completion/status index and preview/not-default/migration-gate boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W18 completion/status index and preview/not-default/migration-gate evidence boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -96,6 +96,13 @@ payload minimization. This is a hard acceptance gate.
 audit is a metadata-safe outer run; any ReAct inner run id is child metadata and
 must not become the product trace's primary query id. Do not replace
 `send_message` or the default Chat path just because the preview path works.
+
+`check_runtime_migration_gate` and the Settings Runtime Migration Gate panel are
+read-only evidence surfaces over existing preview audit state. They must not run
+preview, ReAct, PlanExecute, tools, proposal apply, external writes, or
+LifeModel/Memory writes, and they are not Chat migration switches. Controlled
+Chat migration may only proceed as a smaller pilot after gate evidence stays
+clean across runs.
 
 ## 6. Agent Rules
 

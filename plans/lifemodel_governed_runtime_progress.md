@@ -10,10 +10,11 @@ completion/status index.
 
 ## Current Position
 
-W1-W17 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W18 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
-PlanExecute adapters, and a read-only Runtime Migration Gate for Chat migration
-diagnostics.
+PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
+diagnostics, and a Settings evidence surface that makes the gate result visible
+without changing Chat behavior.
 
 The key boundary is unchanged:
 
@@ -31,6 +32,9 @@ The key boundary is unchanged:
 - `check_runtime_migration_gate` is a read-only diagnostic over existing
   preview AgentRun audit state. It does not execute ReAct, PlanExecute, tools,
   or external writes.
+- The Settings Runtime Migration Gate panel only displays pass/block evidence
+  and blocking reasons from `check_runtime_migration_gate`; it is not a Chat
+  switching control and it does not auto-run preview.
 
 ## Work Package Status
 
@@ -53,19 +57,20 @@ The key boundary is unchanged:
 | W15 PlanExecute Governed Vertical Slice | Done | `plan_execute.rs`, MultiStrategy PlanExecute payload, PlanExecute tests | `PlanExecuteReport` records plan id, source run id, step counts, governance summaries, read-only observations, warnings, and metadata-safe summary; write-like steps require proposal and are not executed. |
 | W16 RuntimeStrategy Trait Foundation | Done | `strategy_runtime.rs`, `multi_strategy_runtime.rs`, MultiStrategy tests | Defines the lightweight `RuntimeStrategy` trait, ReAct/PlanExecute adapters, and registry-backed MultiStrategy execution while preserving ReAct/PlanExecute/Blocked payload compatibility and metadata-safe summaries. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, Tauri wrapper/tests | Adds the read-only migration gate report: default Chat unchanged, preview path healthy, metadata-safe trace ready, fallback available, no external writes, proposal-first preserved, and blocking reasons. |
+| W18 Runtime Migration Gate Evidence Surface | Done | Settings experimental panel, frontend tests, docs | Displays `check_runtime_migration_gate` pass/block fields and blocking reasons as a read-only evidence surface. Normal Chat Send still does not call the gate or `run_multi_strategy_agent_preview`. |
 
 ## Next Recommended Sequence
 
 ```text
-Controlled Chat migration follow-up after gate evidence
+Controlled Chat migration pilot after sustained clean gate evidence
 ```
 
 The next phase still must not directly replace the default Chat path. Minimum
-entry criteria for any broader Chat migration: a recent preview AgentRun passes
-`check_runtime_migration_gate` with no blocking reason, fallback remains
-available, the outer preview AgentRun remains the primary trace, any inner ReAct
-run id is child metadata only, traces remain metadata-safe, no real external
-writes occur, proposal-first behavior is preserved, and `make ci` passes.
+entry criteria for any controlled Chat migration pilot: gate evidence stays
+clean across recent preview AgentRuns, fallback remains available, the outer
+preview AgentRun remains the primary trace, any inner ReAct run id is child
+metadata only, traces remain metadata-safe, no real external writes occur,
+proposal-first behavior is preserved, and `make ci` passes.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

@@ -2,14 +2,21 @@ import { type FormEvent, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   ExternalLink,
   Play,
+  RefreshCw,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
-import { runMultiStrategyAgentPreview } from "../../tauri";
-import type { MultiStrategyAgentPreviewLayer, MultiStrategyAgentPreviewOutput } from "../../types";
+import { checkRuntimeMigrationGate, runMultiStrategyAgentPreview } from "../../tauri";
+import type {
+  MultiStrategyAgentPreviewLayer,
+  MultiStrategyAgentPreviewOutput,
+  RuntimeMigrationGateReport,
+} from "../../types";
 
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
@@ -18,6 +25,14 @@ const SAFE_SUMMARY_KEYS = [
   "riskLevel",
   "hasHsPacket",
   "policyReasonCode",
+];
+const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
+  "defaultChatUnchanged",
+  "previewPathHealthy",
+  "metadataSafeTraceReady",
+  "fallbackAvailable",
+  "noExternalWrites",
+  "proposalFirstPreserved",
 ];
 
 function classNames(...classes: (string | false | undefined)[]) {
@@ -58,6 +73,9 @@ export default function MultiStrategyPreviewSection() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MultiStrategyAgentPreviewOutput | null>(null);
+  const [gateChecking, setGateChecking] = useState(false);
+  const [gateError, setGateError] = useState<string | null>(null);
+  const [gateReport, setGateReport] = useState<RuntimeMigrationGateReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -75,6 +93,8 @@ export default function MultiStrategyPreviewSection() {
     setSubmitting(true);
     setError(null);
     setResult(null);
+    setGateError(null);
+    setGateReport(null);
 
     try {
       const output = await runMultiStrategyAgentPreview({
@@ -98,6 +118,21 @@ export default function MultiStrategyPreviewSection() {
     }
   };
 
+  const handleGateCheck = async () => {
+    setGateChecking(true);
+    setGateError(null);
+    setGateReport(null);
+    try {
+      const input = result?.runId ? { previewRunId: result.runId } : {};
+      const report = await checkRuntimeMigrationGate(input);
+      setGateReport(report);
+    } catch (e) {
+      setGateError(`Gate check failed: ${readableError(e)}`);
+    } finally {
+      setGateChecking(false);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
@@ -113,6 +148,90 @@ export default function MultiStrategyPreviewSection() {
           </div>
         </div>
       </div>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Runtime Migration Gate</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only migration diagnostic for existing MultiStrategy preview audit evidence. This
+              is not a Chat switching control and does not run preview, ReAct, PlanExecute, tools,
+              or writes.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleGateCheck}
+            disabled={gateChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              gateChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={gateChecking ? "animate-spin" : undefined} />
+            {gateChecking ? "Checking..." : "Check Runtime Migration Gate"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          {result?.runId
+            ? `Checking explicit preview run: ${result.runId}`
+            : "No preview will be started. The command may read the latest existing preview run."}
+        </div>
+
+        {gateError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {gateError}
+          </div>
+        )}
+
+        {gateReport && (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-2">
+              {GATE_FIELDS.map(field => {
+                const passed = gateReport[field];
+                return (
+                  <div
+                    key={field}
+                    className="flex items-center justify-between gap-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs"
+                  >
+                    <span className="font-mono text-stone-700">{field}</span>
+                    <span
+                      className={classNames(
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
+                        passed ? "bg-emerald-100 text-emerald-800" : "bg-red-100 text-red-700"
+                      )}
+                    >
+                      {passed ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                      {passed ? "Pass" : "Block"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {gateReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {gateReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No blocking reasons returned.</div>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">
         <button
