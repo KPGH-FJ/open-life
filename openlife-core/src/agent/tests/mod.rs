@@ -5,6 +5,7 @@ mod governor;
 mod heuristic_store;
 mod integration;
 mod maturation_loop;
+mod multi_strategy_runtime;
 mod plan_execute;
 mod policy_store;
 mod regression_suite;

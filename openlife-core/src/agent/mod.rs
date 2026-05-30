@@ -9,6 +9,7 @@ pub mod maturation;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
+pub mod multi_strategy_runtime;
 pub mod plan_execute;
 pub mod policy_store;
 pub mod proposal_engine;
@@ -60,6 +61,10 @@ pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     ProviderHealth, TaskType,
+};
+pub use multi_strategy_runtime::{
+    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput,
+    MultiStrategyRuntimePayload,
 };
 pub use plan_execute::{
     PlanDraft, PlanExecuteInput, PlanExecuteService, PlanExecutionOutput, PlanStep, PlanStepStatus,
