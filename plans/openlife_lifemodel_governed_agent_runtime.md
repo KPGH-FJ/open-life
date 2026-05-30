@@ -1,17 +1,18 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-05-30
-> Status: W21 Reviewed Pilot Response Promotion complete; default Chat remains unchanged
+> Status: W22 Post-Promotion Validation And Source Binding complete; default Chat remains unchanged
 > Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W21, it records that MultiStrategy work is preview/audit-ready with a
+As of W22, it records that MultiStrategy work is preview/audit-ready with a
 lightweight fixed RuntimeStrategy adapter boundary, a read-only Chat migration
 gate, a Settings evidence surface, a sustained gate evidence / pilot eligibility
 check, a very small explicit Chat Controlled Pilot with fallback, and reviewed
-pilot response promotion. It is still not the default Chat runtime.
+pilot response promotion with source-bound validation. It is still not the
+default Chat runtime.
 
 It updates the project framing from:
 
@@ -108,7 +109,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W21 status table and preview/not-default/gate evidence/pilot eligibility/controlled pilot/promotion boundary.
+   - Compact W1-W22 status table and preview/not-default/gate evidence/pilot eligibility/controlled pilot/promotion-validation boundary.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -131,7 +132,7 @@ As of this preparation document, the project already has meaningful primitives:
 | Runtime Migration Gate | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_runtime_migration_gate` | Read-only diagnostic over existing preview AgentRun audit. Does not execute ReAct, PlanExecute, tools, or external writes. |
 | Gate evidence surface | `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | Settings-only Runtime Migration Gate panel that displays pass/block fields and blocking reasons. It is not a Chat switching control and does not run preview automatically. |
 | Pilot Eligibility | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_controlled_chat_pilot_eligibility`, Settings Pilot eligibility panel | W19 read-only sustained evidence check over the latest 3 preview gate reports. It returns eligibility, clean count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation and is not a Chat switch. |
-| Controlled Chat Pilot / Promotion | `frontend/src/pages/ChatPage.tsx` | W20 explicit single-turn pilot plus W21 reviewed promotion. The pilot calls eligibility before preview, blocks without preview when ineligible, runs `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, displays “Pilot response” separately, and keeps normal Send unchanged. W21 adds explicit review/confirmation that can promote a successful `userOutput` into one ordinary assistant chat message with existing `run_id` metadata when available. |
+| Controlled Chat Pilot / Promotion | `frontend/src/pages/ChatPage.tsx` | W20 explicit single-turn pilot plus W21 reviewed promotion and W22 source-bound validation. The pilot calls eligibility before preview, blocks without preview when ineligible, runs `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, displays “Pilot response” separately, and keeps normal Send unchanged. Promotion can write one ordinary assistant chat message with existing `run_id` metadata only after explicit review/confirmation and only when the current target session matches the pilot source session. |
 | Preview trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, payload, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
 | Proposal apply | `src-tauri/src/commands/proposal.rs` | Main convergence target for LifeModel, memory, tool permission, scheduled task, data export, and external write application. |
@@ -158,9 +159,9 @@ tool/proposal hygiene
 The implementation has moved ahead of the original work-package text in a few
 places:
 
-- W1-W21 are complete through Runtime Migration Gate evidence surface, Pilot
+- W1-W22 are complete through Runtime Migration Gate evidence surface, Pilot
   Eligibility, the very small controlled Chat pilot with fallback, and reviewed
-  pilot response promotion.
+  pilot response promotion with source-bound validation.
 - StrategySelector, MultiStrategyRuntime orchestrator, and
   `run_multi_strategy_agent_preview` exist earlier than the original plan
   expected.
@@ -186,6 +187,11 @@ places:
   that confirmation writes to current chat history. Confirming writes exactly one
   assistant chat message through the existing chat message save path; cancel,
   blocked, failed, and no-output pilot states write nothing.
+- Controlled Pilot promotion now binds the pilot result to the source chat
+  session where it was run. Review shows source session, target session, runId,
+  selected strategy, and governance summary. Confirmation blocks if the user has
+  switched to a different target session, writes nothing, and tells the user to
+  rerun Controlled Pilot in the current session or switch back.
 
 These early pieces do not change the boundary:
 
@@ -196,8 +202,9 @@ These early pieces do not change the boundary:
 - PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
 - `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
   boundary; it remains fixed to those adapters and is not plugin loading.
-- The next step is still not direct default Chat replacement. W21 promotion is a
-  reviewed user action for a pilot artifact, not a migration of default Send.
+- The next step is still not direct default Chat replacement. W21 promotion and
+  W22 source-bound validation are reviewed user actions for a pilot artifact,
+  not a migration of default Send.
 
 ## 5. Target Spine
 
@@ -640,7 +647,7 @@ Run:
 make ci
 ```
 
-### Completed W1-W21
+### Completed W1-W22
 
 | Work Package | Status | Completion boundary |
 | --- | --- | --- |
@@ -665,6 +672,7 @@ make ci
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | Read-only eligibility checks the latest 3 preview gate reports, clean run count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation. |
 | W20 Very Small Controlled Chat Migration Pilot With Fallback | Done | Chat exposes explicit `Run Controlled Pilot`; eligibility is checked before preview, blocked does not call preview, eligible preview forces `allowWrites=false`, success is rendered as “Pilot response”, and normal Send remains unchanged. |
 | W21 Reviewed Pilot Response Promotion | Done | Successful Controlled Pilot output remains isolated by default, but users can explicitly open review and confirm promotion into one ordinary assistant chat message with existing `run_id` metadata when available. Blocked, failed, canceled, no-output, and repeated promotion paths write nothing. |
+| W22 Post-Promotion Validation And Source Binding | Done | Controlled Pilot results bind to the source chat session. Promotion review shows source session, target session, runId, selected strategy, and governance summary; confirmation blocks source/target mismatch without calling `save_chat_message` and prompts the user to rerun the pilot in the current session. |
 
 ### W11: Documentation Status Sync
 
@@ -809,6 +817,24 @@ Blocked and failed pilots still show no promotion action. Default `Send`,
 `send_message`, and `start_stream_message` still do not call eligibility, the
 migration gate, or preview.
 
+### W22: Post-Promotion Validation And Source Binding
+
+Status: Done.
+
+Controlled Pilot output now records the chat session that produced it. The
+promotion review panel displays source session, target session, runId, selected
+strategy, and governance summary before the user can confirm.
+
+Confirmation validates that the current target session still matches the pilot
+source session. If a user switches sessions after running the pilot, promotion
+is blocked, no `save_chat_message` call is made, and the UI shows a clear
+blocking/fallback message that asks the user to rerun Controlled Pilot in the
+current session or switch back to the source session.
+
+This does not change default Chat. Default `Send`, `send_message`, and
+`start_stream_message` still do not call eligibility, the migration gate,
+preview, or promotion.
+
 ## 10. What Not To Do Next
 
 Do not:
@@ -818,7 +844,8 @@ Do not:
 - Treat the Runtime Migration Gate panel as a Chat switching control.
 - Treat Pilot eligibility as a Chat switching control or automatic migration
   trigger.
-- Treat W20/W21 Controlled Pilot success or promotion as default Chat migration.
+- Treat W20/W21/W22 Controlled Pilot success, promotion, or source validation as
+  default Chat migration.
 - Treat pilot success as automatic permission to write the pilot answer into
   ordinary assistant history; W21 promotion requires explicit review and
   confirmation.

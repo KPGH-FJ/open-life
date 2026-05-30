@@ -238,6 +238,8 @@ function formatChatRuntimeError(error: unknown, diagnostics: SystemDiagnostics |
 const CHAT_PREVIEW_NO_TOOLS_PROMPT = "No developer tools catalog supplied for this chat preview.";
 const CONTROLLED_PILOT_FALLBACK_COPY =
   "Use normal Send for the stable Chat path. The pilot will not retry automatically.";
+const CONTROLLED_PILOT_RERUN_COPY =
+  "Rerun Controlled Pilot in this session before promoting, or switch back to the source session.";
 const CHAT_PREVIEW_SAFE_SUMMARY_KEYS = [
   "taskKind",
   "reasonCode",
@@ -276,6 +278,13 @@ function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, st
 function getPilotPromotionKey(result: MultiStrategyAgentPreviewOutput | null): string {
   if (!result) return "";
   return result.runId || `${result.strategyKind}:${result.payloadKind}:${result.userOutput ?? ""}`;
+}
+
+function buildControlledPilotSourceMismatchMessage(
+  sourceSessionId: string | null,
+  targetSessionId: string | null
+): string {
+  return `Promotion blocked: source session ${sourceSessionId ?? "unknown"} does not match target session ${targetSessionId ?? "unknown"}. ${CONTROLLED_PILOT_RERUN_COPY}`;
 }
 
 function hasPromotablePilotResponse(
@@ -328,6 +337,9 @@ export default function ChatPage() {
     useState<ControlledChatPilotEligibilityReport | null>(null);
   const [controlledPilotResult, setControlledPilotResult] =
     useState<MultiStrategyAgentPreviewOutput | null>(null);
+  const [controlledPilotSourceSessionId, setControlledPilotSourceSessionId] = useState<
+    string | null
+  >(null);
   const [controlledPilotPromotionReviewOpen, setControlledPilotPromotionReviewOpen] =
     useState(false);
   const [controlledPilotPromoting, setControlledPilotPromoting] = useState(false);
@@ -335,7 +347,7 @@ export default function ChatPage() {
     null
   );
   const [promotedControlledPilotKeys, setPromotedControlledPilotKeys] = useState<
-    Record<string, true>
+    Record<string, boolean>
   >({});
 
   // Throttle streaming updates to reduce React re-render pressure
@@ -345,10 +357,16 @@ export default function ChatPage() {
   const streamErrorHandledRef = useRef(false);
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
+  const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
+  const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
   }, [currentSessionId]);
+
+  useEffect(() => {
+    promotedControlledPilotKeysRef.current = promotedControlledPilotKeys;
+  }, [promotedControlledPilotKeys]);
 
   const refreshAgentRuns = async (sessionId = currentSessionIdRef.current) => {
     try {
@@ -920,6 +938,18 @@ export default function ChatPage() {
   const controlledPilotPromoted = Boolean(
     controlledPilotPromotionKey && promotedControlledPilotKeys[controlledPilotPromotionKey]
   );
+  const controlledPilotTargetSessionId = currentSessionId || null;
+  const controlledPilotSessionMismatch = Boolean(
+    controlledPilotResult &&
+    (!controlledPilotSourceSessionId ||
+      controlledPilotSourceSessionId !== controlledPilotTargetSessionId)
+  );
+  const controlledPilotSessionBlockingMessage = controlledPilotSessionMismatch
+    ? buildControlledPilotSourceMismatchMessage(
+        controlledPilotSourceSessionId,
+        controlledPilotTargetSessionId
+      )
+    : "";
   const controlledPilotGovernanceSummary = controlledPilotResult
     ? [
         `decision=${controlledPilotResult.governanceDecisionKind ?? "unknown"}`,
@@ -1124,10 +1154,12 @@ export default function ChatPage() {
     setControlledPilotFallback(null);
     setControlledPilotEligibility(null);
     setControlledPilotResult(null);
+    setControlledPilotSourceSessionId(null);
     setControlledPilotPromotionReviewOpen(false);
     setControlledPilotPromotionError(null);
 
     try {
+      const sourceSessionId = currentSessionIdRef.current;
       const eligibility = await checkControlledChatPilotEligibility();
       setControlledPilotEligibility(eligibility);
 
@@ -1148,8 +1180,10 @@ export default function ChatPage() {
           allowWrites: false,
         },
       });
+      setControlledPilotSourceSessionId(sourceSessionId);
       setControlledPilotResult(output);
     } catch (e) {
+      setControlledPilotSourceSessionId(null);
       setControlledPilotError(`Controlled Pilot failed: ${readablePreviewError(e)}`);
       setControlledPilotFallback(CONTROLLED_PILOT_FALLBACK_COPY);
     } finally {
@@ -1165,8 +1199,24 @@ export default function ChatPage() {
     ) {
       return;
     }
+    const targetSessionId = currentSessionId;
     const promotionKey = getPilotPromotionKey(controlledPilotResult);
-    if (!promotionKey || promotedControlledPilotKeys[promotionKey]) return;
+    if (
+      !promotionKey ||
+      promotedControlledPilotKeysRef.current[promotionKey] ||
+      inFlightControlledPilotPromotionKeysRef.current.has(promotionKey)
+    ) {
+      return;
+    }
+
+    if (!controlledPilotSourceSessionId || controlledPilotSourceSessionId !== targetSessionId) {
+      setControlledPilotPromotionReviewOpen(true);
+      setControlledPilotPromotionError(
+        buildControlledPilotSourceMismatchMessage(controlledPilotSourceSessionId, targetSessionId)
+      );
+      setControlledPilotFallback(CONTROLLED_PILOT_RERUN_COPY);
+      return;
+    }
 
     const assistantMsg: ChatMessage = {
       role: "assistant",
@@ -1174,24 +1224,33 @@ export default function ChatPage() {
       ...(controlledPilotResult.runId ? { run_id: controlledPilotResult.runId } : {}),
     };
 
+    inFlightControlledPilotPromotionKeysRef.current.add(promotionKey);
     setControlledPilotPromoting(true);
     setControlledPilotPromotionError(null);
+    setControlledPilotFallback(null);
     try {
-      await saveChatMessage(currentSessionId, assistantMsg);
-      setMessages(prev => [...prev, assistantMsg]);
-      setPromotedControlledPilotKeys(prev => ({ ...prev, [promotionKey]: true }));
+      await saveChatMessage(targetSessionId, assistantMsg);
+      if (currentSessionIdRef.current === targetSessionId) {
+        setMessages(prev => [...prev, assistantMsg]);
+      }
+      setPromotedControlledPilotKeys(prev => {
+        const next = { ...prev, [promotionKey]: true };
+        promotedControlledPilotKeysRef.current = next;
+        return next;
+      });
       setControlledPilotPromotionReviewOpen(false);
       await loadSessions();
     } catch (e) {
       setControlledPilotPromotionError(`Promotion failed: ${readablePreviewError(e)}`);
     } finally {
+      inFlightControlledPilotPromotionKeysRef.current.delete(promotionKey);
       setControlledPilotPromoting(false);
     }
   }, [
     controlledPilotPromoting,
     controlledPilotResult,
+    controlledPilotSourceSessionId,
     currentSessionId,
-    promotedControlledPilotKeys,
   ]);
 
   const handleIndexMemory = useCallback(
@@ -1541,7 +1600,16 @@ export default function ChatPage() {
                               type="button"
                               onClick={() => {
                                 setControlledPilotPromotionReviewOpen(true);
-                                setControlledPilotPromotionError(null);
+                                setControlledPilotPromotionError(
+                                  controlledPilotSessionMismatch
+                                    ? controlledPilotSessionBlockingMessage
+                                    : null
+                                );
+                                setControlledPilotFallback(
+                                  controlledPilotSessionMismatch
+                                    ? CONTROLLED_PILOT_RERUN_COPY
+                                    : null
+                                );
                               }}
                               className="inline-flex items-center gap-1.5 rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-800"
                             >
@@ -1581,6 +1649,12 @@ export default function ChatPage() {
                         <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
                           Governance: {controlledPilotResult.governanceDecisionKind ?? "unknown"}
                         </div>
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          Source session: {controlledPilotSourceSessionId ?? "unknown"}
+                        </div>
+                        <div className="rounded-md bg-stone-50 px-3 py-2 text-stone-700">
+                          Target session: {currentSessionId || "unknown"}
+                        </div>
                       </div>
 
                       {controlledPilotSummaryEntries.length > 0 && (
@@ -1613,6 +1687,12 @@ export default function ChatPage() {
                               </div>
                             </div>
 
+                            {controlledPilotSessionMismatch && !controlledPilotPromotionError && (
+                              <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
+                                {controlledPilotSessionBlockingMessage}
+                              </div>
+                            )}
+
                             <div>
                               <div className="text-[10px] uppercase text-emerald-700">
                                 Pilot response text
@@ -1623,6 +1703,22 @@ export default function ChatPage() {
                             </div>
 
                             <div className="grid gap-2 md:grid-cols-2">
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">
+                                  Source session
+                                </div>
+                                <div className="mt-1 font-mono text-stone-900">
+                                  {controlledPilotSourceSessionId ?? "unknown"}
+                                </div>
+                              </div>
+                              <div className="rounded-md bg-white px-3 py-2">
+                                <div className="text-[10px] uppercase text-emerald-700">
+                                  Target session
+                                </div>
+                                <div className="mt-1 font-mono text-stone-900">
+                                  {currentSessionId || "unknown"}
+                                </div>
+                              </div>
                               <div className="rounded-md bg-white px-3 py-2">
                                 <div className="text-[10px] uppercase text-emerald-700">runId</div>
                                 <div className="mt-1 font-mono text-stone-900">

@@ -10,14 +10,14 @@ completion/status index.
 
 ## Current Position
 
-W1-W21 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W22 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
 without changing Chat behavior, and a read-only controlled Chat pilot
 eligibility check for sustained clean gate evidence. Chat also has a very small
 explicit Controlled Pilot entry with fallback plus reviewed pilot response
-promotion.
+promotion with source-bound post-promotion validation.
 
 The key boundary is unchanged:
 
@@ -60,6 +60,13 @@ The key boundary is unchanged:
   and no-output pilot states write nothing. The promoted assistant message may
   carry the existing `run_id` trace field when present; no LifeModel, Memory,
   Proposal, or external tool result is written by promotion.
+- W22 Post-Promotion Validation binds each successful Controlled Pilot result
+  to the chat session where it was run. Promotion review displays source
+  session, target session, runId, strategy, and governance summary. Confirming
+  promotion first verifies the current target session still matches the pilot
+  source session. If the user switched sessions, promotion is blocked, no
+  `save_chat_message` call is made, and the UI tells the user to rerun
+  Controlled Pilot in the current session or switch back to the source session.
 
 ## Work Package Status
 
@@ -86,17 +93,19 @@ The key boundary is unchanged:
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | `runtime_migration_gate.rs`, `agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_pilot_eligibility`: read-only eligibility over the latest 3 preview gate reports with clean count, checked run ids, blockers, latest gate report, and default Chat unchanged. It creates no AgentRun/Proposal/Action/Observation and normal Chat Send does not call it. |
 | W20 Very Small Controlled Chat Migration Pilot With Fallback | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Adds explicit `Run Controlled Pilot` in Chat. It calls eligibility before preview, blocks without preview when ineligible, runs single-turn `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, shows “Pilot response” separately, keeps normal Send unchanged, and performs no automatic ordinary assistant chat-history write. |
 | W21 Reviewed Pilot Response Promotion | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Adds explicit reviewed promotion for successful Controlled Pilot results with `userOutput`. Promotion requires user review/confirmation, writes one assistant chat message via `save_chat_message` with existing `run_id` metadata when available, prevents duplicate promotion for the same pilot response, and leaves normal Send / blocked / failed / no-output pilot paths unchanged. |
+| W22 Post-Promotion Validation And Source Binding | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Binds each Controlled Pilot result to its source chat session, displays source session / target session / runId / strategy / governance summary in promotion review, blocks promotion when the current target session differs from the source session, shows rerun fallback guidance, and prevents mismatch writes to a different chat session. |
 
 ## Next Recommended Sequence
 
 ```text
-post-promotion validation before any default Chat migration
+further reviewed migration planning only after source-bound promotion validation
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
-adds an explicit review-and-confirm promotion step for successful pilot output.
-Default `Send`, `send_message`, and `start_stream_message` remain unchanged
-until a later reviewed migration stage with separate evidence.
+added an explicit review-and-confirm promotion step for successful pilot output,
+and W22 only added source binding plus target-session validation for that
+promotion step. Default `Send`, `send_message`, and `start_stream_message`
+remain unchanged until a later reviewed migration stage with separate evidence.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

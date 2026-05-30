@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W20 completion/status index. This is not a second roadmap.
+   - Compact W1-W22 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,12 +43,13 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W20 through sustained Runtime Migration
-Gate evidence, controlled Chat pilot eligibility, and a very small explicit
-Chat Controlled Pilot with fallback. The next practical sequence is:
+Current implementation has completed W1-W22 through sustained Runtime Migration
+Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
+Controlled Pilot with fallback, reviewed pilot response promotion, and
+source-bound post-promotion validation. The next practical sequence is:
 
 ```text
-reviewed pilot response promotion
+further reviewed migration planning only after source-bound promotion validation
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -57,7 +58,7 @@ reviewed pilot response promotion
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W20 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W22 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |

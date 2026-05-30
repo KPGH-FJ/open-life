@@ -802,6 +802,8 @@ describe("ChatPage", () => {
     expect(screen.getByText("Review pilot promotion")).toBeInTheDocument();
     expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
     expect(screen.getAllByText("run-controlled-pilot-1")).toHaveLength(2);
+    expect(screen.getByText("Source session")).toBeInTheDocument();
+    expect(screen.getByText("Target session")).toBeInTheDocument();
     expect(screen.getByText("Selected strategy")).toBeInTheDocument();
     expect(screen.getByText("Governance summary")).toBeInTheDocument();
     expect(screen.getByText("Payload summary")).toBeInTheDocument();
@@ -836,6 +838,22 @@ describe("ChatPage", () => {
       },
     });
     expect(screen.getAllByText("Pilot-only answer")).toHaveLength(2);
+  });
+
+  it("blocks pilot promotion after switching sessions and asks the user to rerun the pilot", async () => {
+    mockSuccessfulControlledPilot();
+
+    await runControlledPilotFromChat();
+    fireEvent.click(await screen.findByText("会话 2"));
+    fireEvent.click(await screen.findByRole("button", { name: "Promote Pilot Response" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm Promotion" }));
+
+    expect(await screen.findByText(/Promotion blocked/)).toBeInTheDocument();
+    expect(screen.getByText(/source session session-1/)).toBeInTheDocument();
+    expect(screen.getByText(/target session session-2/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Rerun Controlled Pilot in this session/).length).toBeGreaterThan(0);
+    const saveCalls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "save_chat_message");
+    expect(saveCalls).toHaveLength(0);
   });
 
   it("does not allow repeating promotion for the same pilot response", async () => {
