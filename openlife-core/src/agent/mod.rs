@@ -4,6 +4,7 @@ pub mod context_assembler;
 pub mod evidence_store;
 pub mod heuristic_store;
 pub mod hs_selector;
+pub mod maturation;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
@@ -43,6 +44,9 @@ pub use hs_selector::{
     behavior_checks_for_packet, build_runtime_hs_packet, HSAssetExclusion, HSAssetKind,
     HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
     RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
+};
+pub use maturation::{
+    LifeModelMaturationService, MaturationInput, MaturationOutput, MaturationProposalCandidate,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
