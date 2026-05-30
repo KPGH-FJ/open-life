@@ -2,6 +2,7 @@ pub mod action_executor;
 pub mod agent_loop;
 pub mod context_assembler;
 pub mod evidence_store;
+pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
 pub mod maturation;
@@ -34,6 +35,10 @@ pub use context_assembler::{
 pub use evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
     EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
+};
+pub use governor::{
+    GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
+    ModelRouteGovernanceInput, ToolGovernanceInput,
 };
 pub use heuristic_store::{
     DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicDraft, HeuristicLifecycleStatus,

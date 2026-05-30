@@ -1,6 +1,7 @@
 //! Agent module tests
 
 mod evidence_store;
+mod governor;
 mod heuristic_store;
 mod integration;
 mod maturation_loop;
