@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-05-30 W11 status sync
-> Current direction: LifeModel-Governed Runtime convergence after W10 MultiStrategy Preview AgentRun Audit Persistence
+> Version: 2026-05-30 W16 RuntimeStrategy trait foundation
+> Current direction: Runtime integration hardening / Chat migration gate after W16 RuntimeStrategy Trait Foundation
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -12,10 +12,10 @@
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
 ReAct remains the current default Chat execution strategy and Beta execution
-kernel, but the long-term architecture is not "ReAct only." W1-W10 have already
+kernel, but the long-term architecture is not "ReAct only." W1-W16 have already
 implemented the thin runtime contract, LifeModel governance foundations,
-PlanExecute core MVP, StrategySelector, MultiStrategy runtime orchestrator,
-preview command, and metadata-safe preview AgentRun audit.
+PlanExecute core/vertical slices, StrategySelector, MultiStrategy preview/audit,
+and the lightweight RuntimeStrategy adapter foundation.
 
 The important current boundary is that MultiStrategy Runtime is
 preview/audit-ready, not productized as the default Chat path. Future work must
@@ -93,10 +93,10 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | Execution tools | Core OS, file/web/calendar/email/task/MCP/A2A taxonomy is synchronized; calendar/email write-like tools are proposal-only governed executors | Keep proposal-only semantics, disabled/declarative-only handling, and tests aligned |
 | Calibration/Evolution | Feedback and model improvement suggestions exist and proposal-first paths are in place | Needs maturation loop V1 rather than scattered direct writes |
 | LifeModel-HS foundations | RuntimeHSPacket, PolicyStore, EvidenceStore, HeuristicStore, RegressionSuite, Governor MVP exist | Still needs end-to-end LifeEvent/Signal/Evidence/Governor/Proposal loop |
-| PlanExecute | Core MVP exists and can appear as a MultiStrategy preview payload | Not yet a productized weekly planning vertical slice |
+| PlanExecute | Governed V1 runtime slice exists and can appear as a MultiStrategy preview payload/report | Not yet a productized weekly planning vertical slice |
 | MultiStrategy preview | `run_multi_strategy_agent_preview` persists metadata-safe outer AgentRun audit and Runs/Trace can display it | Preview/beta only; not default Chat |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
-| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Runs/Trace display preview audit | Next preview UI/debug entry must remain non-default |
+| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths | Next Chat migration must pass an explicit gate and preserve fallback |
 
 ## 3. Current Gaps
 
@@ -109,14 +109,15 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No consistent representation of tool actions, model actions, memory writes, and LifeModel patches.~~ ✅ 已实现（统一 Proposal 结构）
 - ~~Chat, Builder, Calibration, and Evolution still use separate pipelines.~~ ✅ 已完成（Builder/Calibration/Chat 已接入 Proposal 流；Chat Proposal 持久化和 AgentRun 关联已抽共享 helper）
 - ~~No StrategySelector / MultiStrategy preview path.~~ ✅ 已完成（W7-W10：selector、orchestrator、preview command、metadata-safe AgentRun audit）
+- ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **No formal `RuntimeStrategy` trait.** This must wait until guarded Chat subpaths, maturation V1, and PlanExecute vertical slice create real interface pressure.
+- **Next boundary: runtime integration hardening / Chat migration gate.** Do not treat W16 as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
-- MultiStrategy preview does not yet have a product/debug entry beyond the command and trace surfaces.
+- MultiStrategy preview is still not the default Chat path; runtime integration hardening and migration gates are not yet defined.
 - Users cannot yet use a productized LifeModel-governed weekly planning flow.
-- LifeModel maturation is not yet a visible end-to-end loop.
+- LifeModel maturation V1 exists as a service, but is not yet a visible end-to-end product loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
 - Dashboard is still closer to a summary page than an operating workspace.
 
@@ -414,32 +415,30 @@ Every major development round should verify:
 - Do not hardcode test counts in planning docs; they drift quickly.
 - `make ci` is the release gate and includes format-check, Rust tests, frontend tests, and frontend build/typecheck.
 
-### W1-W10 LifeModel-Governed Runtime Progress (2026-05-30)
+### W1-W16 LifeModel-Governed Runtime Progress (2026-05-30)
 
 | Work Package | 状态 | 边界 |
 | --- | --- | --- |
 | W1-W3 | ✅ Done | Tool/proposal hygiene, thin runtime spine, ReAct runtime contract convergence. |
-| W4-W5 | ✅ Done | Maturation/Governor foundations exist; mature end-to-end loop remains future work. |
+| W4-W5 | ✅ Done | Maturation/Governor foundations exist. |
 | W6 | ✅ Done | PlanExecute core MVP exists; not productized weekly planning. |
-| W7-W8 | ✅ Done | StrategySelector and MultiStrategy orchestrator exist; no formal trait yet. |
+| W7-W8 | ✅ Done | StrategySelector and MultiStrategy orchestrator exist. |
 | W9-W10 | ✅ Done | Preview command exists and writes metadata-safe outer AgentRun audit. |
+| W11-W13 | ✅ Done | Docs/status sync, non-default preview UI, and guarded Chat preview subpath exist. |
+| W14-W16 | ✅ Done | Maturation V1 service, PlanExecute governed V1 report, and RuntimeStrategy adapter/registry foundation exist. |
 
 ## 8. Current Next Step
 
 The next concrete development task is:
 
 ```text
-W11: docs/status sync
+W17: Runtime integration hardening / Chat migration gate
 ```
 
-After W11, continue in this order:
+After W16, continue in this order:
 
 ```text
-non-default preview UI/debug entry
--> guarded Chat subpath migration
--> maturation loop V1
--> PlanExecute vertical slice
--> RuntimeStrategy trait
+Runtime integration hardening / Chat migration gate
 ```
 
 Guardrails:

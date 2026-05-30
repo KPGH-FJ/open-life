@@ -2,8 +2,10 @@ use crate::agent::policy_store::{ModelRoutePolicy, BUILTIN_POLICY_SENSITIVE_TOPI
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, EvidenceQuery, EvidenceStore, HSSelectionAudit,
     HeuristicQuery, HeuristicStore, ModelRouter, MultiStrategyRuntime, MultiStrategyRuntimeInput,
-    MultiStrategyRuntimePayload, PlanStepStatus, ProposalStore, ProviderAvailability,
-    RuntimeHSPacket, RuntimeInput, RuntimeStrategyKind, SelectedPolicyRef, StrategySelectionInput,
+    MultiStrategyRuntimePayload, PlanExecuteRuntimeStrategy, PlanStepStatus, ProposalStore,
+    ProviderAvailability, RuntimeHSPacket, RuntimeInput, RuntimeOutput, RuntimeStrategy,
+    RuntimeStrategyInput, RuntimeStrategyKind, RuntimeStrategyOutput, RuntimeStrategyPayload,
+    RuntimeStrategyPayloadKind, RuntimeStrategyRegistry, SelectedPolicyRef, StrategySelectionInput,
     StrategySelector,
 };
 use crate::layer_router::Layer;
@@ -11,6 +13,9 @@ use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::memory::MemoryStore;
 use crate::scheduler::InferenceScheduler;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn no_network_scheduler() -> InferenceScheduler {
     let mut router = ModelRouter::new();
@@ -109,6 +114,137 @@ fn sensitive_packet() -> RuntimeHSPacket {
     }
 }
 
+#[derive(Clone)]
+struct CountingRuntimeStrategy {
+    kind: RuntimeStrategyKind,
+    payload_kind: RuntimeStrategyPayloadKind,
+    metadata_safe_id: &'static str,
+    metadata_safe_name: &'static str,
+    payload: RuntimeStrategyPayload,
+    execution_count: Arc<AtomicUsize>,
+    seen_summaries: Arc<Mutex<Vec<Value>>>,
+}
+
+impl CountingRuntimeStrategy {
+    fn react(execution_count: Arc<AtomicUsize>, seen_summaries: Arc<Mutex<Vec<Value>>>) -> Self {
+        Self {
+            kind: RuntimeStrategyKind::ReAct,
+            payload_kind: RuntimeStrategyPayloadKind::ReAct,
+            metadata_safe_id: "test_react",
+            metadata_safe_name: "Test ReAct",
+            payload: RuntimeStrategyPayload::ReAct(RuntimeOutput {
+                run_id: Some("run-test-react".into()),
+                user_output: "react adapter output".into(),
+                actions: Vec::new(),
+                observations: Vec::new(),
+                proposal_ids: Vec::new(),
+                life_event_candidates: Vec::new(),
+                warnings: Vec::new(),
+            }),
+            execution_count,
+            seen_summaries,
+        }
+    }
+
+    fn plan_execute(
+        execution_count: Arc<AtomicUsize>,
+        seen_summaries: Arc<Mutex<Vec<Value>>>,
+    ) -> Self {
+        Self {
+            kind: RuntimeStrategyKind::PlanExecute,
+            payload_kind: RuntimeStrategyPayloadKind::PlanExecute,
+            metadata_safe_id: "test_plan_execute",
+            metadata_safe_name: "Test PlanExecute",
+            payload: RuntimeStrategyPayload::PlanExecute(crate::agent::PlanExecutionOutput {
+                report: crate::agent::PlanExecuteReport {
+                    plan_id: "plan-test".into(),
+                    source_run_id: Some("source-run-test".into()),
+                    step_count: 1,
+                    executed_read_only_step_count: 1,
+                    blocked_or_proposal_required_step_count: 0,
+                    governance_decisions: Vec::new(),
+                    observation_summaries: Vec::new(),
+                    warnings: Vec::new(),
+                    metadata_safe_summary: json!({
+                        "reportKind": "plan_execute_v1",
+                        "planId": "plan-test",
+                        "sourceRunId": "source-run-test",
+                        "stepCount": 1,
+                    }),
+                },
+                plan: crate::agent::PlanDraft {
+                    objective: "selected_strategy=plan_execute task_kind=conversation reason_code=planning_intent_allowed".into(),
+                    steps: Vec::new(),
+                },
+                traces: Vec::new(),
+                runtime_outputs: Vec::new(),
+                warnings: Vec::new(),
+            }),
+            execution_count,
+            seen_summaries,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeStrategy for CountingRuntimeStrategy {
+    fn kind(&self) -> RuntimeStrategyKind {
+        self.kind
+    }
+
+    fn metadata_safe_id(&self) -> &'static str {
+        self.metadata_safe_id
+    }
+
+    fn metadata_safe_name(&self) -> &'static str {
+        self.metadata_safe_name
+    }
+
+    fn payload_kind(&self) -> RuntimeStrategyPayloadKind {
+        self.payload_kind
+    }
+
+    async fn execute(
+        &self,
+        input: RuntimeStrategyInput,
+    ) -> Result<RuntimeStrategyOutput, crate::agent::AgentRuntimeError> {
+        self.execution_count.fetch_add(1, Ordering::SeqCst);
+        self.seen_summaries
+            .lock()
+            .unwrap()
+            .push(input.selection.metadata_safe_summary);
+
+        Ok(RuntimeStrategyOutput {
+            payload: self.payload.clone(),
+            metadata_safe_summary: json!({
+                "strategyId": self.metadata_safe_id,
+                "strategyName": self.metadata_safe_name,
+                "payloadKind": self.payload_kind.as_str(),
+            }),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn counting_runtime(
+    react_count: Arc<AtomicUsize>,
+    plan_count: Arc<AtomicUsize>,
+    seen_summaries: Arc<Mutex<Vec<Value>>>,
+) -> MultiStrategyRuntime {
+    MultiStrategyRuntime::with_strategy_registry(
+        StrategySelector::default(),
+        RuntimeStrategyRegistry::new()
+            .with_strategy(Box::new(CountingRuntimeStrategy::react(
+                react_count,
+                Arc::clone(&seen_summaries),
+            )))
+            .with_strategy(Box::new(CountingRuntimeStrategy::plan_execute(
+                plan_count,
+                seen_summaries,
+            ))),
+    )
+}
+
 #[tokio::test]
 async fn simple_chat_orchestrates_react_path() {
     let output = test_runtime()
@@ -138,6 +274,45 @@ async fn simple_chat_orchestrates_react_path() {
 }
 
 #[tokio::test]
+async fn simple_chat_executes_selected_react_adapter() {
+    let react_count = Arc::new(AtomicUsize::new(0));
+    let plan_count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+
+    let output = counting_runtime(
+        Arc::clone(&react_count),
+        Arc::clone(&plan_count),
+        Arc::clone(&seen_summaries),
+    )
+    .execute(multi_input(
+        runtime_input(
+            "What should I focus on today?",
+            "Available tools: memory.search",
+        ),
+        true,
+        true,
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(output.selection.kind, RuntimeStrategyKind::ReAct);
+    assert_eq!(react_count.load(Ordering::SeqCst), 1);
+    assert_eq!(plan_count.load(Ordering::SeqCst), 0);
+    match output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output) => {
+            assert_eq!(runtime_output.run_id.as_deref(), Some("run-test-react"));
+            assert_eq!(runtime_output.user_output, "react adapter output");
+        }
+        other => panic!("expected ReAct payload, got {other:?}"),
+    }
+
+    let summaries = seen_summaries.lock().unwrap();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0]["selectedStrategyKind"], "react");
+    assert!(!summaries[0].to_string().contains("memory.search"));
+}
+
+#[tokio::test]
 async fn planning_intent_orchestrates_plan_execute_path() {
     let output = test_runtime()
         .execute(multi_input(
@@ -149,7 +324,7 @@ async fn planning_intent_orchestrates_plan_execute_path() {
         .unwrap();
 
     assert_eq!(output.selection.kind, RuntimeStrategyKind::PlanExecute);
-    match output.payload {
+    match &output.payload {
         MultiStrategyRuntimePayload::PlanExecute(plan_output) => {
             assert_eq!(plan_output.plan.steps.len(), 1);
             assert_eq!(plan_output.traces.len(), 1);
@@ -163,6 +338,89 @@ async fn planning_intent_orchestrates_plan_execute_path() {
             assert!(plan_output.runtime_outputs.is_empty());
         }
         other => panic!("expected PlanExecute payload, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn planning_intent_executes_selected_plan_execute_adapter_and_keeps_report() {
+    let react_count = Arc::new(AtomicUsize::new(0));
+    let plan_count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+
+    let output = counting_runtime(
+        Arc::clone(&react_count),
+        Arc::clone(&plan_count),
+        Arc::clone(&seen_summaries),
+    )
+    .execute(multi_input(
+        runtime_input(
+            "Plan steps for Alice and alice@example.com without leaking the raw prompt.",
+            "",
+        ),
+        true,
+        true,
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(output.selection.kind, RuntimeStrategyKind::PlanExecute);
+    assert_eq!(react_count.load(Ordering::SeqCst), 0);
+    assert_eq!(plan_count.load(Ordering::SeqCst), 1);
+    match &output.payload {
+        MultiStrategyRuntimePayload::PlanExecute(plan_output) => {
+            assert_eq!(plan_output.report.plan_id, "plan-test");
+            assert_eq!(plan_output.report.step_count, 1);
+            assert_eq!(
+                plan_output.report.metadata_safe_summary["reportKind"],
+                "plan_execute_v1"
+            );
+        }
+        other => panic!("expected PlanExecute payload, got {other:?}"),
+    }
+
+    let serialized_output = serde_json::to_string(&output).unwrap();
+    assert!(!serialized_output.contains("Alice"));
+    assert!(!serialized_output.contains("alice@example.com"));
+    assert!(!serialized_output.contains("raw prompt"));
+}
+
+#[tokio::test]
+async fn plan_execute_strategy_output_and_metadata_summary_are_metadata_safe() {
+    let runtime_input = runtime_input(
+        "Plan steps for Alice and alice@example.com using raw memory context.",
+        "Available tools: email.send with body payloads and file.update",
+    );
+    let selection = StrategySelector::default().select(StrategySelectionInput {
+        runtime_input: runtime_input.clone(),
+        allow_planning: true,
+        local_model_available: true,
+    });
+
+    let output = PlanExecuteRuntimeStrategy::default()
+        .execute(RuntimeStrategyInput {
+            runtime_input,
+            selection,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(output.metadata_safe_summary["strategyId"], "plan_execute");
+    assert_eq!(output.metadata_safe_summary["payloadKind"], "plan_execute");
+
+    let serialized_output = serde_json::to_string(&output).unwrap();
+    assert!(!serialized_output.contains("Alice"));
+    assert!(!serialized_output.contains("alice@example.com"));
+    assert!(!serialized_output.contains("raw memory context"));
+    assert!(!serialized_output.contains("email.send"));
+    assert!(!serialized_output.contains("file.update"));
+
+    match output.payload {
+        RuntimeStrategyPayload::PlanExecute(plan_output) => {
+            assert!(plan_output.plan.objective.contains("selected_strategy="));
+            assert!(!plan_output.plan.objective.contains("Alice"));
+            assert!(!plan_output.plan.objective.contains("alice@example.com"));
+        }
+        other => panic!("expected PlanExecute strategy payload, got {other:?}"),
     }
 }
 
@@ -218,6 +476,36 @@ async fn blocked_local_only_selection_does_not_execute_any_runtime() {
         output.payload,
         MultiStrategyRuntimePayload::Blocked
     ));
+}
+
+#[tokio::test]
+async fn blocked_local_only_selection_does_not_execute_any_strategy_adapter() {
+    let react_count = Arc::new(AtomicUsize::new(0));
+    let plan_count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+    let input = runtime_input_with_life_model(
+        "Talk through a sensitive health topic.",
+        "Available tools: memory.search",
+        LifeModel::default(),
+        Some(sensitive_packet()),
+    );
+
+    let output = counting_runtime(
+        Arc::clone(&react_count),
+        Arc::clone(&plan_count),
+        Arc::clone(&seen_summaries),
+    )
+    .execute(multi_input(input, true, false))
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        output.payload,
+        MultiStrategyRuntimePayload::Blocked
+    ));
+    assert_eq!(react_count.load(Ordering::SeqCst), 0);
+    assert_eq!(plan_count.load(Ordering::SeqCst), 0);
+    assert!(seen_summaries.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

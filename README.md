@@ -16,19 +16,19 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-当前项目处于 **W11 文档状态同步 / LifeModel-Governed Runtime preview convergence** 阶段：
+当前项目处于 **W16 RuntimeStrategy Trait Foundation / Runtime integration hardening gate preparation** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
-- **W1-W10 已完成**：当前已经推进到 MultiStrategy Preview AgentRun Audit Persistence；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
+- **W1-W16 已完成**：当前已经推进到 RuntimeStrategy Trait Foundation；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
 - **ReAct 仍是当前默认 Chat 主链路**：MultiStrategy Runtime 已有 preview command 和 audit-ready 路径，但尚未接管默认 `send_message` / Chat 主流程。
 - **MultiStrategy preview 已可审计**：`run_multi_strategy_agent_preview` 已存在，preview run 会写入 metadata-safe 外层 AgentRun audit；Runs / Trace 已能展示 preview strategy、payload、governance 和 warnings。
-- **PlanExecute 仍是 core MVP**：当前可通过 MultiStrategy preview 产生 planExecute payload，但不是产品化周计划流程。
-- **LifeModel-HS 仍是协议层方向**：Evidence/Governor 等基础能力已存在，但 `LifeEvent -> Signal -> Evidence -> Governor -> Proposal -> RuntimeHSPacket` 的成熟闭环尚未 end-to-end 完成。
-- **RuntimeStrategy trait 尚未开始**：StrategySelector 和 MultiStrategy orchestrator 已作为 preview/core 代码存在，但不能提前抽象成正式 trait。
+- **PlanExecute V1 是受治理 runtime slice**：当前可通过 MultiStrategy preview 产生 planExecute payload/report，但不是产品化周计划流程。
+- **LifeModel-HS 仍是协议层方向**：Maturation V1 service、Evidence/Governor 等基础能力已存在，但 Chat 自动成熟化和产品化反馈闭环仍需 gate。
+- **RuntimeStrategy trait 已成型**：MultiStrategy Runtime 通过 ReAct / PlanExecute adapter registry 执行；这不是插件化加载，也不是默认 Chat 替换。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
 - **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **下一步顺序固定**：docs/status sync -> non-default preview UI/debug entry -> guarded Chat subpath migration -> maturation loop V1 -> PlanExecute vertical slice -> RuntimeStrategy trait。
+- **下一步顺序固定**：Runtime integration hardening / Chat migration gate；不能直接替换默认 Chat 主路径。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
@@ -65,7 +65,7 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 | Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
 | **Chat Proposal** | ✅ **自动从对话中提取目标/状态/能力** | 自动感知用户意图并生成 LifeModel 更新提案 |
 | **ContextAssembler** | ✅ **模块化上下文组装（V2 灰度中）** | 可插拔的记忆/隐私/工具上下文组装 |
-| PlanExecute | Core MVP，可在 preview 中生成受治理计划 payload | 产品化周计划 vertical slice，必须先经过用户 review/edit |
+| PlanExecute | Governed V1 runtime slice，可在 preview 中生成受治理计划 payload/report | 产品化周计划 vertical slice，必须先经过用户 review/edit |
 | **Workspace** | ✅ **驾驶舱首页，实时状态概览** | 统一的 Agent 任务入口和监控中心 |
 | **Feedback Loop** | ✅ **应用内反馈收集** | Chat 消息 👍/👎 反馈，诊断报告导出，Workspace 统计 |
 | **Memory Governance** | ✅ **显式/隐式记忆提取** | "记住这个"生成 Proposal，自动记忆建议，异步 Embedding |
@@ -245,19 +245,20 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
-### W1-W10: LifeModel-Governed Runtime Preview
+### W1-W16: LifeModel-Governed Runtime Preview And Strategy Foundation
 - ✅ Tool / Proposal Hygiene、Thin Runtime Spine、ReAct Runtime Contract Convergence。
 - ✅ LifeModel Maturation Loop Foundation、LifeModel Governor MVP、PlanExecute Core MVP。
 - ✅ StrategySelector、MultiStrategy Runtime Orchestrator、Preview Command。
 - ✅ MultiStrategy Preview AgentRun Audit Persistence：metadata-safe 外层 run 可在 Runs / Trace 展示。
+- ✅ Non-default Settings preview、guarded Chat preview subpath、Maturation V1 service。
+- ✅ PlanExecute governed V1 report、RuntimeStrategy trait、ReAct / PlanExecute adapter registry。
 
 ## 当前重要开发方向
 
-1. 完成 W11 文档状态同步，保持入口文档、Tool Taxonomy、metadata-safe AgentRun trace 与代码一致。
-2. 做非默认 MultiStrategy preview UI/debug entry，不新增默认 Chat 替换入口。
-3. 受控迁移一个 Chat 子路径，保留 `send_message` / 现有 Chat fallback。
-4. 推进 LifeModel maturation loop V1。
-5. 做 PlanExecute 产品 vertical slice，最后再抽 `RuntimeStrategy` trait。
+1. 进入 Runtime integration hardening / Chat migration gate，先定义迁移门槛和回退策略。
+2. 保持 `send_message` / `start_stream_message` 默认 Chat 主路径稳定，不能直接替换。
+3. 将 MultiStrategy preview、Runs/Trace、Maturation V1、PlanExecute V1 的 metadata-safe 边界做硬化验收。
+4. 只有在 gate 明确通过后，才继续扩大 Chat 子路径迁移范围。
 
 ## 常见问题
 

@@ -10,9 +10,9 @@ completion/status index.
 
 ## Current Position
 
-W1-W15 are complete. The project now has a governed PlanExecute V1 vertical
-slice with metadata-safe reports, internal read-only observations, and
-Governor-enforced write interception.
+W1-W16 are complete. The project now has a governed PlanExecute V1 vertical
+slice plus a lightweight `RuntimeStrategy` trait foundation for ReAct and
+PlanExecute adapters.
 
 The key boundary is unchanged:
 
@@ -25,8 +25,8 @@ The key boundary is unchanged:
   explicit service entry, while automatic Chat application remains out of scope.
 - PlanExecute V1 is a governed runtime slice, not a productized weekly-planning
   workflow.
-- A formal `RuntimeStrategy` trait has not started and must not be introduced
-  ahead of proven vertical slices.
+- `RuntimeStrategy` now exists as a light adapter/registry boundary; it is not
+  plugin loading and it does not migrate the default Chat path.
 
 ## Work Package Status
 
@@ -47,12 +47,16 @@ The key boundary is unchanged:
 | W13 Guarded Chat Subpath Migration | Done | Chat governed preview panel, Chat tests | Chat exposes an explicit Governed Preview path that calls `run_multi_strategy_agent_preview` with `allowWrites=false`, displays metadata-safe runtime output, links to Runs trace, and leaves normal Send on the existing stream path. |
 | W14 LifeModel Maturation Loop V1 | Done | `maturation.rs`, evidence/proposal stores, maturation tests | `MaturationService::mature_runtime_output` converts RuntimeOutput candidates into proposal-first evidence/proposals, records structured drop reasons and governance audit, and keeps evidence/report metadata-safe. |
 | W15 PlanExecute Governed Vertical Slice | Done | `plan_execute.rs`, MultiStrategy PlanExecute payload, PlanExecute tests | `PlanExecuteReport` records plan id, source run id, step counts, governance summaries, read-only observations, warnings, and metadata-safe summary; write-like steps require proposal and are not executed. |
+| W16 RuntimeStrategy Trait Foundation | Done | `strategy_runtime.rs`, `multi_strategy_runtime.rs`, MultiStrategy tests | Defines the lightweight `RuntimeStrategy` trait, ReAct/PlanExecute adapters, and registry-backed MultiStrategy execution while preserving ReAct/PlanExecute/Blocked payload compatibility and metadata-safe summaries. |
 
 ## Next Recommended Sequence
 
 ```text
-RuntimeStrategy trait
+Runtime integration hardening / Chat migration gate
 ```
+
+The next phase should harden runtime integration and define the Chat migration
+gate criteria. It should not directly replace the default Chat path.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

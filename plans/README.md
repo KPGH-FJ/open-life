@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W10 completion/status index. This is not a second roadmap.
+   - Compact W1-W16 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,16 +43,11 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W10 through MultiStrategy Preview
-AgentRun Audit Persistence. The next practical sequence is:
+Current implementation has completed W1-W16 through RuntimeStrategy Trait
+Foundation. The next practical sequence is:
 
 ```text
-docs/status sync
--> non-default preview UI/debug entry
--> guarded Chat subpath migration
--> maturation loop V1
--> PlanExecute vertical slice
--> RuntimeStrategy trait
+Runtime integration hardening / Chat migration gate
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -61,7 +56,7 @@ docs/status sync
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W10 completion/status index and preview/not-default boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W16 completion/status index and preview/not-default boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |

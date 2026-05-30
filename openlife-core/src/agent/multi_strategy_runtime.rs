@@ -1,9 +1,13 @@
-use crate::agent::governor::{GovernanceDecisionKind, LifeModelGovernor};
-use crate::agent::plan_execute::{PlanExecuteInput, PlanExecuteService, PlanExecutionOutput};
+use crate::agent::governor::GovernanceDecisionKind;
+use crate::agent::plan_execute::PlanExecutionOutput;
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeError};
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::strategy::{
     RuntimeStrategyKind, StrategySelection, StrategySelectionInput, StrategySelector,
+};
+use crate::agent::strategy_runtime::{
+    PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategyInput, RuntimeStrategyPayload,
+    RuntimeStrategyRegistry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,19 +36,26 @@ pub struct MultiStrategyRuntimeOutput {
 }
 
 pub struct MultiStrategyRuntime {
-    runtime: AgentRuntime,
     selector: StrategySelector,
-    governor: LifeModelGovernor,
-    plan_execute: PlanExecuteService,
+    strategies: RuntimeStrategyRegistry,
 }
 
 impl MultiStrategyRuntime {
     pub fn new(runtime: AgentRuntime) -> Self {
+        let strategies = RuntimeStrategyRegistry::new()
+            .with_strategy(Box::new(ReActRuntimeStrategy::new(runtime)))
+            .with_strategy(Box::new(PlanExecuteRuntimeStrategy::default()));
+
+        Self::with_strategy_registry(StrategySelector, strategies)
+    }
+
+    pub(crate) fn with_strategy_registry(
+        selector: StrategySelector,
+        strategies: RuntimeStrategyRegistry,
+    ) -> Self {
         Self {
-            runtime,
-            selector: StrategySelector,
-            governor: LifeModelGovernor,
-            plan_execute: PlanExecuteService,
+            selector,
+            strategies,
         }
     }
 
@@ -71,59 +82,42 @@ impl MultiStrategyRuntime {
             });
         }
 
-        match selection.kind {
-            RuntimeStrategyKind::ReAct => {
-                let runtime_output = self
-                    .runtime
-                    .execute_runtime_input(input.runtime_input)
-                    .await?;
-                Ok(MultiStrategyRuntimeOutput {
-                    selection,
-                    payload: MultiStrategyRuntimePayload::ReAct(runtime_output),
-                    warnings,
-                })
-            }
-            RuntimeStrategyKind::PlanExecute => {
-                let max_steps = input.runtime_input.execution_budget.max_steps as usize;
-                let plan_output = self.plan_execute.execute_plan(
-                    PlanExecuteInput::from_runtime_input(
-                        input.runtime_input,
-                        metadata_safe_objective(&selection),
-                        max_steps,
-                    ),
-                    &self.governor,
-                );
-                warnings.extend(plan_output.warnings.iter().cloned());
+        let strategy = self.strategies.get(selection.kind).ok_or_else(|| {
+            AgentRuntimeError::StrategyNotFound(format!(
+                "runtime strategy {}",
+                strategy_kind_str(selection.kind)
+            ))
+        })?;
+        let strategy_output = strategy
+            .execute(RuntimeStrategyInput {
+                runtime_input: input.runtime_input,
+                selection: selection.clone(),
+            })
+            .await?;
+        warnings.extend(strategy_output.warnings.iter().cloned());
 
-                Ok(MultiStrategyRuntimeOutput {
-                    selection,
-                    payload: MultiStrategyRuntimePayload::PlanExecute(plan_output),
-                    warnings,
-                })
+        Ok(MultiStrategyRuntimeOutput {
+            selection,
+            payload: MultiStrategyRuntimePayload::from(strategy_output.payload),
+            warnings,
+        })
+    }
+}
+
+impl From<RuntimeStrategyPayload> for MultiStrategyRuntimePayload {
+    fn from(payload: RuntimeStrategyPayload) -> Self {
+        match payload {
+            RuntimeStrategyPayload::ReAct(output) => MultiStrategyRuntimePayload::ReAct(output),
+            RuntimeStrategyPayload::PlanExecute(output) => {
+                MultiStrategyRuntimePayload::PlanExecute(output)
             }
         }
     }
 }
 
-fn metadata_safe_objective(selection: &StrategySelection) -> String {
-    let selected_strategy = selection
-        .metadata_safe_summary
-        .get("selectedStrategyKind")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let task_kind = selection
-        .metadata_safe_summary
-        .get("taskKind")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-    let reason_code = selection
-        .metadata_safe_summary
-        .get("reasonCode")
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown");
-
-    format!(
-        "selected_strategy={} task_kind={} reason_code={}",
-        selected_strategy, task_kind, reason_code
-    )
+fn strategy_kind_str(kind: RuntimeStrategyKind) -> &'static str {
+    match kind {
+        RuntimeStrategyKind::ReAct => "react",
+        RuntimeStrategyKind::PlanExecute => "plan_execute",
+    }
 }

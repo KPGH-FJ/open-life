@@ -1,14 +1,14 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-05-30
-> Status: W11 status sync baseline; W1-W10 complete through MultiStrategy Preview AgentRun Audit Persistence
+> Status: W16 RuntimeStrategy trait foundation complete; next is runtime integration hardening / Chat migration gate
 > Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W11, it also records that W1-W10 have been completed and that current
-MultiStrategy work is preview/audit-ready, not the default Chat runtime.
+As of W16, it records that MultiStrategy work is preview/audit-ready with a
+lightweight RuntimeStrategy adapter boundary, not the default Chat runtime.
 
 It updates the project framing from:
 
@@ -105,7 +105,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W10 status table and preview/not-default boundary.
+   - Compact W1-W16 status table and preview/not-default boundary.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -151,7 +151,7 @@ tool/proposal hygiene
 The implementation has moved ahead of the original work-package text in a few
 places:
 
-- W1-W10 are complete through MultiStrategy Preview AgentRun Audit Persistence.
+- W1-W16 are complete through RuntimeStrategy Trait Foundation.
 - StrategySelector, MultiStrategyRuntime orchestrator, and
   `run_multi_strategy_agent_preview` exist earlier than the original plan
   expected.
@@ -165,8 +165,9 @@ These early pieces do not change the boundary:
   MultiStrategy Runtime.
 - The LifeEvent / Signal / Evidence / Governor loop is not end-to-end.
 - PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
-- The formal `RuntimeStrategy` trait has not started and must not be introduced
-  ahead of the next vertical slices.
+- `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
+  boundary; the next step is runtime integration hardening / Chat migration
+  gate, not direct default Chat replacement.
 
 ## 5. Target Spine
 
@@ -248,10 +249,11 @@ Current implementation note:
 - StrategySelector and MultiStrategyRuntime exist for preview/core orchestration.
 - `run_multi_strategy_agent_preview` exposes the orchestrator as a non-default
   preview/beta command and persists metadata-safe outer AgentRun audit.
-- There is no first-class `RuntimeStrategy` trait yet.
-- PlanExecute exists as a core MVP payload path, but the product weekly-plan
-  vertical slice should still wait until the governed maturation loop and
-  explicit review/edit flow are ready.
+- A lightweight first-class `RuntimeStrategy` trait now exists for fixed
+  ReAct/PlanExecute adapters.
+- PlanExecute exists as a governed V1 runtime payload/report path, but the
+  product weekly-plan flow still requires explicit review/edit UX and migration
+  gates.
 
 ## 8. Development Order
 
@@ -339,8 +341,8 @@ RuntimeOutput {
 
 Rules:
 
-- Do not introduce a broad `RuntimeStrategy` trait until existing Direct,
-  Layered, and ReAct paths can be adapted without churn.
+- Keep the current `RuntimeStrategy` boundary lightweight and fixed to proven
+  adapters; do not expand it into dynamic plugin loading or broad rewrites.
 - First extract shared runtime input/output boundaries and contract tests.
 - Stream and non-stream chat should continue moving toward shared execution
   semantics.
@@ -608,7 +610,7 @@ Run:
 make ci
 ```
 
-### Completed W1-W10
+### Completed W1-W16
 
 | Work Package | Status | Completion boundary |
 | --- | --- | --- |
@@ -619,9 +621,15 @@ make ci
 | W5 LifeModel Governor MVP | Done | Governor/policy MVP exists for narrow decisions; not full mature learning. |
 | W6 PlanExecute Core MVP | Done | Core governed plan payload exists; not product weekly planning. |
 | W7 Strategy Selector | Done | Metadata-safe strategy selection exists. |
-| W8 MultiStrategy Runtime Orchestrator | Done | Preview/core orchestrator exists; no formal `RuntimeStrategy` trait. |
+| W8 MultiStrategy Runtime Orchestrator | Done | Preview/core orchestrator exists. |
 | W9 MultiStrategy Preview Command | Done | `run_multi_strategy_agent_preview` exists as non-default preview/beta command. |
 | W10 Preview AgentRun Audit Persistence | Done | Metadata-safe outer AgentRun audit persists preview strategy/payload/governance/warnings. |
+| W11 Documentation Status Sync | Done | Entry docs and progress index synced with code status. |
+| W12 Non-Default Preview UI / Debug Entry | Done | Settings preview panel calls preview command without replacing Chat. |
+| W13 Guarded Chat Subpath Migration | Done | Chat has explicit write-disabled Governed Preview while normal Send stays unchanged. |
+| W14 Maturation Loop V1 | Done | RuntimeOutput candidates mature into governed evidence/proposals without direct LifeModel/Memory writes. |
+| W15 PlanExecute Governed Vertical Slice | Done | PlanExecuteReport records metadata-safe plan/governance/read-only observation summaries. |
+| W16 RuntimeStrategy Trait | Done | ReAct and PlanExecute execute through lightweight fixed adapters and registry. |
 
 ### W11: Documentation Status Sync
 
@@ -635,9 +643,9 @@ Current task:
 
 ### W12: Non-Default Preview UI / Debug Entry
 
-Next implementation task after W11:
+Status: Done.
 
-- Add or expose a non-default preview/debug entry that calls
+- Settings exposes a non-default preview/debug entry that calls
   `run_multi_strategy_agent_preview`.
 - Keep it clearly marked as preview/beta.
 - Do not add a default user-facing Chat replacement.
@@ -645,36 +653,41 @@ Next implementation task after W11:
 
 ### W13: Guarded Chat Subpath Migration
 
-Only after the preview/debug path is inspectable:
+Status: Done.
 
-- Migrate one narrow Chat subpath behind an explicit guard or feature flag.
-- Preserve `send_message` / existing Chat fallback.
-- Use the W10 outer AgentRun audit as the primary trace record.
+- Chat exposes one explicit guarded preview subpath.
+- `send_message` / existing Chat fallback remain preserved.
+- The W10 outer AgentRun audit remains the primary trace record.
 
 ### W14: Maturation Loop V1
 
-Build one end-to-end loop for the first maturation domain:
+Status: Done for V1 service foundation.
 
-```text
-state/energy + planning intensity
-```
+- `MaturationService::mature_runtime_output` converts RuntimeOutput candidates
+  into governed evidence/proposals.
+- Raw data stays out of accepted LifeModel truth until proposal/user decision.
+- Visible product loop and automatic Chat application remain future gated work.
 
-- Wire Chat/Feedback/Calibration into LifeEvent/Signal/Evidence/Governor.
-- Ensure user accept/reject/edit changes future RuntimeHSPacket behavior.
-- Keep raw data out of accepted LifeModel truth until proposal/user decision.
+### W15: PlanExecute Governed Vertical Slice
 
-### W15: PlanExecute Product Vertical Slice
+Status: Done for runtime V1 slice.
 
-Implement one reviewed weekly planning flow after W14:
-
-- Plan -> user review/edit -> execute one step or create proposals.
-- Reflect outcomes into LifeEvent candidates.
-- Do not treat the current PlanExecute core MVP as this product slice.
+- `PlanExecuteReport` records metadata-safe plan id, source run id, step
+  counts, governance summaries, read-only observations, and warnings.
+- Read-only internal steps can execute; write-like steps require proposal and
+  are not executed.
+- Product weekly planning remains future work.
 
 ### W16: RuntimeStrategy Trait
 
-Extract a first-class trait only after W13-W15 provide enough real pressure from
-ReAct, guarded Chat subpaths, maturation, and PlanExecute product needs.
+Status: Done.
+
+`openlife-core/src/agent/strategy_runtime.rs` now defines the lightweight
+`RuntimeStrategy` trait, ReAct and PlanExecute adapters, and a fixed registry
+used by MultiStrategyRuntime. This is an adapter boundary, not plugin loading,
+and it does not replace the default Chat path.
+
+Next recommended phase: Runtime integration hardening / Chat migration gate.
 
 ## 10. What Not To Do Next
 
@@ -685,8 +698,8 @@ Do not:
 - Present `run_multi_strategy_agent_preview` as a production Chat path.
 - Treat W10 outer AgentRun audit as permission to skip metadata-safe review;
   ReAct inner run id remains child metadata, not the product trace's primary id.
-- Build a complete formal `RuntimeStrategy` trait before guarded Chat,
-  maturation V1, and one PlanExecute product slice create real interface needs.
+- Treat the new `RuntimeStrategy` adapter boundary as permission to directly
+  replace default Chat without runtime hardening and explicit migration gates.
 - Add many new LifeModel fields before the evidence/governor path exists.
 - Treat current YAML as the canonical HS database.
 - Let extracted signals auto-write identity/values/goals.

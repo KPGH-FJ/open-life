@@ -46,16 +46,10 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-W1-W10 已完成到 MultiStrategy Preview AgentRun Audit Persistence。当前
-W11 是文档状态同步；下一步实际执行顺序是：
+W1-W16 已完成到 RuntimeStrategy Trait Foundation。下一步实际执行顺序是：
 
 ```text
-docs/status sync
--> non-default preview UI/debug entry
--> guarded Chat subpath migration
--> maturation loop V1
--> PlanExecute vertical slice
--> RuntimeStrategy trait
+Runtime integration hardening / Chat migration gate
 ```
 
 注意：`run_multi_strategy_agent_preview` 是 preview/beta command。它写入
@@ -76,11 +70,11 @@ metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接�
 
 当前更适合 Codex 做的，不是继续铺大功能，而是：
 
-- 先完成 W11 文档状态同步，确保入口文档和代码状态一致
+- 进入 Runtime integration hardening / Chat migration gate，先定义默认 Chat 迁移门槛
 - 保持 `calendar.propose_event` / `email.propose_draft` 的 proposal-only taxonomy 与测试覆盖
 - 维护 ExternalWriteAction 入库前 size limit 与 payload minimization 硬验收
-- 做非默认 MultiStrategy preview UI/debug entry，而不是替换 Chat 主路径
-- 先推进成熟闭环和 PlanExecute vertical slice，再抽 RuntimeStrategy trait
+- 保持 MultiStrategy preview / guarded Chat preview 的非默认边界
+- 硬化 RuntimeStrategy adapter/registry 的 metadata-safe 输出、fallback 和 blocked 行为
 
 当前不建议优先做的：
 
@@ -89,7 +83,7 @@ metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接�
 - 脱离试用主链新增复杂生态能力
 - 直接把默认 Chat 主流程替换成 MultiStrategy Runtime
 - 把 preview/beta command 描述成正式产品路径
-- 在 Plan-Execute 产品垂直切片前抽象完整 `RuntimeStrategy` trait
+- 把 RuntimeStrategy adapter 边界扩展成动态插件加载或大规模重构
 - 在 evidence/governor 路径成熟前扩充大量 LifeModel 字段
 
 ---
