@@ -16,23 +16,29 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-当前项目处于 **Agent Framework Beta / LifeModel-HS MVP convergence** 阶段：
+当前项目处于 **W11 文档状态同步 / LifeModel-Governed Runtime preview convergence** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
-- **ReAct 是当前默认 RuntimeStrategy**：后续会预留 Plan-Execute、Workflow、Proactive 等多策略执行形态，但不会在协议主干成熟前提前大抽象。
+- **W1-W10 已完成**：当前已经推进到 MultiStrategy Preview AgentRun Audit Persistence；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
+- **ReAct 仍是当前默认 Chat 主链路**：MultiStrategy Runtime 已有 preview command 和 audit-ready 路径，但尚未接管默认 `send_message` / Chat 主流程。
+- **MultiStrategy preview 已可审计**：`run_multi_strategy_agent_preview` 已存在，preview run 会写入 metadata-safe 外层 AgentRun audit；Runs / Trace 已能展示 preview strategy、payload、governance 和 warnings。
+- **PlanExecute 仍是 core MVP**：当前可通过 MultiStrategy preview 产生 planExecute payload，但不是产品化周计划流程。
+- **LifeModel-HS 仍是协议层方向**：Evidence/Governor 等基础能力已存在，但 `LifeEvent -> Signal -> Evidence -> Governor -> Proposal -> RuntimeHSPacket` 的成熟闭环尚未 end-to-end 完成。
+- **RuntimeStrategy trait 尚未开始**：StrategySelector 和 MultiStrategy orchestrator 已作为 preview/core 代码存在，但不能提前抽象成正式 trait。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
 - **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **下一步顺序固定**：tool/proposal hygiene -> thin runtime spine -> ReAct convergence -> maturation loop -> governor -> Plan-Execute -> strategy abstraction。
+- **下一步顺序固定**：docs/status sync -> non-default preview UI/debug entry -> guarded Chat subpath migration -> maturation loop V1 -> PlanExecute vertical slice -> RuntimeStrategy trait。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
-- **`make ci` 为发布门控**：258 测试全绿，前端生产构建通过。
+- **`make ci` 为发布门控**：文档不写死测试数量；以本地 `make ci` 最新结果为准。
 
 下一阶段总纲和架构基准文档见：
 
 - [Plans Document Governance](/Users/fujing/Desktop/偶来福/plans/README.md)
 - [OpenLife LifeModel-Governed Agent Runtime Program](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
+- [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 - [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 - [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
@@ -48,8 +54,10 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 |---|---|---|
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
 | Builder | 已支持快速、渐进、苏格拉底式构建；默认只创建 Proposal | 通过 Review Center 确认后安全写入 LifeModel |
-| Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal | 继续收敛共享执行核心，展示上下文、模型路由和运行轨迹 |
-| **ModelRouter** | ✅ **任务/隐私感知路由灰度中，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
+| Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal；默认主链路尚未切到 MultiStrategy Runtime | 继续稳定迁移受控子路径，展示上下文、模型路由和运行轨迹 |
+| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit | 先作为非默认 debug/preview 入口验证，再逐步迁移受控 Chat 子路径 |
+| Runs / Trace | 已能展示 MultiStrategy preview strategy / payload / governance / warnings | 成为所有 runtime strategy 的统一 metadata-safe trace viewer |
+| **ModelRouter** | ✅ **任务/隐私感知路由已毕业，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
 | MCP/A2A | 已有工具和外部 Agent 接入基础 | 成为 AgentAction 执行层，并默认受权限和审计保护 |
 | Tools/Skills | 已有 ToolManifest、MCP/A2A、内置 Skill MVP | 成为 ReAct Agent 的执行能力层，覆盖 Core OS tools、Execution tools、Governance tools、Skill tools |
@@ -57,6 +65,7 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 | Diagnostics/Safe Mode | 已有试用稳定化能力 | 成为系统控制台和恢复中枢 |
 | **Chat Proposal** | ✅ **自动从对话中提取目标/状态/能力** | 自动感知用户意图并生成 LifeModel 更新提案 |
 | **ContextAssembler** | ✅ **模块化上下文组装（V2 灰度中）** | 可插拔的记忆/隐私/工具上下文组装 |
+| PlanExecute | Core MVP，可在 preview 中生成受治理计划 payload | 产品化周计划 vertical slice，必须先经过用户 review/edit |
 | **Workspace** | ✅ **驾驶舱首页，实时状态概览** | 统一的 Agent 任务入口和监控中心 |
 | **Feedback Loop** | ✅ **应用内反馈收集** | Chat 消息 👍/👎 反馈，诊断报告导出，Workspace 统计 |
 | **Memory Governance** | ✅ **显式/隐式记忆提取** | "记住这个"生成 Proposal，自动记忆建议，异步 Embedding |
@@ -110,16 +119,17 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 
 1. [Plans Document Governance](/Users/fujing/Desktop/偶来福/plans/README.md)
 2. [OpenLife LifeModel-Governed Agent Runtime Program](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
-3. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
-4. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
-5. [LifeModel-HS MVP Task Specifications](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_mvp_task_specs.md)
-6. [ADR 0013: LifeModel-HS Source Of Truth And Governance](/Users/fujing/Desktop/偶来福/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)
-7. [LifeModel-HS Legacy Write Path Audit](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_legacy_write_path_audit.md)
-8. [LifeModel-HS Architecture Plan](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_architecture_plan.md)
-9. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
-10. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
-11. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
-12. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
+3. [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
+4. [OpenLife Agent Framework Architecture](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
+5. [OpenLife ReAct Beta Roadmap](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
+6. [LifeModel-HS MVP Task Specifications](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_mvp_task_specs.md)
+7. [ADR 0013: LifeModel-HS Source Of Truth And Governance](/Users/fujing/Desktop/偶来福/plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)
+8. [LifeModel-HS Legacy Write Path Audit](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_legacy_write_path_audit.md)
+9. [LifeModel-HS Architecture Plan](/Users/fujing/Desktop/偶来福/plans/lifemodel_hs_architecture_plan.md)
+10. [OpenLife PRD v2: Personal Agent Framework](/Users/fujing/Desktop/偶来福/OpenLife_PRD_v2_Agent_Framework.md)
+11. [OpenLife Development Plan](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+12. [Codex Execution Playbook](/Users/fujing/Desktop/偶来福/plans/openlife_codex_execution_playbook.md)
+13. [OpenLife Final PRD](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)，仅作为历史需求参考
 
 ## 快速开始
 
@@ -202,7 +212,7 @@ make ci
 在 Settings → 实验性功能中可开启：
 
 - **ContextAssembler V2**：使用模块化组装器构建对话上下文（灰度中，可回滚）
-- **ModelRouter**：智能路由选择本地/云端模型（灰度中，云端 Provider 需配置并通过轻量健康检查）
+- **ModelRouter**：智能路由选择本地/云端模型（默认路由基础设施，云端 Provider 需配置并通过轻量健康检查）
 
 ```text
 Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memory Update
@@ -235,13 +245,19 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
+### W1-W10: LifeModel-Governed Runtime Preview
+- ✅ Tool / Proposal Hygiene、Thin Runtime Spine、ReAct Runtime Contract Convergence。
+- ✅ LifeModel Maturation Loop Foundation、LifeModel Governor MVP、PlanExecute Core MVP。
+- ✅ StrategySelector、MultiStrategy Runtime Orchestrator、Preview Command。
+- ✅ MultiStrategy Preview AgentRun Audit Persistence：metadata-safe 外层 run 可在 Runs / Trace 展示。
+
 ## 当前重要开发方向
 
-1. 灰度测试 ContextAssembler V2 和 ModelRouter，收集反馈。
-2. 建立 RolloutMetrics 监控和自动回滚机制。
-3. 实现 Proactive Agent 的安全 MVP。
-4. 将 MemoryAssembler 接入真实的 VectorStore。
-5. 完善 E2E 测试覆盖和性能基准。
+1. 完成 W11 文档状态同步，保持入口文档、Tool Taxonomy、metadata-safe AgentRun trace 与代码一致。
+2. 做非默认 MultiStrategy preview UI/debug entry，不新增默认 Chat 替换入口。
+3. 受控迁移一个 Chat 子路径，保留 `send_message` / 现有 Chat fallback。
+4. 推进 LifeModel maturation loop V1。
+5. 做 PlanExecute 产品 vertical slice，最后再抽 `RuntimeStrategy` trait。
 
 ## 常见问题
 

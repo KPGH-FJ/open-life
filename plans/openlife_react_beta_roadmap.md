@@ -8,7 +8,9 @@
 > seriousness baseline, but implementation order is now governed by
 > `plans/openlife_lifemodel_governed_agent_runtime.md`. ReAct is the current
 > default strategy, not the final runtime boundary. Tool status in this roadmap
-> must stay synchronized with `AGENTS.md` Tool Taxonomy.
+> must stay synchronized with `AGENTS.md` Tool Taxonomy. W1-W10 are complete;
+> `run_multi_strategy_agent_preview` is preview/beta only and does not replace
+> the default Chat path.
 
 ## 1. Alignment
 

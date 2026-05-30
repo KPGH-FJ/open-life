@@ -1,8 +1,9 @@
 # OpenLife Development Plan
 
-> Version: 2026-05-01
-> Current direction: LifeModel-Governed Runtime convergence after ReAct Beta and LifeModel-HS MVP
+> Version: 2026-05-30 W11 status sync
+> Current direction: LifeModel-Governed Runtime convergence after W10 MultiStrategy Preview AgentRun Audit Persistence
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
+> Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
 > Beta roadmap: [`openlife_react_beta_roadmap.md`](/Users/fujing/Desktop/偶来福/plans/openlife_react_beta_roadmap.md)
 
@@ -10,11 +11,16 @@
 
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
-ReAct remains the current default execution strategy and Beta execution kernel,
-but the long-term architecture is not "ReAct only." The next development cycle
-should prepare OpenLife as a LifeModel-Governed Agent Runtime where Direct,
-Layered, ReAct, Plan-Execute, Workflow, Proactive, and Reflective strategies can
-eventually share the same LifeModel-HS protocol layer.
+ReAct remains the current default Chat execution strategy and Beta execution
+kernel, but the long-term architecture is not "ReAct only." W1-W10 have already
+implemented the thin runtime contract, LifeModel governance foundations,
+PlanExecute core MVP, StrategySelector, MultiStrategy runtime orchestrator,
+preview command, and metadata-safe preview AgentRun audit.
+
+The important current boundary is that MultiStrategy Runtime is
+preview/audit-ready, not productized as the default Chat path. Future work must
+move from preview to controlled product migration without directly replacing
+`send_message` or the existing Chat main flow.
 
 The immediate order is defined in
 [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md):
@@ -29,6 +35,17 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
+The next practical sequence after W10 is:
+
+```text
+docs/status sync
+-> non-default preview UI/debug entry
+-> guarded Chat subpath migration
+-> maturation loop V1
+-> PlanExecute vertical slice
+-> RuntimeStrategy trait
+```
+
 `calendar.propose_event` and `email.propose_draft` are now P1 proposal-only
 governed executors: they create `ScheduledTask` / `DataExport` proposals and do
 not perform real calendar writes, email sends, or `ExternalWriteAction`
@@ -36,7 +53,12 @@ fallback. Documentation entry points and tool taxonomy must be updated in the
 same work package as any tool status change; stale status labels are treated as
 blockers because they mislead future development Agents.
 
-The existing project already contains many working or partially working modules: LifeModel, Builder, Chat, Memory, MCP, A2A, Calibration, VersionControl, Diagnostics, and model scheduling. The next stage should not add more isolated features. The next stage should introduce the missing architectural spine:
+The existing project already contains many working or partially working modules:
+LifeModel, Builder, Chat, Memory, MCP, A2A, Calibration, VersionControl,
+Diagnostics, model scheduling, HS packet selection, evidence/governor
+foundations, StrategySelector, PlanExecute core MVP, and MultiStrategy preview.
+The next stage should not add more isolated features. It should continue
+hardening the architectural spine:
 
 ```text
 AgentTask -> ContextAssembler -> ModelRouter -> AgentLoop -> Tool/Skill Action -> Observation -> Proposal/Permission -> Apply/Replay -> AgentRun Trace
@@ -49,6 +71,11 @@ Does this make OpenLife more like a trustworthy ReAct personal Agent OS?
 Does this make LifeModel-HS more like the shared personal protocol layer for all runtime strategies?
 ```
 
+Before starting any implementation task, the Agent must check whether entry docs
+and actual code status still agree. Stale runtime authority, tool taxonomy,
+proposal semantics, metadata-safe audit, or AgentRun trace descriptions are
+treated as blockers because they mislead later work.
+
 Beta must not be declared because one blocker is fixed. Beta requires the Beta Gates in `openlife_react_beta_roadmap.md` to pass, especially ReAct execution, tool registry/action execution, permission replay, LifeModel/Memory governance, skill runtime, ModelRouter privacy, and Runs traceability.
 
 Execution tools are part of the Beta definition. OpenLife must support OpenClaw-like execution seriousness through governed tools such as `mcp.call_tool`, `a2a.call_agent`, `file.read`, `file.write_proposal`, `web.search`, `web.fetch`, `calendar.read`, `calendar.propose_event`, `email.read`, `email.propose_draft`, and `task.create_proposal`. Connectors that cannot truly execute must be registered as disabled/declarative-only and may only create proposals.
@@ -60,13 +87,16 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | LifeModel | Four-dimensional model exists with Identity, Goals, Capabilities, State, preferences, relationships, snapshots | Strong base, but needs unified patch/proposal semantics |
 | Builder | Quick, incremental, and Socratic construction flows exist | Valuable, but should become a LifeModel-building AgentTask |
 | Chat | Streaming chat, sessions, persistence, diagnostics, model readiness UI exist | Main surface, but should become the first Agent execution interface |
-| Model scheduling | Ollama + cloud provider routing exists | Needs provider-agnostic ModelRouter and per-run route trace |
+| Model scheduling | Ollama + cloud provider routing and ModelRouter exist | Continue provider diagnostics and privacy-aware route trace hardening |
 | Memory | SQLite messages, semantic vectors, memory search and recovery exist | Needs governance, source tracking, and AgentRun linkage |
-| MCP/A2A | Tool and external Agent integration foundations exist | Needs ActionExecutor, deny-by-default policy, and consistent audit |
-| Execution tools | MCP/A2A exist; file/web/calendar/email/task tools are not yet a complete governed set | Needs Beta tool contracts, capability/risk metadata, disabled/declarative-only handling, and proposal paths for writes |
-| Calibration/Evolution | Feedback and model improvement suggestions exist | Needs unified Proposal/Confirmation layer |
+| MCP/A2A | Tool and external Agent integrations exist with governed execution paths | Continue provider coverage and audit/replay hardening |
+| Execution tools | Core OS, file/web/calendar/email/task/MCP/A2A taxonomy is synchronized; calendar/email write-like tools are proposal-only governed executors | Keep proposal-only semantics, disabled/declarative-only handling, and tests aligned |
+| Calibration/Evolution | Feedback and model improvement suggestions exist and proposal-first paths are in place | Needs maturation loop V1 rather than scattered direct writes |
+| LifeModel-HS foundations | RuntimeHSPacket, PolicyStore, EvidenceStore, HeuristicStore, RegressionSuite, Governor MVP exist | Still needs end-to-end LifeEvent/Signal/Evidence/Governor/Proposal loop |
+| PlanExecute | Core MVP exists and can appear as a MultiStrategy preview payload | Not yet a productized weekly planning vertical slice |
+| MultiStrategy preview | `run_multi_strategy_agent_preview` persists metadata-safe outer AgentRun audit and Runs/Trace can display it | Preview/beta only; not default Chat |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
-| Frontend | Many pages exist and can support trial flow | Needs information architecture reset around Workspace / Agent / LifeModel / Memory / Runs / Settings |
+| Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Runs/Trace display preview audit | Next preview UI/debug entry must remain non-default |
 
 ## 3. Current Gaps
 
@@ -78,12 +108,15 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No unified `AgentProposal`.~~ ✅ 已实现（ProposalEngine + ProposalStore）
 - ~~No consistent representation of tool actions, model actions, memory writes, and LifeModel patches.~~ ✅ 已实现（统一 Proposal 结构）
 - ~~Chat, Builder, Calibration, and Evolution still use separate pipelines.~~ ✅ 已完成（Builder/Calibration/Chat 已接入 Proposal 流；Chat Proposal 持久化和 AgentRun 关联已抽共享 helper）
+- ~~No StrategySelector / MultiStrategy preview path.~~ ✅ 已完成（W7-W10：selector、orchestrator、preview command、metadata-safe AgentRun audit）
+- **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
+- **No formal `RuntimeStrategy` trait.** This must wait until guarded Chat subpaths, maturation V1, and PlanExecute vertical slice create real interface pressure.
 
 ### 3.2 Product Gaps
 
-- UI still looks like a set of app pages, not an Agent framework.
-- Users cannot clearly see what context was used by the model.
-- Users cannot clearly see why local or cloud model was chosen.
+- MultiStrategy preview does not yet have a product/debug entry beyond the command and trace surfaces.
+- Users cannot yet use a productized LifeModel-governed weekly planning flow.
+- LifeModel maturation is not yet a visible end-to-end loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
 - Dashboard is still closer to a summary page than an operating workspace.
 
@@ -378,28 +411,48 @@ Every major development round should verify:
 
 ### 测试覆盖
 
-- Rust: 262 passed (openlife-core) + 32 passed (openlife-tauri)
-- Frontend: 148 passed
-- `make ci`: ✅ 通过（format-check + lint + test + build-front）
+- Do not hardcode test counts in planning docs; they drift quickly.
+- `make ci` is the release gate and includes format-check, Rust tests, frontend tests, and frontend build/typecheck.
+
+### W1-W10 LifeModel-Governed Runtime Progress (2026-05-30)
+
+| Work Package | 状态 | 边界 |
+| --- | --- | --- |
+| W1-W3 | ✅ Done | Tool/proposal hygiene, thin runtime spine, ReAct runtime contract convergence. |
+| W4-W5 | ✅ Done | Maturation/Governor foundations exist; mature end-to-end loop remains future work. |
+| W6 | ✅ Done | PlanExecute core MVP exists; not productized weekly planning. |
+| W7-W8 | ✅ Done | StrategySelector and MultiStrategy orchestrator exist; no formal trait yet. |
+| W9-W10 | ✅ Done | Preview command exists and writes metadata-safe outer AgentRun audit. |
 
 ## 8. Current Next Step
 
 The next concrete development task is:
 
 ```text
-Phase 6: Proactive Agent MVP (complete)
-Sprint 13: Engineering Consolidation + multi-provider search
+W11: docs/status sync
 ```
 
-Let OpenLife safely initiate useful check-ins without becoming intrusive. Now entering Phase 6 implementation with Sprint 13:
-- Proactive check-in generator (daily brief, weekly review)
-- Stale goal detection
-- Pending proposal aging alerts
-- Dashboard proactive card
-- Toolset allowlist enforcement in AgentLoop
+After W11, continue in this order:
+
+```text
+non-default preview UI/debug entry
+-> guarded Chat subpath migration
+-> maturation loop V1
+-> PlanExecute vertical slice
+-> RuntimeStrategy trait
+```
+
+Guardrails:
+
+- `run_multi_strategy_agent_preview` remains preview/beta.
+- The default Chat path must not be replaced directly.
+- W10 AgentRun audit is a metadata-safe outer run; any inner ReAct run id is
+  child metadata only.
+- `make ci` remains the publication gate.
 
 ## 9. Historical Plans
 
 Older Alpha/Beta plans are still useful for context, but they are no longer the primary source of truth.
 
-Use this file and `openlife_agent_framework_architecture.md` for future planning.
+Use this file, `plans/README.md`, and
+`openlife_lifemodel_governed_agent_runtime.md` for future planning.

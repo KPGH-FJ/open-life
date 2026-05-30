@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：Agent Framework Beta。ReAct 执行闭环已建立：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合、ModelRouter 已毕业。Execution Tools 以 P1（真实）/ P2（declarative-only stub）分层落地。`make ci` 为发布门控。
+- **当前阶段**：W11 文档状态同步。W1-W10 已完成到 MultiStrategy Preview AgentRun Audit Persistence；MultiStrategy Runtime 当前是 preview/audit-ready，不是默认 Chat 主链路。ReAct 执行闭环、Tool Registry、Permission/Proposal/Replay、ModelRouter、Tool Taxonomy 仍是当前稳定基础。`make ci` 为发布门控。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -19,22 +19,27 @@
 
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
-3. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
-4. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
-5. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
-6. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
-7. [`plans/lifemodel_hs_legacy_write_path_audit.md`](plans/lifemodel_hs_legacy_write_path_audit.md)：Legacy direct-write 收口地图，后续治理化开发必须参考。
-8. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013、MVP specs 和总纲接管实现入口。
-9. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准；实现顺序不得覆盖 LifeModel-Governed 总纲。
-10. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
-11. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-12. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W10 完成度与当前 non-default preview 状态索引；不是第二套路线图。
+4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
+5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
+6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
+7. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
+8. [`plans/lifemodel_hs_legacy_write_path_audit.md`](plans/lifemodel_hs_legacy_write_path_audit.md)：Legacy direct-write 收口地图，后续治理化开发必须参考。
+9. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013、MVP specs 和总纲接管实现入口。
+10. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准；实现顺序不得覆盖 LifeModel-Governed 总纲。
+11. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+12. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+13. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
 - ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
+- 当前分支已完成 W1-W10；下一步建议顺序是 `docs/status sync -> non-default preview UI/debug entry -> guarded Chat subpath migration -> maturation loop V1 -> PlanExecute vertical slice -> RuntimeStrategy trait`。
+- `run_multi_strategy_agent_preview` 是 preview/beta command。它可用于非默认调试和审计验证，不代表 MultiStrategy Runtime 已产品化。
+- W10 的 preview AgentRun audit 是 metadata-safe 外层 run。ReAct payload 里的 inner run id 只能作为 child metadata 存在，不是 Runs 查询和产品 trace 的主 id。
+- 后续 Agent 不得默认替换 `send_message`、`start_stream_message` 或 Chat 主流程；任何迁移必须先从非默认 preview/debug 入口或受控子路径开始，并保留稳定 fallback。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
 - Beta 的 Execution Tools 至少要覆盖 MCP、A2A、file、web、calendar、email、task proposal 等类别；未实现真实 executor 的工具必须 disabled/declarative-only，不能伪装成可执行。
 - `calendar.propose_event` / `email.propose_draft` 当前是 P1 proposal-only governed executors：只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入、邮件发送或 `ExternalWriteAction` fallback。后续若接入真实 provider executor，必须重新补治理测试和 taxonomy。
@@ -173,12 +178,14 @@
 | **MemoryStore** | [`openlife-core/src/memory.rs`](openlife-core/src/memory.rs) | SQLite 持久化：聊天记录、会话管理、人生模型快照、状态历史、自定义记忆记录 | 独立，被 lib.rs 调用 |
 | **VectorStore** | [`openlife-core/src/vectors.rs`](openlife-core/src/vectors.rs) | 向量记忆 Tier 3：存储 embedding，支持余弦相似度检索、session 过滤、tier 升降维护 | 依赖 tract-onnx/tokenizers 做本地 embedding |
 | **McpRegistry** | [`openlife-core/src/mcp.rs`](openlife-core/src/mcp.rs) | MCP 客户端管理：注册/注销服务器、list_tools、call_tool、内置工具、参数隐私检查 | 依赖 privacy.rs、tool_manifest.rs |
+| **MultiStrategyRuntime** | [`openlife-core/src/agent/multi_strategy_runtime.rs`](openlife-core/src/agent/multi_strategy_runtime.rs) | Preview/core orchestrator：用 StrategySelector 在 ReAct、PlanExecute、Blocked payload 间选择，并输出 warnings | 仅通过 `run_multi_strategy_agent_preview` 非默认命令暴露；尚未接管 Chat |
+| **Preview Audit** | [`src-tauri/src/commands/agent_runtime.rs`](src-tauri/src/commands/agent_runtime.rs) + [`frontend/src/utils/previewAudit.ts`](frontend/src/utils/previewAudit.ts) | W10 metadata-safe 外层 AgentRun audit；Runs / Trace 识别 preview strategy/payload/governance/warnings | ReAct inner run id 只作为 child metadata，不作为主查询 id |
 | **Tauri Commands** | [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) | 30+ 个 `#[tauri::command]`：聊天、MCP、A2A、记忆、版本控制、Builder、进化、校准、系统诊断 | 依赖 openlife-core 全部模块 |
 | **Frontend API** | [`frontend/src/tauri.ts`](frontend/src/tauri.ts) | TypeScript 封装层：所有后端调用的唯一入口，约 40+ 个 invoke 函数 | 仅依赖 `@tauri-apps/api/core` |
 
 ### 目标架构主线
 
-当前代码还没有完整实现统一 Agent Runtime。后续开发应向下面这条主线迁移：
+当前代码已有 AgentRun / RuntimeInput-Output / HS packet / StrategySelector / MultiStrategy preview 等关键部件，但默认 Chat 主链路仍保留在现有 ReAct/AgentLoop 路径。后续开发应从非默认 preview/debug 入口向下面这条主线受控迁移：
 
 ```
 用户意图 / 主动触发
@@ -648,8 +655,8 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 7. **前端 ErrorBoundary 过于简单**：目前只显示红色背景文本，可以添加重试按钮或错误上报。
 8. ~~**核心逻辑测试覆盖**：Rust 测试集中在 config.rs、vectors.rs、builder.rs、versioning.rs，核心逻辑（AgentRuntime、ModelRouter、LayeredReasoner、scheduler）需要补充测试。~~ ✅ 已补充（AgentRuntime 4 个核心测试 + Tauri 命令 6 个测试 + 10 个集成测试）
 9. ~~**Chat 流 Proposal 接入**：当前 Chat 对话不生成 LifeModel 更新 Proposal，未来应支持 Chat 中 AI 建议修改 LifeModel 时走 Proposal 确认流。~~ ✅ 已完成（Chat 流程自动调用 ProposalEngine 生成提案）
-10. **Execution Tools 真实实现**：file.read/web.fetch 目前是 stub，需实现真实执行器。
-11. **AgentLoop Streaming**：当前 stream 路径仍使用 legacy 逻辑，需接入 AgentLoop。
+10. **Execution Tools 继续加固**：file/web/calendar/task/MCP/A2A 已有 P1 路径；后续重点是 provider 覆盖、失败可解释性和 taxonomy 同步，不能把 proposal-only 工具描述成真实外部写入。
+11. **MultiStrategy 受控迁移**：当前 MultiStrategy 仅通过 preview/beta command 暴露；后续先做非默认 preview UI/debug entry，再做受控 Chat 子路径迁移，不能直接替换 Chat 主流程。
 
 ---
 
@@ -746,6 +753,7 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-05-05 | **Sprint 13: Proactive Agent MVP（Phase 6）**：ProactiveEngine（每日简报、每周复盘、目标陈旧检测、提案提醒、状态签到）；ProactiveConfig 集成 SystemConfig；Tauri 命令 get_proactive_suggestions；record_state 自动更新 last_updated；toolset_allowlist 过滤 AgentLoop 执行 | AI Agent |
 | 2026-05-05 | **Sprint 14: Dashboard + 搜索增强**：Dashboard 主动建议卡片前端集成；web.search 多Provider支持（DuckDuckGo 默认/Brave API/SearXNG）；web.fetch 新增 summarize 参数 → Ollama 中文摘要；search_provider 配置入 SystemConfig | AI Agent |
 | 2026-05-05 | **Sprint 15: Engineering Consolidation**：AGENTS.md、development_plan.md 文档同步；工具 Taxonomy 表更新（P2→P1 标记校正）；ProviderTab act() 测试警告修复；Email Settings 配置区；前端 ErrorBoundary 完善（重试+错误详情） | AI Agent |
+| 2026-05-30 | **W11: LifeModel-Governed Runtime 状态同步**：W1-W10 标记完成；明确 MultiStrategy preview/audit-ready 但非默认 Chat；记录 W10 metadata-safe 外层 AgentRun audit 与下一步受控迁移顺序 | AI Agent |
 
 ---
 

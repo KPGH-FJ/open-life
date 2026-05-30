@@ -19,6 +19,7 @@
 与其他文档的关系：
 
 - 下一阶段总纲：见 [plans/openlife_lifemodel_governed_agent_runtime.md](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
+- 当前进度索引：见 [plans/lifemodel_governed_runtime_progress.md](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 - 长期目标和产品哲学：见 [OpenLife_Final_PRD.md](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)
 - 当前阶段主计划：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
 - 本文档：规定 Codex 的日常执行方式
@@ -45,6 +46,22 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
+W1-W10 已完成到 MultiStrategy Preview AgentRun Audit Persistence。当前
+W11 是文档状态同步；下一步实际执行顺序是：
+
+```text
+docs/status sync
+-> non-default preview UI/debug entry
+-> guarded Chat subpath migration
+-> maturation loop V1
+-> PlanExecute vertical slice
+-> RuntimeStrategy trait
+```
+
+注意：`run_multi_strategy_agent_preview` 是 preview/beta command。它写入
+metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接管
+默认 Chat。
+
 当前版本优先围绕五个闭环推进：
 
 1. 工具 Proposal 治理闭环
@@ -59,18 +76,20 @@ tool/proposal hygiene
 
 当前更适合 Codex 做的，不是继续铺大功能，而是：
 
-- 先完成 W1 Tool Proposal Hygiene
-- 校准 `calendar.propose_event` / `email.propose_draft` 的 proposal 语义和 taxonomy
-- 给 ExternalWriteAction 增加入库前 size limit 与 payload minimization 硬验收
-- 抽取薄 runtime spine，而不是提前做大 RuntimeStrategy 抽象
-- 补充能防止 `tools_prompt` 工具清单误判任务意图的契约测试
+- 先完成 W11 文档状态同步，确保入口文档和代码状态一致
+- 保持 `calendar.propose_event` / `email.propose_draft` 的 proposal-only taxonomy 与测试覆盖
+- 维护 ExternalWriteAction 入库前 size limit 与 payload minimization 硬验收
+- 做非默认 MultiStrategy preview UI/debug entry，而不是替换 Chat 主路径
+- 先推进成熟闭环和 PlanExecute vertical slice，再抽 RuntimeStrategy trait
 
 当前不建议优先做的：
 
 - 再开远期产品线
 - 大规模重构为“更优雅的架构”
 - 脱离试用主链新增复杂生态能力
-- 在 Plan-Execute 垂直切片前抽象完整 Multi-Strategy Runtime
+- 直接把默认 Chat 主流程替换成 MultiStrategy Runtime
+- 把 preview/beta command 描述成正式产品路径
+- 在 Plan-Execute 产品垂直切片前抽象完整 `RuntimeStrategy` trait
 - 在 evidence/governor 路径成熟前扩充大量 LifeModel 字段
 
 ---
@@ -98,11 +117,12 @@ Codex 单轮最适合处理以下粒度的任务：
 每轮开发尽量遵循这个顺序：
 
 1. 读相关代码和现有文档
-2. 判断任务归属哪个闭环
-3. 先补或修正契约，再改实现
-4. 实现最小可用闭环
-5. 跑测试或补测试
-6. 更新文档中的状态或执行说明，尤其是 AGENTS.md Tool Taxonomy
+2. 检查文档状态和代码状态是否一致，尤其是 runtime authority、Tool Taxonomy、proposal-only、metadata-safe audit、AgentRun trace
+3. 判断任务归属哪个闭环
+4. 先补或修正契约，再改实现
+5. 实现最小可用闭环
+6. 跑测试或补测试
+7. 更新文档中的状态或执行说明，尤其是 AGENTS.md Tool Taxonomy
 
 任何改变工具执行状态的任务，都必须同步检查：
 
@@ -269,6 +289,14 @@ Codex 做任何新增功能时，都应显式回答：
 - 新增或更新 Vitest 用例
 
 涉及主链路时，优先同时做两边。
+
+当前发布门控始终是：
+
+```bash
+make ci
+```
+
+即使只改 Markdown 状态文档，也要运行 `make ci`，因为入口文档错误会误导后续开发 Agent。不要在文档里写死测试数量；以本次 `make ci` 输出为准。
 
 ### 7.2 当前最该补的测试类型
 

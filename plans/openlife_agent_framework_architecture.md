@@ -8,7 +8,9 @@
 > `plans/openlife_lifemodel_governed_agent_runtime.md`. This document remains
 > the Agent Framework baseline, but LifeModel-HS should now be treated as the
 > shared protocol layer and ReAct as the current default runtime strategy, not
-> the final architecture boundary.
+> the final architecture boundary. W1-W10 are complete through MultiStrategy
+> Preview AgentRun Audit Persistence; MultiStrategy is preview/audit-ready and
+> must not be treated as the default Chat runtime.
 
 ## 1. Executive Summary
 

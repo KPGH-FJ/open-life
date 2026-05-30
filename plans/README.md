@@ -14,18 +14,20 @@ work. If two documents disagree, use the precedence below.
    - This document authority map.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
-4. Hard governance baselines:
+4. `plans/lifemodel_governed_runtime_progress.md`
+   - Compact W1-W10 completion/status index. This is not a second roadmap.
+5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-5. Scoped architecture/product baselines:
+6. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-6. Current execution helpers:
+7. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-7. Historical/reference documents.
+8. Historical/reference documents.
    - These can explain why earlier decisions were made, but cannot override
      the current program.
 
@@ -41,12 +43,25 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
+Current implementation has completed W1-W10 through MultiStrategy Preview
+AgentRun Audit Persistence. The next practical sequence is:
+
+```text
+docs/status sync
+-> non-default preview UI/debug entry
+-> guarded Chat subpath migration
+-> maturation loop V1
+-> PlanExecute vertical slice
+-> RuntimeStrategy trait
+```
+
 ## 3. Current Authoritative Entry Points
 
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W10 completion/status index and preview/not-default boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -81,6 +96,11 @@ fallback unless a future governed provider executor and tests are added.
 
 `ExternalWriteAction` proposal creation must enforce pre-insert size limits and
 payload minimization. This is a hard acceptance gate.
+
+`run_multi_strategy_agent_preview` is a preview/beta command. Its W10 AgentRun
+audit is a metadata-safe outer run; any ReAct inner run id is child metadata and
+must not become the product trace's primary query id. Do not replace
+`send_message` or the default Chat path just because the preview path works.
 
 ## 6. Agent Rules
 

@@ -1,13 +1,14 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-05-30
-> Status: architecture preparation baseline
+> Status: W11 status sync baseline; W1-W10 complete through MultiStrategy Preview AgentRun Audit Persistence
 > Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
 
 ## 1. Purpose
 
-This document is the preparation baseline for the next OpenLife development
-cycle.
+This document is the program baseline for the next OpenLife development cycle.
+As of W11, it also records that W1-W10 have been completed and that current
+MultiStrategy work is preview/audit-ready, not the default Chat runtime.
 
 It updates the project framing from:
 
@@ -32,6 +33,10 @@ one axis:
 - ReAct is not the only possible execution architecture.
 - Multi-strategy runtime should not be built before the protocol spine is real.
 - LifeModel maturation should not proceed through scattered direct writes.
+
+Current status details are summarized in
+`plans/lifemodel_governed_runtime_progress.md`. That file is a compact status
+index, not a replacement roadmap.
 
 ## 2. Strategic Thesis
 
@@ -99,6 +104,10 @@ This document sits above these existing baselines:
    - The current map of legacy direct writes.
    - This is the starting point for convergence tasks.
 
+6. `plans/lifemodel_governed_runtime_progress.md`
+   - Compact W1-W10 status table and preview/not-default boundary.
+   - It must not override the strategic order in this program.
+
 ## 4. Current Code Baseline
 
 As of this preparation document, the project already has meaningful primitives:
@@ -106,12 +115,17 @@ As of this preparation document, the project already has meaningful primitives:
 | Area | Current implementation | Current maturity |
 | --- | --- | --- |
 | AgentLoop | `openlife-core/src/agent/agent_loop.rs` | Real ReAct-style loop with parse, action execution, observation, follow-up, budgets, streaming callbacks. |
-| AgentRuntime | `openlife-core/src/agent/runtime.rs` | Context assembly plus Direct/Layered reasoning strategy registration. Not yet a multi-strategy runtime abstraction. |
+| AgentRuntime | `openlife-core/src/agent/runtime.rs` | Context assembly plus Direct/Layered reasoning strategy registration and shared runtime contract. |
 | RuntimeHSPacket | `openlife-core/src/agent/hs_selector.rs` | Deterministic policy/heuristic packet with metadata-safe audit. |
 | PolicyStore | `openlife-core/src/agent/policy_store.rs` | Built-in hard policy MVP: sensitive LocalOnly and external write proposal-first. Not persisted/user-governed yet. |
 | EvidenceStore | `openlife-core/src/agent/evidence_store.rs` | Persisted candidate evidence layer with source refs and digests. No full LifeEvent/Signal pipeline yet. |
 | HeuristicStore | `openlife-core/src/agent/heuristic_store.rs` | Persisted collaboration guidance store with lifecycle and seeded MVP heuristics. |
 | RegressionSuite | `openlife-core/src/agent/regression_suite.rs` | Deterministic MVP behavior checks. Not yet a durable user scenario store. |
+| PlanExecute | `openlife-core/src/agent/plan_execute.rs` | Core MVP for governed plan payloads. Not a productized weekly planning flow. |
+| StrategySelector | `openlife-core/src/agent/strategy.rs` | Selects ReAct, PlanExecute, or Blocked with metadata-safe summaries. Not a formal strategy trait. |
+| MultiStrategyRuntime | `openlife-core/src/agent/multi_strategy_runtime.rs` | Preview/core orchestrator for selected payloads. Not the default Chat runtime. |
+| Preview command | `src-tauri/src/commands/agent_runtime.rs::run_multi_strategy_agent_preview` | Non-default preview/beta command. W10 persists a metadata-safe outer AgentRun audit. |
+| Preview trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, payload, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
 | Proposal apply | `src-tauri/src/commands/proposal.rs` | Main convergence target for LifeModel, memory, tool permission, scheduled task, data export, and external write application. |
 | Model routing | `openlife-core/src/agent/model_router.rs`, `openlife-core/src/scheduler.rs` | Role/privacy-aware router plus scheduler integration; HS LocalOnly can fail closed. |
@@ -119,6 +133,40 @@ As of this preparation document, the project already has meaningful primitives:
 
 This means the next phase should not start from blank design. It should
 converge existing primitives into a stronger spine.
+
+## 4.1 Current Actual Progress
+
+The original strategic order remains valid:
+
+```text
+tool/proposal hygiene
+-> thin runtime spine
+-> ReAct convergence
+-> maturation loop
+-> governor
+-> Plan-Execute
+-> strategy abstraction
+```
+
+The implementation has moved ahead of the original work-package text in a few
+places:
+
+- W1-W10 are complete through MultiStrategy Preview AgentRun Audit Persistence.
+- StrategySelector, MultiStrategyRuntime orchestrator, and
+  `run_multi_strategy_agent_preview` exist earlier than the original plan
+  expected.
+- Preview runs now persist metadata-safe outer AgentRun audit records; Runs and
+  Trace can show strategy, payload, governance, and warnings.
+
+These early pieces do not change the boundary:
+
+- Chat main-path migration is not complete.
+- The default `send_message` / Chat path must not be directly replaced by
+  MultiStrategy Runtime.
+- The LifeEvent / Signal / Evidence / Governor loop is not end-to-end.
+- PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
+- The formal `RuntimeStrategy` trait has not started and must not be introduced
+  ahead of the next vertical slices.
 
 ## 5. Target Spine
 
@@ -197,9 +245,13 @@ Current implementation note:
 
 - Direct and Layered exist as reasoning strategies inside `AgentRuntime`.
 - ReAct exists as `AgentLoop`.
+- StrategySelector and MultiStrategyRuntime exist for preview/core orchestration.
+- `run_multi_strategy_agent_preview` exposes the orchestrator as a non-default
+  preview/beta command and persists metadata-safe outer AgentRun audit.
 - There is no first-class `RuntimeStrategy` trait yet.
-- Plan-Execute should be implemented only after the LifeModel-governed spine and
-  one maturation loop are working.
+- PlanExecute exists as a core MVP payload path, but the product weekly-plan
+  vertical slice should still wait until the governed maturation loop and
+  explicit review/edit flow are ready.
 
 ## 8. Development Order
 
@@ -537,7 +589,7 @@ Acceptance:
 - All strategies produce AgentRun, obey HS policies, use ActionExecutor, and
   output proposals/events.
 
-## 9. First Work Packages For Future Agents
+## 9. Work Package Status And Next Order
 
 ### W0: Read And Confirm Baseline
 
@@ -545,6 +597,7 @@ Read:
 
 - `AGENTS.md`
 - this document
+- `plans/lifemodel_governed_runtime_progress.md`
 - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
 - `plans/lifemodel_hs_legacy_write_path_audit.md`
 - `plans/openlife_react_beta_roadmap.md`
@@ -555,82 +608,85 @@ Run:
 make ci
 ```
 
-### W1: Tool Proposal Hygiene
+### Completed W1-W10
 
-Completed baseline:
+| Work Package | Status | Completion boundary |
+| --- | --- | --- |
+| W1 Tool / Proposal Hygiene | Done | Proposal-only calendar/email semantics, ExternalWriteAction size/minimization, docs/taxonomy sync. |
+| W2 Thin Runtime Spine | Done | Runtime input/output contract and HS packet boundary. |
+| W3 ReAct Runtime Contract Convergence | Done | ReAct path consumes runtime/HS contract pieces and keeps AgentRun traceability. |
+| W4 LifeModel Maturation Loop Foundation | Done | Foundations for LifeEvent/Signal/Evidence exist; not an end-to-end V1 loop. |
+| W5 LifeModel Governor MVP | Done | Governor/policy MVP exists for narrow decisions; not full mature learning. |
+| W6 PlanExecute Core MVP | Done | Core governed plan payload exists; not product weekly planning. |
+| W7 Strategy Selector | Done | Metadata-safe strategy selection exists. |
+| W8 MultiStrategy Runtime Orchestrator | Done | Preview/core orchestrator exists; no formal `RuntimeStrategy` trait. |
+| W9 MultiStrategy Preview Command | Done | `run_multi_strategy_agent_preview` exists as non-default preview/beta command. |
+| W10 Preview AgentRun Audit Persistence | Done | Metadata-safe outer AgentRun audit persists preview strategy/payload/governance/warnings. |
 
-- `calendar.propose_event` governance classification and proposal semantics:
-  P1 proposal-only `ScheduledTask`.
-- `email.propose_draft` governance classification and proposal semantics:
-  P1 proposal-only `DataExport`/email-draft.
-- ExternalWriteAction hard pre-insert size limit.
-- ExternalWriteAction hard pre-insert payload minimization.
-- Documentation entry points and Tool Taxonomy status sync.
+### W11: Documentation Status Sync
 
-Verify:
+Current task:
 
-- Rust integration tests.
-- No docs present `calendar.propose_event` or `email.propose_draft` as real
-  provider write executors.
-- `make ci`.
+- Synchronize README, AGENTS, plans, and progress status with code.
+- Mark MultiStrategy Runtime as preview/audit-ready and not default Chat.
+- Keep Tool Taxonomy, proposal-only semantics, metadata-safe audit, and
+  AgentRun trace rules visible at entry points.
+- Run `make ci` even for Markdown-only changes.
 
-### W2: Runtime Spine Contract Draft
+### W12: Non-Default Preview UI / Debug Entry
 
-Add a narrow internal contract around runtime input/output and HS packet use.
-Include a test that prevents full `tools_prompt`/tool-catalog presence from
-being interpreted as current-task write or external-side-effect intent.
+Next implementation task after W11:
 
-Do not:
+- Add or expose a non-default preview/debug entry that calls
+  `run_multi_strategy_agent_preview`.
+- Keep it clearly marked as preview/beta.
+- Do not add a default user-facing Chat replacement.
+- Ensure Runs / Trace remains the source of truth for preview audit.
 
-- add Plan-Execute,
-- rewrite AgentLoop,
-- replace AgentRuntime broadly.
+### W13: Guarded Chat Subpath Migration
 
-### W3: ReAct Convergence
+Only after the preview/debug path is inspectable:
 
-Make the existing ReAct path consume the thin runtime boundary and HS packet
-consistently.
+- Migrate one narrow Chat subpath behind an explicit guard or feature flag.
+- Preserve `send_message` / existing Chat fallback.
+- Use the W10 outer AgentRun audit as the primary trace record.
 
-Verify:
+### W14: Maturation Loop V1
 
-- tool-rich read-only prompts do not trigger write/external HS decisions,
-- ReAct proposals/observations appear in Run trace,
-- `make ci`.
-
-### W4: Direct-Write Guard Tests
-
-Add tests that fail if high-risk product paths silently persist durable
-LifeModel changes outside proposal/governor/manual-override paths.
-
-### W5: LifeEventStore MVP
-
-Add a persisted LifeEventStore with redacted summaries and digests.
-
-### W6: SignalExtractor MVP
-
-Start deterministic extraction for the first maturation domain:
+Build one end-to-end loop for the first maturation domain:
 
 ```text
 state/energy + planning intensity
 ```
 
-### W7: LifeModelGovernor MVP
+- Wire Chat/Feedback/Calibration into LifeEvent/Signal/Evidence/Governor.
+- Ensure user accept/reject/edit changes future RuntimeHSPacket behavior.
+- Keep raw data out of accepted LifeModel truth until proposal/user decision.
 
-Connect candidate evidence to proposal decisions for the first domain.
+### W15: PlanExecute Product Vertical Slice
 
-### W8: Maturation Loop V1
+Implement one reviewed weekly planning flow after W14:
 
-Wire Chat/Feedback/Calibration into the first loop.
+- Plan -> user review/edit -> execute one step or create proposals.
+- Reflect outcomes into LifeEvent candidates.
+- Do not treat the current PlanExecute core MVP as this product slice.
 
-### W9: Plan-Execute Slice
+### W16: RuntimeStrategy Trait
 
-Implement one reviewed weekly planning flow after W1-W8.
+Extract a first-class trait only after W13-W15 provide enough real pressure from
+ReAct, guarded Chat subpaths, maturation, and PlanExecute product needs.
 
 ## 10. What Not To Do Next
 
 Do not:
 
-- Build a complete Multi-Strategy runtime before one Plan-Execute slice exists.
+- Replace default Chat with MultiStrategy Runtime just because the preview
+  command works.
+- Present `run_multi_strategy_agent_preview` as a production Chat path.
+- Treat W10 outer AgentRun audit as permission to skip metadata-safe review;
+  ReAct inner run id remains child metadata, not the product trace's primary id.
+- Build a complete formal `RuntimeStrategy` trait before guarded Chat,
+  maturation V1, and one PlanExecute product slice create real interface needs.
 - Add many new LifeModel fields before the evidence/governor path exists.
 - Treat current YAML as the canonical HS database.
 - Let extracted signals auto-write identity/values/goals.
