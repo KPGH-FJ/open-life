@@ -442,6 +442,68 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           automaticMigrationEnabled: false,
         },
       } as T);
+    case "draft_default_chat_adapter_activation_plan":
+      return Promise.resolve({
+        draftReady: true,
+        candidatePromotionReadinessReport: {
+          ready: true,
+          cutoverReadinessEligible: true,
+          requiredApprovedCandidates: _args?.input?.requiredApprovedCandidates ?? 1,
+          approvedCandidateCount: 1,
+          latestDecision: {
+            evidenceId: "ev_candidate_review_1",
+            candidateRunId: "run-candidate-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:mock-candidate-summary",
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T06:07:08Z",
+          },
+          approvedCandidates: [],
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            promotionReadinessGate: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            readOnly: true,
+          },
+          checkedAt: "2026-05-31T06:08:00Z",
+        },
+        runtimeBoundaryStatus: {
+          currentMode: "legacy_stream",
+          controlledCandidateAvailable: false,
+          defaultChatUnchanged: true,
+          candidatePromotionReadinessRequired: true,
+          automaticMigrationEnabled: false,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            runtimeBoundary: "default_chat",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        activationScope: ["Human-review-only adapter activation draft."],
+        requiredPreconditions: ["W33 candidate promotion readiness remains ready."],
+        adapterContractChecks: ["send_message-compatible contract shape remains stable."],
+        fallbackPlan: ["Keep default Chat on the legacy stream fallback."],
+        rollbackPlan: ["Revert only a separate adapter implementation."],
+        observabilityPlan: ["Use metadata-safe activation counters only."],
+        testPlan: ["Verify send_message and start_stream_message do not call this command."],
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        requiresSeparateImplementation: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationPlan: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

@@ -1507,6 +1507,174 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
   });
 
+  it("refreshes and renders default chat adapter activation plan draft without activation controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_default_chat_adapter_activation_plan") {
+        return Promise.resolve({
+          draftReady: true,
+          candidatePromotionReadinessReport: {
+            ready: true,
+            cutoverReadinessEligible: true,
+            requiredApprovedCandidates: 1,
+            approvedCandidateCount: 1,
+            latestDecision: {
+              evidenceId: "ev_candidate_review_4",
+              candidateRunId: "run-candidate-activation-1",
+              decisionKind: "approve",
+              contractShape: "send_message_compatible",
+              candidateSummaryDigest: "sha256:candidate-summary-4",
+              reviewerNoteChecksum: null,
+              reviewerNoteLength: 0,
+              reviewerNoteCategory: "none",
+              createdAt: "2026-05-31T09:10:11Z",
+            },
+            approvedCandidates: [],
+            defaultChatUnchanged: true,
+            blockingReasons: [],
+            metadataSafeSummary: {
+              promotionReadinessGate: "controlled_chat_cutover_candidate",
+              metadataSafe: true,
+              readOnly: true,
+            },
+            checkedAt: "2026-05-31T09:11:00Z",
+          },
+          runtimeBoundaryStatus: {
+            currentMode: "legacy_stream",
+            controlledCandidateAvailable: false,
+            defaultChatUnchanged: true,
+            candidatePromotionReadinessRequired: true,
+            automaticMigrationEnabled: false,
+            blockingReasons: [],
+            metadataSafeSummary: {
+              runtimeBoundary: "default_chat",
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          activationScope: ["Human-review-only adapter activation draft."],
+          requiredPreconditions: ["W33 candidate promotion readiness remains ready."],
+          adapterContractChecks: ["send_message-compatible contract shape remains stable."],
+          fallbackPlan: ["Keep default Chat on the legacy stream fallback."],
+          rollbackPlan: ["Revert only a separate adapter implementation."],
+          observabilityPlan: ["Use metadata-safe activation counters only."],
+          testPlan: ["Verify send_message and start_stream_message do not call this command."],
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            activationPlan: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            manualReviewRequired: true,
+            notAutomaticMigration: true,
+            requiresSeparateImplementation: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Adapter Activation Plan")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Activation Plan Draft" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_activation_plan", {
+        input: { requiredApprovedCandidates: 1 },
+      });
+    });
+    expect(await screen.findByText("Activation draft ready")).toBeInTheDocument();
+    expect(screen.getByText("Human-review-only adapter activation draft.")).toBeInTheDocument();
+    expect(
+      screen.getByText("W33 candidate promotion readiness remains ready.")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("send_message-compatible contract shape remains stable.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("Use metadata-safe activation counters only.")).toBeInTheDocument();
+    expect(screen.getByText("manualReviewRequired: true")).toBeInTheDocument();
+    expect(screen.getByText("requiresSeparateImplementation: true")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter activation plan blockers without plan sections", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_default_chat_adapter_activation_plan") {
+        return Promise.resolve({
+          draftReady: false,
+          candidatePromotionReadinessReport: {
+            ready: false,
+            cutoverReadinessEligible: false,
+            requiredApprovedCandidates: 1,
+            approvedCandidateCount: 0,
+            latestDecision: null,
+            approvedCandidates: [],
+            defaultChatUnchanged: true,
+            blockingReasons: ["candidate_review_decision_missing"],
+            metadataSafeSummary: {
+              metadataSafe: true,
+              readOnly: true,
+            },
+            checkedAt: "2026-05-31T09:12:00Z",
+          },
+          runtimeBoundaryStatus: {
+            currentMode: "legacy_stream",
+            controlledCandidateAvailable: false,
+            defaultChatUnchanged: true,
+            candidatePromotionReadinessRequired: true,
+            automaticMigrationEnabled: false,
+            blockingReasons: [],
+            metadataSafeSummary: {
+              runtimeBoundary: "default_chat",
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          activationScope: [],
+          requiredPreconditions: [],
+          adapterContractChecks: [],
+          fallbackPlan: [],
+          rollbackPlan: [],
+          observabilityPlan: [],
+          testPlan: [],
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          blockingReasons: [
+            "candidate_promotion_readiness_not_ready",
+            "candidate_review_decision_missing",
+          ],
+          metadataSafeSummary: {
+            activationPlan: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            draftReady: false,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh Activation Plan Draft" }));
+
+    expect(await screen.findByText("Activation draft blocked")).toBeInTheDocument();
+    expect(screen.getByText("candidate_promotion_readiness_not_ready")).toBeInTheDocument();
+    expect(screen.getByText("candidate_review_decision_missing")).toBeInTheDocument();
+    expect(screen.queryByText("Activation Scope")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

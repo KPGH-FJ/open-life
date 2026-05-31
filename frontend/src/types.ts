@@ -596,6 +596,30 @@ export interface ControlledChatCutoverCandidatePromotionReadinessReport {
   checkedAt: string;
 }
 
+export interface DefaultChatAdapterActivationPlanDraftInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterActivationPlanDraft {
+  draftReady: boolean;
+  candidatePromotionReadinessReport: ControlledChatCutoverCandidatePromotionReadinessReport;
+  runtimeBoundaryStatus: DefaultChatRuntimeBoundaryStatus;
+  activationScope: string[];
+  requiredPreconditions: string[];
+  adapterContractChecks: string[];
+  fallbackPlan: string[];
+  rollbackPlan: string[];
+  observabilityPlan: string[];
+  testPlan: string[];
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

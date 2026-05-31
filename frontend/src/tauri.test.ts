@@ -15,6 +15,7 @@ import {
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   getDefaultChatRuntimeBoundaryStatus,
+  draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -754,5 +755,69 @@ describe("tauri command argument aliases", () => {
     expect(result.currentMode).toBe("legacy_stream");
     expect(result.controlledCandidateAvailable).toBe(false);
     expect(result.automaticMigrationEnabled).toBe(false);
+  });
+
+  it("invokes default chat adapter activation plan draft as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      draftReady: true,
+      candidatePromotionReadinessReport: {
+        ready: true,
+        cutoverReadinessEligible: true,
+        requiredApprovedCandidates: 1,
+        approvedCandidateCount: 1,
+        latestDecision: null,
+        approvedCandidates: [],
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          metadataSafe: true,
+          readOnly: true,
+        },
+        checkedAt: "2026-05-31T08:10:00Z",
+      },
+      runtimeBoundaryStatus: {
+        currentMode: "legacy_stream",
+        controlledCandidateAvailable: false,
+        defaultChatUnchanged: true,
+        candidatePromotionReadinessRequired: true,
+        automaticMigrationEnabled: false,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          runtimeBoundary: "default_chat",
+          metadataSafe: true,
+          readOnly: true,
+        },
+      },
+      activationScope: ["human review only"],
+      requiredPreconditions: ["W33 ready"],
+      adapterContractChecks: ["send_message-compatible"],
+      fallbackPlan: ["use legacy stream"],
+      rollbackPlan: ["revert separate implementation"],
+      observabilityPlan: ["metadata-safe counters"],
+      testPlan: ["verify send_message and start_stream_message"],
+      manualReviewRequired: true,
+      notAutomaticMigration: true,
+      requiresSeparateImplementation: true,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        activationPlan: "default_chat_adapter_activation",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await draftDefaultChatAdapterActivationPlan({
+      requiredApprovedCandidates: 2,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_activation_plan", {
+      input: {
+        requiredApprovedCandidates: 2,
+      },
+    });
+    expect(result.draftReady).toBe(true);
+    expect(result.manualReviewRequired).toBe(true);
+    expect(result.requiresSeparateImplementation).toBe(true);
+    expect(result.activationScope[0]).toContain("human review");
   });
 });

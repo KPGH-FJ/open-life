@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W34 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W35 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -48,6 +48,9 @@ safety, and default Chat isolation. It is implementation-planning readiness,
 not default Chat migration. W34 adds a read-only default Chat runtime boundary
 status that explicitly reports the current default Chat runtime as
 `legacy_stream` with automatic migration disabled. It is boundary observability,
+not default Chat migration. W35 adds a read-only default Chat adapter activation
+plan draft that combines W33 readiness with W34 boundary status and returns only
+human-review activation planning sections when ready. It is activation planning,
 not default Chat migration.
 
 The key boundary is unchanged:
@@ -257,6 +260,19 @@ The key boundary is unchanged:
   Memory, LifeModel patches, MCP audit rows, or chat messages. Default Send /
   `send_message` / `start_stream_message` do not call it. Boundary status is
   observability only, not default Chat migration.
+- W35 Default Chat Adapter Activation Plan Draft adds
+  `draft_default_chat_adapter_activation_plan` and the Settings Default Chat
+  Adapter Activation Plan panel. It is read-only and combines W33 candidate
+  promotion readiness with W34 default Chat runtime boundary status. Blocked
+  output returns blockers and no plan sections; ready output returns only
+  human-review activation scope, required preconditions, adapter contract
+  checks, fallback, rollback, observability, and test plan. It fixes
+  `manualReviewRequired=true`, `notAutomaticMigration=true`, and
+  `requiresSeparateImplementation=true`. It does not switch default Chat,
+  modify feature flags, run runtime/tool/model paths, or create AgentRuns,
+  Evidence, Proposals, Memory, LifeModel patches, MCP audit rows, or chat
+  messages. Default Send / `send_message` / `start_stream_message` do not call
+  it. Activation plan draft is planning only, not default Chat migration.
 
 ## Work Package Status
 
@@ -296,11 +312,12 @@ The key boundary is unchanged:
 | W32 Controlled Chat Cutover Candidate Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_controlled_chat_cutover_candidate_review_decision` and read-only summary. Approve requires a completed, ready, send_message-compatible, write-disabled, zero-tool, metadata-safe, side-effect-free candidate AgentRun. Evidence stores only candidateRunId, decisionKind, contractShape, candidateSummaryDigest, reviewer-note checksum/length/category, and createdAt; it stores no reviewer raw text, candidate output, raw prompt/output, or tool payload. Normal Send / `send_message` / `start_stream_message` do not call it. This is candidate review evidence, not default Chat migration. |
 | W33 Controlled Chat Cutover Candidate Promotion Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_controlled_chat_cutover_candidate_promotion_readiness`. It reuses W30 readiness, reads W32 metadata-safe review evidence, requires latest approve, verifies approved candidate AgentRuns are still send-message-compatible/write-disabled/zero-tool/metadata-safe/side-effect-free, and returns ready/blockers/counts/latest decision/defaultChatUnchanged/metadata-safe summary. It creates no records and runs no runtime/tool/model call. Normal Send / `send_message` / `start_stream_message` do not call it. This is implementation-planning readiness, not default Chat migration. |
 | W34 Default Chat Runtime Boundary Status | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `get_default_chat_runtime_boundary_status`. It reports the current default Chat runtime boundary as `legacy_stream`, with default Chat unchanged, automatic migration disabled, no controlled candidate available on the default path, and candidate promotion readiness still required. It calls no W19-W33 gates, creates no records, runs no runtime/tool/model call, and normal Send / `send_message` / `start_stream_message` do not call it. This is boundary observability, not default Chat migration. |
+| W35 Default Chat Adapter Activation Plan Draft | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `draft_default_chat_adapter_activation_plan`. It combines W33 candidate promotion readiness and W34 default Chat boundary status. Blocked output has no plan sections; ready output returns only human-review activation scope, required preconditions, adapter contract checks, fallback, rollback, observability, and test plan with `manualReviewRequired=true`, `notAutomaticMigration=true`, and `requiresSeparateImplementation=true`. It creates no records, runs no runtime/tool/model call, switches no feature flags, and normal Send / `send_message` / `start_stream_message` do not call it. This is activation planning, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use default Chat runtime boundary status only for explicit activation planning; default Chat remains unchanged
+use default Chat adapter activation plan draft only for explicit human review; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -315,10 +332,11 @@ comparison after W27 eligibility, W29 only records metadata-safe human shadow
 review evidence, W30 only checks cutover planning readiness for entering
 implementation discussion, W31 only runs an explicit non-default cutover
 candidate for contract-shape validation after W30 eligibility, and W32 only
-records metadata-safe human candidate review evidence. Default `Send`,
-`send_message`, and `start_stream_message` remain unchanged until a later
-reviewed migration stage with separate implementation work and explicit human
-approval.
+records metadata-safe human candidate review evidence, W33 only checks
+candidate promotion readiness, W34 only observes the default Chat boundary, and
+W35 only drafts a human-review activation plan. Default `Send`, `send_message`,
+and `start_stream_message` remain unchanged until a later reviewed migration
+stage with separate implementation work and explicit human approval.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

@@ -18,6 +18,7 @@ import {
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
+  draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -38,6 +39,7 @@ import type {
   ControlledChatCutoverCandidateReviewSummary,
   ControlledChatCutoverCandidatePromotionReadinessReport,
   ControlledChatCutoverReadinessReport,
+  DefaultChatAdapterActivationPlanDraft,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
   ControlledChatMigrationReviewDecisionKind,
@@ -60,6 +62,7 @@ import type {
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
   "runtimeBoundary",
+  "activationPlan",
   "cutoverReadinessGate",
   "promotionReadinessGate",
   "taskKind",
@@ -79,7 +82,12 @@ const SAFE_SUMMARY_KEYS = [
   "requiredEvidenceReady",
   "defaultChatUnchanged",
   "readOnly",
+  "humanReviewOnly",
+  "draftReady",
+  "manualReviewRequired",
   "notAutomaticMigration",
+  "requiresSeparateImplementation",
+  "candidatePromotionReady",
   "currentMode",
   "controlledCandidateAvailable",
   "candidatePromotionReadinessRequired",
@@ -91,6 +99,13 @@ const SAFE_SUMMARY_KEYS = [
   "verifiedCandidateCount",
   "latestDecisionKind",
   "blockingReasonCount",
+  "activationSectionCount",
+  "preconditionSectionCount",
+  "adapterContractCheckCount",
+  "fallbackPlanCount",
+  "rollbackPlanCount",
+  "observabilityPlanCount",
+  "testPlanCount",
   "implementationEligible",
   "latestShadowReviewDecisionKind",
   "shadowRunReady",
@@ -252,6 +267,10 @@ export default function MultiStrategyPreviewSection() {
   >(null);
   const [candidatePromotionReadinessReport, setCandidatePromotionReadinessReport] =
     useState<ControlledChatCutoverCandidatePromotionReadinessReport | null>(null);
+  const [activationPlanChecking, setActivationPlanChecking] = useState(false);
+  const [activationPlanError, setActivationPlanError] = useState<string | null>(null);
+  const [activationPlanDraft, setActivationPlanDraft] =
+    useState<DefaultChatAdapterActivationPlanDraft | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -557,6 +576,22 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setCandidatePromotionReadinessChecking(false);
+    }
+  };
+
+  const handleActivationPlanRefresh = async () => {
+    setActivationPlanChecking(true);
+    setActivationPlanError(null);
+    setActivationPlanDraft(null);
+    try {
+      const draft = await draftDefaultChatAdapterActivationPlan({
+        requiredApprovedCandidates: 1,
+      });
+      setActivationPlanDraft(draft);
+    } catch (e) {
+      setActivationPlanError(`Activation plan draft failed: ${readableError(e)}`);
+    } finally {
+      setActivationPlanChecking(false);
     }
   };
 
@@ -2658,6 +2693,138 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No candidate promotion readiness report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Activation Plan
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W35 draft for future adapter activation review. It combines W33 candidate
+              promotion readiness with W34 default Chat boundary status and does not provide any
+              switch, migrate, or enable action.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleActivationPlanRefresh}
+            disabled={activationPlanChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              activationPlanChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={activationPlanChecking ? "animate-spin" : undefined} />
+            {activationPlanChecking ? "Refreshing..." : "Refresh Activation Plan Draft"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This panel is human-review-only. Default Chat remains on the legacy stream path, and any
+          adapter activation would require separate implementation work.
+        </div>
+
+        {activationPlanError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {activationPlanError}
+          </div>
+        )}
+
+        {activationPlanDraft ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  activationPlanDraft.draftReady
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {activationPlanDraft.draftReady ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {activationPlanDraft.draftReady
+                  ? "Activation draft ready"
+                  : "Activation draft blocked"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                currentMode: {activationPlanDraft.runtimeBoundaryStatus.currentMode}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                automaticMigrationEnabled:{" "}
+                {String(activationPlanDraft.runtimeBoundaryStatus.automaticMigrationEnabled)}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                W33 ready: {String(activationPlanDraft.candidatePromotionReadinessReport.ready)}
+              </span>
+            </div>
+
+            {safeSummaryEntries(activationPlanDraft.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(activationPlanDraft.metadataSafeSummary).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {activationPlanDraft.draftReady && (
+              <div className="grid gap-3 md:grid-cols-2">
+                <PlanList title="Activation Scope" items={activationPlanDraft.activationScope} />
+                <PlanList
+                  title="Required Preconditions"
+                  items={activationPlanDraft.requiredPreconditions}
+                />
+                <PlanList
+                  title="Adapter Contract Checks"
+                  items={activationPlanDraft.adapterContractChecks}
+                />
+                <PlanList title="Fallback Plan" items={activationPlanDraft.fallbackPlan} />
+                <PlanList title="Rollback Plan" items={activationPlanDraft.rollbackPlan} />
+                <PlanList
+                  title="Observability Plan"
+                  items={activationPlanDraft.observabilityPlan}
+                />
+                <PlanList title="Test Plan" items={activationPlanDraft.testPlan} />
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {activationPlanDraft.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {activationPlanDraft.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No activation plan blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter activation draft loaded.
           </div>
         )}
       </section>
