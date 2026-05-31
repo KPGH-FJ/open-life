@@ -2456,6 +2456,121 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("renders default chat adapter implementation readiness as a read-only gate", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_implementation_readiness") {
+        return Promise.resolve({
+          implementationReady: true,
+          latestDryRunReviewDecision: {
+            evidenceId: "ev_dry_run_review_1",
+            decisionKind: "approve",
+            sourceSessionId: args?.input?.sourceSessionId ?? "settings-dry-run",
+            contractShape: "default_chat_adapter_dry_run_contract",
+            dryRunReady: true,
+            dryRunSummaryDigest: "sha256:abc123",
+            reviewerNoteChecksum: "sha256:def456",
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T00:00:00Z",
+          },
+          activationImplementationGateEligible: true,
+          contractHarnessReady: true,
+          dryRunReady: true,
+          dryRunReviewApproved: true,
+          dryRunDigestMatched: true,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            implementationReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            implementationReady: true,
+            dryRunReviewApproved: true,
+            controlledAdapterEnabled: false,
+            automaticMigrationEnabled: false,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Implementation Readiness")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Adapter Implementation Readiness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_implementation_readiness", {
+        input: {
+          sourceSessionId: "settings-dry-run",
+          message: "Settings adapter dry-run probe.",
+          requiredApprovedCandidates: 1,
+        },
+      });
+    });
+    expect(await screen.findByText("Implementation readiness ready")).toBeInTheDocument();
+    expect(screen.getByText("implementationReady: true")).toBeInTheDocument();
+    expect(screen.getByText("dryRunReviewApproved: true")).toBeInTheDocument();
+    expect(screen.getByText("dryRunDigestMatched: true")).toBeInTheDocument();
+    expect(screen.getByText("implementationReadiness: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter implementation readiness blockers", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "check_default_chat_adapter_implementation_readiness") {
+        return Promise.resolve({
+          implementationReady: false,
+          latestDryRunReviewDecision: null,
+          activationImplementationGateEligible: false,
+          contractHarnessReady: false,
+          dryRunReady: false,
+          dryRunReviewApproved: false,
+          dryRunDigestMatched: false,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          blockingReasons: [
+            "activation_implementation_gate_not_eligible",
+            "dry_run_review_approval_missing",
+          ],
+          metadataSafeSummary: {
+            implementationReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            implementationReady: false,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Check Adapter Implementation Readiness" })
+    );
+
+    expect(await screen.findByText("Implementation readiness blocked")).toBeInTheDocument();
+    expect(screen.getByText("activation_implementation_gate_not_eligible")).toBeInTheDocument();
+    expect(screen.getByText("dry_run_review_approval_missing")).toBeInTheDocument();
+    expect(screen.getByText("implementationReady: false")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

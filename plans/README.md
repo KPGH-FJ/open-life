@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W41 completion/status index. This is not a second roadmap.
+   - Compact W1-W42 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W41 through sustained Runtime Migration
+Current implementation has completed W1-W42 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -60,11 +60,12 @@ evidence plus a read-only default Chat adapter activation implementation gate
 plus a read-only default Chat adapter disabled routing scaffold plus a read-only
 default Chat adapter contract harness plus a write-disabled default Chat adapter
 dry-run invocation boundary plus metadata-safe default Chat adapter dry-run
-review evidence.
+review evidence plus a read-only default Chat adapter implementation readiness
+gate.
 The next practical sequence is:
 
 ```text
-use default Chat adapter dry-run review evidence only for human review of the write-disabled invocation contract; default Chat remains unchanged
+use default Chat adapter implementation readiness only to enter adapter implementation coding discussion; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -73,7 +74,7 @@ use default Chat adapter dry-run review evidence only for human review of the wr
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W41 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W42 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -358,6 +359,18 @@ patches, MCP audit rows, chat messages, runtime/tool/model calls, external
 writes, feature flags, or default Chat routing changes. Default Send,
 `send_message`, and `start_stream_message` must not call dry-run review commands.
 W41 is dry-run review evidence, not default Chat migration.
+
+W42 adds only `check_default_chat_adapter_implementation_readiness` and the
+Settings Default Chat Adapter Implementation Readiness panel. The command is
+read-only: it combines W37 activation implementation gate, W39 contract harness,
+W40 dry run, and W41 latest dry-run review evidence; ready requires latest
+approve, current dry-run digest match, default Chat unchanged, controlled
+adapter disabled, automatic migration disabled, and send/stream paths still on
+`legacy_stream`. It must not create AgentRuns, Evidence, Proposals, Memory,
+LifeModel patches, MCP audit rows, chat messages, runtime/tool/model calls,
+external writes, feature flags, or default Chat routing changes. Default Send,
+`send_message`, and `start_stream_message` must not call implementation
+readiness. W42 is implementation readiness, not default Chat migration.
 
 ## 6. Agent Rules
 

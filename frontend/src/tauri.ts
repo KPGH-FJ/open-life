@@ -51,6 +51,8 @@ import type {
   DefaultChatAdapterDryRunReviewDecisionInput,
   DefaultChatAdapterDryRunReviewDecisionResult,
   DefaultChatAdapterDryRunReviewSummary,
+  DefaultChatAdapterImplementationReadinessInput,
+  DefaultChatAdapterImplementationReadinessReport,
   DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
@@ -483,6 +485,15 @@ export async function recordDefaultChatAdapterDryRunReviewDecision(
 export async function getDefaultChatAdapterDryRunReviewSummary(): Promise<DefaultChatAdapterDryRunReviewSummary> {
   return safeInvoke<DefaultChatAdapterDryRunReviewSummary>(
     "get_default_chat_adapter_dry_run_review_summary"
+  );
+}
+
+export async function checkDefaultChatAdapterImplementationReadiness(
+  input: DefaultChatAdapterImplementationReadinessInput
+): Promise<DefaultChatAdapterImplementationReadinessReport> {
+  return safeInvoke<DefaultChatAdapterImplementationReadinessReport>(
+    "check_default_chat_adapter_implementation_readiness",
+    { input }
   );
 }
 

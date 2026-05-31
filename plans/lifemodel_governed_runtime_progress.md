@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W41 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W42 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -72,7 +72,13 @@ invocation contract observability, not default Chat migration. W41 adds explicit
 human review evidence over W40 dry-run output. It records
 approve/reject/request_rework as metadata-safe evidence only; approve requires a
 currently ready dry run, and blocked dry-run approval writes no evidence. It is
-dry-run review evidence, not default Chat migration.
+dry-run review evidence, not default Chat migration. W42 adds a read-only
+default Chat adapter implementation readiness gate over W37/W39/W40/W41 current
+evidence. It requires activation implementation gate eligibility, contract
+harness readiness, dry-run readiness, latest approved dry-run review, matching
+current dry-run digest, default Chat still on `legacy_stream`, controlled adapter
+disabled, and automatic migration disabled. It is implementation discussion
+readiness, not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -357,6 +363,18 @@ The key boundary is unchanged:
   no feature flags or routing, and Default Send / `send_message` /
   `start_stream_message` do not call it. Dry-run review approval is evidence for
   later implementation discussion, not default Chat migration.
+- W42 Default Chat Adapter Implementation Readiness Gate adds
+  `check_default_chat_adapter_implementation_readiness` and the Settings Default
+  Chat Adapter Implementation Readiness panel. It only reads/recomputes
+  metadata-safe W37 activation implementation gate, W39 contract harness, W40
+  dry-run, and W41 dry-run review evidence. It requires latest dry-run review
+  approval, a matching current dry-run digest, default Send and stream paths
+  still on `legacy_stream`, controlled adapter disabled, and automatic migration
+  disabled. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP
+  audit/chat/external write records, runs no runtime/tool/model call, changes
+  no feature flags or routing, and Default Send / `send_message` /
+  `start_stream_message` do not call it. Implementation readiness is a gate for
+  later adapter implementation coding discussion, not default Chat migration.
 
 ## Work Package Status
 
@@ -403,11 +421,12 @@ The key boundary is unchanged:
 | W39 Default Chat Adapter Contract Harness | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_contract_harness`. It calls W38 routing status and validates a disabled adapter contract where send_message and start_stream_message both remain on `legacy_stream`, controlled adapter remains disabled, and activation implementation gate is eligible. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is contract observability, not default Chat migration. |
 | W40 Default Chat Adapter Dry-Run Invocation Boundary | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit non-default `run_default_chat_adapter_dry_run`. It calls W39 contract harness first, blocks without dry-run output when harness is not ready, and when ready returns a metadata-safe dry-run contract result with `allowWrites=false`, `maxToolCalls=0`, `defaultChatPathUnchanged=true`, and checksum-only input metadata. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is invocation contract observability, not default Chat migration. |
 | W41 Default Chat Adapter Dry-Run Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_dry_run_review_decision` and read-only summary. The record command re-runs W40 dry run first; approve requires dry-run ready, blocked approve writes no evidence, and reject/request_rework write only metadata-safe evidence. Evidence stores only decision/source session/contract shape/dry-run readiness/digest/reviewer-note checksum-length-category/timestamp metadata. It creates no AgentRun/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is dry-run review evidence, not default Chat migration. |
+| W42 Default Chat Adapter Implementation Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_implementation_readiness`. It combines W37 activation implementation gate, W39 contract harness, W40 dry run, and W41 latest dry-run review evidence. Ready requires latest approve, dry-run digest match, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and both send paths on `legacy_stream`. It creates no records, runs no runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is implementation readiness, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use default Chat adapter dry-run review evidence only for human review of the write-disabled invocation contract; default Chat remains unchanged
+use default Chat adapter implementation readiness only to enter adapter implementation coding discussion; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -428,8 +447,9 @@ only drafts a human-review activation plan, W36 only records activation review
 evidence, W37 only checks activation implementation gate readiness, and W38
 only observes disabled adapter routing scaffold state, W39 only checks the
 disabled adapter contract harness, W40 only runs an explicit write-disabled
-adapter dry-run contract boundary, and W41 only records metadata-safe human
-review evidence over that dry run. Default
+adapter dry-run contract boundary, W41 only records metadata-safe human review
+evidence over that dry run, and W42 only checks read-only implementation
+readiness over W37/W39/W40/W41 evidence. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

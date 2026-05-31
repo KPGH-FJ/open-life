@@ -19,6 +19,7 @@ import {
   checkControlledPilotPromotionReadiness,
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
+  checkDefaultChatAdapterImplementationReadiness,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
@@ -54,6 +55,7 @@ import type {
   DefaultChatAdapterDryRunReviewDecisionKind,
   DefaultChatAdapterDryRunReviewDecisionResult,
   DefaultChatAdapterDryRunReviewSummary,
+  DefaultChatAdapterImplementationReadinessReport,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
   DefaultChatAdapterActivationReviewDecisionResult,
@@ -84,6 +86,7 @@ const SAFE_SUMMARY_KEYS = [
   "contractHarness",
   "adapterDryRun",
   "dryRunReview",
+  "implementationReadiness",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -363,6 +366,13 @@ export default function MultiStrategyPreviewSection() {
   >(null);
   const [adapterDryRunReviewSummary, setAdapterDryRunReviewSummary] =
     useState<DefaultChatAdapterDryRunReviewSummary | null>(null);
+  const [adapterImplementationReadinessChecking, setAdapterImplementationReadinessChecking] =
+    useState(false);
+  const [adapterImplementationReadinessError, setAdapterImplementationReadinessError] = useState<
+    string | null
+  >(null);
+  const [adapterImplementationReadinessReport, setAdapterImplementationReadinessReport] =
+    useState<DefaultChatAdapterImplementationReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -834,6 +844,26 @@ export default function MultiStrategyPreviewSection() {
       setAdapterDryRunReviewError(`Adapter dry-run review recording failed: ${readableError(e)}`);
     } finally {
       setAdapterDryRunReviewRecording(false);
+    }
+  };
+
+  const handleAdapterImplementationReadinessCheck = async () => {
+    setAdapterImplementationReadinessChecking(true);
+    setAdapterImplementationReadinessError(null);
+    setAdapterImplementationReadinessReport(null);
+    try {
+      const report = await checkDefaultChatAdapterImplementationReadiness({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterImplementationReadinessReport(report);
+    } catch (e) {
+      setAdapterImplementationReadinessError(
+        `Adapter implementation readiness failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterImplementationReadinessChecking(false);
     }
   };
 
@@ -4037,6 +4067,185 @@ export default function MultiStrategyPreviewSection() {
             </div>
           )}
         </div>
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Implementation Readiness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W42 gate over activation implementation eligibility, adapter contract
+              harness, dry-run boundary, and latest dry-run review evidence. Ready means
+              implementation discussion can proceed; it does not switch, enable, activate, or
+              migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterImplementationReadinessCheck}
+            disabled={adapterImplementationReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterImplementationReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={adapterImplementationReadinessChecking ? "animate-spin" : undefined}
+            />
+            {adapterImplementationReadinessChecking
+              ? "Checking..."
+              : "Check Adapter Implementation Readiness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          The gate re-checks the same bounded dry-run probe and compares its metadata-safe digest
+          with the latest approved dry-run review. It does not write Evidence, Chat messages,
+          AgentRuns, proposals, memory, LifeModel patches, MCP audit, external writes, or model
+          calls.
+        </div>
+
+        {adapterImplementationReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterImplementationReadinessError}
+          </div>
+        )}
+
+        {adapterImplementationReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterImplementationReadinessReport.implementationReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterImplementationReadinessReport.implementationReady
+                ? "Implementation readiness ready"
+                : "Implementation readiness blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                [
+                  "implementationReady",
+                  String(adapterImplementationReadinessReport.implementationReady),
+                ],
+                [
+                  "activationImplementationGateEligible",
+                  String(adapterImplementationReadinessReport.activationImplementationGateEligible),
+                ],
+                [
+                  "contractHarnessReady",
+                  String(adapterImplementationReadinessReport.contractHarnessReady),
+                ],
+                ["dryRunReady", String(adapterImplementationReadinessReport.dryRunReady)],
+                [
+                  "dryRunReviewApproved",
+                  String(adapterImplementationReadinessReport.dryRunReviewApproved),
+                ],
+                [
+                  "dryRunDigestMatched",
+                  String(adapterImplementationReadinessReport.dryRunDigestMatched),
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(adapterImplementationReadinessReport.defaultChatUnchanged),
+                ],
+                [
+                  "controlledAdapterEnabled",
+                  String(adapterImplementationReadinessReport.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(adapterImplementationReadinessReport.automaticMigrationEnabled),
+                ],
+                ["defaultSendPath", adapterImplementationReadinessReport.defaultSendPath],
+                ["startStreamPath", adapterImplementationReadinessReport.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {adapterImplementationReadinessReport.latestDryRunReviewDecision && (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+                <div className="font-medium text-stone-900">Latest dry-run review decision</div>
+                <div className="mt-1">
+                  latestDryRunReviewDecisionKind:{" "}
+                  {adapterImplementationReadinessReport.latestDryRunReviewDecision.decisionKind}
+                </div>
+                <div>
+                  latestDryRunReady:{" "}
+                  {String(
+                    adapterImplementationReadinessReport.latestDryRunReviewDecision.dryRunReady
+                  )}
+                </div>
+                <div>
+                  sourceSessionId:{" "}
+                  {adapterImplementationReadinessReport.latestDryRunReviewDecision.sourceSessionId}
+                </div>
+                <div className="break-all">
+                  dryRunSummaryDigest:{" "}
+                  {
+                    adapterImplementationReadinessReport.latestDryRunReviewDecision
+                      .dryRunSummaryDigest
+                  }
+                </div>
+              </div>
+            )}
+
+            {safeSummaryEntries(adapterImplementationReadinessReport.metadataSafeSummary).length >
+              0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterImplementationReadinessReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterImplementationReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterImplementationReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No adapter implementation readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter implementation readiness report loaded.
+          </div>
+        )}
       </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">

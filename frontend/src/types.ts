@@ -801,6 +801,30 @@ export interface DefaultChatAdapterDryRunReviewSummary {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterImplementationReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterImplementationReadinessReport {
+  implementationReady: boolean;
+  latestDryRunReviewDecision?: DefaultChatAdapterDryRunReviewLatestDecision | null;
+  activationImplementationGateEligible: boolean;
+  contractHarnessReady: boolean;
+  dryRunReady: boolean;
+  dryRunReviewApproved: boolean;
+  dryRunDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

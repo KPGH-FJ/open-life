@@ -15,6 +15,7 @@ import {
   checkControlledPilotPromotionReadiness,
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
+  checkDefaultChatAdapterImplementationReadiness,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
@@ -1145,5 +1146,54 @@ describe("tauri command argument aliases", () => {
     );
     expect(result.latestDecision?.decisionKind).toBe("approve");
     expect(result.approvedCount).toBe(1);
+  });
+
+  it("checks default chat adapter implementation readiness", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      implementationReady: true,
+      latestDryRunReviewDecision: {
+        evidenceId: "ev_dry_run_review_1",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        contractShape: "default_chat_adapter_dry_run_contract",
+        dryRunReady: true,
+        dryRunSummaryDigest: "sha256:abc123",
+        reviewerNoteChecksum: "sha256:def456",
+        reviewerNoteLength: 8,
+        reviewerNoteCategory: "short",
+        createdAt: "2026-05-31T00:00:00Z",
+      },
+      activationImplementationGateEligible: true,
+      contractHarnessReady: true,
+      dryRunReady: true,
+      dryRunReviewApproved: true,
+      dryRunDigestMatched: true,
+      defaultChatUnchanged: true,
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        implementationReadiness: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+        implementationReady: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterImplementationReadiness({
+      sourceSessionId: "session-1",
+      message: "implementation probe",
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_implementation_readiness", {
+      input: {
+        sourceSessionId: "session-1",
+        message: "implementation probe",
+        requiredApprovedCandidates: 1,
+      },
+    });
+    expect(result.implementationReady).toBe(true);
+    expect(result.dryRunReviewApproved).toBe(true);
   });
 });
