@@ -393,6 +393,20 @@ export interface ControlledChatMigrationReviewDecisionSummary {
   blockingReasons: string[];
 }
 
+export interface ControlledChatMigrationImplementationGateInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatMigrationImplementationGateReport {
+  implementationEligible: boolean;
+  latestDecision?: ControlledChatMigrationReviewLatestDecision | null;
+  readinessReport: ControlledPilotPromotionReadinessReport;
+  draftHashMatched: boolean;
+  approvedAfterLatestDraft: boolean;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

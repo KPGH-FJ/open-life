@@ -758,6 +758,89 @@ describe("SettingsPage", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("renders controlled chat migration implementation gate as eligible without switching default Chat", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Implementation Gate")).toBeInTheDocument();
+    expect(screen.getByText(/current Send remains untouched/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Implementation Gate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_migration_implementation_gate", {
+        input: {},
+      });
+    });
+
+    expect(await screen.findByText("Eligible")).toBeInTheDocument();
+    expect(screen.getByText("Latest decision")).toBeInTheDocument();
+    expect(screen.getByText("approve")).toBeInTheDocument();
+    expect(screen.getByText("draftHashMatched: true")).toBeInTheDocument();
+    expect(screen.getByText("approvedAfterLatestDraft: true")).toBeInTheDocument();
+    expect(screen.getByText("3 / 3 promotions")).toBeInTheDocument();
+    expect(
+      screen.getByText("Even when eligible, default Chat will not switch.")
+    ).toBeInTheDocument();
+    expect(screen.getByText("No implementation gate blockers returned.")).toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
+  it("renders implementation gate blocking reasons when latest approval is invalid", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_migration_implementation_gate") {
+        return Promise.resolve({
+          implementationEligible: false,
+          latestDecision: {
+            evidenceId: "ev_review_decision_2",
+            decisionKind: "request_rework",
+            draftReady: true,
+            draftHash: "sha256:previous-draft",
+            createdAt: "2026-05-31T02:03:04Z",
+          },
+          readinessReport: {
+            ready: false,
+            requiredPromotions: 3,
+            promotedCount: 2,
+            recentPromotedPilotRunIds: ["run-controlled-pilot-2", "run-controlled-pilot-1"],
+            latestPromotionTimestamp: "2026-05-30T02:03:04Z",
+            sourceTargetMismatchBlockCount: 1,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: [
+              "insufficient_promotion_evidence: required 3 promotions, found 2",
+              "source_target_mismatch_blocks_present",
+            ],
+          },
+          draftHashMatched: false,
+          approvedAfterLatestDraft: false,
+          blockingReasons: [
+            "promotion_readiness_currently_blocked",
+            "latest_review_decision_is_request_rework",
+            "insufficient_promotion_evidence: required 3 promotions, found 2",
+          ],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Check Implementation Gate" }));
+
+    expect(await screen.findByText("Blocked")).toBeInTheDocument();
+    expect(screen.getByText("request_rework")).toBeInTheDocument();
+    expect(screen.getByText("draftHashMatched: false")).toBeInTheDocument();
+    expect(screen.getByText("approvedAfterLatestDraft: false")).toBeInTheDocument();
+    expect(screen.getByText("2 / 3 promotions")).toBeInTheDocument();
+    expect(screen.getByText("promotion_readiness_currently_blocked")).toBeInTheDocument();
+    expect(screen.getByText("latest_review_decision_is_request_rework")).toBeInTheDocument();
+    expect(
+      screen.getByText("insufficient_promotion_evidence: required 3 promotions, found 2")
+    ).toBeInTheDocument();
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {

@@ -38,9 +38,9 @@ use commands::agent::{
     replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
-    check_controlled_chat_pilot_eligibility, check_controlled_pilot_promotion_readiness,
-    check_runtime_migration_gate, draft_controlled_chat_migration_plan,
-    get_controlled_chat_migration_review_decision_summary,
+    check_controlled_chat_migration_implementation_gate, check_controlled_chat_pilot_eligibility,
+    check_controlled_pilot_promotion_readiness, check_runtime_migration_gate,
+    draft_controlled_chat_migration_plan, get_controlled_chat_migration_review_decision_summary,
     get_controlled_pilot_promotion_evidence_summary,
     record_controlled_chat_migration_review_decision, record_controlled_pilot_promotion_evidence,
     run_multi_strategy_agent_preview,
@@ -3053,6 +3053,7 @@ pub fn run() {
             draft_controlled_chat_migration_plan,
             record_controlled_chat_migration_review_decision,
             get_controlled_chat_migration_review_decision_summary,
+            check_controlled_chat_migration_implementation_gate,
             record_controlled_pilot_promotion_evidence,
             get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,

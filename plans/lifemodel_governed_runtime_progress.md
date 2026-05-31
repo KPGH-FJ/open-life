@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W26 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W27 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -24,7 +24,9 @@ discuss the next Chat migration step. W25 adds a read-only reviewed migration
 plan draft generator that reuses W24 readiness and produces a human-review-only
 draft when readiness passes. W26 adds an explicit manual review decision stage
 that records approve/reject/request_rework as metadata-safe decision evidence
-only.
+only. W27 adds a read-only implementation gate that checks whether latest
+metadata-safe approval, current W25 draft hash, and current W24 readiness are
+aligned before implementation discussion can begin.
 
 The key boundary is unchanged:
 
@@ -117,6 +119,18 @@ The key boundary is unchanged:
   approved count, rework/reject count, latest timestamp, and blockers. Approval
   means permission to discuss a separate implementation stage, not Chat
   migration permission.
+- W27 Approved Migration Implementation Gate adds
+  `check_controlled_chat_migration_implementation_gate`, a read-only command
+  over current W24 readiness, current W25 draft hash, and W26 metadata-safe
+  review decision evidence. It returns `implementationEligible`,
+  `latestDecision`, `readinessReport`, `draftHashMatched`,
+  `approvedAfterLatestDraft`, and `blockingReasons`. The latest metadata-safe
+  review decision must be `approve`; latest `reject` or `request_rework`,
+  approved draft hash mismatch, or current readiness failure blocks
+  eligibility. Eligible means implementation development discussion only. It
+  does not migrate Chat, replace default Chat, modify feature flags, write
+  evidence, create AgentRuns/Proposals/Memory/LifeModel patches, or invoke
+  external tools.
 
 ## Work Package Status
 
@@ -148,11 +162,12 @@ The key boundary is unchanged:
 | W24 Promotion Evidence Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_pilot_promotion_readiness` as a read-only gate over existing W23 metadata-safe promotion evidence. It defaults to 3 required promotions, surfaces pass/block counts, recent run ids, latest timestamp, mismatch block count, metadata-safe/default-chat flags, and blocking reasons in Settings. It does not migrate Chat, does not create evidence/runs/proposals/actions/observations, and does not read raw pilot response or raw user input. |
 | W25 Reviewed Migration Plan Draft Generator | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `draft_controlled_chat_migration_plan` as a read-only command over W24 readiness output. Blocked readiness returns `draftReady=false` and blockers with empty plan sections; passed readiness returns human-review-only scope, preconditions, rollback, fallback, and test plan with `manualReviewRequired=true` and `notAutomaticMigration=true`. It does not replace default Chat, modify default runtime feature flags, create evidence/runs/proposals/memory/lifemodel patches, or expose raw user/assistant/tool payload content. |
 | W26 Manual Migration Review Decision Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds explicit approve/reject/request_rework review decision recording after W25 draft. Blocked-draft approve returns blockers and writes no evidence; ready drafts write only metadata-safe `migration_review_decision` evidence with readiness counts, draft hash, createdAt, and sanitized reviewer-note metadata. Summary is read-only and normal Send / `send_message` / `start_stream_message` do not call these commands. |
+| W27 Approved Migration Implementation Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_migration_implementation_gate` as a read-only gate over W24 readiness, W25 current draft hash, and W26 metadata-safe review decision evidence. It requires the latest metadata-safe decision to be approve, blocks latest reject/request_rework, blocks draft hash mismatch, blocks current readiness failure, creates no evidence/runs/proposals/memory/lifemodel patches, and normal Send / `send_message` / `start_stream_message` do not call it. |
 
 ## Next Recommended Sequence
 
 ```text
-separate implementation discussion only after explicit review approval evidence
+separate implementation discussion only after explicit implementation gate eligibility
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -161,9 +176,10 @@ W22 only added source binding plus target-session validation for that promotion
 step, W23 only records/reads metadata-safe promotion evidence, W24 only checks
 readiness for discussing the next migration step, W25 only generates a
 read-only human-review draft, and W26 only records metadata-safe manual review
-decision evidence. Default `Send`, `send_message`, and `start_stream_message`
-remain unchanged until a later reviewed migration stage with separate evidence
-and explicit implementation approval.
+decision evidence, and W27 only checks whether current evidence qualifies for
+implementation discussion. Default `Send`, `send_message`, and
+`start_stream_message` remain unchanged until a later reviewed migration stage
+with separate implementation work and explicit human approval.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

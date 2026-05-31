@@ -9,6 +9,7 @@ import {
   getStateHistory,
   recordState,
   checkControlledChatPilotEligibility,
+  checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
@@ -348,5 +349,47 @@ describe("tauri command argument aliases", () => {
     expect(result.latestDecision?.decisionKind).toBe("request_rework");
     expect(result.approvedCount).toBe(1);
     expect(result.reworkRejectCount).toBe(2);
+  });
+
+  it("invokes controlled chat migration implementation gate as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      implementationEligible: true,
+      latestDecision: {
+        evidenceId: "ev_review_2",
+        decisionKind: "approve",
+        draftReady: true,
+        draftHash: "sha256:test-draft",
+        createdAt: "2026-05-31T02:03:04Z",
+      },
+      readinessReport: {
+        ready: true,
+        requiredPromotions: 3,
+        promotedCount: 3,
+        recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+        latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+        sourceTargetMismatchBlockCount: 0,
+        metadataSafeEvidenceReady: true,
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+      },
+      draftHashMatched: true,
+      approvedAfterLatestDraft: true,
+      blockingReasons: [],
+    });
+
+    const result = await checkControlledChatMigrationImplementationGate({
+      requiredPromotions: 3,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_controlled_chat_migration_implementation_gate", {
+      input: {
+        requiredPromotions: 3,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.implementationEligible).toBe(true);
+    expect(result.latestDecision?.decisionKind).toBe("approve");
+    expect(result.draftHashMatched).toBe(true);
   });
 });

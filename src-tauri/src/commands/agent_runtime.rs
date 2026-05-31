@@ -215,6 +215,27 @@ pub struct ControlledChatMigrationReviewDecisionSummary {
     pub blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationImplementationGateInput {
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationImplementationGateReport {
+    pub implementation_eligible: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<ControlledChatMigrationReviewLatestDecision>,
+    pub readiness_report: ControlledPilotPromotionReadinessReport,
+    pub draft_hash_matched: bool,
+    pub approved_after_latest_draft: bool,
+    pub blocking_reasons: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -727,6 +748,106 @@ pub(crate) async fn get_controlled_chat_migration_review_decision_summary_with_s
         approved_count,
         rework_reject_count,
         latest_timestamp,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn check_controlled_chat_migration_implementation_gate(
+    input: ControlledChatMigrationImplementationGateInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatMigrationImplementationGateReport, String> {
+    check_controlled_chat_migration_implementation_gate_with_state(input, &state.inner().clone())
+        .await
+}
+
+pub(crate) async fn check_controlled_chat_migration_implementation_gate_with_state(
+    input: ControlledChatMigrationImplementationGateInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatMigrationImplementationGateReport, String> {
+    let session_id = normalize_optional_internal_id(input.session_id.as_deref(), "sessionId")?;
+    let current_draft = draft_controlled_chat_migration_plan_with_state(
+        ControlledChatMigrationPlanDraftInput {
+            required_promotions: input.required_promotions,
+            session_id,
+        },
+        state,
+    )
+    .await?;
+    let current_draft_hash = metadata_hash_for_serializable(&current_draft)?;
+    let readiness_report = current_draft.readiness_report.clone();
+    let decision_summary =
+        get_controlled_chat_migration_review_decision_summary_with_state(state).await?;
+    let latest_decision = decision_summary.latest_decision;
+    let draft_hash_matched = latest_decision
+        .as_ref()
+        .is_some_and(|decision| decision.draft_hash == current_draft_hash);
+    let latest_is_approve = latest_decision
+        .as_ref()
+        .is_some_and(|decision| decision.decision_kind == "approve");
+    let approved_after_latest_draft = latest_is_approve && draft_hash_matched;
+
+    let mut blocking_reasons = Vec::new();
+    if !readiness_report.ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "promotion_readiness_currently_blocked".to_string(),
+        );
+        for reason in &readiness_report.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+    if !current_draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "migration_plan_draft_not_ready".to_string(),
+        );
+    }
+
+    match latest_decision.as_ref() {
+        Some(decision) if decision.decision_kind == "approve" => {
+            if !decision.draft_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "latest_approval_draft_not_ready".to_string(),
+                );
+            }
+            if !draft_hash_matched {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_draft_hash_mismatch".to_string(),
+                );
+            }
+        }
+        Some(decision) => {
+            push_unique_string(
+                &mut blocking_reasons,
+                format!("latest_review_decision_is_{}", decision.decision_kind),
+            );
+        }
+        None => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "metadata_safe_approve_decision_missing".to_string(),
+            );
+        }
+    }
+
+    let implementation_eligible = readiness_report.ready
+        && current_draft.draft_ready
+        && latest_is_approve
+        && latest_decision
+            .as_ref()
+            .is_some_and(|decision| decision.draft_ready)
+        && draft_hash_matched
+        && blocking_reasons.is_empty();
+
+    Ok(ControlledChatMigrationImplementationGateReport {
+        implementation_eligible,
+        latest_decision,
+        readiness_report,
+        draft_hash_matched,
+        approved_after_latest_draft,
         blocking_reasons,
     })
 }
@@ -2961,6 +3082,314 @@ mod tests {
             serde_json::to_string(&before_messages).unwrap(),
             serde_json::to_string(&after_messages).unwrap()
         );
+    }
+
+    async fn seed_migration_review_decision_evidence(
+        state: &Arc<crate::AppState>,
+        decision_kind: &str,
+        draft_hash: &str,
+    ) {
+        let store = state.evidence_store.lock().await;
+        let mut draft = EvidenceDraft::new(
+            EvidenceType::RuntimeBehavior,
+            CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH,
+            1.0,
+            RiskLevel::Low,
+            EvidencePrivacyLevel::Internal,
+        )
+        .with_summary("Controlled chat migration review decision recorded");
+        draft.run_metadata = json!({
+            "evidenceKind": "migration_review_decision",
+            "metadataSafe": true,
+            "draftReady": true,
+            "decisionKind": decision_kind,
+            "readinessCounts": {
+                "requiredPromotions": 3,
+                "promotedCount": 3,
+                "recentPromotedPilotRunCount": 3,
+                "sourceTargetMismatchBlockCount": 0,
+                "blockingReasonCount": 0
+            },
+            "draftHash": draft_hash,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+            "sessionId": "session-1",
+            "reviewerNote": {
+                "present": false,
+                "length": 0,
+                "checksum": null,
+                "category": "none"
+            },
+            "blockingReasons": [],
+            "metadataSafeEvidenceReady": true,
+            "defaultChatUnchanged": true,
+            "manualReviewRequired": true,
+            "notAutomaticMigration": true,
+            "contentStorage": "checksum_only",
+            "reviewerNoteStorage": "length_checksum_category_only",
+            "toolStorage": "none",
+            "transcriptStorage": "none"
+        });
+        store.create_evidence(draft).unwrap();
+    }
+
+    struct SideEffectCounts {
+        run_count: i64,
+        pending_proposal_count: usize,
+        evidence_count: usize,
+        patch_count: usize,
+        model_version: String,
+        messages_json: String,
+    }
+
+    async fn side_effect_counts(state: &Arc<crate::AppState>) -> SideEffectCounts {
+        let run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let pending_proposal_count = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap()
+            .len();
+        let evidence_count = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let patch_count = {
+            let store = state.patch_store.as_ref().unwrap().lock().await;
+            store.patch_count().unwrap()
+        };
+        let model_version = {
+            let manager = state.life_model_manager.lock().await;
+            manager.load().unwrap().metadata.version
+        };
+        let messages_json = {
+            let store = state.memory_store.lock().await;
+            serde_json::to_string(&store.export_all_messages().unwrap()).unwrap()
+        };
+
+        SideEffectCounts {
+            run_count,
+            pending_proposal_count,
+            evidence_count,
+            patch_count,
+            model_version,
+            messages_json,
+        }
+    }
+
+    #[tokio::test]
+    async fn implementation_gate_blocks_without_approve_evidence() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+
+        let report = check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_eligible);
+        assert!(report.latest_decision.is_none());
+        assert!(report.readiness_report.ready);
+        assert!(!report.draft_hash_matched);
+        assert!(!report.approved_after_latest_draft);
+        assert!(report
+            .blocking_reasons
+            .contains(&"metadata_safe_approve_decision_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn implementation_gate_blocks_when_latest_decision_is_reject_or_request_rework() {
+        for decision_kind in ["reject", "request_rework"] {
+            let state = preview_state().await;
+            seed_ready_migration_review_promotions(&state).await;
+            record_controlled_chat_migration_review_decision_with_state(
+                ControlledChatMigrationReviewDecisionInput {
+                    decision_kind: "approve".into(),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                    optional_reviewer_note: None,
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            record_controlled_chat_migration_review_decision_with_state(
+                ControlledChatMigrationReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                    optional_reviewer_note: None,
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            let report = check_controlled_chat_migration_implementation_gate_with_state(
+                ControlledChatMigrationImplementationGateInput {
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(!report.implementation_eligible);
+            assert_eq!(
+                report
+                    .latest_decision
+                    .as_ref()
+                    .map(|decision| decision.decision_kind.as_str()),
+                Some(decision_kind)
+            );
+            assert!(report.draft_hash_matched);
+            assert!(!report.approved_after_latest_draft);
+            assert!(report
+                .blocking_reasons
+                .contains(&format!("latest_review_decision_is_{decision_kind}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn implementation_gate_blocks_when_approved_draft_hash_differs_from_current_draft() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        seed_migration_review_decision_evidence(&state, "approve", "sha256:stale-reviewed-draft")
+            .await;
+
+        let report = check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_eligible);
+        assert_eq!(
+            report
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("approve")
+        );
+        assert!(report.readiness_report.ready);
+        assert!(!report.draft_hash_matched);
+        assert!(!report.approved_after_latest_draft);
+        assert!(report
+            .blocking_reasons
+            .contains(&"approved_draft_hash_mismatch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn implementation_gate_blocks_when_current_readiness_fails() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        {
+            let store = state.evidence_store.lock().await;
+            store
+                .create_evidence(EvidenceDraft::new(
+                    EvidenceType::RuntimeBehavior,
+                    CONTROLLED_PILOT_PROMOTION_BLOCK_PATH,
+                    1.0,
+                    RiskLevel::Low,
+                    EvidencePrivacyLevel::Internal,
+                ))
+                .unwrap();
+        }
+
+        let report = check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_eligible);
+        assert!(!report.readiness_report.ready);
+        assert!(report
+            .blocking_reasons
+            .contains(&"promotion_readiness_currently_blocked".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"source_target_mismatch_blocks_present".to_string()));
+    }
+
+    #[tokio::test]
+    async fn implementation_gate_is_eligible_with_latest_approve_readiness_pass_and_hash_match() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Ready to discuss implementation.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.implementation_eligible);
+        assert_eq!(
+            report
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("approve")
+        );
+        assert!(report.readiness_report.ready);
+        assert!(report.draft_hash_matched);
+        assert!(report.approved_after_latest_draft);
+        assert!(report.blocking_reasons.is_empty());
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
     }
 
     #[tokio::test]

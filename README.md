@@ -16,10 +16,10 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-当前项目处于 **W26 Manual Migration Review Decision Evidence** 阶段：
+当前项目处于 **W27 Approved Migration Implementation Gate** 阶段：
 
 - **ReAct 执行闭环已建立**：AgentLoop 迭代执行、Action Parser JSON envelope、Tool Registry 统一注册、Permission/Proposal/Replay 闭合。
-- **W1-W26 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层、Settings evidence surface、controlled Chat migration pilot eligibility 只读资格检查、Chat 页面显式单轮 Controlled Pilot、reviewed pilot response promotion、promotion 后的 source/target session 验证、metadata-safe promotion evidence 记录与只读 summary、基于既有 promotion evidence 的只读 readiness gate、reviewed migration plan draft 只读草案生成器，以及人工 migration review decision metadata-safe evidence 记录阶段；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
+- **W1-W27 已完成**：当前已经建立 Runtime Migration Gate 只读诊断层、Settings evidence surface、controlled Chat migration pilot eligibility 只读资格检查、Chat 页面显式单轮 Controlled Pilot、reviewed pilot response promotion、promotion 后的 source/target session 验证、metadata-safe promotion evidence 记录与只读 summary、基于既有 promotion evidence 的只读 readiness gate、reviewed migration plan draft 只读草案生成器、人工 migration review decision metadata-safe evidence 记录阶段，以及只读 implementation gate；完整状态索引见 [LifeModel-Governed Runtime Progress](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)。
 - **ReAct 仍是当前默认 Chat 主链路**：MultiStrategy Runtime 已有 preview command 和 audit-ready 路径，但尚未接管默认 `send_message` / Chat 主流程。
 - **MultiStrategy preview 已可审计**：`run_multi_strategy_agent_preview` 已存在，preview run 会写入 metadata-safe 外层 AgentRun audit；Runs / Trace 已能展示 preview strategy、payload、governance 和 warnings。
 - **Runtime Migration Gate 已建立**：`check_runtime_migration_gate` 只读取既有 preview AgentRun / audit，输出 `defaultChatUnchanged`、`previewPathHealthy`、`metadataSafeTraceReady`、`fallbackAvailable`、`noExternalWrites`、`proposalFirstPreserved` 和 `blockingReasons`；它不执行 ReAct、PlanExecute、工具调用或外部写入。
@@ -32,13 +32,14 @@ LifeModel-HS Protocol Layer
 - **Promotion Readiness Gate 已完成**：`check_controlled_pilot_promotion_readiness` 只读取 W23 promotion evidence，默认要求 3 条 metadata-safe promotion evidence，返回 ready、requiredPromotions、promotedCount、recent run ids、latest timestamp、source/target mismatch block count、metadataSafeEvidenceReady、defaultChatUnchanged 和 blockingReasons。`sessionId` 参数已预留；当前 EvidenceStore summary 仍是 global summary。gate pass 只表示“可进入下一阶段讨论”，不是自动迁移许可。
 - **Reviewed Migration Plan Draft 已完成**：`draft_controlled_chat_migration_plan` 复用 W24 readiness gate 结果。readiness blocked 时仅返回 `draftReady=false` 与 blocking reasons，不生成可执行迁移方案；readiness passed 时返回 migration scope、required preconditions、rollback/fallback/test plan，并固定 `manualReviewRequired=true`、`notAutomaticMigration=true`。该 command 不切换 default Chat、不改 feature flag、不创建 AgentRun/Proposal/Memory/LifeModel patch/promotion evidence，也不输出 raw user content、raw assistant output 或 tool payload。
 - **Manual Migration Review Decision Evidence 已完成**：`record_controlled_chat_migration_review_decision` 会先调用 W25 draft command，再记录用户显式 `approve` / `reject` / `request_rework` 决策。`draftReady=false` 时拒绝记录 approve 且不写 evidence；ready draft 的 decision 只写 metadata-safe EvidenceStore 记录，包含 `evidenceKind=migration_review_decision`、`metadataSafe=true`、draftReady、decisionKind、readiness counts、draft hash 和 createdAt。reviewer note 不原文存储，仅保存 length、checksum 和 bounded category。`get_controlled_chat_migration_review_decision_summary` 只读返回 latest decision、approved count、rework/reject count、latest timestamp 和 blockers，不读取 raw transcript，不创建 AgentRun/Proposal/Memory/LifeModel patch。
+- **Approved Migration Implementation Gate 已完成**：`check_controlled_chat_migration_implementation_gate` 只读读取当前 W24 readiness、当前 W25 draft hash 和 W26 metadata-safe review decision evidence，返回 `implementationEligible`、`latestDecision`、`readinessReport`、`draftHashMatched`、`approvedAfterLatestDraft` 和 `blockingReasons`。只有 latest metadata-safe decision 为 `approve`、当前 readiness 通过、且 approved evidence draftHash 匹配当前 draft hash 时才 eligible；latest `reject` / `request_rework`、hash mismatch 或 readiness blocked 都会阻断。eligible 只表示可进入 controlled Chat migration implementation discussion，不会切换 default Chat。
 - **PlanExecute V1 是受治理 runtime slice**：当前可通过 MultiStrategy preview 产生 planExecute payload/report，但不是产品化周计划流程。
 - **LifeModel-HS 仍是协议层方向**：Maturation V1 service、Evidence/Governor 等基础能力已存在，但 Chat 自动成熟化和产品化反馈闭环仍需 gate。
 - **RuntimeStrategy trait 已成型**：MultiStrategy Runtime 通过固定 ReAct / PlanExecute adapter registry 执行；这不是插件化加载，也不是默认 Chat 替换。
 - **ModelRouter 已毕业**：移除 experimental flag，成为默认路由基础设施。
 - **Execution Tools 分层落地**：P1 工具必须有真实 executor 或明确的 proposal-only governed executor 和治理测试；`calendar.propose_event` / `email.propose_draft` 当前只创建 `ScheduledTask` / `DataExport` proposal，不执行真实日历写入或邮件发送。
 - **Core OS Tools 注册**：life_model.read、goal.read、memory.search、proposal.list 等 9 个 builtin 工具。
-- **下一步仍不能直接替换默认 Chat**：W26 只是人工评审决策证据阶段。approval 只允许进入下一阶段 implementation discussion，不是 Chat migration；默认 Chat 仍未迁移；默认 `Send` / `send_message` / `start_stream_message` 路径保持现状，且不得调用 eligibility、gate、preview、promotion、evidence recorder、promotion readiness gate、migration draft 或 migration review decision command。
+- **下一步仍不能直接替换默认 Chat**：W27 只是实现资格只读 gate。eligible 只允许进入 controlled migration implementation discussion，不是 Chat migration；默认 Chat 仍未迁移；默认 `Send` / `send_message` / `start_stream_message` 路径保持现状，且不得调用 eligibility、gate、preview、promotion、evidence recorder、promotion readiness gate、migration draft、migration review decision 或 implementation gate command。
 - **文档与 taxonomy 同步**：入口文档和 Tool Taxonomy 必须随代码状态更新，避免后续 Agent 按过期 P1/P2 标签开发。
 - **双轨架构**：`use_agent_loop` feature flag 控制 Chat 路径，旧路径完整保留作为 fallback。
 - **UI 最小收敛**：导航聚焦 Chat/Review/Runs/Settings，Settings 新增 safe paths 和 AgentLoop toggle。
@@ -65,7 +66,7 @@ Post-Beta 的下一阶段是 LifeModel-HS MVP：把当前 LifeModel 从 YAML 兼
 | LifeModel | 已有四维模型和编辑器 | 成为所有 Agent 任务的私人上下文层 |
 | Builder | 已支持快速、渐进、苏格拉底式构建；默认只创建 Proposal | 通过 Review Center 确认后安全写入 LifeModel |
 | Chat | 已支持流式对话、历史持久化、AgentRun 和 Chat Proposal；默认主链路尚未切到 MultiStrategy Runtime | 继续稳定迁移受控子路径，展示上下文、模型路由和运行轨迹 |
-| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit；Settings Runtime Migration Gate、Pilot eligibility、Promotion evidence summary、Promotion readiness gate、Draft Migration Plan 和 Migration Review Decision 展示 gate/promotion evidence、人工评审草案与 metadata-safe review decision summary；Chat 有 W20 显式 Controlled Pilot 单轮入口、W21 reviewed promotion、W22 source-bound validation、W23 metadata-safe promotion evidence recorder、W24 readiness gate、W25 draft plan generator 和 W26 review decision evidence | 继续保持默认 Chat 不迁移；promotion 只是用户确认且 source/target session 一致后写入 assistant message，并记录 metadata-safe evidence 的受控台阶；readiness pass、migration draft 和 review approval 都只表示可进入人工讨论，不是迁移许可 |
+| MultiStrategy Runtime | Preview/audit-ready：`run_multi_strategy_agent_preview` 可选择 ReAct/PlanExecute/Blocked payload，并写入 metadata-safe 外层 AgentRun audit；Settings Runtime Migration Gate、Pilot eligibility、Promotion evidence summary、Promotion readiness gate、Draft Migration Plan、Migration Review Decision 和 Implementation Gate 展示 gate/promotion evidence、人工评审草案、metadata-safe review decision summary 与 implementation eligibility；Chat 有 W20 显式 Controlled Pilot 单轮入口、W21 reviewed promotion、W22 source-bound validation、W23 metadata-safe promotion evidence recorder、W24 readiness gate、W25 draft plan generator、W26 review decision evidence 和 W27 implementation gate | 继续保持默认 Chat 不迁移；promotion 只是用户确认且 source/target session 一致后写入 assistant message，并记录 metadata-safe evidence 的受控台阶；readiness pass、migration draft、review approval 和 implementation eligibility 都只表示可进入人工讨论/开发讨论，不是迁移许可 |
 | Runs / Trace | 已能展示 MultiStrategy preview strategy / payload / governance / warnings | 成为所有 runtime strategy 的统一 metadata-safe trace viewer |
 | **ModelRouter** | ✅ **任务/隐私感知路由已毕业，带真实健康检查语义** | 按任务类型、隐私需求、成本和延迟智能选择模型 |
 | Memory | 已有 SQLite 与向量记忆；Memory Proposal 可写入/归档 | 升级为可治理、可归档、可追踪来源的长期记忆层 |
@@ -255,7 +256,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Chat Proposal 持久化与 AgentRun.generated_proposals 关联收敛到共享 helper。
 - ✅ `make ci` 覆盖格式检查、Rust tests、frontend tests、frontend production build/typecheck。
 
-### W1-W26: LifeModel-Governed Runtime Preview, Gate Evidence, Controlled Pilot, Promotion Evidence, Readiness, Draft Planning, And Review Decision Evidence
+### W1-W27: LifeModel-Governed Runtime Preview, Gate Evidence, Controlled Pilot, Promotion Evidence, Readiness, Draft Planning, Review Decision Evidence, And Implementation Gate
 - ✅ Tool / Proposal Hygiene、Thin Runtime Spine、ReAct Runtime Contract Convergence。
 - ✅ LifeModel Maturation Loop Foundation、LifeModel Governor MVP、PlanExecute Core MVP。
 - ✅ StrategySelector、MultiStrategy Runtime Orchestrator、Preview Command。
@@ -271,6 +272,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 - ✅ Promotion Evidence Readiness Gate：新增只读 `check_controlled_pilot_promotion_readiness`，默认要求 3 条 metadata-safe promotion evidence；Settings 实验区展示 ready/block、counts、recent pilot run ids、blocking reasons 和 mismatch block count。`sessionId` 已预留，当前 EvidenceStore 不支持时按 global summary 读取；默认 Send 不调用该 gate。
 - ✅ Reviewed Migration Plan Draft Generator：新增只读 `draft_controlled_chat_migration_plan`，复用 W24 readiness gate。blocked 时不生成 plan sections；passed 时生成仅供人工评审的 scope/preconditions/rollback/fallback/test plan。Settings 实验区展示 Draft Migration Plan 面板；默认 Send 不调用该 command。
 - ✅ Manual Migration Review Decision Evidence：新增 `record_controlled_chat_migration_review_decision` 和只读 summary command。record 先调用 W25 draft；blocked draft approve 不写 evidence；ready draft 可记录 approve/reject/request_rework metadata-safe evidence，reviewer note 仅存 length/checksum/category。Settings 实验区展示 Migration Review Decision 面板；approval 不是 Chat migration。
+- ✅ Approved Migration Implementation Gate：新增只读 `check_controlled_chat_migration_implementation_gate`。它要求 latest metadata-safe decision 为 approve、当前 W25 draft hash 与 approved evidence draftHash 匹配、当前 W24 readiness 通过；reject/request_rework、hash mismatch 或 readiness blocked 均阻断。Settings 实验区展示 Implementation Gate；eligible 也不会切换 default Chat。
 
 ## 当前重要开发方向
 
@@ -281,6 +283,7 @@ Workspace -> Agent Task -> Agent Run Trace -> Proposal Review -> LifeModel/Memor
 5. Pilot response 默认隔离；只有用户显式点击 `Promote Pilot Response`、确认 review，且当前 target session 与 pilot source session 一致后，才写入一条 ordinary assistant message，并记录 metadata-safe promotion evidence。不得自动 promotion，不得把 promotion 当成默认 Chat 迁移；默认 Send 路径不得调用 evidence recorder。
 6. 用 Settings Promotion readiness 或 `check_controlled_pilot_promotion_readiness` 只读判断是否具备讨论下一步 Chat migration 的资格；ready 不是自动迁移许可。
 7. 用 Settings Draft Migration Plan 和 Migration Review Decision 进行人工决策记录；approve 只允许进入下一阶段 implementation discussion，不是默认 Chat migration，默认 Send 路径不得调用 review decision record/summary。
+8. 用 Settings Implementation Gate 或 `check_controlled_chat_migration_implementation_gate` 只读判断是否具备进入 controlled Chat migration implementation discussion 的资格；eligible 不是默认 Chat migration，默认 Send 路径不得调用 implementation gate。
 
 ## 常见问题
 

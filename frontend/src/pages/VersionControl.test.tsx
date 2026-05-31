@@ -29,7 +29,7 @@ describe("VersionControl", () => {
       expect(screen.getByText("历史版本")).toBeInTheDocument();
     });
 
-    const checkboxes = screen.getAllByRole("checkbox");
+    const checkboxes = await screen.findAllByRole("checkbox");
     fireEvent.click(checkboxes[0]);
     fireEvent.click(checkboxes[1]);
     fireEvent.click(screen.getByText("对比选中版本"));
