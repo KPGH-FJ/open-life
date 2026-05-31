@@ -1,6 +1,6 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-05-30
+> Last updated: 2026-05-31
 > Status: compact progress index, not a second roadmap
 
 This file summarizes implementation status for Agents entering the project. It
@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W24 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W25 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -20,7 +20,9 @@ explicit Controlled Pilot entry with fallback plus reviewed pilot response
 promotion with source-bound post-promotion validation and metadata-safe
 promotion evidence recording. W24 adds a read-only promotion evidence readiness
 gate that answers only whether the existing W23 evidence is sufficient to
-discuss the next Chat migration step.
+discuss the next Chat migration step. W25 adds a read-only reviewed migration
+plan draft generator that reuses W24 readiness and produces a human-review-only
+draft when readiness passes.
 
 The key boundary is unchanged:
 
@@ -90,6 +92,16 @@ The key boundary is unchanged:
   future filtered EvidenceStore path; current behavior is documented as a
   global summary. A ready result means discussion eligibility only, not
   automatic migration permission.
+- W25 Reviewed Migration Plan Draft Generator adds
+  `draft_controlled_chat_migration_plan`, a read-only command that reuses W24
+  readiness output. When readiness is blocked it returns `draftReady=false`,
+  the readiness report, and blocking reasons without executable plan sections.
+  When readiness passes it returns migration scope, required preconditions,
+  rollback plan, fallback plan, and test plan for human review only, with
+  `manualReviewRequired=true` and `notAutomaticMigration=true`. It does not
+  replace default Chat, modify default runtime feature flags, create AgentRuns,
+  Proposals, Memory writes, LifeModel patches, promotion evidence, or output raw
+  user content, raw assistant output, or tool payloads.
 
 ## Work Package Status
 
@@ -119,20 +131,22 @@ The key boundary is unchanged:
 | W22 Post-Promotion Validation And Source Binding | Done | `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/ChatPage.test.tsx`, docs | Binds each Controlled Pilot result to its source chat session, displays source session / target session / runId / strategy / governance summary in promotion review, blocks promotion when the current target session differs from the source session, shows rerun fallback guidance, and prevents mismatch writes to a different chat session. |
 | W23 Controlled Pilot Promotion Evidence Recorder | Done | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/pages/ChatPage.tsx`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Records metadata-safe promotion evidence only after reviewed promotion saves one assistant message. Evidence includes run/session/strategy/payload/governance/length/checksum/timestamp only, is idempotent by pilotRunId/checksum, exposes a read-only Settings summary, and keeps default Send / `send_message` / `start_stream_message` isolated from eligibility/gate/preview/promotion/evidence. |
 | W24 Promotion Evidence Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_pilot_promotion_readiness` as a read-only gate over existing W23 metadata-safe promotion evidence. It defaults to 3 required promotions, surfaces pass/block counts, recent run ids, latest timestamp, mismatch block count, metadata-safe/default-chat flags, and blocking reasons in Settings. It does not migrate Chat, does not create evidence/runs/proposals/actions/observations, and does not read raw pilot response or raw user input. |
+| W25 Reviewed Migration Plan Draft Generator | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `draft_controlled_chat_migration_plan` as a read-only command over W24 readiness output. Blocked readiness returns `draftReady=false` and blockers with empty plan sections; passed readiness returns human-review-only scope, preconditions, rollback, fallback, and test plan with `manualReviewRequired=true` and `notAutomaticMigration=true`. It does not replace default Chat, modify default runtime feature flags, create evidence/runs/proposals/memory/lifemodel patches, or expose raw user/assistant/tool payload content. |
 
 ## Next Recommended Sequence
 
 ```text
-further reviewed migration planning only after promotion readiness passes
+human review of the generated migration draft before any separate implementation
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
 added an explicit review-and-confirm promotion step for successful pilot output,
 W22 only added source binding plus target-session validation for that promotion
-step, W23 only records/reads metadata-safe promotion evidence, and W24 only
-checks readiness for discussing the next migration step. Default `Send`,
-`send_message`, and `start_stream_message` remain unchanged until a later
-reviewed migration stage with separate evidence.
+step, W23 only records/reads metadata-safe promotion evidence, W24 only checks
+readiness for discussing the next migration step, and W25 only generates a
+read-only human-review draft. Default `Send`, `send_message`, and
+`start_stream_message` remain unchanged until a later reviewed migration stage
+with separate evidence and explicit approval.
 
 `make ci` remains the release gate for every implementation task, including
 documentation-only status syncs.

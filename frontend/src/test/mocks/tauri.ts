@@ -471,6 +471,37 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         defaultChatUnchanged: true,
         blockingReasons: [],
       } as T);
+    case "draft_controlled_chat_migration_plan":
+      return Promise.resolve({
+        draftReady: true,
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: [
+            "run-controlled-pilot-3",
+            "run-controlled-pilot-2",
+            "run-controlled-pilot-1",
+          ],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+        },
+        migrationScope: [
+          "Draft scope is limited to a human-reviewed controlled pilot discussion; default Chat remains unchanged.",
+        ],
+        requiredPreconditions: [
+          "Separate human approval is required before any migration implementation work begins.",
+        ],
+        rollbackPlan: ["Disable the controlled pilot entry and keep default Chat unchanged."],
+        fallbackPlan: ["Use the existing default Chat send path whenever the pilot is blocked."],
+        testPlan: ["Verify send_message and start_stream_message do not call this draft command."],
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

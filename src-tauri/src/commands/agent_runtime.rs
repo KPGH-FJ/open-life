@@ -141,6 +141,30 @@ pub struct ControlledPilotPromotionReadinessReport {
     pub blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationPlanDraftInput {
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationPlanDraft {
+    pub draft_ready: bool,
+    pub readiness_report: ControlledPilotPromotionReadinessReport,
+    pub migration_scope: Vec<String>,
+    pub required_preconditions: Vec<String>,
+    pub rollback_plan: Vec<String>,
+    pub fallback_plan: Vec<String>,
+    pub test_plan: Vec<String>,
+    pub manual_review_required: bool,
+    pub not_automatic_migration: bool,
+    pub blocking_reasons: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -414,6 +438,80 @@ pub(crate) async fn check_controlled_pilot_promotion_readiness_with_state(
         source_target_mismatch_block_count: mismatch_blocks.len(),
         metadata_safe_evidence_ready,
         default_chat_unchanged,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn draft_controlled_chat_migration_plan(
+    input: ControlledChatMigrationPlanDraftInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatMigrationPlanDraft, String> {
+    draft_controlled_chat_migration_plan_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn draft_controlled_chat_migration_plan_with_state(
+    input: ControlledChatMigrationPlanDraftInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatMigrationPlanDraft, String> {
+    let readiness_report = check_controlled_pilot_promotion_readiness_with_state(
+        ControlledPilotPromotionReadinessCheckInput {
+            required_promotions: input.required_promotions,
+            session_id: input.session_id,
+        },
+        state,
+    )
+    .await?;
+
+    let blocking_reasons = readiness_report.blocking_reasons.clone();
+    if !readiness_report.ready {
+        return Ok(ControlledChatMigrationPlanDraft {
+            draft_ready: false,
+            readiness_report,
+            migration_scope: Vec::new(),
+            required_preconditions: Vec::new(),
+            rollback_plan: Vec::new(),
+            fallback_plan: Vec::new(),
+            test_plan: Vec::new(),
+            manual_review_required: true,
+            not_automatic_migration: true,
+            blocking_reasons,
+        });
+    }
+
+    Ok(ControlledChatMigrationPlanDraft {
+        draft_ready: true,
+        readiness_report,
+        migration_scope: vec![
+            "Draft scope is limited to a human-reviewed controlled pilot discussion; default Chat remains unchanged.".into(),
+            "No default runtime feature flag is enabled or modified by this draft.".into(),
+            "No LifeModel, Memory, Proposal, AgentRun, full tool call data, or promotion evidence write is part of this draft.".into(),
+        ],
+        required_preconditions: vec![
+            "separate human approval is required before any migration implementation work begins.".into(),
+            "Readiness pass must be treated only as permission to discuss the next step, not migration permission.".into(),
+            "Default Chat send_message and start_stream_message paths must remain on the existing runtime until a later approved change.".into(),
+            "Controlled pilot UI must remain explicit, reversible, and write-disabled unless a later review approves otherwise.".into(),
+        ],
+        rollback_plan: vec![
+            "disable the controlled pilot entry and keep default Chat on the existing send path.".into(),
+            "Keep existing Chat history and promoted assistant messages as ordinary messages; do not replay pilot output.".into(),
+            "Use promotion evidence summaries only for audit review; do not synthesize replacement evidence.".into(),
+        ],
+        fallback_plan: vec![
+            "Use the existing default Chat send path whenever the controlled pilot is unavailable, blocked, or fails.".into(),
+            "If migration discussion is rejected, continue collecting reviewed pilot promotion evidence without changing default Chat.".into(),
+            "If a future pilot degrades, show blockers and route users back to ordinary Chat without automatic retry or promotion.".into(),
+        ],
+        test_plan: vec![
+            "Verify send_message and start_stream_message do not call the migration draft command.".into(),
+            "Verify readiness blocked returns draftReady=false and no executable plan sections.".into(),
+            "Verify readiness passed returns scope, preconditions, rollback, fallback, and test plan sections.".into(),
+            "Verify the command creates no AgentRun, Proposal, Memory, LifeModel patch, or promotion evidence.".into(),
+            "Verify serialized output contains no private transcript text, assistant transcript text, or full tool call data.".into(),
+        ],
+        manual_review_required: true,
+        not_automatic_migration: true,
         blocking_reasons,
     })
 }
@@ -1996,6 +2094,206 @@ mod tests {
         assert!(report
             .blocking_reasons
             .contains(&"promotion_evidence_not_metadata_safe".to_string()));
+    }
+
+    #[tokio::test]
+    async fn migration_plan_draft_blocks_when_promotion_readiness_is_blocked_and_is_read_only() {
+        let state = preview_state().await;
+        record_controlled_pilot_promotion_evidence_with_state(
+            ControlledPilotPromotionEvidenceInput {
+                pilot_run_id: "run-controlled-pilot-1".into(),
+                source_session_id: "session-1".into(),
+                target_session_id: "session-1".into(),
+                strategy_kind: "react".into(),
+                payload_kind: "react".into(),
+                governance_decision_kind: Some("allow".into()),
+                promoted_message_length: 17,
+                promoted_message_hash: "checksum:run-controlled-pilot-1".into(),
+                promoted_at: Some("2026-05-30T01:02:03Z".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let before_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap()
+            .len();
+        let before_evidence_count = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let before_patch_count = {
+            let store = state.patch_store.as_ref().unwrap().lock().await;
+            store.patch_count().unwrap()
+        };
+        let before_model = {
+            let manager = state.life_model_manager.lock().await;
+            manager.load().unwrap()
+        };
+        let before_messages = {
+            let store = state.memory_store.lock().await;
+            store.export_all_messages().unwrap()
+        };
+
+        let draft = draft_controlled_chat_migration_plan_with_state(
+            ControlledChatMigrationPlanDraftInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!draft.draft_ready);
+        assert!(!draft.readiness_report.ready);
+        assert!(draft.migration_scope.is_empty());
+        assert!(draft.required_preconditions.is_empty());
+        assert!(draft.rollback_plan.is_empty());
+        assert!(draft.fallback_plan.is_empty());
+        assert!(draft.test_plan.is_empty());
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("insufficient_promotion_evidence")));
+
+        let serialized = serde_json::to_string(&draft).unwrap();
+        assert!(!serialized.contains("raw user"));
+        assert!(!serialized.contains("raw user content"));
+        assert!(!serialized.contains("raw assistant"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("tool payload"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("Pilot-only answer"));
+
+        let after_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let after_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap()
+            .len();
+        let after_evidence_count = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let after_patch_count = {
+            let store = state.patch_store.as_ref().unwrap().lock().await;
+            store.patch_count().unwrap()
+        };
+        let after_model = {
+            let manager = state.life_model_manager.lock().await;
+            manager.load().unwrap()
+        };
+        let after_messages = {
+            let store = state.memory_store.lock().await;
+            store.export_all_messages().unwrap()
+        };
+
+        assert_eq!(before_run_count, after_run_count);
+        assert_eq!(before_pending_proposals, after_pending_proposals);
+        assert_eq!(before_evidence_count, after_evidence_count);
+        assert_eq!(before_patch_count, after_patch_count);
+        assert_eq!(before_model.metadata.version, after_model.metadata.version);
+        assert_eq!(
+            serde_json::to_string(&before_messages).unwrap(),
+            serde_json::to_string(&after_messages).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_plan_draft_passes_with_complete_human_review_plan() {
+        let state = preview_state().await;
+        for (run_id, promoted_at) in [
+            ("run-controlled-pilot-1", "2026-05-30T01:02:03Z"),
+            ("run-controlled-pilot-2", "2026-05-30T02:03:04Z"),
+            ("run-controlled-pilot-3", "2026-05-30T03:04:05Z"),
+        ] {
+            record_controlled_pilot_promotion_evidence_with_state(
+                ControlledPilotPromotionEvidenceInput {
+                    pilot_run_id: run_id.into(),
+                    source_session_id: "session-1".into(),
+                    target_session_id: "session-1".into(),
+                    strategy_kind: "react".into(),
+                    payload_kind: "react".into(),
+                    governance_decision_kind: Some("allow".into()),
+                    promoted_message_length: 17,
+                    promoted_message_hash: format!("checksum:{run_id}"),
+                    promoted_at: Some(promoted_at.into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+        }
+
+        let draft = draft_controlled_chat_migration_plan_with_state(
+            ControlledChatMigrationPlanDraftInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(draft.draft_ready);
+        assert!(draft.readiness_report.ready);
+        assert!(draft.manual_review_required);
+        assert!(draft.not_automatic_migration);
+        assert!(draft.blocking_reasons.is_empty());
+        assert!(!draft.migration_scope.is_empty());
+        assert!(!draft.required_preconditions.is_empty());
+        assert!(!draft.rollback_plan.is_empty());
+        assert!(!draft.fallback_plan.is_empty());
+        assert!(!draft.test_plan.is_empty());
+        assert!(draft
+            .migration_scope
+            .iter()
+            .any(|item| item.contains("default Chat remains unchanged")));
+        assert!(draft
+            .required_preconditions
+            .iter()
+            .any(|item| item.contains("separate human approval")));
+        assert!(draft
+            .rollback_plan
+            .iter()
+            .any(|item| item.contains("disable the controlled pilot entry")));
+        assert!(draft
+            .fallback_plan
+            .iter()
+            .any(|item| item.contains("existing default Chat send path")));
+        assert!(draft
+            .test_plan
+            .iter()
+            .any(|item| item.contains("send_message and start_stream_message")));
+
+        let serialized = serde_json::to_string(&draft).unwrap();
+        assert!(!serialized.contains("raw user content"));
+        assert!(!serialized.contains("rawUserInput"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("rawAssistantResponse"));
+        assert!(!serialized.contains("tool payload"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("Pilot-only answer"));
     }
 
     #[tokio::test]

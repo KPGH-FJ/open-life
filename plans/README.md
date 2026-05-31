@@ -1,6 +1,6 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-05-30
+> Last updated: 2026-05-31
 > Status: authoritative document index for Agents
 
 This file prevents old planning documents from accidentally steering new Agent
@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W24 completion/status index. This is not a second roadmap.
+   - Compact W1-W25 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,14 +43,15 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W24 through sustained Runtime Migration
+Current implementation has completed W1-W25 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
-source-bound post-promotion validation, metadata-safe promotion evidence, and a
-read-only promotion readiness gate. The next practical sequence is:
+source-bound post-promotion validation, metadata-safe promotion evidence, a
+read-only promotion readiness gate, and a reviewed migration plan draft
+generator. The next practical sequence is:
 
 ```text
-further reviewed migration planning only after promotion readiness passes
+human review of the generated draft before any separate migration implementation
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -59,7 +60,7 @@ further reviewed migration planning only after promotion readiness passes
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W24 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W25 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -129,6 +130,16 @@ but currently reports a global EvidenceStore summary, and must not create
 AgentRuns, Proposals, Actions, Observations, LifeModel/Memory writes, external
 tool writes, or new evidence. A ready result means discussion eligibility only;
 it is not permission to migrate default Chat.
+
+W25 adds only `draft_controlled_chat_migration_plan` and its Settings Draft
+Migration Plan panel. The command reuses W24 readiness output. When readiness is
+blocked it returns `draftReady=false` plus blockers and does not generate plan
+sections. When readiness passes it returns a human-review-only scope,
+preconditions, rollback plan, fallback plan, and test plan with
+`manualReviewRequired=true` and `notAutomaticMigration=true`. It must not
+replace default Chat, modify default runtime feature flags, create AgentRuns,
+Proposals, Memory writes, LifeModel patches, promotion evidence, or output raw
+user content, raw assistant output, or tool payloads.
 
 ## 6. Agent Rules
 

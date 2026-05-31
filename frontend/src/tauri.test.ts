@@ -11,6 +11,7 @@ import {
   checkControlledChatPilotEligibility,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
+  draftControlledChatMigrationPlan,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
   saveChatMessage,
@@ -249,5 +250,45 @@ describe("tauri command argument aliases", () => {
     });
     expect(result.ready).toBe(true);
     expect(result.promotedCount).toBe(3);
+  });
+
+  it("invokes controlled chat migration plan draft as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      draftReady: true,
+      readinessReport: {
+        ready: true,
+        requiredPromotions: 3,
+        promotedCount: 3,
+        recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+        latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+        sourceTargetMismatchBlockCount: 0,
+        metadataSafeEvidenceReady: true,
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+      },
+      migrationScope: ["default Chat remains unchanged"],
+      requiredPreconditions: ["separate human approval"],
+      rollbackPlan: ["disable the controlled pilot entry"],
+      fallbackPlan: ["use the existing default Chat send path"],
+      testPlan: ["verify send_message and start_stream_message"],
+      manualReviewRequired: true,
+      notAutomaticMigration: true,
+      blockingReasons: [],
+    });
+
+    const result = await draftControlledChatMigrationPlan({
+      requiredPromotions: 3,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("draft_controlled_chat_migration_plan", {
+      input: {
+        requiredPromotions: 3,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.draftReady).toBe(true);
+    expect(result.manualReviewRequired).toBe(true);
+    expect(result.notAutomaticMigration).toBe(true);
   });
 });

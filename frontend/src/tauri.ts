@@ -14,6 +14,8 @@ import type {
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessCheckInput,
   ControlledPilotPromotionReadinessReport,
+  ControlledChatMigrationPlanDraftInput,
+  ControlledChatMigrationPlanDraft,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -272,6 +274,14 @@ export async function checkControlledPilotPromotionReadiness(
     "check_controlled_pilot_promotion_readiness",
     { input }
   );
+}
+
+export async function draftControlledChatMigrationPlan(
+  input: ControlledChatMigrationPlanDraftInput = {}
+): Promise<ControlledChatMigrationPlanDraft> {
+  return safeInvoke<ControlledChatMigrationPlanDraft>("draft_controlled_chat_migration_plan", {
+    input,
+  });
 }
 
 export async function startStreamMessage(

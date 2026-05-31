@@ -340,6 +340,24 @@ export interface ControlledPilotPromotionReadinessReport {
   blockingReasons: string[];
 }
 
+export interface ControlledChatMigrationPlanDraftInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatMigrationPlanDraft {
+  draftReady: boolean;
+  readinessReport: ControlledPilotPromotionReadinessReport;
+  migrationScope: string[];
+  requiredPreconditions: string[];
+  rollbackPlan: string[];
+  fallbackPlan: string[];
+  testPlan: string[];
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

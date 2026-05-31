@@ -571,6 +571,78 @@ describe("SettingsPage", () => {
     expect(screen.getByText("source_target_mismatch_blocks_present")).toBeInTheDocument();
   });
 
+  it("renders controlled chat migration plan draft after readiness passes", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Draft Migration Plan")).toBeInTheDocument();
+    expect(screen.getByText(/human review draft/)).toBeInTheDocument();
+    expect(screen.getByText(/will not switch default Chat/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Draft Migration Plan" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("draft_controlled_chat_migration_plan", {
+        input: {},
+      });
+    });
+
+    expect(await screen.findByText("Draft ready")).toBeInTheDocument();
+    expect(screen.getByText("Manual review required")).toBeInTheDocument();
+    expect(screen.getByText("Not automatic migration")).toBeInTheDocument();
+    expect(screen.getByText("Migration scope")).toBeInTheDocument();
+    expect(screen.getByText("Required preconditions")).toBeInTheDocument();
+    expect(screen.getByText("Rollback plan")).toBeInTheDocument();
+    expect(screen.getByText("Fallback plan")).toBeInTheDocument();
+    expect(screen.getByText("Test plan")).toBeInTheDocument();
+    expect(screen.getByText(/default Chat remains unchanged/)).toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+    expect(screen.queryByText("toolPayload")).not.toBeInTheDocument();
+  });
+
+  it("renders migration plan blockers without executable plan sections", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_controlled_chat_migration_plan") {
+        return Promise.resolve({
+          draftReady: false,
+          readinessReport: {
+            ready: false,
+            requiredPromotions: 3,
+            promotedCount: 1,
+            recentPromotedPilotRunIds: ["run-controlled-pilot-1"],
+            latestPromotionTimestamp: "2026-05-30T01:02:03Z",
+            sourceTargetMismatchBlockCount: 0,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: ["insufficient_promotion_evidence: required 3 promotions, found 1"],
+          },
+          migrationScope: [],
+          requiredPreconditions: [],
+          rollbackPlan: [],
+          fallbackPlan: [],
+          testPlan: [],
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          blockingReasons: ["insufficient_promotion_evidence: required 3 promotions, found 1"],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Draft Migration Plan" }));
+
+    expect(await screen.findByText("Draft blocked")).toBeInTheDocument();
+    expect(
+      screen.getByText("insufficient_promotion_evidence: required 3 promotions, found 1")
+    ).toBeInTheDocument();
+    expect(screen.getByText(/No executable migration plan is generated/)).toBeInTheDocument();
+    expect(screen.queryByText("Migration scope")).not.toBeInTheDocument();
+    expect(screen.queryByText("Rollback plan")).not.toBeInTheDocument();
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {

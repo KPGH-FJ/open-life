@@ -15,10 +15,12 @@ import {
   checkControlledChatPilotEligibility,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
+  draftControlledChatMigrationPlan,
   getControlledPilotPromotionEvidenceSummary,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
+  ControlledChatMigrationPlanDraft,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessReport,
@@ -70,6 +72,24 @@ function safeSummaryEntries(summary: Record<string, unknown>): Array<[string, st
   });
 }
 
+function PlanList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <div className="text-xs font-medium text-stone-700">{title}</div>
+      <div className="mt-1 space-y-1">
+        {items.map(item => (
+          <div
+            key={item}
+            className="rounded-md border border-stone-100 bg-stone-50 px-2 py-1 text-xs leading-5 text-stone-700"
+          >
+            {item}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function MultiStrategyPreviewSection() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -96,6 +116,11 @@ export default function MultiStrategyPreviewSection() {
   const [promotionReadinessError, setPromotionReadinessError] = useState<string | null>(null);
   const [promotionReadinessReport, setPromotionReadinessReport] =
     useState<ControlledPilotPromotionReadinessReport | null>(null);
+  const [migrationDraftChecking, setMigrationDraftChecking] = useState(false);
+  const [migrationDraftError, setMigrationDraftError] = useState<string | null>(null);
+  const [migrationDraft, setMigrationDraft] = useState<ControlledChatMigrationPlanDraft | null>(
+    null
+  );
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -193,6 +218,20 @@ export default function MultiStrategyPreviewSection() {
       setPromotionReadinessError(`Promotion readiness check failed: ${readableError(e)}`);
     } finally {
       setPromotionReadinessChecking(false);
+    }
+  };
+
+  const handleMigrationDraft = async () => {
+    setMigrationDraftChecking(true);
+    setMigrationDraftError(null);
+    setMigrationDraft(null);
+    try {
+      const draft = await draftControlledChatMigrationPlan();
+      setMigrationDraft(draft);
+    } catch (e) {
+      setMigrationDraftError(`Migration plan draft failed: ${readableError(e)}`);
+    } finally {
+      setMigrationDraftChecking(false);
     }
   };
 
@@ -641,6 +680,113 @@ export default function MultiStrategyPreviewSection() {
           </div>
         ) : (
           <div className="mt-3 text-xs text-stone-500">No promotion readiness report loaded.</div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Migration plan draft</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only human review draft generated from the promotion readiness gate. It will not
+              switch default Chat, does not change feature flags, and does not create migration
+              evidence.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleMigrationDraft}
+            disabled={migrationDraftChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              migrationDraftChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={migrationDraftChecking ? "animate-spin" : undefined} />
+            {migrationDraftChecking ? "Drafting..." : "Draft Migration Plan"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          This command reuses W24 readiness output only. Readiness pass is not migration permission,
+          and this panel cannot replace default Chat.
+        </div>
+
+        {migrationDraftError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {migrationDraftError}
+          </div>
+        )}
+
+        {migrationDraft ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  migrationDraft.draftReady
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {migrationDraft.draftReady ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                {migrationDraft.draftReady ? "Draft ready" : "Draft blocked"}
+              </span>
+              {migrationDraft.manualReviewRequired && (
+                <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                  Manual review required
+                </span>
+              )}
+              {migrationDraft.notAutomaticMigration && (
+                <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                  Not automatic migration
+                </span>
+              )}
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                {migrationDraft.readinessReport.promotedCount} /{" "}
+                {migrationDraft.readinessReport.requiredPromotions} promotions
+              </span>
+            </div>
+
+            {migrationDraft.blockingReasons.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+                <div className="mt-1 space-y-1">
+                  {migrationDraft.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {migrationDraft.draftReady ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                <PlanList title="Migration scope" items={migrationDraft.migrationScope} />
+                <PlanList
+                  title="Required preconditions"
+                  items={migrationDraft.requiredPreconditions}
+                />
+                <PlanList title="Rollback plan" items={migrationDraft.rollbackPlan} />
+                <PlanList title="Fallback plan" items={migrationDraft.fallbackPlan} />
+                <div className="md:col-span-2">
+                  <PlanList title="Test plan" items={migrationDraft.testPlan} />
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">
+                No executable migration plan is generated until promotion readiness passes.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No migration plan draft loaded.</div>
         )}
       </section>
 

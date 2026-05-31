@@ -185,6 +185,17 @@ impl PatchStore {
         patches.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
 
+    pub fn patch_count(&self) -> Result<usize> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM life_model_patches", [], |row| {
+            row.get(0)
+        })?;
+        Ok(count as usize)
+    }
+
     pub fn record_conflict(&self, conflict: &PatchConflict) -> Result<()> {
         let conn = self
             .conn
