@@ -853,6 +853,49 @@ export interface DefaultChatAdapterControlledPreviewReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export type DefaultChatAdapterControlledPreviewReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterControlledPreviewReviewDecisionInput {
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  contractShape: string;
+  previewSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewLatestDecision {
+  evidenceId: string;
+  previewRunId: string;
+  decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind;
+  contractShape: string;
+  previewSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterControlledPreviewReviewSummary {
+  latestDecision?: DefaultChatAdapterControlledPreviewReviewLatestDecision | null;
+  approvedCount: number;
+  rejectOrReworkCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

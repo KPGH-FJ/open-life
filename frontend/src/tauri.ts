@@ -53,6 +53,9 @@ import type {
   DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterControlledPreviewInput,
   DefaultChatAdapterControlledPreviewReport,
+  DefaultChatAdapterControlledPreviewReviewDecisionInput,
+  DefaultChatAdapterControlledPreviewReviewDecisionResult,
+  DefaultChatAdapterControlledPreviewReviewSummary,
   DefaultChatAdapterImplementationReadinessInput,
   DefaultChatAdapterImplementationReadinessReport,
   DefaultChatRuntimeBoundaryStatus,
@@ -505,6 +508,21 @@ export async function runDefaultChatAdapterControlledPreview(
   return safeInvoke<DefaultChatAdapterControlledPreviewReport>(
     "run_default_chat_adapter_controlled_preview",
     { input }
+  );
+}
+
+export async function recordDefaultChatAdapterControlledPreviewReviewDecision(
+  input: DefaultChatAdapterControlledPreviewReviewDecisionInput
+): Promise<DefaultChatAdapterControlledPreviewReviewDecisionResult> {
+  return safeInvoke<DefaultChatAdapterControlledPreviewReviewDecisionResult>(
+    "record_default_chat_adapter_controlled_preview_review_decision",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterControlledPreviewReviewSummary(): Promise<DefaultChatAdapterControlledPreviewReviewSummary> {
+  return safeInvoke<DefaultChatAdapterControlledPreviewReviewSummary>(
+    "get_default_chat_adapter_controlled_preview_review_summary"
   );
 }
 

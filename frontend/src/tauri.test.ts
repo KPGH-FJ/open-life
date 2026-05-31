@@ -20,6 +20,8 @@ import {
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
   runDefaultChatAdapterControlledPreview,
+  getDefaultChatAdapterControlledPreviewReviewSummary,
+  recordDefaultChatAdapterControlledPreviewReviewDecision,
   runDefaultChatAdapterDryRun,
   getDefaultChatAdapterDryRunReviewSummary,
   recordDefaultChatAdapterDryRunReviewDecision,
@@ -1248,5 +1250,71 @@ describe("tauri command argument aliases", () => {
     expect(result.metadataSafeSummary.adapterPreview).toBe(
       "default_chat_adapter_controlled_preview"
     );
+  });
+
+  it("records default chat adapter controlled preview review decisions", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_adapter_preview_review_1",
+      previewRunId: "run-adapter-preview-1",
+      decisionKind: "approve",
+      contractShape: "send_message_compatible",
+      previewSummaryDigest: "sha256:preview123",
+      createdAt: "2026-05-31T00:00:00Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordDefaultChatAdapterControlledPreviewReviewDecision({
+      previewRunId: "run-adapter-preview-1",
+      decisionKind: "approve",
+      optionalReviewerNote: "Looks safe.",
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "record_default_chat_adapter_controlled_preview_review_decision",
+      {
+        input: {
+          previewRunId: "run-adapter-preview-1",
+          decisionKind: "approve",
+          optionalReviewerNote: "Looks safe.",
+        },
+      }
+    );
+    expect(result.recorded).toBe(true);
+    expect(result.previewRunId).toBe("run-adapter-preview-1");
+  });
+
+  it("loads default chat adapter controlled preview review summary", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_adapter_preview_review_1",
+        previewRunId: "run-adapter-preview-1",
+        decisionKind: "approve",
+        contractShape: "send_message_compatible",
+        previewSummaryDigest: "sha256:preview123",
+        reviewerNoteChecksum: "sha256:note123",
+        reviewerNoteLength: 11,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-05-31T00:00:00Z",
+      },
+      approvedCount: 1,
+      rejectOrReworkCount: 0,
+      latestTimestamp: "2026-05-31T00:00:00Z",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        controlledPreviewReview: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await getDefaultChatAdapterControlledPreviewReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_default_chat_adapter_controlled_preview_review_summary",
+      undefined
+    );
+    expect(result.approvedCount).toBe(1);
+    expect(result.latestDecision?.previewRunId).toBe("run-adapter-preview-1");
   });
 });

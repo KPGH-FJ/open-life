@@ -792,6 +792,41 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           startStreamPath: "legacy_stream",
         },
       } as T);
+    case "record_default_chat_adapter_controlled_preview_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_adapter_preview_review_1",
+        previewRunId: _args?.input?.previewRunId ?? "run-adapter-preview-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        contractShape: "send_message_compatible",
+        previewSummaryDigest: "sha256:adapterpreviewreview",
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_controlled_preview_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_adapter_preview_review_1",
+          previewRunId: "run-adapter-preview-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          previewSummaryDigest: "sha256:adapterpreviewreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          controlledPreviewReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

@@ -30,6 +30,8 @@ const DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.default_chat.adapter_activation_review_decision";
 const DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.default_chat.adapter_dry_run_review_decision";
+const DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.default_chat.adapter_controlled_preview_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -806,6 +808,57 @@ pub struct DefaultChatAdapterControlledPreviewReport {
     pub agent_run_recorded: bool,
     pub implementation_ready: bool,
     pub warnings: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewReviewDecisionInput {
+    pub preview_run_id: String,
+    pub decision_kind: String,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub preview_run_id: String,
+    pub decision_kind: String,
+    pub contract_shape: String,
+    pub preview_summary_digest: String,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewReviewLatestDecision {
+    pub evidence_id: String,
+    pub preview_run_id: String,
+    pub decision_kind: String,
+    pub contract_shape: String,
+    pub preview_summary_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_note_checksum: Option<String>,
+    pub reviewer_note_length: usize,
+    pub reviewer_note_category: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterControlledPreviewReviewLatestDecision>,
+    pub approved_count: usize,
+    pub reject_or_rework_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
     pub metadata_safe_summary: Value,
 }
@@ -3816,6 +3869,194 @@ pub(crate) async fn run_default_chat_adapter_controlled_preview_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn record_default_chat_adapter_controlled_preview_review_decision(
+    input: DefaultChatAdapterControlledPreviewReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterControlledPreviewReviewDecisionResult, String> {
+    record_default_chat_adapter_controlled_preview_review_decision_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn record_default_chat_adapter_controlled_preview_review_decision_with_state(
+    input: DefaultChatAdapterControlledPreviewReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterControlledPreviewReviewDecisionResult, String> {
+    let preview_run_id = safe_internal_id(&input.preview_run_id, "previewRunId")?;
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let run =
+        load_default_chat_adapter_controlled_preview_review_run(state, &preview_run_id).await?;
+    let readiness = default_chat_adapter_controlled_preview_review_readiness(run.as_ref())?;
+    let mut blocking_reasons = readiness.blocking_reasons.clone();
+
+    if decision_kind == "approve" {
+        if readiness.contract_shape != "send_message_compatible" {
+            push_unique_string(
+                &mut blocking_reasons,
+                "preview_run_contract_shape_not_send_message_compatible".into(),
+            );
+        }
+        if !readiness.preview_ready {
+            push_unique_string(
+                &mut blocking_reasons,
+                "preview_run_not_ready_for_approval".into(),
+            );
+        }
+    }
+
+    if !blocking_reasons.is_empty() {
+        return Ok(DefaultChatAdapterControlledPreviewReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            preview_run_id,
+            decision_kind,
+            contract_shape: readiness.contract_shape,
+            preview_summary_digest: readiness.digest,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note_fields(input.optional_reviewer_note.as_deref());
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    );
+    evidence_draft.run_metadata = json!({
+        "previewRunId": preview_run_id.clone(),
+        "decisionKind": decision_kind.clone(),
+        "contractShape": readiness.contract_shape.clone(),
+        "previewSummaryDigest": readiness.digest.clone(),
+        "reviewerNoteChecksum": reviewer_note_metadata.checksum,
+        "reviewerNoteLength": reviewer_note_metadata.length,
+        "reviewerNoteCategory": reviewer_note_metadata.category,
+        "createdAt": created_at.clone(),
+    });
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store.create_evidence(evidence_draft).map_err(|e| {
+            format!("failed to record default Chat adapter controlled preview review evidence: {e}")
+        })?
+    };
+
+    Ok(DefaultChatAdapterControlledPreviewReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        preview_run_id,
+        decision_kind,
+        contract_shape: readiness.contract_shape,
+        preview_summary_digest: readiness.digest,
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_controlled_preview_review_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterControlledPreviewReviewSummary, String> {
+    get_default_chat_adapter_controlled_preview_review_summary_with_state(&state.inner().clone())
+        .await
+}
+
+pub(crate) async fn get_default_chat_adapter_controlled_preview_review_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterControlledPreviewReviewSummary, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| {
+                format!(
+                    "failed to read default Chat adapter controlled preview review evidence: {e}"
+                )
+            })?
+    };
+    let records = records
+        .into_iter()
+        .filter(default_chat_adapter_controlled_preview_review_decision_evidence_is_metadata_safe)
+        .collect::<Vec<_>>();
+
+    let approved_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_controlled_preview_review_decision_kind(record) == Some("approve")
+        })
+        .count();
+    let reject_or_rework_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                default_chat_adapter_controlled_preview_review_decision_kind(record),
+                Some("reject" | "request_rework")
+            )
+        })
+        .count();
+    let latest_decision = records
+        .first()
+        .and_then(default_chat_adapter_controlled_preview_review_latest_decision);
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+    let latest_decision_present = latest_decision.is_some();
+    let blocking_reasons = if latest_decision_present {
+        Vec::new()
+    } else {
+        vec!["controlled_preview_review_decision_missing".into()]
+    };
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterControlledPreviewReviewSummary {
+        latest_decision,
+        approved_count,
+        reject_or_rework_count,
+        latest_timestamp,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "controlledPreviewReview": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "approvedCount": approved_count,
+            "rejectOrReworkCount": reject_or_rework_count,
+            "latestDecisionPresent": latest_decision_present,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "reviewerNoteStorage": "length_checksum_category_only",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+            "notAutomaticMigration": true,
+        }),
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -4303,6 +4544,13 @@ struct CutoverCandidateReviewReadiness {
     blocking_reasons: Vec<String>,
 }
 
+struct DefaultChatAdapterControlledPreviewReviewReadiness {
+    digest: String,
+    contract_shape: String,
+    preview_ready: bool,
+    blocking_reasons: Vec<String>,
+}
+
 async fn load_shadow_review_run(
     state: &Arc<AppState>,
     shadow_run_id: &str,
@@ -4627,6 +4875,203 @@ fn cutover_candidate_review_readiness(
         digest: metadata_hash_for_serializable(&summary)?,
         contract_shape,
         candidate_ready,
+        blocking_reasons,
+    })
+}
+
+async fn load_default_chat_adapter_controlled_preview_review_run(
+    state: &Arc<AppState>,
+    preview_run_id: &str,
+) -> Result<Option<AgentRun>, String> {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return Ok(None);
+    };
+    let store = store_arc.lock().await;
+    store
+        .get_run(preview_run_id)
+        .map_err(|e| format!("failed to read default Chat adapter controlled preview run: {e}"))
+}
+
+fn default_chat_adapter_controlled_preview_review_readiness(
+    run: Option<&AgentRun>,
+) -> Result<DefaultChatAdapterControlledPreviewReviewReadiness, String> {
+    let Some(run) = run else {
+        let summary = json!({
+            "runFound": false,
+            "metadataSafe": true,
+            "sideEffectAuditReady": false,
+        });
+        return Ok(DefaultChatAdapterControlledPreviewReviewReadiness {
+            digest: metadata_hash_for_serializable(&summary)?,
+            contract_shape: "missing".into(),
+            preview_ready: false,
+            blocking_reasons: vec!["preview_run_missing".into()],
+        });
+    };
+
+    let audit = run
+        .reasoning_trace
+        .as_ref()
+        .and_then(|trace| trace.strategy_result.as_ref());
+    let metadata_safe = audit_bool(audit, "metadataSafe").unwrap_or(false);
+    let contract_shape = audit_string(audit, "contractShape")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "missing".into());
+    let contract_shape_allowed = matches!(
+        contract_shape.as_str(),
+        "send_message_compatible" | "blocked" | "failed"
+    );
+    let preview_ready = audit_bool(audit, "previewReady").unwrap_or(false);
+    let allow_writes = default_chat_adapter_controlled_preview_review_allow_writes(audit);
+    let max_tool_calls = default_chat_adapter_controlled_preview_review_max_tool_calls(audit);
+    let chat_message_saved = audit_bool(audit, "chatMessageSaved").unwrap_or(false);
+    let storage = |key: &str| audit_string(audit, key).unwrap_or("missing");
+    let declared_write_step_count =
+        audit_u64_at(audit, &["writeControl", "declaredWriteStepCount"]).unwrap_or_default();
+    let proposal_required_step_count =
+        audit_u64_at(audit, &["writeControl", "proposalRequiredStepCount"]).unwrap_or_default();
+    let proposal_id_count = audit_u64(audit, "proposalIdCount").unwrap_or_default();
+
+    let side_effects_absent = run.user_input.is_none()
+        && run.generated_proposals.is_empty()
+        && run.actions.is_empty()
+        && run.observations.is_empty()
+        && run.tool_call_count == 0
+        && proposal_id_count == 0
+        && declared_write_step_count == 0
+        && proposal_required_step_count == 0
+        && allow_writes == Some(false)
+        && max_tool_calls == Some(0)
+        && !chat_message_saved;
+
+    let summary = json!({
+        "runFound": true,
+        "previewRunId": run.id,
+        "reasoningStrategy": run.reasoning_strategy.as_deref().unwrap_or("missing"),
+        "status": run.status.to_string(),
+        "contractShape": contract_shape.clone(),
+        "previewReady": preview_ready,
+        "metadataSafe": metadata_safe,
+        "allowWrites": allow_writes,
+        "maxToolCalls": max_tool_calls,
+        "chatMessageSaved": chat_message_saved,
+        "contentStorage": storage("contentStorage"),
+        "toolStorage": storage("toolStorage"),
+        "chatHistoryStorage": storage("chatHistoryStorage"),
+        "proposalStorage": storage("proposalStorage"),
+        "lifeModelPatchStorage": storage("lifeModelPatchStorage"),
+        "memoryStorage": storage("memoryStorage"),
+        "evidenceStorage": storage("evidenceStorage"),
+        "mcpAuditStorage": storage("mcpAuditStorage"),
+        "externalWriteStorage": storage("externalWriteStorage"),
+        "userInputStored": run.user_input.is_some(),
+        "generatedProposalCount": run.generated_proposals.len(),
+        "actionCount": run.actions.len(),
+        "observationCount": run.observations.len(),
+        "toolCallCount": run.tool_call_count,
+        "proposalIdCount": proposal_id_count,
+        "declaredWriteStepCount": declared_write_step_count,
+        "proposalRequiredStepCount": proposal_required_step_count,
+        "sideEffectsAbsent": side_effects_absent,
+    });
+    let mut blocking_reasons = Vec::new();
+
+    if run.reasoning_strategy.as_deref() != Some("default_chat_adapter_controlled_preview") {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_strategy_mismatch".into(),
+        );
+    }
+    if run.status != AgentRunStatus::Completed {
+        push_unique_string(&mut blocking_reasons, "preview_run_not_completed".into());
+    }
+    if audit.is_none() {
+        push_unique_string(&mut blocking_reasons, "preview_run_audit_missing".into());
+    }
+    if !contract_shape_allowed {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_contract_shape_invalid".into(),
+        );
+    }
+    if !metadata_safe {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_metadata_not_safe".into(),
+        );
+    }
+    if allow_writes != Some(false) {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_allow_writes_not_false".into(),
+        );
+    }
+    if max_tool_calls != Some(0) {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_max_tool_calls_not_zero".into(),
+        );
+    }
+    for (key, reason) in [
+        ("contentStorage", "preview_run_content_storage_not_none"),
+        ("toolStorage", "preview_run_tool_storage_not_none"),
+        (
+            "chatHistoryStorage",
+            "preview_run_chat_history_storage_not_none",
+        ),
+        ("proposalStorage", "preview_run_proposal_storage_not_none"),
+        (
+            "lifeModelPatchStorage",
+            "preview_run_life_model_patch_storage_not_none",
+        ),
+        ("memoryStorage", "preview_run_memory_storage_not_none"),
+        ("evidenceStorage", "preview_run_evidence_storage_not_none"),
+        ("mcpAuditStorage", "preview_run_mcp_audit_storage_not_none"),
+        (
+            "externalWriteStorage",
+            "preview_run_external_write_storage_not_none",
+        ),
+    ] {
+        if audit_string(audit, key) != Some("none") {
+            push_unique_string(&mut blocking_reasons, reason.into());
+        }
+    }
+    if chat_message_saved {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_chat_message_saved".into(),
+        );
+    }
+    if run.user_input.is_some() {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_user_input_persisted".into(),
+        );
+    }
+    if !run.generated_proposals.is_empty()
+        || proposal_id_count > 0
+        || proposal_required_step_count > 0
+    {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_proposal_side_effects_present".into(),
+        );
+    }
+    if !run.actions.is_empty()
+        || !run.observations.is_empty()
+        || run.tool_call_count > 0
+        || declared_write_step_count > 0
+    {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_run_external_write_side_effects_present".into(),
+        );
+    }
+
+    Ok(DefaultChatAdapterControlledPreviewReviewReadiness {
+        digest: metadata_hash_for_serializable(&summary)?,
+        contract_shape,
+        preview_ready,
         blocking_reasons,
     })
 }
@@ -5372,6 +5817,115 @@ fn cutover_candidate_review_latest_decision(
     })
 }
 
+fn default_chat_adapter_controlled_preview_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || record.summary.is_some()
+        || !record.source_refs.is_empty()
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(metadata) = record.run_metadata.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "previewRunId",
+        "decisionKind",
+        "contractShape",
+        "previewSummaryDigest",
+        "reviewerNoteChecksum",
+        "reviewerNoteLength",
+        "reviewerNoteCategory",
+        "createdAt",
+    ];
+    if metadata.len() != allowed.len()
+        || !metadata.keys().all(|key| allowed.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    metadata_string_is_safe(&record.run_metadata, "previewRunId", safe_internal_id)
+        && metadata_string_is_safe(&record.run_metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && metadata_string_is_safe(&record.run_metadata, "contractShape", |value, field| {
+            safe_enum_value(
+                value,
+                field,
+                &["send_message_compatible", "blocked", "failed"],
+            )
+        })
+        && metadata_string_is_safe(&record.run_metadata, "previewSummaryDigest", |value, _| {
+            safe_checksum(value)
+        })
+        && reviewer_note_flat_metadata_is_safe(&record.run_metadata)
+        && record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && !contains_unsafe_promotion_metadata(&record.run_metadata)
+}
+
+fn default_chat_adapter_controlled_preview_review_decision_kind(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn default_chat_adapter_controlled_preview_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<DefaultChatAdapterControlledPreviewReviewLatestDecision> {
+    Some(DefaultChatAdapterControlledPreviewReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        preview_run_id: record
+            .run_metadata
+            .get("previewRunId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        decision_kind: default_chat_adapter_controlled_preview_review_decision_kind(record)?
+            .to_string(),
+        contract_shape: record
+            .run_metadata
+            .get("contractShape")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        preview_summary_digest: record
+            .run_metadata
+            .get("previewSummaryDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        reviewer_note_checksum: record
+            .run_metadata
+            .get("reviewerNoteChecksum")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        reviewer_note_length: record
+            .run_metadata
+            .get("reviewerNoteLength")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        reviewer_note_category: record
+            .run_metadata
+            .get("reviewerNoteCategory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339()),
+    })
+}
+
 fn default_chat_adapter_activation_review_decision_evidence_is_metadata_safe(
     record: &openlife_core::agent::EvidenceRecord,
 ) -> bool {
@@ -5637,6 +6191,21 @@ fn cutover_candidate_review_allow_writes(audit: Option<&Value>) -> Option<bool> 
 }
 
 fn cutover_candidate_review_max_tool_calls(audit: Option<&Value>) -> Option<u64> {
+    audit_u64_at(audit, &["runtimeLimits", "maxToolCalls"])
+        .or_else(|| audit_u64(audit, "maxToolCalls"))
+}
+
+fn default_chat_adapter_controlled_preview_review_allow_writes(
+    audit: Option<&Value>,
+) -> Option<bool> {
+    audit_bool_at(audit, &["runtimeLimits", "allowWrites"])
+        .or_else(|| audit_bool_at(audit, &["writeControl", "allowWrites"]))
+        .or_else(|| audit_bool(audit, "allowWrites"))
+}
+
+fn default_chat_adapter_controlled_preview_review_max_tool_calls(
+    audit: Option<&Value>,
+) -> Option<u64> {
     audit_u64_at(audit, &["runtimeLimits", "maxToolCalls"])
         .or_else(|| audit_u64(audit, "maxToolCalls"))
 }
@@ -12436,6 +13005,416 @@ mod tests {
             assert!(!serialized.contains("toolPayload"));
             assert!(!serialized.contains("full tool payload"));
         }
+    }
+
+    fn completed_default_chat_adapter_controlled_preview_review_run(run_id: &str) -> AgentRun {
+        let mut run = AgentRun::new_chat_run("session-1", "raw prompt should not persist");
+        run.id = run_id.to_string();
+        run.status = AgentRunStatus::Completed;
+        run.user_input = None;
+        run.reasoning_strategy = Some("default_chat_adapter_controlled_preview".into());
+        run.output_preview = Some("Default Chat adapter controlled preview: react / react".into());
+        run.generated_proposals = Vec::new();
+        run.actions = Vec::new();
+        run.observations = Vec::new();
+        run.tool_call_count = 0;
+        run.finished_at = Some(chrono::Utc::now());
+        run.reasoning_trace = Some(ReasoningTrace {
+            strategy_result: Some(json!({
+                "adapterPreview": "default_chat_adapter_controlled_preview",
+                "strategyKind": "react",
+                "payloadKind": "react",
+                "contractShape": "send_message_compatible",
+                "previewReady": true,
+                "metadataSafe": true,
+                "nonDefault": true,
+                "defaultChatPathUnchanged": true,
+                "runtimeLimits": {
+                    "allowWrites": false,
+                    "maxToolCalls": 0
+                },
+                "contentStorage": "none",
+                "toolStorage": "none",
+                "chatHistoryStorage": "none",
+                "proposalStorage": "none",
+                "lifeModelPatchStorage": "none",
+                "memoryStorage": "none",
+                "evidenceStorage": "none",
+                "mcpAuditStorage": "none",
+                "externalWriteStorage": "none",
+                "proposalIdCount": 0,
+                "writeControl": {
+                    "allowWrites": false,
+                    "declaredWriteStepCount": 0,
+                    "proposalRequiredStepCount": 0,
+                    "blockedStepCount": 0
+                }
+            })),
+            output: Some("default_chat_adapter_controlled_preview".into()),
+            ..ReasoningTrace::default()
+        });
+        run
+    }
+
+    async fn insert_default_chat_adapter_controlled_preview_review_run(
+        state: &Arc<crate::AppState>,
+        run: &AgentRun,
+    ) {
+        let store = state.agent_run_store.as_ref().unwrap().lock().await;
+        store.create_run(run).unwrap();
+    }
+
+    async fn default_chat_adapter_controlled_preview_review_evidence_records(
+        state: &Arc<crate::AppState>,
+    ) -> Vec<openlife_core::agent::EvidenceRecord> {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_review_blocks_missing_preview_run_without_evidence(
+    ) {
+        let state = preview_state().await;
+
+        let result = record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: "run-preview-missing".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: Some("Do not store reviewer@example.com".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert_eq!(result.preview_run_id, "run-preview-missing");
+        assert_eq!(result.decision_kind, "approve");
+        assert!(result
+            .blocking_reasons
+            .contains(&"preview_run_missing".to_string()));
+        assert!(
+            default_chat_adapter_controlled_preview_review_evidence_records(&state)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_review_blocks_invalid_preview_runs_without_evidence(
+    ) {
+        for (run_id, mutate, expected_reason) in [
+            (
+                "run-preview-not-preview",
+                "strategy",
+                "preview_run_strategy_mismatch",
+            ),
+            (
+                "run-preview-running",
+                "running",
+                "preview_run_not_completed",
+            ),
+            ("run-preview-failed", "failed", "preview_run_not_completed"),
+            (
+                "run-preview-not-ready",
+                "not_ready",
+                "preview_run_not_ready_for_approval",
+            ),
+            (
+                "run-preview-bad-shape",
+                "bad_shape",
+                "preview_run_contract_shape_not_send_message_compatible",
+            ),
+        ] {
+            let state = preview_state().await;
+            let mut run = completed_default_chat_adapter_controlled_preview_review_run(run_id);
+            match mutate {
+                "strategy" => {
+                    run.reasoning_strategy = Some("controlled_chat_cutover_candidate".into())
+                }
+                "running" => {
+                    run.status = AgentRunStatus::Running;
+                    run.finished_at = None;
+                }
+                "failed" => {
+                    run.fail(AgentRunError {
+                        message: "metadata-safe failure".into(),
+                        phase: "test".into(),
+                        recoverable: false,
+                    });
+                }
+                "not_ready" => {
+                    let audit = run
+                        .reasoning_trace
+                        .as_mut()
+                        .and_then(|trace| trace.strategy_result.as_mut())
+                        .and_then(Value::as_object_mut)
+                        .unwrap();
+                    audit.insert("previewReady".into(), json!(false));
+                }
+                "bad_shape" => {
+                    let audit = run
+                        .reasoning_trace
+                        .as_mut()
+                        .and_then(|trace| trace.strategy_result.as_mut())
+                        .and_then(Value::as_object_mut)
+                        .unwrap();
+                    audit.insert("contractShape".into(), json!("failed"));
+                }
+                _ => unreachable!(),
+            }
+            insert_default_chat_adapter_controlled_preview_review_run(&state, &run).await;
+
+            let result = record_default_chat_adapter_controlled_preview_review_decision_with_state(
+                DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                    preview_run_id: run_id.into(),
+                    decision_kind: "approve".into(),
+                    optional_reviewer_note: None,
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(!result.recorded);
+            assert!(result.evidence_id.is_none());
+            assert!(result
+                .blocking_reasons
+                .contains(&expected_reason.to_string()));
+            assert!(
+                default_chat_adapter_controlled_preview_review_evidence_records(&state)
+                    .await
+                    .is_empty()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_review_approve_records_metadata_safe_evidence()
+    {
+        let state = preview_state().await;
+        let run =
+            completed_default_chat_adapter_controlled_preview_review_run("run-preview-review-ok");
+        insert_default_chat_adapter_controlled_preview_review_run(&state, &run).await;
+        let before = side_effect_counts(&state).await;
+        let raw_note = "Approve preview, but never store raw-preview-reviewer@example.com.";
+
+        let result = record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: "run-preview-review-ok".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: Some(raw_note.into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.recorded);
+        assert!(result.evidence_id.is_some());
+        assert_eq!(result.decision_kind, "approve");
+        assert_eq!(result.contract_shape, "send_message_compatible");
+        assert!(result.preview_summary_digest.starts_with("sha256:"));
+        assert!(result.blocking_reasons.is_empty());
+
+        let evidence =
+            default_chat_adapter_controlled_preview_review_evidence_records(&state).await;
+        assert_eq!(evidence.len(), 1);
+        let record = &evidence[0];
+        assert!(record.summary.is_none());
+        assert!(record.source_refs.is_empty());
+        assert!(record.linked_agent_run_ids.is_empty());
+        assert!(record.linked_proposal_ids.is_empty());
+
+        let metadata = record.run_metadata.as_object().unwrap();
+        let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "contractShape",
+                "createdAt",
+                "decisionKind",
+                "previewRunId",
+                "previewSummaryDigest",
+                "reviewerNoteCategory",
+                "reviewerNoteChecksum",
+                "reviewerNoteLength"
+            ]
+        );
+        assert_eq!(record.run_metadata["previewRunId"], "run-preview-review-ok");
+        assert_eq!(record.run_metadata["decisionKind"], "approve");
+        assert_eq!(
+            record.run_metadata["contractShape"],
+            "send_message_compatible"
+        );
+        assert_eq!(
+            record.run_metadata["reviewerNoteLength"],
+            raw_note.chars().count()
+        );
+        assert!(record.run_metadata["reviewerNoteChecksum"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(record.run_metadata["reviewerNoteCategory"], "brief");
+        assert!(record.run_metadata["previewSummaryDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(record.run_metadata["createdAt"].as_str().is_some());
+
+        let serialized = serde_json::to_string(record).unwrap();
+        assert!(!serialized.contains(raw_note));
+        assert!(!serialized.contains("raw-preview-reviewer@example.com"));
+        assert!(!serialized.contains("reviewerNoteRaw"));
+        assert!(!serialized.contains("preview reply"));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("toolPayload"));
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count + 1, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_review_reject_and_rework_can_be_recorded_metadata_safe(
+    ) {
+        let state = preview_state().await;
+
+        for decision_kind in ["reject", "request_rework"] {
+            let run_id = format!("run-preview-review-{decision_kind}");
+            let mut run = completed_default_chat_adapter_controlled_preview_review_run(&run_id);
+            let audit = run
+                .reasoning_trace
+                .as_mut()
+                .and_then(|trace| trace.strategy_result.as_mut())
+                .and_then(Value::as_object_mut)
+                .unwrap();
+            audit.insert("previewReady".into(), json!(false));
+            insert_default_chat_adapter_controlled_preview_review_run(&state, &run).await;
+
+            let result = record_default_chat_adapter_controlled_preview_review_decision_with_state(
+                DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                    preview_run_id: run_id.clone(),
+                    decision_kind: decision_kind.into(),
+                    optional_reviewer_note: Some("Needs human follow-up.".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.recorded);
+            assert_eq!(result.decision_kind, decision_kind);
+            assert_eq!(result.preview_run_id, run_id);
+        }
+
+        let summary = get_default_chat_adapter_controlled_preview_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.reject_or_rework_count, 2);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+
+        for record in default_chat_adapter_controlled_preview_review_evidence_records(&state).await
+        {
+            let serialized = serde_json::to_string(&record).unwrap();
+            assert!(!serialized.contains("Needs human follow-up."));
+            assert!(!serialized.contains("userOutput"));
+            assert!(!serialized.contains("rawPrompt"));
+            assert!(!serialized.contains("toolPayload"));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_review_summary_is_read_only() {
+        let state = preview_state().await;
+        let approve_run =
+            completed_default_chat_adapter_controlled_preview_review_run("run-preview-summary-ok");
+        insert_default_chat_adapter_controlled_preview_review_run(&state, &approve_run).await;
+        record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: "run-preview-summary-ok".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let rework_run = completed_default_chat_adapter_controlled_preview_review_run(
+            "run-preview-summary-rework",
+        );
+        insert_default_chat_adapter_controlled_preview_review_run(&state, &rework_run).await;
+        record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: "run-preview-summary-rework".into(),
+                decision_kind: "request_rework".into(),
+                optional_reviewer_note: Some("Needs rework.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let summary = get_default_chat_adapter_controlled_preview_review_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.reject_or_rework_count, 1);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.preview_run_id.as_str()),
+            Some("run-preview-summary-rework")
+        );
+        assert!(summary.latest_timestamp.is_some());
+        assert!(summary.blocking_reasons.is_empty());
+        assert_eq!(summary.metadata_safe_summary["readOnly"], true);
+        assert_eq!(
+            summary.metadata_safe_summary["reviewerNoteStorage"],
+            "length_checksum_category_only"
+        );
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
     }
 
     #[tokio::test]

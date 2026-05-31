@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W43 completion/status index. This is not a second roadmap.
+   - Compact W1-W44 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W43 through sustained Runtime Migration
+Current implementation has completed W1-W44 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -61,11 +61,12 @@ plus a read-only default Chat adapter disabled routing scaffold plus a read-only
 default Chat adapter contract harness plus a write-disabled default Chat adapter
 dry-run invocation boundary plus metadata-safe default Chat adapter dry-run
 review evidence plus a read-only default Chat adapter implementation readiness
-gate plus an explicit non-default default Chat adapter controlled preview.
+gate plus an explicit non-default default Chat adapter controlled preview plus
+metadata-safe human review decision evidence over that controlled preview.
 The next practical sequence is:
 
 ```text
-use default Chat adapter controlled preview only as non-default implementation evidence; default Chat remains unchanged
+use controlled preview review evidence only as non-default implementation evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -74,7 +75,7 @@ use default Chat adapter controlled preview only as non-default implementation e
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W43 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W44 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -383,6 +384,19 @@ Proposals, Memory, LifeModel patches, MCP audit rows, chat messages, external
 writes, feature flags, or default Chat routing changes. Default Send,
 `send_message`, and `start_stream_message` must not call controlled preview.
 W43 is controlled implementation preview, not default Chat migration.
+
+W44 adds only `record_default_chat_adapter_controlled_preview_review_decision`,
+`get_default_chat_adapter_controlled_preview_review_summary`, and the Settings
+Default Chat Adapter Controlled Preview Review panel. Approve requires a
+completed W43 preview AgentRun with
+`reasoning_strategy=default_chat_adapter_controlled_preview`,
+`contractShape=send_message_compatible`, `previewReady=true`,
+`allowWrites=false`, `maxToolCalls=0`, `metadataSafe=true`, and no side effects.
+Evidence metadata is limited to previewRunId, decisionKind, contractShape,
+previewSummaryDigest, reviewer-note checksum/length/category, and createdAt;
+summary is read-only. Default Send, `send_message`, and
+`start_stream_message` must not call controlled preview review commands. W44 is
+review evidence, not default Chat migration.
 
 ## 6. Agent Rules
 

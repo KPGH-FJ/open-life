@@ -2699,6 +2699,114 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("records default chat adapter controlled preview review evidence explicitly", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_default_chat_adapter_controlled_preview") {
+        return Promise.resolve({
+          previewReady: true,
+          blocked: false,
+          contractShape: "send_message_compatible",
+          sourceSessionId: args?.input?.sourceSessionId ?? "settings-dry-run",
+          adapterPath: "controlled_adapter_preview",
+          reply: "Controlled adapter preview reply",
+          reasoningTrace: {
+            strategyResult: {
+              adapterPreview: "default_chat_adapter_controlled_preview",
+              metadataSafe: true,
+            },
+          },
+          toolCalls: [],
+          runId: "run-adapter-preview-review-1",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: true,
+          implementationReady: true,
+          warnings: [],
+          blockingReasons: [],
+          metadataSafeSummary: {
+            adapterPreview: "default_chat_adapter_controlled_preview",
+            metadataSafe: true,
+            allowWrites: false,
+            maxToolCalls: 0,
+          },
+        });
+      }
+      if (cmd === "record_default_chat_adapter_controlled_preview_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_adapter_preview_review_1",
+          previewRunId: args?.input?.previewRunId,
+          decisionKind: args?.input?.decisionKind,
+          contractShape: "send_message_compatible",
+          previewSummaryDigest: "sha256:preview123",
+          createdAt: "2026-05-31T00:00:00Z",
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "get_default_chat_adapter_controlled_preview_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_adapter_preview_review_1",
+            previewRunId: "run-adapter-preview-review-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            previewSummaryDigest: "sha256:preview123",
+            reviewerNoteChecksum: "sha256:note123",
+            reviewerNoteLength: 11,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-05-31T00:00:00Z",
+          },
+          approvedCount: 1,
+          rejectOrReworkCount: 0,
+          latestTimestamp: "2026-05-31T00:00:00Z",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            controlledPreviewReview: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            reviewerNoteStorage: "length_checksum_category_only",
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Adapter Controlled Preview" }));
+    expect(await screen.findByText("Controlled preview ready")).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("Optional preview review note"), {
+      target: { value: "Looks safe." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve Controlled Preview" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_default_chat_adapter_controlled_preview_review_decision",
+        {
+          input: {
+            previewRunId: "run-adapter-preview-review-1",
+            decisionKind: "approve",
+            optionalReviewerNote: "Looks safe.",
+          },
+        }
+      );
+    });
+    expect(await screen.findAllByText(/ev_adapter_preview_review_1/)).toHaveLength(2);
+    expect(screen.getAllByText("previewRunId: run-adapter-preview-review-1")).toHaveLength(2);
+    expect(screen.getByText("approvedCount: 1")).toBeInTheDocument();
+    expect(screen.getByText("controlledPreviewReview: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

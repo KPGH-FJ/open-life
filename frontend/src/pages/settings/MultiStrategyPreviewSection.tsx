@@ -24,6 +24,7 @@ import {
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
+  getDefaultChatAdapterControlledPreviewReviewSummary,
   getDefaultChatAdapterDryRunReviewSummary,
   getDefaultChatAdapterRoutingStatus,
   getControlledChatCutoverCandidateReviewSummary,
@@ -32,6 +33,7 @@ import {
   getControlledPilotPromotionEvidenceSummary,
   getDefaultChatRuntimeBoundaryStatus,
   recordDefaultChatAdapterActivationReviewDecision,
+  recordDefaultChatAdapterControlledPreviewReviewDecision,
   recordDefaultChatAdapterDryRunReviewDecision,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
@@ -53,6 +55,9 @@ import type {
   DefaultChatAdapterActivationImplementationGateReport,
   DefaultChatAdapterContractHarnessReport,
   DefaultChatAdapterControlledPreviewReport,
+  DefaultChatAdapterControlledPreviewReviewDecisionKind,
+  DefaultChatAdapterControlledPreviewReviewDecisionResult,
+  DefaultChatAdapterControlledPreviewReviewSummary,
   DefaultChatAdapterDryRunReport,
   DefaultChatAdapterDryRunReviewDecisionKind,
   DefaultChatAdapterDryRunReviewDecisionResult,
@@ -90,6 +95,7 @@ const SAFE_SUMMARY_KEYS = [
   "dryRunReview",
   "implementationReadiness",
   "adapterPreview",
+  "controlledPreviewReview",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -383,6 +389,24 @@ export default function MultiStrategyPreviewSection() {
   );
   const [adapterControlledPreviewReport, setAdapterControlledPreviewReport] =
     useState<DefaultChatAdapterControlledPreviewReport | null>(null);
+  const [adapterControlledPreviewReviewNote, setAdapterControlledPreviewReviewNote] = useState("");
+  const [adapterControlledPreviewReviewRecording, setAdapterControlledPreviewReviewRecording] =
+    useState(false);
+  const [adapterControlledPreviewReviewError, setAdapterControlledPreviewReviewError] = useState<
+    string | null
+  >(null);
+  const [adapterControlledPreviewReviewResult, setAdapterControlledPreviewReviewResult] =
+    useState<DefaultChatAdapterControlledPreviewReviewDecisionResult | null>(null);
+  const [
+    adapterControlledPreviewReviewSummaryChecking,
+    setAdapterControlledPreviewReviewSummaryChecking,
+  ] = useState(false);
+  const [
+    adapterControlledPreviewReviewSummaryError,
+    setAdapterControlledPreviewReviewSummaryError,
+  ] = useState<string | null>(null);
+  const [adapterControlledPreviewReviewSummary, setAdapterControlledPreviewReviewSummary] =
+    useState<DefaultChatAdapterControlledPreviewReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -881,6 +905,8 @@ export default function MultiStrategyPreviewSection() {
     setAdapterControlledPreviewChecking(true);
     setAdapterControlledPreviewError(null);
     setAdapterControlledPreviewReport(null);
+    setAdapterControlledPreviewReviewError(null);
+    setAdapterControlledPreviewReviewResult(null);
     try {
       const report = await runDefaultChatAdapterControlledPreview({
         sourceSessionId: "settings-dry-run",
@@ -892,6 +918,56 @@ export default function MultiStrategyPreviewSection() {
       setAdapterControlledPreviewError(`Adapter controlled preview failed: ${readableError(e)}`);
     } finally {
       setAdapterControlledPreviewChecking(false);
+    }
+  };
+
+  const handleAdapterControlledPreviewReviewSummaryRefresh = async () => {
+    setAdapterControlledPreviewReviewSummaryChecking(true);
+    setAdapterControlledPreviewReviewSummaryError(null);
+    try {
+      const summary = await getDefaultChatAdapterControlledPreviewReviewSummary();
+      setAdapterControlledPreviewReviewSummary(summary);
+    } catch (e) {
+      setAdapterControlledPreviewReviewSummaryError(
+        `Adapter controlled preview review summary failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterControlledPreviewReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordAdapterControlledPreviewReviewDecision = async (
+    decisionKind: DefaultChatAdapterControlledPreviewReviewDecisionKind
+  ) => {
+    const previewRunId = adapterControlledPreviewReport?.runId;
+    if (!previewRunId) {
+      setAdapterControlledPreviewReviewError(
+        "Controlled preview review recording requires a preview AgentRun id."
+      );
+      return;
+    }
+
+    setAdapterControlledPreviewReviewRecording(true);
+    setAdapterControlledPreviewReviewError(null);
+    setAdapterControlledPreviewReviewResult(null);
+    try {
+      const trimmedNote = adapterControlledPreviewReviewNote.trim();
+      const result = await recordDefaultChatAdapterControlledPreviewReviewDecision({
+        previewRunId,
+        decisionKind,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setAdapterControlledPreviewReviewResult(result);
+      if (result.recorded) {
+        setAdapterControlledPreviewReviewNote("");
+        await handleAdapterControlledPreviewReviewSummaryRefresh();
+      }
+    } catch (e) {
+      setAdapterControlledPreviewReviewError(
+        `Adapter controlled preview review recording failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterControlledPreviewReviewRecording(false);
     }
   };
 
@@ -4411,6 +4487,194 @@ export default function MultiStrategyPreviewSection() {
               ) : (
                 <div className="mt-1 text-xs text-stone-500">
                   No adapter controlled preview blockers returned.
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-md border border-stone-100 bg-white p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-medium text-stone-800">
+                    Controlled Preview Review Evidence
+                  </div>
+                  <div className="mt-1 text-xs leading-5 text-stone-500">
+                    Records metadata-safe human review evidence for the preview AgentRun only.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAdapterControlledPreviewReviewSummaryRefresh}
+                  disabled={adapterControlledPreviewReviewSummaryChecking}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    adapterControlledPreviewReviewSummaryChecking
+                      ? "bg-stone-100 text-stone-400"
+                      : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+                  )}
+                >
+                  <RefreshCw size={13} />
+                  {adapterControlledPreviewReviewSummaryChecking
+                    ? "Refreshing..."
+                    : "Refresh Controlled Preview Review Summary"}
+                </button>
+              </div>
+
+              <textarea
+                value={adapterControlledPreviewReviewNote}
+                onChange={event => setAdapterControlledPreviewReviewNote(event.target.value)}
+                placeholder="Optional preview review note"
+                className="mt-3 min-h-[72px] w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-stone-400"
+              />
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                {(
+                  [
+                    ["approve", "Approve Controlled Preview"],
+                    ["reject", "Reject Controlled Preview"],
+                    ["request_rework", "Request Controlled Preview Rework"],
+                  ] as const
+                ).map(([decisionKind, label]) => (
+                  <button
+                    key={decisionKind}
+                    type="button"
+                    onClick={() => handleRecordAdapterControlledPreviewReviewDecision(decisionKind)}
+                    disabled={
+                      adapterControlledPreviewReviewRecording ||
+                      !adapterControlledPreviewReport.runId
+                    }
+                    className={classNames(
+                      "rounded-md px-3 py-2 text-xs font-medium",
+                      adapterControlledPreviewReviewRecording ||
+                        !adapterControlledPreviewReport.runId
+                        ? "bg-stone-100 text-stone-400"
+                        : decisionKind === "approve"
+                          ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                          : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {adapterControlledPreviewReviewError && (
+                <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {adapterControlledPreviewReviewError}
+                </div>
+              )}
+              {adapterControlledPreviewReviewSummaryError && (
+                <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {adapterControlledPreviewReviewSummaryError}
+                </div>
+              )}
+
+              {adapterControlledPreviewReviewResult && (
+                <div className="mt-3 grid gap-2 md:grid-cols-3">
+                  {[
+                    ["recorded", String(adapterControlledPreviewReviewResult.recorded)],
+                    ["evidenceId", adapterControlledPreviewReviewResult.evidenceId ?? "none"],
+                    ["previewRunId", adapterControlledPreviewReviewResult.previewRunId],
+                    ["decisionKind", adapterControlledPreviewReviewResult.decisionKind],
+                    ["contractShape", adapterControlledPreviewReviewResult.contractShape],
+                    [
+                      "previewSummaryDigest",
+                      adapterControlledPreviewReviewResult.previewSummaryDigest,
+                    ],
+                  ].map(([label, value]) => (
+                    <div
+                      key={label}
+                      className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                    >
+                      {label}: {value}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {adapterControlledPreviewReviewResult?.blockingReasons.length ? (
+                <div className="mt-3 space-y-1">
+                  {adapterControlledPreviewReviewResult.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {adapterControlledPreviewReviewSummary && (
+                <div className="mt-3 space-y-2">
+                  <div className="grid gap-2 md:grid-cols-3">
+                    {[
+                      [
+                        "approvedCount",
+                        String(adapterControlledPreviewReviewSummary.approvedCount),
+                      ],
+                      [
+                        "rejectOrReworkCount",
+                        String(adapterControlledPreviewReviewSummary.rejectOrReworkCount),
+                      ],
+                      [
+                        "latestTimestamp",
+                        adapterControlledPreviewReviewSummary.latestTimestamp ?? "none",
+                      ],
+                    ].map(([label, value]) => (
+                      <div
+                        key={label}
+                        className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                      >
+                        {label}: {value}
+                      </div>
+                    ))}
+                  </div>
+
+                  {adapterControlledPreviewReviewSummary.latestDecision && (
+                    <div className="grid gap-2 md:grid-cols-3">
+                      {[
+                        [
+                          "latestEvidenceId",
+                          adapterControlledPreviewReviewSummary.latestDecision.evidenceId,
+                        ],
+                        [
+                          "previewRunId",
+                          adapterControlledPreviewReviewSummary.latestDecision.previewRunId,
+                        ],
+                        [
+                          "latestDecisionKind",
+                          adapterControlledPreviewReviewSummary.latestDecision.decisionKind,
+                        ],
+                        [
+                          "latestContractShape",
+                          adapterControlledPreviewReviewSummary.latestDecision.contractShape,
+                        ],
+                      ].map(([label, value]) => (
+                        <div
+                          key={label}
+                          className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                        >
+                          {label}: {value}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {safeSummaryEntries(adapterControlledPreviewReviewSummary.metadataSafeSummary)
+                    .length > 0 && (
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {safeSummaryEntries(
+                        adapterControlledPreviewReviewSummary.metadataSafeSummary
+                      ).map(([key, value]) => (
+                        <span
+                          key={key}
+                          className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                        >
+                          {key}: {value}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
