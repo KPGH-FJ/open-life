@@ -10,6 +10,7 @@ import {
   recordState,
   checkControlledChatPilotEligibility,
   checkControlledChatCutoverReadiness,
+  checkControlledChatCutoverCandidatePromotionReadiness,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
@@ -672,5 +673,60 @@ describe("tauri command argument aliases", () => {
     expect(result.latestDecision?.decisionKind).toBe("request_rework");
     expect(result.latestDecision?.candidateRunId).toBe("run-candidate-2");
     expect(result.reworkRejectCount).toBe(2);
+  });
+
+  it("invokes controlled chat cutover candidate promotion readiness as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ready: true,
+      cutoverReadinessEligible: true,
+      requiredApprovedCandidates: 1,
+      approvedCandidateCount: 1,
+      latestDecision: {
+        evidenceId: "ev_candidate_review_3",
+        candidateRunId: "run-candidate-3",
+        decisionKind: "approve",
+        contractShape: "send_message_compatible",
+        candidateSummaryDigest: "sha256:candidate-summary-3",
+        reviewerNoteChecksum: null,
+        reviewerNoteLength: 0,
+        reviewerNoteCategory: "none",
+        createdAt: "2026-05-31T08:09:10Z",
+      },
+      approvedCandidates: [
+        {
+          evidenceId: "ev_candidate_review_3",
+          candidateRunId: "run-candidate-3",
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:candidate-summary-3",
+          runReadinessDigest: "sha256:run-readiness",
+          decisionCreatedAt: "2026-05-31T08:09:10Z",
+          ready: true,
+          blockingReasons: [],
+        },
+      ],
+      defaultChatUnchanged: true,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        metadataSafe: true,
+        readOnly: true,
+      },
+      checkedAt: "2026-05-31T08:10:00Z",
+    });
+
+    const result = await checkControlledChatCutoverCandidatePromotionReadiness({
+      requiredApprovedCandidates: 2,
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_controlled_chat_cutover_candidate_promotion_readiness",
+      {
+        input: {
+          requiredApprovedCandidates: 2,
+        },
+      }
+    );
+    expect(result.ready).toBe(true);
+    expect(result.approvedCandidateCount).toBe(1);
+    expect(result.approvedCandidates[0].candidateRunId).toBe("run-candidate-3");
   });
 });

@@ -12,6 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import {
+  checkControlledChatCutoverCandidatePromotionReadiness,
   checkControlledChatCutoverReadiness,
   checkControlledChatPilotEligibility,
   checkControlledChatMigrationImplementationGate,
@@ -34,6 +35,7 @@ import type {
   ControlledChatCutoverCandidateReviewDecisionKind,
   ControlledChatCutoverCandidateReviewDecisionResult,
   ControlledChatCutoverCandidateReviewSummary,
+  ControlledChatCutoverCandidatePromotionReadinessReport,
   ControlledChatCutoverReadinessReport,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
@@ -56,6 +58,7 @@ import type {
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
   "cutoverReadinessGate",
+  "promotionReadinessGate",
   "taskKind",
   "reasonCode",
   "riskLevel",
@@ -72,6 +75,15 @@ const SAFE_SUMMARY_KEYS = [
   "planningOnly",
   "requiredEvidenceReady",
   "defaultChatUnchanged",
+  "readOnly",
+  "notAutomaticMigration",
+  "ready",
+  "cutoverReadinessEligible",
+  "requiredApprovedCandidates",
+  "approvedCandidateCount",
+  "verifiedCandidateCount",
+  "latestDecisionKind",
+  "blockingReasonCount",
   "implementationEligible",
   "latestShadowReviewDecisionKind",
   "shadowRunReady",
@@ -221,6 +233,13 @@ export default function MultiStrategyPreviewSection() {
   >(null);
   const [cutoverCandidateReviewSummary, setCutoverCandidateReviewSummary] =
     useState<ControlledChatCutoverCandidateReviewSummary | null>(null);
+  const [candidatePromotionReadinessChecking, setCandidatePromotionReadinessChecking] =
+    useState(false);
+  const [candidatePromotionReadinessError, setCandidatePromotionReadinessError] = useState<
+    string | null
+  >(null);
+  const [candidatePromotionReadinessReport, setCandidatePromotionReadinessReport] =
+    useState<ControlledChatCutoverCandidatePromotionReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -494,6 +513,24 @@ export default function MultiStrategyPreviewSection() {
       setCutoverCandidateReviewSummaryError(`Candidate review summary failed: ${readableError(e)}`);
     } finally {
       setCutoverCandidateReviewSummaryChecking(false);
+    }
+  };
+
+  const handleCandidatePromotionReadinessRefresh = async () => {
+    setCandidatePromotionReadinessChecking(true);
+    setCandidatePromotionReadinessError(null);
+    setCandidatePromotionReadinessReport(null);
+    try {
+      const report = await checkControlledChatCutoverCandidatePromotionReadiness({
+        requiredApprovedCandidates: 1,
+      });
+      setCandidatePromotionReadinessReport(report);
+    } catch (e) {
+      setCandidatePromotionReadinessError(
+        `Candidate promotion readiness failed: ${readableError(e)}`
+      );
+    } finally {
+      setCandidatePromotionReadinessChecking(false);
     }
   };
 
@@ -2300,6 +2337,207 @@ export default function MultiStrategyPreviewSection() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Candidate Promotion Readiness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only gate for W33. It checks W30 cutover readiness, metadata-safe candidate
+              review approvals, current candidate AgentRun safety, and default Chat isolation. It
+              does not run runtime or switch default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleCandidatePromotionReadinessRefresh}
+            disabled={candidatePromotionReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              candidatePromotionReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={candidatePromotionReadinessChecking ? "animate-spin" : undefined}
+            />
+            {candidatePromotionReadinessChecking
+              ? "Refreshing..."
+              : "Refresh Candidate Promotion Readiness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          Approval evidence is still only permission to discuss migration implementation. The
+          default Send path remains unchanged, and this panel has no Chat migration action.
+        </div>
+
+        {candidatePromotionReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {candidatePromotionReadinessError}
+          </div>
+        )}
+
+        {candidatePromotionReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  candidatePromotionReadinessReport.ready
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {candidatePromotionReadinessReport.ready ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {candidatePromotionReadinessReport.ready ? "Promotion ready" : "Promotion blocked"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                {candidatePromotionReadinessReport.approvedCandidateCount} /{" "}
+                {candidatePromotionReadinessReport.requiredApprovedCandidates} approved candidates
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  candidatePromotionReadinessReport.cutoverReadinessEligible
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                cutoverReadinessEligible:{" "}
+                {candidatePromotionReadinessReport.cutoverReadinessEligible ? "true" : "false"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  candidatePromotionReadinessReport.defaultChatUnchanged
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                defaultChatUnchanged:{" "}
+                {candidatePromotionReadinessReport.defaultChatUnchanged ? "true" : "false"}
+              </span>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest decision</div>
+                <div className="mt-1 text-xs text-stone-800">
+                  Latest decision:{" "}
+                  {candidatePromotionReadinessReport.latestDecision?.decisionKind ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Checked at</div>
+                <div className="mt-1 font-mono text-xs text-stone-800">
+                  {candidatePromotionReadinessReport.checkedAt}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Gate meaning</div>
+                <div className="mt-1 text-xs text-stone-700">discussion only</div>
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Approved candidates</div>
+              {candidatePromotionReadinessReport.approvedCandidates.length > 0 ? (
+                <div className="mt-1 space-y-2">
+                  {candidatePromotionReadinessReport.approvedCandidates.map(candidate => (
+                    <div
+                      key={`${candidate.evidenceId}-${candidate.candidateRunId}`}
+                      className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700"
+                    >
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-mono text-stone-900">{candidate.candidateRunId}</span>
+                        <span
+                          className={classNames(
+                            "rounded-full px-2 py-0.5 text-[11px] font-medium",
+                            candidate.ready
+                              ? "bg-emerald-50 text-emerald-700"
+                              : "bg-red-50 text-red-700"
+                          )}
+                        >
+                          {candidate.ready ? "ready" : "blocked"}
+                        </span>
+                        <span>{candidate.contractShape}</span>
+                      </div>
+                      <div className="mt-1 break-all font-mono text-stone-500">
+                        {candidate.runReadinessDigest}
+                      </div>
+                      {candidate.blockingReasons.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {candidate.blockingReasons.map(reason => (
+                            <div
+                              key={reason}
+                              className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                            >
+                              {reason}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No approved candidate review evidence loaded.
+                </div>
+              )}
+            </div>
+
+            {safeSummaryEntries(candidatePromotionReadinessReport.metadataSafeSummary).length >
+              0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(candidatePromotionReadinessReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {candidatePromotionReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {candidatePromotionReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No candidate promotion readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No candidate promotion readiness report loaded.
           </div>
         )}
       </section>

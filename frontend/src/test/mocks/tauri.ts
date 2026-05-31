@@ -732,6 +732,47 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         latestTimestamp: "2026-05-31T06:07:08Z",
         blockingReasons: [],
       } as T);
+    case "check_controlled_chat_cutover_candidate_promotion_readiness":
+      return Promise.resolve({
+        ready: true,
+        cutoverReadinessEligible: true,
+        requiredApprovedCandidates: _args?.input?.requiredApprovedCandidates ?? 1,
+        approvedCandidateCount: 1,
+        latestDecision: {
+          evidenceId: "ev_candidate_review_1",
+          candidateRunId: "run-candidate-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:mock-candidate-summary",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T06:07:08Z",
+        },
+        approvedCandidates: [
+          {
+            evidenceId: "ev_candidate_review_1",
+            candidateRunId: "run-candidate-1",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:mock-candidate-summary",
+            runReadinessDigest: "sha256:mock-candidate-run-readiness",
+            decisionCreatedAt: "2026-05-31T06:07:08Z",
+            ready: true,
+            blockingReasons: [],
+          },
+        ],
+        defaultChatUnchanged: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          promotionReadinessGate: "controlled_chat_cutover_candidate",
+          metadataSafe: true,
+          readOnly: true,
+          notAutomaticMigration: true,
+          defaultChatUnchanged: true,
+          approvedCandidateCount: 1,
+        },
+        checkedAt: "2026-05-31T06:08:00Z",
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

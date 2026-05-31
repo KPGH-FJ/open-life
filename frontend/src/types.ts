@@ -556,6 +556,36 @@ export interface ControlledChatCutoverCandidateReviewSummary {
   blockingReasons: string[];
 }
 
+export interface ControlledChatCutoverCandidatePromotionReadinessInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatCutoverCandidatePromotionApprovedCandidate {
+  evidenceId: string;
+  candidateRunId: string;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  runReadinessDigest: string;
+  decisionCreatedAt: string;
+  ready: boolean;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverCandidatePromotionReadinessReport {
+  ready: boolean;
+  cutoverReadinessEligible: boolean;
+  requiredApprovedCandidates: number;
+  approvedCandidateCount: number;
+  latestDecision?: ControlledChatCutoverCandidateReviewLatestDecision | null;
+  approvedCandidates: ControlledChatCutoverCandidatePromotionApprovedCandidate[];
+  defaultChatUnchanged: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+  checkedAt: string;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

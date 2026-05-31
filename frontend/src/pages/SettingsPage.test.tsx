@@ -1396,6 +1396,75 @@ describe("SettingsPage", () => {
     expect(screen.getByText("brief")).toBeInTheDocument();
   });
 
+  it("refreshes and renders cutover candidate promotion readiness without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_cutover_candidate_promotion_readiness") {
+        return Promise.resolve({
+          ready: false,
+          cutoverReadinessEligible: true,
+          requiredApprovedCandidates: 3,
+          approvedCandidateCount: 1,
+          latestDecision: {
+            evidenceId: "ev_candidate_review_3",
+            candidateRunId: "run-candidate-promotion-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:candidate-summary-3",
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T08:09:10Z",
+          },
+          approvedCandidates: [
+            {
+              evidenceId: "ev_candidate_review_3",
+              candidateRunId: "run-candidate-promotion-1",
+              contractShape: "send_message_compatible",
+              candidateSummaryDigest: "sha256:candidate-summary-3",
+              runReadinessDigest: "sha256:run-readiness",
+              decisionCreatedAt: "2026-05-31T08:09:10Z",
+              ready: true,
+              blockingReasons: [],
+            },
+          ],
+          defaultChatUnchanged: true,
+          blockingReasons: ["insufficient_approved_candidate_evidence"],
+          metadataSafeSummary: {
+            promotionReadinessGate: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+            defaultChatUnchanged: true,
+            approvedCandidateCount: 1,
+          },
+          checkedAt: "2026-05-31T08:10:00Z",
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Candidate Promotion Readiness")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Candidate Promotion Readiness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "check_controlled_chat_cutover_candidate_promotion_readiness",
+        { input: { requiredApprovedCandidates: 1 } }
+      );
+    });
+    expect(await screen.findByText("Promotion blocked")).toBeInTheDocument();
+    expect(screen.getByText("Latest decision: approve")).toBeInTheDocument();
+    expect(screen.getByText("1 / 3 approved candidates")).toBeInTheDocument();
+    expect(screen.getByText("run-candidate-promotion-1")).toBeInTheDocument();
+    expect(screen.getByText("insufficient_approved_candidate_evidence")).toBeInTheDocument();
+    expect(screen.getByText("readOnly: true")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch default chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

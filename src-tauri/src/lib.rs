@@ -38,6 +38,7 @@ use commands::agent::{
     replay_agent_action, restore_agent_run,
 };
 use commands::agent_runtime::{
+    check_controlled_chat_cutover_candidate_promotion_readiness,
     check_controlled_chat_cutover_readiness, check_controlled_chat_migration_implementation_gate,
     check_controlled_chat_pilot_eligibility, check_controlled_pilot_promotion_readiness,
     check_runtime_migration_gate, draft_controlled_chat_migration_plan,
@@ -3067,6 +3068,7 @@ pub fn run() {
             run_controlled_chat_cutover_candidate,
             record_controlled_chat_cutover_candidate_review_decision,
             get_controlled_chat_cutover_candidate_review_summary,
+            check_controlled_chat_cutover_candidate_promotion_readiness,
             record_controlled_pilot_promotion_evidence,
             get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,
