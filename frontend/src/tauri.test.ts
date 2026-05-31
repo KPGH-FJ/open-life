@@ -12,6 +12,8 @@ import {
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
+  getControlledChatMigrationReviewDecisionSummary,
+  recordControlledChatMigrationReviewDecision,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
   saveChatMessage,
@@ -290,5 +292,61 @@ describe("tauri command argument aliases", () => {
     expect(result.draftReady).toBe(true);
     expect(result.manualReviewRequired).toBe(true);
     expect(result.notAutomaticMigration).toBe(true);
+  });
+
+  it("records controlled chat migration review decision through explicit wrapper", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_review_1",
+      decisionKind: "approve",
+      draftReady: true,
+      draftHash: "sha256:test-draft",
+      createdAt: "2026-05-31T01:02:03Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordControlledChatMigrationReviewDecision({
+      decisionKind: "approve",
+      requiredPromotions: 3,
+      sessionId: "session-1",
+      optionalReviewerNote: "Reviewer note stays backend-sanitized.",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("record_controlled_chat_migration_review_decision", {
+      input: {
+        decisionKind: "approve",
+        requiredPromotions: 3,
+        sessionId: "session-1",
+        optionalReviewerNote: "Reviewer note stays backend-sanitized.",
+      },
+    });
+    expect(result.recorded).toBe(true);
+    expect(result.evidenceId).toBe("ev_review_1");
+  });
+
+  it("reads controlled chat migration review decision summary through explicit wrapper", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_review_1",
+        decisionKind: "request_rework",
+        draftReady: true,
+        draftHash: "sha256:test-draft",
+        createdAt: "2026-05-31T01:02:03Z",
+      },
+      approvedCount: 1,
+      reworkRejectCount: 2,
+      latestTimestamp: "2026-05-31T01:02:03Z",
+      blockingReasons: [],
+    });
+
+    const result = await getControlledChatMigrationReviewDecisionSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_controlled_chat_migration_review_decision_summary",
+      undefined
+    );
+    expect(result.latestDecision?.decisionKind).toBe("request_rework");
+    expect(result.approvedCount).toBe(1);
+    expect(result.reworkRejectCount).toBe(2);
   });
 });

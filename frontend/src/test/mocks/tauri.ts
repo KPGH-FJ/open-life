@@ -502,6 +502,30 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         notAutomaticMigration: true,
         blockingReasons: [],
       } as T);
+    case "record_controlled_chat_migration_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_review_decision_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        draftReady: true,
+        draftHash: "sha256:mock-migration-draft",
+        createdAt: "2026-05-31T01:02:03Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_migration_review_decision_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_review_decision_1",
+          decisionKind: "request_rework",
+          draftReady: true,
+          draftHash: "sha256:mock-migration-draft",
+          createdAt: "2026-05-31T01:02:03Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 2,
+        latestTimestamp: "2026-05-31T01:02:03Z",
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

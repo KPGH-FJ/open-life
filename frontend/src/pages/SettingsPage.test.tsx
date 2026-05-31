@@ -641,6 +641,121 @@ describe("SettingsPage", () => {
     expect(screen.getByText(/No executable migration plan is generated/)).toBeInTheDocument();
     expect(screen.queryByText("Migration scope")).not.toBeInTheDocument();
     expect(screen.queryByText("Rollback plan")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve Review Decision" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject Review Decision" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Request Rework Review Decision" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("records migration review decision only after a ready draft and shows latest summary", async () => {
+    renderSettings();
+
+    await clickTab("实验");
+
+    expect(await screen.findByText("Migration Review Decision")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Approval only allows next-stage implementation discussion/)
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve Review Decision" })
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Draft Migration Plan" }));
+    expect(await screen.findByText("Draft ready")).toBeInTheDocument();
+
+    expect(screen.getByRole("button", { name: "Approve Review Decision" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject Review Decision" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Request Rework Review Decision" })
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Reviewer note"), {
+      target: { value: "Raw reviewer note should be sanitized by backend." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Request Rework Review Decision" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("record_controlled_chat_migration_review_decision", {
+        input: {
+          decisionKind: "request_rework",
+          optionalReviewerNote: "Raw reviewer note should be sanitized by backend.",
+        },
+      });
+    });
+    expect(await screen.findByText(/Decision recorded/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Decision Summary" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_controlled_chat_migration_review_decision_summary",
+        undefined
+      );
+    });
+
+    expect(await screen.findByText("Latest decision")).toBeInTheDocument();
+    expect(screen.getByText("request_rework")).toBeInTheDocument();
+    expect(screen.getByText("Approved count")).toBeInTheDocument();
+    expect(screen.getByText("Rework/reject count")).toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
+  it("keeps migration review decision actions hidden for blocked drafts", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_controlled_chat_migration_plan") {
+        return Promise.resolve({
+          draftReady: false,
+          readinessReport: {
+            ready: false,
+            requiredPromotions: 3,
+            promotedCount: 1,
+            recentPromotedPilotRunIds: ["run-controlled-pilot-1"],
+            latestPromotionTimestamp: "2026-05-30T01:02:03Z",
+            sourceTargetMismatchBlockCount: 0,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: ["insufficient_promotion_evidence: required 3 promotions, found 1"],
+          },
+          migrationScope: [],
+          requiredPreconditions: [],
+          rollbackPlan: [],
+          fallbackPlan: [],
+          testPlan: [],
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          blockingReasons: ["insufficient_promotion_evidence: required 3 promotions, found 1"],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(screen.getByRole("button", { name: "Draft Migration Plan" }));
+
+    expect(await screen.findByText("Draft blocked")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Review decision recording is blocked until draftReady=true/)
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Review decision blocker: insufficient_promotion_evidence: required 3 promotions, found 1"
+      )
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve Review Decision" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject Review Decision" })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Request Rework Review Decision" })
+    ).not.toBeInTheDocument();
   });
 
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {

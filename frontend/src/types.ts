@@ -358,6 +358,41 @@ export interface ControlledChatMigrationPlanDraft {
   blockingReasons: string[];
 }
 
+export type ControlledChatMigrationReviewDecisionKind = "approve" | "reject" | "request_rework";
+
+export interface ControlledChatMigrationReviewDecisionInput {
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  requiredPromotions?: number;
+  sessionId?: string;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatMigrationReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  draftReady: boolean;
+  draftHash: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: ControlledChatMigrationReviewDecisionKind;
+  draftReady: boolean;
+  draftHash: string;
+  createdAt: string;
+}
+
+export interface ControlledChatMigrationReviewDecisionSummary {
+  latestDecision?: ControlledChatMigrationReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

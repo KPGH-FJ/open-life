@@ -14,11 +14,14 @@ use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
 const CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH: &str = "runtime.controlled_pilot.promotion";
 const CONTROLLED_PILOT_PROMOTION_BLOCK_PATH: &str = "runtime.controlled_pilot.promotion_block";
+const CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.controlled_chat.migration_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +165,53 @@ pub struct ControlledChatMigrationPlanDraft {
     pub test_plan: Vec<String>,
     pub manual_review_required: bool,
     pub not_automatic_migration: bool,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationReviewDecisionInput {
+    pub decision_kind: String,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub decision_kind: String,
+    pub draft_ready: bool,
+    pub draft_hash: String,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationReviewLatestDecision {
+    pub evidence_id: String,
+    pub decision_kind: String,
+    pub draft_ready: bool,
+    pub draft_hash: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationReviewDecisionSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<ControlledChatMigrationReviewLatestDecision>,
+    pub approved_count: usize,
+    pub rework_reject_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
 }
 
@@ -516,6 +566,171 @@ pub(crate) async fn draft_controlled_chat_migration_plan_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn record_controlled_chat_migration_review_decision(
+    input: ControlledChatMigrationReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatMigrationReviewDecisionResult, String> {
+    record_controlled_chat_migration_review_decision_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn record_controlled_chat_migration_review_decision_with_state(
+    input: ControlledChatMigrationReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatMigrationReviewDecisionResult, String> {
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let session_id = normalize_optional_internal_id(input.session_id.as_deref(), "sessionId")?;
+    let draft = draft_controlled_chat_migration_plan_with_state(
+        ControlledChatMigrationPlanDraftInput {
+            required_promotions: input.required_promotions,
+            session_id: session_id.clone(),
+        },
+        state,
+    )
+    .await?;
+    let draft_hash = metadata_hash_for_serializable(&draft)?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut blocking_reasons = draft.blocking_reasons.clone();
+
+    if decision_kind == "approve" && !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "draft_not_ready_for_approval".to_string(),
+        );
+        return Ok(ControlledChatMigrationReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            decision_kind,
+            draft_ready: false,
+            draft_hash,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note(input.optional_reviewer_note.as_deref());
+    let metadata = json!({
+        "evidenceKind": "migration_review_decision",
+        "metadataSafe": true,
+        "draftReady": draft.draft_ready,
+        "decisionKind": decision_kind.clone(),
+        "readinessCounts": {
+            "requiredPromotions": draft.readiness_report.required_promotions,
+            "promotedCount": draft.readiness_report.promoted_count,
+            "recentPromotedPilotRunCount": draft.readiness_report.recent_promoted_pilot_run_ids.len(),
+            "sourceTargetMismatchBlockCount": draft.readiness_report.source_target_mismatch_block_count,
+            "blockingReasonCount": draft.blocking_reasons.len()
+        },
+        "draftHash": draft_hash.clone(),
+        "createdAt": created_at.clone(),
+        "sessionId": session_id.as_deref().unwrap_or("global"),
+        "reviewerNote": reviewer_note_metadata,
+        "blockingReasons": draft.blocking_reasons.clone(),
+        "metadataSafeEvidenceReady": draft.readiness_report.metadata_safe_evidence_ready,
+        "defaultChatUnchanged": draft.readiness_report.default_chat_unchanged,
+        "manualReviewRequired": draft.manual_review_required,
+        "notAutomaticMigration": draft.not_automatic_migration,
+        "contentStorage": "checksum_only",
+        "reviewerNoteStorage": "length_checksum_category_only",
+        "toolStorage": "none",
+        "transcriptStorage": "none"
+    });
+
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    )
+    .with_summary("Controlled chat migration review decision recorded")
+    .with_source_ref(EvidenceSourceRef::from_digest(
+        EvidenceSourceType::RunMetadata,
+        "controlled_chat_migration_plan_draft",
+        Some("migration_review_decision"),
+        &draft_hash,
+    ));
+    evidence_draft.run_metadata = metadata;
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store
+            .create_evidence(evidence_draft)
+            .map_err(|e| format!("failed to record migration review decision evidence: {e}"))?
+    };
+
+    Ok(ControlledChatMigrationReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        decision_kind,
+        draft_ready: draft.draft_ready,
+        draft_hash,
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_controlled_chat_migration_review_decision_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatMigrationReviewDecisionSummary, String> {
+    get_controlled_chat_migration_review_decision_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_controlled_chat_migration_review_decision_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<ControlledChatMigrationReviewDecisionSummary, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH.into()),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| format!("failed to read migration review decision evidence: {e}"))?
+    };
+    let records = records
+        .into_iter()
+        .filter(migration_review_decision_evidence_is_metadata_safe)
+        .collect::<Vec<_>>();
+
+    let approved_count = records
+        .iter()
+        .filter(|record| migration_review_decision_kind(record) == Some("approve"))
+        .count();
+    let rework_reject_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                migration_review_decision_kind(record),
+                Some("reject" | "request_rework")
+            )
+        })
+        .count();
+    let latest_decision = records.first().and_then(migration_review_latest_decision);
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+    let blocking_reasons = records
+        .first()
+        .map(migration_review_decision_blocking_reasons)
+        .unwrap_or_default();
+
+    Ok(ControlledChatMigrationReviewDecisionSummary {
+        latest_decision,
+        approved_count,
+        rework_reject_count,
+        latest_timestamp,
+        blocking_reasons,
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -592,6 +807,17 @@ fn safe_internal_id(value: &str, field: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn normalize_optional_internal_id(
+    value: Option<&str>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| safe_internal_id(value, field))
+        .transpose()
+}
+
 fn safe_enum_value(value: &str, field: &str, allowed: &[&str]) -> Result<String, String> {
     let trimmed = value.trim();
     if allowed
@@ -621,6 +847,41 @@ fn is_safe_metadata_token_char(ch: char) -> bool {
 
 fn is_safe_checksum_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ':' | '.')
+}
+
+fn metadata_hash_for_serializable<T: Serialize>(value: &T) -> Result<String, String> {
+    let serialized = serde_json::to_string(value)
+        .map_err(|e| format!("failed to serialize metadata-safe draft for hashing: {e}"))?;
+    Ok(sha256_metadata_checksum(&serialized))
+}
+
+fn sha256_metadata_checksum(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn metadata_safe_reviewer_note(note: Option<&str>) -> Value {
+    let note = note.unwrap_or_default();
+    let length = note.chars().count();
+    let category = match length {
+        0 => "none",
+        1..=120 => "brief",
+        121..=1000 => "standard",
+        _ => "extended",
+    };
+    let checksum = if length == 0 {
+        Value::Null
+    } else {
+        Value::String(sha256_metadata_checksum(note))
+    };
+
+    json!({
+        "present": length > 0,
+        "length": length,
+        "checksum": checksum,
+        "category": category
+    })
 }
 
 fn promotion_evidence_pilot_run_id(
@@ -682,6 +943,128 @@ fn promotion_evidence_is_metadata_safe(record: &openlife_core::agent::EvidenceRe
             safe_checksum(value)
         })
         && !contains_unsafe_promotion_metadata(metadata)
+}
+
+fn migration_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let metadata = &record.run_metadata;
+    metadata
+        .get("evidenceKind")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "migration_review_decision")
+        && metadata
+            .get("metadataSafe")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        && metadata
+            .get("reviewerNoteStorage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "length_checksum_category_only")
+        && metadata
+            .get("toolStorage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "none")
+        && metadata
+            .get("transcriptStorage")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "none")
+        && metadata_bool_is_present(metadata, "draftReady")
+        && metadata_string_is_safe(metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && metadata_string_is_safe(metadata, "draftHash", |value, _field| safe_checksum(value))
+        && metadata.get("createdAt").and_then(Value::as_str).is_some()
+        && metadata
+            .get("readinessCounts")
+            .and_then(Value::as_object)
+            .is_some()
+        && reviewer_note_metadata_is_safe(metadata.get("reviewerNote"))
+        && !contains_unsafe_promotion_metadata(metadata)
+}
+
+fn metadata_bool_is_present(metadata: &Value, key: &str) -> bool {
+    metadata.get(key).and_then(Value::as_bool).is_some()
+}
+
+fn reviewer_note_metadata_is_safe(value: Option<&Value>) -> bool {
+    let Some(Value::Object(note)) = value else {
+        return false;
+    };
+    let category_is_bounded = note
+        .get("category")
+        .and_then(Value::as_str)
+        .is_some_and(|value| matches!(value, "none" | "brief" | "standard" | "extended"));
+    let checksum_is_safe = match note.get("checksum") {
+        Some(Value::Null) => true,
+        Some(Value::String(value)) => safe_checksum(value).is_ok(),
+        _ => false,
+    };
+
+    note.get("length").and_then(Value::as_u64).is_some()
+        && note.get("present").and_then(Value::as_bool).is_some()
+        && category_is_bounded
+        && checksum_is_safe
+}
+
+fn migration_review_decision_kind(record: &openlife_core::agent::EvidenceRecord) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn migration_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<ControlledChatMigrationReviewLatestDecision> {
+    Some(ControlledChatMigrationReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        decision_kind: migration_review_decision_kind(record)?.to_string(),
+        draft_ready: record
+            .run_metadata
+            .get("draftReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        draft_hash: record
+            .run_metadata
+            .get("draftHash")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: migration_review_decision_timestamp(record),
+    })
+}
+
+fn migration_review_decision_timestamp(record: &openlife_core::agent::EvidenceRecord) -> String {
+    record
+        .run_metadata
+        .get("createdAt")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| record.created_at.to_rfc3339())
+}
+
+fn migration_review_decision_blocking_reasons(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Vec<String> {
+    record
+        .run_metadata
+        .get("blockingReasons")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn metadata_string_is_safe(
@@ -2294,6 +2677,290 @@ mod tests {
         assert!(!serialized.contains("tool payload"));
         assert!(!serialized.contains("toolPayload"));
         assert!(!serialized.contains("Pilot-only answer"));
+    }
+
+    async fn seed_ready_migration_review_promotions(state: &Arc<crate::AppState>) {
+        for (run_id, promoted_at) in [
+            ("run-controlled-pilot-1", "2026-05-30T01:02:03Z"),
+            ("run-controlled-pilot-2", "2026-05-30T02:03:04Z"),
+            ("run-controlled-pilot-3", "2026-05-30T03:04:05Z"),
+        ] {
+            record_controlled_pilot_promotion_evidence_with_state(
+                ControlledPilotPromotionEvidenceInput {
+                    pilot_run_id: run_id.into(),
+                    source_session_id: "session-1".into(),
+                    target_session_id: "session-1".into(),
+                    strategy_kind: "react".into(),
+                    payload_kind: "react".into(),
+                    governance_decision_kind: Some("allow".into()),
+                    promoted_message_length: 17,
+                    promoted_message_hash: format!("checksum:{run_id}"),
+                    promoted_at: Some(promoted_at.into()),
+                },
+                state,
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_review_decision_blocks_approve_when_draft_is_not_ready_without_evidence() {
+        let state = preview_state().await;
+        record_controlled_pilot_promotion_evidence_with_state(
+            ControlledPilotPromotionEvidenceInput {
+                pilot_run_id: "run-controlled-pilot-1".into(),
+                source_session_id: "session-1".into(),
+                target_session_id: "session-1".into(),
+                strategy_kind: "react".into(),
+                payload_kind: "react".into(),
+                governance_decision_kind: Some("allow".into()),
+                promoted_message_length: 17,
+                promoted_message_hash: "checksum:run-controlled-pilot-1".into(),
+                promoted_at: Some("2026-05-30T01:02:03Z".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let result = record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Approve this blocked draft? secret@example.com".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert_eq!(result.decision_kind, "approve");
+        assert!(!result.draft_ready);
+        assert!(result
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("insufficient_promotion_evidence")));
+
+        let evidence = {
+            let store = state.evidence_store.lock().await;
+            store
+                .query(EvidenceQuery {
+                    affected_path: Some("runtime.controlled_chat.migration_review_decision".into()),
+                    evidence_type: Some(EvidenceType::RuntimeBehavior),
+                    ..EvidenceQuery::default()
+                })
+                .unwrap()
+        };
+        assert!(evidence.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_review_decision_records_metadata_safe_evidence_for_ready_decisions() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        let raw_reviewer_note = "Looks ready for discussion, but never store raw@example.com.";
+
+        for decision_kind in ["approve", "reject", "request_rework"] {
+            let result = record_controlled_chat_migration_review_decision_with_state(
+                ControlledChatMigrationReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                    optional_reviewer_note: Some(raw_reviewer_note.into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.recorded);
+            assert!(result.evidence_id.is_some());
+            assert!(result.draft_ready);
+            assert_eq!(result.decision_kind, decision_kind);
+            assert!(result.draft_hash.starts_with("sha256:"));
+            assert!(result.blocking_reasons.is_empty());
+        }
+
+        let evidence = {
+            let store = state.evidence_store.lock().await;
+            store
+                .query(EvidenceQuery {
+                    affected_path: Some("runtime.controlled_chat.migration_review_decision".into()),
+                    evidence_type: Some(EvidenceType::RuntimeBehavior),
+                    ..EvidenceQuery::default()
+                })
+                .unwrap()
+        };
+        assert_eq!(evidence.len(), 3);
+
+        let serialized = serde_json::to_string(&evidence).unwrap();
+        assert!(!serialized.contains(raw_reviewer_note));
+        assert!(!serialized.contains("raw@example.com"));
+        assert!(!serialized.contains("optionalReviewerNote"));
+        assert!(!serialized.contains("reviewerNoteRaw"));
+        assert!(!serialized.contains("Pilot-only answer"));
+        assert!(!serialized.contains("toolPayload"));
+
+        for record in &evidence {
+            assert_eq!(record.evidence_type, EvidenceType::RuntimeBehavior);
+            assert_eq!(
+                record.affected_path,
+                "runtime.controlled_chat.migration_review_decision"
+            );
+            assert!(record.linked_agent_run_ids.is_empty());
+            assert!(record.linked_proposal_ids.is_empty());
+            assert_eq!(
+                record.run_metadata["evidenceKind"],
+                "migration_review_decision"
+            );
+            assert_eq!(record.run_metadata["metadataSafe"], true);
+            assert_eq!(record.run_metadata["draftReady"], true);
+            assert_eq!(
+                record.run_metadata["readinessCounts"]["requiredPromotions"],
+                3
+            );
+            assert_eq!(record.run_metadata["readinessCounts"]["promotedCount"], 3);
+            assert!(record.run_metadata["draftHash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"));
+            assert!(record.run_metadata["createdAt"].as_str().is_some());
+            assert_eq!(
+                record.run_metadata["reviewerNote"]["length"],
+                raw_reviewer_note.chars().count()
+            );
+            assert!(record.run_metadata["reviewerNote"]["checksum"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"));
+            assert!(matches!(
+                record.run_metadata["reviewerNote"]["category"]
+                    .as_str()
+                    .unwrap(),
+                "brief" | "standard" | "extended" | "none"
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_review_decision_summary_is_read_only() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "reject".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Needs a clearer rollback owner.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let before_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let before_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap()
+            .len();
+        let before_evidence_count = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let before_patch_count = {
+            let store = state.patch_store.as_ref().unwrap().lock().await;
+            store.patch_count().unwrap()
+        };
+        let before_model = {
+            let manager = state.life_model_manager.lock().await;
+            manager.load().unwrap()
+        };
+        let before_messages = {
+            let store = state.memory_store.lock().await;
+            store.export_all_messages().unwrap()
+        };
+
+        let summary = get_controlled_chat_migration_review_decision_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.rework_reject_count, 1);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|item| item.decision_kind.as_str()),
+            Some("approve")
+        );
+        assert!(summary.latest_timestamp.is_some());
+        assert!(summary.blocking_reasons.is_empty());
+
+        let after_run_count = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.run_count().unwrap()
+        };
+        let after_pending_proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(10)
+            .unwrap()
+            .len();
+        let after_evidence_count = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let after_patch_count = {
+            let store = state.patch_store.as_ref().unwrap().lock().await;
+            store.patch_count().unwrap()
+        };
+        let after_model = {
+            let manager = state.life_model_manager.lock().await;
+            manager.load().unwrap()
+        };
+        let after_messages = {
+            let store = state.memory_store.lock().await;
+            store.export_all_messages().unwrap()
+        };
+
+        assert_eq!(before_run_count, after_run_count);
+        assert_eq!(before_pending_proposals, after_pending_proposals);
+        assert_eq!(before_evidence_count, after_evidence_count);
+        assert_eq!(before_patch_count, after_patch_count);
+        assert_eq!(before_model.metadata.version, after_model.metadata.version);
+        assert_eq!(
+            serde_json::to_string(&before_messages).unwrap(),
+            serde_json::to_string(&after_messages).unwrap()
+        );
     }
 
     #[tokio::test]

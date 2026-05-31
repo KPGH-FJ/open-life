@@ -16,6 +16,9 @@ import type {
   ControlledPilotPromotionReadinessReport,
   ControlledChatMigrationPlanDraftInput,
   ControlledChatMigrationPlanDraft,
+  ControlledChatMigrationReviewDecisionInput,
+  ControlledChatMigrationReviewDecisionResult,
+  ControlledChatMigrationReviewDecisionSummary,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -282,6 +285,21 @@ export async function draftControlledChatMigrationPlan(
   return safeInvoke<ControlledChatMigrationPlanDraft>("draft_controlled_chat_migration_plan", {
     input,
   });
+}
+
+export async function recordControlledChatMigrationReviewDecision(
+  input: ControlledChatMigrationReviewDecisionInput
+): Promise<ControlledChatMigrationReviewDecisionResult> {
+  return safeInvoke<ControlledChatMigrationReviewDecisionResult>(
+    "record_controlled_chat_migration_review_decision",
+    { input }
+  );
+}
+
+export async function getControlledChatMigrationReviewDecisionSummary(): Promise<ControlledChatMigrationReviewDecisionSummary> {
+  return safeInvoke<ControlledChatMigrationReviewDecisionSummary>(
+    "get_controlled_chat_migration_review_decision_summary"
+  );
 }
 
 export async function startStreamMessage(

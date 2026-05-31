@@ -16,11 +16,16 @@ import {
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
+  getControlledChatMigrationReviewDecisionSummary,
   getControlledPilotPromotionEvidenceSummary,
+  recordControlledChatMigrationReviewDecision,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
   ControlledChatMigrationPlanDraft,
+  ControlledChatMigrationReviewDecisionKind,
+  ControlledChatMigrationReviewDecisionResult,
+  ControlledChatMigrationReviewDecisionSummary,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessReport,
@@ -121,6 +126,15 @@ export default function MultiStrategyPreviewSection() {
   const [migrationDraft, setMigrationDraft] = useState<ControlledChatMigrationPlanDraft | null>(
     null
   );
+  const [reviewerNote, setReviewerNote] = useState("");
+  const [reviewDecisionRecording, setReviewDecisionRecording] = useState(false);
+  const [reviewDecisionError, setReviewDecisionError] = useState<string | null>(null);
+  const [reviewDecisionResult, setReviewDecisionResult] =
+    useState<ControlledChatMigrationReviewDecisionResult | null>(null);
+  const [reviewDecisionSummaryChecking, setReviewDecisionSummaryChecking] = useState(false);
+  const [reviewDecisionSummaryError, setReviewDecisionSummaryError] = useState<string | null>(null);
+  const [reviewDecisionSummary, setReviewDecisionSummary] =
+    useState<ControlledChatMigrationReviewDecisionSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -225,6 +239,8 @@ export default function MultiStrategyPreviewSection() {
     setMigrationDraftChecking(true);
     setMigrationDraftError(null);
     setMigrationDraft(null);
+    setReviewDecisionResult(null);
+    setReviewDecisionError(null);
     try {
       const draft = await draftControlledChatMigrationPlan();
       setMigrationDraft(draft);
@@ -232,6 +248,42 @@ export default function MultiStrategyPreviewSection() {
       setMigrationDraftError(`Migration plan draft failed: ${readableError(e)}`);
     } finally {
       setMigrationDraftChecking(false);
+    }
+  };
+
+  const handleReviewDecisionSummaryRefresh = async () => {
+    setReviewDecisionSummaryChecking(true);
+    setReviewDecisionSummaryError(null);
+    try {
+      const summary = await getControlledChatMigrationReviewDecisionSummary();
+      setReviewDecisionSummary(summary);
+    } catch (e) {
+      setReviewDecisionSummaryError(`Review decision summary failed: ${readableError(e)}`);
+    } finally {
+      setReviewDecisionSummaryChecking(false);
+    }
+  };
+
+  const handleRecordReviewDecision = async (
+    decisionKind: ControlledChatMigrationReviewDecisionKind
+  ) => {
+    setReviewDecisionRecording(true);
+    setReviewDecisionError(null);
+    setReviewDecisionResult(null);
+    try {
+      const trimmedNote = reviewerNote.trim();
+      const result = await recordControlledChatMigrationReviewDecision({
+        decisionKind,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setReviewDecisionResult(result);
+      if (result.recorded) {
+        setReviewerNote("");
+      }
+    } catch (e) {
+      setReviewDecisionError(`Review decision recording failed: ${readableError(e)}`);
+    } finally {
+      setReviewDecisionRecording(false);
     }
   };
 
@@ -788,6 +840,214 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">No migration plan draft loaded.</div>
         )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Migration Review Decision</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Approval only allows next-stage implementation discussion. It is not Chat migration,
+              does not replace default Chat, and records metadata-safe decision evidence only.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleReviewDecisionSummaryRefresh}
+            disabled={reviewDecisionSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              reviewDecisionSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={reviewDecisionSummaryChecking ? "animate-spin" : undefined}
+            />
+            {reviewDecisionSummaryChecking ? "Refreshing..." : "Refresh Decision Summary"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+          The record command first rechecks the W25 draft. Reviewer notes are sent for backend
+          checksum categorization only; raw note text is not evidence.
+        </div>
+
+        {reviewDecisionSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {reviewDecisionSummaryError}
+          </div>
+        )}
+
+        {reviewDecisionSummary ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest decision</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {reviewDecisionSummary.latestDecision?.decisionKind ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Approved count</div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {reviewDecisionSummary.approvedCount}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Rework/reject count</div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {reviewDecisionSummary.reworkRejectCount}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest timestamp</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {reviewDecisionSummary.latestTimestamp ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Draft hash</div>
+                <div className="mt-1 break-all font-mono text-xs text-stone-900">
+                  {reviewDecisionSummary.latestDecision?.draftHash ?? "none"}
+                </div>
+              </div>
+            </div>
+
+            {reviewDecisionSummary.blockingReasons.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+                <div className="mt-1 space-y-1">
+                  {reviewDecisionSummary.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No review decision summary loaded.</div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          {migrationDraft?.draftReady ? (
+            <>
+              <label className="block">
+                <span className="text-xs font-medium text-stone-700">Reviewer note</span>
+                <textarea
+                  value={reviewerNote}
+                  onChange={event => setReviewerNote(event.target.value)}
+                  rows={2}
+                  className="mt-1 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-900 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
+                  placeholder="Optional note. Stored as length, checksum, and category only."
+                />
+              </label>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRecordReviewDecision("approve")}
+                  disabled={reviewDecisionRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    reviewDecisionRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-emerald-700 text-white hover:bg-emerald-800"
+                  )}
+                >
+                  <CheckCircle2 size={13} />
+                  Approve Review Decision
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRecordReviewDecision("reject")}
+                  disabled={reviewDecisionRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    reviewDecisionRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-red-700 text-white hover:bg-red-800"
+                  )}
+                >
+                  <XCircle size={13} />
+                  Reject Review Decision
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRecordReviewDecision("request_rework")}
+                  disabled={reviewDecisionRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    reviewDecisionRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                  )}
+                >
+                  <RefreshCw size={13} />
+                  Request Rework Review Decision
+                </button>
+              </div>
+            </>
+          ) : migrationDraft ? (
+            <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">
+              <div>Review decision recording is blocked until draftReady=true.</div>
+              {migrationDraft.blockingReasons.length > 0 && (
+                <div className="mt-1 space-y-1">
+                  {migrationDraft.blockingReasons.map(reason => (
+                    <div key={reason}>Review decision blocker: {reason}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+              Load a ready migration plan draft before recording a review decision.
+            </div>
+          )}
+
+          {reviewDecisionError && (
+            <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {reviewDecisionError}
+            </div>
+          )}
+
+          {reviewDecisionResult && (
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-xs leading-5",
+                reviewDecisionResult.recorded
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              <div className="font-medium">
+                {reviewDecisionResult.recorded ? "Decision recorded" : "Decision blocked"}
+              </div>
+              <div className="mt-1">
+                {reviewDecisionResult.decisionKind} · draftReady:{" "}
+                {reviewDecisionResult.draftReady ? "true" : "false"} ·{" "}
+                {reviewDecisionResult.evidenceId ?? "no evidence"}
+              </div>
+              {reviewDecisionResult.blockingReasons.length > 0 && (
+                <div className="mt-1 space-y-1">
+                  {reviewDecisionResult.blockingReasons.map(reason => (
+                    <div key={reason}>{reason}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">

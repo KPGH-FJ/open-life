@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W25 completion/status index. This is not a second roadmap.
+   - Compact W1-W26 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,15 +43,16 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W25 through sustained Runtime Migration
+Current implementation has completed W1-W26 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
 read-only promotion readiness gate, and a reviewed migration plan draft
-generator. The next practical sequence is:
+generator plus metadata-safe manual migration review decision evidence. The
+next practical sequence is:
 
 ```text
-human review of the generated draft before any separate migration implementation
+separate implementation discussion only after explicit review approval evidence
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -60,7 +61,7 @@ human review of the generated draft before any separate migration implementation
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W25 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W26 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -140,6 +141,19 @@ preconditions, rollback plan, fallback plan, and test plan with
 replace default Chat, modify default runtime feature flags, create AgentRuns,
 Proposals, Memory writes, LifeModel patches, promotion evidence, or output raw
 user content, raw assistant output, or tool payloads.
+
+W26 adds only `record_controlled_chat_migration_review_decision`,
+`get_controlled_chat_migration_review_decision_summary`, and the Settings
+Migration Review Decision panel. The record command first calls W25 draft,
+rejects blocked-draft `approve` without writing evidence, and records ready
+draft `approve` / `reject` / `request_rework` as metadata-safe EvidenceStore
+decision evidence only. Evidence metadata must include
+`evidenceKind=migration_review_decision`, `metadataSafe=true`, `draftReady`,
+`decisionKind`, readiness counts, draft hash, and `createdAt`; reviewer notes
+are stored only as length, checksum, and bounded category. The summary command
+is read-only and must not read raw transcript or create AgentRuns, Proposals,
+Memory writes, LifeModel patches, or external tool results. Approval only allows
+next-stage implementation discussion; it is not Chat migration permission.
 
 ## 6. Agent Rules
 
