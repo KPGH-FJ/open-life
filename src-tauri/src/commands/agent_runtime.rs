@@ -312,6 +312,32 @@ pub struct ControlledChatMigrationShadowReviewSummary {
     pub blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverReadinessInput {
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverReadinessReport {
+    pub cutover_planning_eligible: bool,
+    pub implementation_gate_report: ControlledChatMigrationImplementationGateReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_shadow_review_decision: Option<ControlledChatMigrationShadowReviewLatestDecision>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_shadow_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_summary_digest: Option<String>,
+    pub default_chat_unchanged: bool,
+    pub required_evidence_ready: bool,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -1193,6 +1219,129 @@ pub(crate) async fn get_controlled_chat_migration_shadow_review_summary_with_sta
     })
 }
 
+#[tauri::command]
+pub async fn check_controlled_chat_cutover_readiness(
+    input: ControlledChatCutoverReadinessInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatCutoverReadinessReport, String> {
+    check_controlled_chat_cutover_readiness_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn check_controlled_chat_cutover_readiness_with_state(
+    input: ControlledChatCutoverReadinessInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatCutoverReadinessReport, String> {
+    let implementation_gate_report =
+        check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: input.required_promotions,
+                session_id: input.session_id,
+            },
+            state,
+        )
+        .await?;
+    let shadow_review_summary =
+        get_controlled_chat_migration_shadow_review_summary_with_state(state).await?;
+    let latest_shadow_review_decision = shadow_review_summary.latest_decision.clone();
+    let default_chat_unchanged = implementation_gate_report
+        .readiness_report
+        .default_chat_unchanged;
+
+    let mut blocking_reasons = Vec::new();
+    if !implementation_gate_report.implementation_eligible {
+        push_unique_string(
+            &mut blocking_reasons,
+            "implementation_gate_not_eligible".into(),
+        );
+        for reason in &implementation_gate_report.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+    if !default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_changed".into());
+    }
+
+    let mut readiness_summary_digest = None;
+    let mut verified_shadow_run_id = None;
+    let mut shadow_run_ready = false;
+    let latest_shadow_decision_kind = latest_shadow_review_decision
+        .as_ref()
+        .map(|decision| decision.decision_kind.clone())
+        .unwrap_or_else(|| "none".into());
+
+    match latest_shadow_review_decision.as_ref() {
+        Some(decision) if decision.decision_kind == "approve" => {
+            let run = load_shadow_review_run(state, &decision.shadow_run_id).await?;
+            let readiness = shadow_review_readiness(run.as_ref())?;
+            readiness_summary_digest = Some(readiness.digest.clone());
+            for reason in &readiness.blocking_reasons {
+                push_unique_string(&mut blocking_reasons, reason.clone());
+            }
+            if readiness.blocking_reasons.is_empty()
+                && readiness.digest != decision.readiness_summary_digest
+            {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "shadow_run_readiness_digest_mismatch".into(),
+                );
+            }
+            shadow_run_ready = readiness.blocking_reasons.is_empty()
+                && readiness.digest == decision.readiness_summary_digest;
+            if shadow_run_ready {
+                verified_shadow_run_id = Some(decision.shadow_run_id.clone());
+            }
+        }
+        Some(decision) => {
+            readiness_summary_digest = Some(decision.readiness_summary_digest.clone());
+            push_unique_string(
+                &mut blocking_reasons,
+                format!(
+                    "latest_shadow_review_decision_is_{}",
+                    decision.decision_kind
+                ),
+            );
+        }
+        None => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "shadow_review_approve_missing".into(),
+            );
+        }
+    }
+
+    let required_evidence_ready = implementation_gate_report.implementation_eligible
+        && default_chat_unchanged
+        && latest_shadow_review_decision
+            .as_ref()
+            .is_some_and(|decision| decision.decision_kind == "approve")
+        && shadow_run_ready;
+    let cutover_planning_eligible = required_evidence_ready && blocking_reasons.is_empty();
+    let metadata_safe_summary =
+        cutover_readiness_metadata_safe_summary(CutoverReadinessMetadataSafeSummaryInput {
+            cutover_planning_eligible,
+            required_evidence_ready,
+            default_chat_unchanged,
+            implementation_eligible: implementation_gate_report.implementation_eligible,
+            latest_shadow_decision_kind: &latest_shadow_decision_kind,
+            shadow_run_ready,
+            verified_shadow_run_id: verified_shadow_run_id.as_deref(),
+            readiness_summary_digest: readiness_summary_digest.as_deref(),
+            shadow_review_summary: &shadow_review_summary,
+        });
+
+    Ok(ControlledChatCutoverReadinessReport {
+        cutover_planning_eligible,
+        implementation_gate_report,
+        latest_shadow_review_decision,
+        verified_shadow_run_id,
+        readiness_summary_digest,
+        default_chat_unchanged,
+        required_evidence_ready,
+        blocking_reasons,
+        metadata_safe_summary,
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -1754,6 +1903,47 @@ fn shadow_review_readiness(run: Option<&AgentRun>) -> Result<ShadowReviewReadine
     Ok(ShadowReviewReadiness {
         digest: metadata_hash_for_serializable(&summary)?,
         blocking_reasons,
+    })
+}
+
+struct CutoverReadinessMetadataSafeSummaryInput<'a> {
+    cutover_planning_eligible: bool,
+    required_evidence_ready: bool,
+    default_chat_unchanged: bool,
+    implementation_eligible: bool,
+    latest_shadow_decision_kind: &'a str,
+    shadow_run_ready: bool,
+    verified_shadow_run_id: Option<&'a str>,
+    readiness_summary_digest: Option<&'a str>,
+    shadow_review_summary: &'a ControlledChatMigrationShadowReviewSummary,
+}
+
+fn cutover_readiness_metadata_safe_summary(
+    input: CutoverReadinessMetadataSafeSummaryInput<'_>,
+) -> Value {
+    json!({
+        "cutoverReadinessGate": "controlled_chat_cutover_planning",
+        "metadataSafe": true,
+        "planningOnly": true,
+        "notAutomaticMigration": true,
+        "cutoverPlanningEligible": input.cutover_planning_eligible,
+        "requiredEvidenceReady": input.required_evidence_ready,
+        "defaultChatUnchanged": input.default_chat_unchanged,
+        "implementationEligible": input.implementation_eligible,
+        "latestShadowReviewDecisionKind": input.latest_shadow_decision_kind,
+        "shadowRunReady": input.shadow_run_ready,
+        "verifiedShadowRunId": input.verified_shadow_run_id.unwrap_or("none"),
+        "readinessSummaryDigest": input.readiness_summary_digest.unwrap_or("none"),
+        "approvedShadowReviewCount": input.shadow_review_summary.approved_count,
+        "shadowReviewReworkRejectCount": input.shadow_review_summary.rework_reject_count,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "reviewerNoteStorage": "length_checksum_category_only",
+        "transcriptStorage": "none",
     })
 }
 
@@ -4587,6 +4777,31 @@ mod tests {
             .unwrap()
     }
 
+    async fn seed_shadow_review_decision_evidence(
+        state: &Arc<crate::AppState>,
+        shadow_run_id: &str,
+        decision_kind: &str,
+    ) {
+        let store = state.evidence_store.lock().await;
+        let mut draft = EvidenceDraft::new(
+            EvidenceType::RuntimeBehavior,
+            CONTROLLED_CHAT_MIGRATION_SHADOW_REVIEW_DECISION_EVIDENCE_PATH,
+            1.0,
+            RiskLevel::Low,
+            EvidencePrivacyLevel::Internal,
+        );
+        draft.run_metadata = json!({
+            "shadowRunId": shadow_run_id,
+            "decisionKind": decision_kind,
+            "reviewerNoteChecksum": null,
+            "reviewerNoteLength": 0,
+            "reviewerNoteCategory": "none",
+            "readinessSummaryDigest": "sha256:seeded-shadow-readiness",
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+        });
+        store.create_evidence(draft).unwrap();
+    }
+
     #[tokio::test]
     async fn shadow_review_invalid_run_is_blocked_without_evidence() {
         let state = preview_state().await;
@@ -4877,6 +5092,299 @@ mod tests {
         assert!(summary.latest_timestamp.is_some());
         assert!(summary.blocking_reasons.is_empty());
 
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_blocks_without_implementation_gate_eligibility() {
+        let state = preview_state().await;
+        let run = completed_shadow_review_run("run-shadow-cutover-implementation-blocked");
+        insert_shadow_review_run(&state, &run).await;
+        record_controlled_chat_migration_shadow_review_decision_with_state(
+            ControlledChatMigrationShadowReviewDecisionInput {
+                shadow_run_id: "run-shadow-cutover-implementation-blocked".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.cutover_planning_eligible);
+        assert!(!report.implementation_gate_report.implementation_eligible);
+        assert!(report
+            .blocking_reasons
+            .contains(&"implementation_gate_not_eligible".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"metadata_safe_approve_decision_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_blocks_without_approved_shadow_review() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.cutover_planning_eligible);
+        assert!(report.implementation_gate_report.implementation_eligible);
+        assert!(report.latest_shadow_review_decision.is_none());
+        assert!(report
+            .blocking_reasons
+            .contains(&"shadow_review_approve_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_blocks_if_approved_shadow_run_missing() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        seed_shadow_review_decision_evidence(&state, "run-shadow-cutover-missing", "approve").await;
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.cutover_planning_eligible);
+        assert_eq!(
+            report
+                .latest_shadow_review_decision
+                .as_ref()
+                .map(|decision| decision.shadow_run_id.as_str()),
+            Some("run-shadow-cutover-missing")
+        );
+        assert!(report.verified_shadow_run_id.is_none());
+        assert!(report
+            .blocking_reasons
+            .contains(&"shadow_run_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_blocks_if_shadow_run_no_longer_metadata_safe_write_disabled_or_side_effect_free(
+    ) {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let mut run = completed_shadow_review_run("run-shadow-cutover-drifted");
+        insert_shadow_review_run(&state, &run).await;
+        record_controlled_chat_migration_shadow_review_decision_with_state(
+            ControlledChatMigrationShadowReviewDecisionInput {
+                shadow_run_id: "run-shadow-cutover-drifted".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let audit = run
+            .reasoning_trace
+            .as_mut()
+            .and_then(|trace| trace.strategy_result.as_mut())
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        audit.insert("metadataSafe".into(), json!(false));
+        audit.insert("allowWrites".into(), json!(true));
+        audit
+            .get_mut("writeControl")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("allowWrites".into(), json!(true));
+        run.tool_call_count = 1;
+        {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.update_run(&run).unwrap();
+        }
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.cutover_planning_eligible);
+        assert!(report
+            .blocking_reasons
+            .contains(&"shadow_run_metadata_not_safe".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"shadow_run_allow_writes_not_false".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"shadow_run_external_write_side_effects_present".to_string()));
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_passes_when_w27_w29_and_shadow_run_readiness_are_valid() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let run = completed_shadow_review_run("run-shadow-cutover-ready");
+        insert_shadow_review_run(&state, &run).await;
+        record_controlled_chat_migration_shadow_review_decision_with_state(
+            ControlledChatMigrationShadowReviewDecisionInput {
+                shadow_run_id: "run-shadow-cutover-ready".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: Some("Ready for cutover planning discussion.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.cutover_planning_eligible);
+        assert!(report.required_evidence_ready);
+        assert!(report.default_chat_unchanged);
+        assert_eq!(
+            report.verified_shadow_run_id.as_deref(),
+            Some("run-shadow-cutover-ready")
+        );
+        assert!(report
+            .readiness_summary_digest
+            .as_deref()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(report.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(report.metadata_safe_summary["planningOnly"], true);
+        assert_eq!(report.metadata_safe_summary["contentStorage"], "none");
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("Ready for cutover planning discussion."));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("toolPayload"));
+    }
+
+    #[tokio::test]
+    async fn cutover_readiness_command_is_read_only_by_side_effect_counts() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let run = completed_shadow_review_run("run-shadow-cutover-read-only");
+        insert_shadow_review_run(&state, &run).await;
+        record_controlled_chat_migration_shadow_review_decision_with_state(
+            ControlledChatMigrationShadowReviewDecisionInput {
+                shadow_run_id: "run-shadow-cutover-read-only".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = check_controlled_chat_cutover_readiness_with_state(
+            ControlledChatCutoverReadinessInput {
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.cutover_planning_eligible);
         let after = side_effect_counts(&state).await;
         assert_eq!(before.run_count, after.run_count);
         assert_eq!(before.pending_proposal_count, after.pending_proposal_count);

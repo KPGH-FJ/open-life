@@ -9,6 +9,7 @@ import {
   getStateHistory,
   recordState,
   checkControlledChatPilotEligibility,
+  checkControlledChatCutoverReadiness,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
@@ -509,5 +510,69 @@ describe("tauri command argument aliases", () => {
     expect(result.latestDecision?.decisionKind).toBe("request_rework");
     expect(result.latestDecision?.shadowRunId).toBe("run-shadow-2");
     expect(result.reworkRejectCount).toBe(2);
+  });
+
+  it("invokes controlled chat cutover readiness as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      cutoverPlanningEligible: true,
+      implementationGateReport: {
+        implementationEligible: true,
+        latestDecision: {
+          evidenceId: "ev_review_2",
+          decisionKind: "approve",
+          draftReady: true,
+          draftHash: "sha256:test-draft",
+          createdAt: "2026-05-31T02:03:04Z",
+        },
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+        },
+        draftHashMatched: true,
+        approvedAfterLatestDraft: true,
+        blockingReasons: [],
+      },
+      latestShadowReviewDecision: {
+        evidenceId: "ev_shadow_review_2",
+        shadowRunId: "run-shadow-2",
+        decisionKind: "approve",
+        reviewerNoteChecksum: "sha256:reviewer-note",
+        reviewerNoteLength: 19,
+        reviewerNoteCategory: "brief",
+        readinessSummaryDigest: "sha256:shadow-readiness-2",
+        createdAt: "2026-05-31T05:06:07Z",
+      },
+      verifiedShadowRunId: "run-shadow-2",
+      readinessSummaryDigest: "sha256:shadow-readiness-2",
+      defaultChatUnchanged: true,
+      requiredEvidenceReady: true,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        metadataSafe: true,
+        planningOnly: true,
+      },
+    });
+
+    const result = await checkControlledChatCutoverReadiness({
+      requiredPromotions: 3,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_controlled_chat_cutover_readiness", {
+      input: {
+        requiredPromotions: 3,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.cutoverPlanningEligible).toBe(true);
+    expect(result.verifiedShadowRunId).toBe("run-shadow-2");
+    expect(result.metadataSafeSummary.metadataSafe).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import {
   XCircle,
 } from "lucide-react";
 import {
+  checkControlledChatCutoverReadiness,
   checkControlledChatPilotEligibility,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
@@ -26,6 +27,7 @@ import {
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
+  ControlledChatCutoverReadinessReport,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
   ControlledChatMigrationReviewDecisionKind,
@@ -46,6 +48,7 @@ import type {
 
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
+  "cutoverReadinessGate",
   "taskKind",
   "reasonCode",
   "riskLevel",
@@ -54,6 +57,14 @@ const SAFE_SUMMARY_KEYS = [
   "descriptorKind",
   "allowWrites",
   "metadataSafe",
+  "planningOnly",
+  "requiredEvidenceReady",
+  "defaultChatUnchanged",
+  "implementationEligible",
+  "latestShadowReviewDecisionKind",
+  "shadowRunReady",
+  "contentStorage",
+  "toolStorage",
 ];
 const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
   "defaultChatUnchanged",
@@ -167,6 +178,10 @@ export default function MultiStrategyPreviewSection() {
   const [shadowReviewSummaryError, setShadowReviewSummaryError] = useState<string | null>(null);
   const [shadowReviewSummary, setShadowReviewSummary] =
     useState<ControlledChatMigrationShadowReviewSummary | null>(null);
+  const [cutoverReadinessChecking, setCutoverReadinessChecking] = useState(false);
+  const [cutoverReadinessError, setCutoverReadinessError] = useState<string | null>(null);
+  const [cutoverReadinessReport, setCutoverReadinessReport] =
+    useState<ControlledChatCutoverReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -393,6 +408,20 @@ export default function MultiStrategyPreviewSection() {
       setShadowReviewError(`Shadow review recording failed: ${readableError(e)}`);
     } finally {
       setShadowReviewRecording(false);
+    }
+  };
+
+  const handleCutoverReadinessCheck = async () => {
+    setCutoverReadinessChecking(true);
+    setCutoverReadinessError(null);
+    setCutoverReadinessReport(null);
+    try {
+      const report = await checkControlledChatCutoverReadiness();
+      setCutoverReadinessReport(report);
+    } catch (e) {
+      setCutoverReadinessError(`Cutover readiness check failed: ${readableError(e)}`);
+    } finally {
+      setCutoverReadinessChecking(false);
     }
   };
 
@@ -1659,6 +1688,160 @@ export default function MultiStrategyPreviewSection() {
             </div>
           )}
         </div>
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Cutover Readiness</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only cutover planning readiness check. It verifies W27, latest W29 approval, and
+              the approved shadow run audit; it does not start runtime, write evidence, save Chat,
+              or migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleCutoverReadinessCheck}
+            disabled={cutoverReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              cutoverReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={cutoverReadinessChecking ? "animate-spin" : undefined}
+            />
+            {cutoverReadinessChecking ? "Checking..." : "Check Cutover Readiness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          W30 is cutover planning readiness only. A pass means the team can discuss default Chat
+          migration implementation; it is not a default Chat migration or feature flag change.
+        </div>
+
+        {cutoverReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {cutoverReadinessError}
+          </div>
+        )}
+
+        {cutoverReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  cutoverReadinessReport.cutoverPlanningEligible
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {cutoverReadinessReport.cutoverPlanningEligible ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {cutoverReadinessReport.cutoverPlanningEligible
+                  ? "Cutover Planning Eligible"
+                  : "Cutover Blocked"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  cutoverReadinessReport.requiredEvidenceReady
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                requiredEvidenceReady:{" "}
+                {cutoverReadinessReport.requiredEvidenceReady ? "true" : "false"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  cutoverReadinessReport.defaultChatUnchanged
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                defaultChatUnchanged:{" "}
+                {cutoverReadinessReport.defaultChatUnchanged ? "true" : "false"}
+              </span>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Implementation gate</div>
+                <div className="mt-1 text-xs text-stone-700">
+                  {cutoverReadinessReport.implementationGateReport.implementationEligible
+                    ? "eligible"
+                    : "blocked"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest shadow decision</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {cutoverReadinessReport.latestShadowReviewDecision?.decisionKind ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Verified shadow run</div>
+                <div className="mt-1 break-all font-mono text-xs text-stone-900">
+                  {cutoverReadinessReport.verifiedShadowRunId ?? "none"}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Readiness summary digest</div>
+              <div className="mt-1 break-all font-mono text-xs text-stone-900">
+                {cutoverReadinessReport.readinessSummaryDigest ?? "none"}
+              </div>
+            </div>
+
+            {safeSummaryEntries(cutoverReadinessReport.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(cutoverReadinessReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {cutoverReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {cutoverReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No cutover readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No cutover readiness report loaded.</div>
+        )}
       </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">

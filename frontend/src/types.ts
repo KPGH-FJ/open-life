@@ -470,6 +470,23 @@ export interface ControlledChatMigrationShadowReviewSummary {
   blockingReasons: string[];
 }
 
+export interface ControlledChatCutoverReadinessInput {
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface ControlledChatCutoverReadinessReport {
+  cutoverPlanningEligible: boolean;
+  implementationGateReport: ControlledChatMigrationImplementationGateReport;
+  latestShadowReviewDecision?: ControlledChatMigrationShadowReviewLatestDecision | null;
+  verifiedShadowRunId?: string | null;
+  readinessSummaryDigest?: string | null;
+  defaultChatUnchanged: boolean;
+  requiredEvidenceReady: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

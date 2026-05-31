@@ -1030,6 +1030,167 @@ describe("SettingsPage", () => {
     expect(screen.getByText(/approve · run-shadow-settings-1/)).toBeInTheDocument();
   });
 
+  it("checks cutover readiness explicitly and renders planning eligibility", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_cutover_readiness") {
+        return Promise.resolve({
+          cutoverPlanningEligible: true,
+          implementationGateReport: {
+            implementationEligible: true,
+            latestDecision: {
+              evidenceId: "ev_review_decision_2",
+              decisionKind: "approve",
+              draftReady: true,
+              draftHash: "sha256:mock-migration-draft",
+              createdAt: "2026-05-31T02:03:04Z",
+            },
+            readinessReport: {
+              ready: true,
+              requiredPromotions: 3,
+              promotedCount: 3,
+              recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+              latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+              sourceTargetMismatchBlockCount: 0,
+              metadataSafeEvidenceReady: true,
+              defaultChatUnchanged: true,
+              blockingReasons: [],
+            },
+            draftHashMatched: true,
+            approvedAfterLatestDraft: true,
+            blockingReasons: [],
+          },
+          latestShadowReviewDecision: {
+            evidenceId: "ev_shadow_review_1",
+            shadowRunId: "run-shadow-settings-1",
+            decisionKind: "approve",
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 22,
+            reviewerNoteCategory: "brief",
+            readinessSummaryDigest: "sha256:shadow-readiness",
+            createdAt: "2026-05-31T04:05:06Z",
+          },
+          verifiedShadowRunId: "run-shadow-settings-1",
+          readinessSummaryDigest: "sha256:shadow-readiness",
+          defaultChatUnchanged: true,
+          requiredEvidenceReady: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            metadataSafe: true,
+            planningOnly: true,
+            cutoverReadinessGate: "controlled_chat_cutover_planning",
+            implementationEligible: true,
+            shadowRunReady: true,
+            latestShadowReviewDecisionKind: "approve",
+            contentStorage: "none",
+            toolStorage: "none",
+            rawOutput: "must not render",
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Cutover Readiness")).toBeInTheDocument();
+    expect(screen.getAllByText(/cutover planning readiness/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Check Cutover Readiness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_controlled_chat_cutover_readiness", {
+        input: {},
+      });
+    });
+
+    expect(await screen.findByText("Cutover Planning Eligible")).toBeInTheDocument();
+    expect(screen.getByText("requiredEvidenceReady: true")).toBeInTheDocument();
+    expect(screen.getByText("defaultChatUnchanged: true")).toBeInTheDocument();
+    expect(screen.getByText("run-shadow-settings-1")).toBeInTheDocument();
+    expect(screen.getByText("sha256:shadow-readiness")).toBeInTheDocument();
+    expect(screen.getByText("No cutover readiness blockers returned.")).toBeInTheDocument();
+    expect(screen.getByText("planningOnly: true")).toBeInTheDocument();
+    expect(screen.queryByText("must not render")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
+  it("renders cutover readiness blockers without triggering shadow run or preview", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_controlled_chat_cutover_readiness") {
+        return Promise.resolve({
+          cutoverPlanningEligible: false,
+          implementationGateReport: {
+            implementationEligible: true,
+            latestDecision: {
+              evidenceId: "ev_review_decision_2",
+              decisionKind: "approve",
+              draftReady: true,
+              draftHash: "sha256:mock-migration-draft",
+              createdAt: "2026-05-31T02:03:04Z",
+            },
+            readinessReport: {
+              ready: true,
+              requiredPromotions: 3,
+              promotedCount: 3,
+              recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+              latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+              sourceTargetMismatchBlockCount: 0,
+              metadataSafeEvidenceReady: true,
+              defaultChatUnchanged: true,
+              blockingReasons: [],
+            },
+            draftHashMatched: true,
+            approvedAfterLatestDraft: true,
+            blockingReasons: [],
+          },
+          latestShadowReviewDecision: {
+            evidenceId: "ev_shadow_review_1",
+            shadowRunId: "run-shadow-settings-1",
+            decisionKind: "request_rework",
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 22,
+            reviewerNoteCategory: "brief",
+            readinessSummaryDigest: "sha256:shadow-readiness",
+            createdAt: "2026-05-31T04:05:06Z",
+          },
+          verifiedShadowRunId: null,
+          readinessSummaryDigest: "sha256:shadow-readiness",
+          defaultChatUnchanged: true,
+          requiredEvidenceReady: false,
+          blockingReasons: ["latest_shadow_review_decision_is_request_rework"],
+          metadataSafeSummary: {
+            metadataSafe: true,
+            planningOnly: true,
+          },
+        });
+      }
+      if (
+        cmd === "run_controlled_chat_migration_shadow_run" ||
+        cmd === "run_multi_strategy_agent_preview"
+      ) {
+        return Promise.reject(new Error("cutover readiness must not run runtime"));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Check Cutover Readiness" }));
+
+    expect(await screen.findByText("Cutover Blocked")).toBeInTheDocument();
+    expect(screen.getByText("latest_shadow_review_decision_is_request_rework")).toBeInTheDocument();
+    expect(screen.getByText("requiredEvidenceReady: false")).toBeInTheDocument();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "run_controlled_chat_migration_shadow_run")
+    ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

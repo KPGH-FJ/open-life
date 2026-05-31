@@ -626,6 +626,63 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         latestTimestamp: "2026-05-31T04:05:06Z",
         blockingReasons: [],
       } as T);
+    case "check_controlled_chat_cutover_readiness":
+      return Promise.resolve({
+        cutoverPlanningEligible: true,
+        implementationGateReport: {
+          implementationEligible: true,
+          latestDecision: {
+            evidenceId: "ev_review_decision_2",
+            decisionKind: "approve",
+            draftReady: true,
+            draftHash: "sha256:mock-migration-draft",
+            createdAt: "2026-05-31T02:03:04Z",
+          },
+          readinessReport: {
+            ready: true,
+            requiredPromotions: 3,
+            promotedCount: 3,
+            recentPromotedPilotRunIds: [
+              "run-controlled-pilot-3",
+              "run-controlled-pilot-2",
+              "run-controlled-pilot-1",
+            ],
+            latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+            sourceTargetMismatchBlockCount: 0,
+            metadataSafeEvidenceReady: true,
+            defaultChatUnchanged: true,
+            blockingReasons: [],
+          },
+          draftHashMatched: true,
+          approvedAfterLatestDraft: true,
+          blockingReasons: [],
+        },
+        latestShadowReviewDecision: {
+          evidenceId: "ev_shadow_review_1",
+          shadowRunId: "run-shadow-1",
+          decisionKind: "approve",
+          reviewerNoteChecksum: "sha256:reviewer-note",
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          readinessSummaryDigest: "sha256:mock-shadow-readiness",
+          createdAt: "2026-05-31T04:05:06Z",
+        },
+        verifiedShadowRunId: "run-shadow-1",
+        readinessSummaryDigest: "sha256:mock-shadow-readiness",
+        defaultChatUnchanged: true,
+        requiredEvidenceReady: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverReadinessGate: "controlled_chat_cutover_planning",
+          metadataSafe: true,
+          planningOnly: true,
+          implementationEligible: true,
+          shadowRunReady: true,
+          latestShadowReviewDecisionKind: "approve",
+          contentStorage: "none",
+          toolStorage: "none",
+        },
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

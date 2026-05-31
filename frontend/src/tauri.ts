@@ -21,6 +21,8 @@ import type {
   ControlledChatMigrationReviewDecisionSummary,
   ControlledChatMigrationImplementationGateInput,
   ControlledChatMigrationImplementationGateReport,
+  ControlledChatCutoverReadinessInput,
+  ControlledChatCutoverReadinessReport,
   ControlledChatMigrationShadowRunInput,
   ControlledChatMigrationShadowRunOutput,
   ControlledChatMigrationShadowReviewDecisionInput,
@@ -339,6 +341,15 @@ export async function recordControlledChatMigrationShadowReviewDecision(
 export async function getControlledChatMigrationShadowReviewSummary(): Promise<ControlledChatMigrationShadowReviewSummary> {
   return safeInvoke<ControlledChatMigrationShadowReviewSummary>(
     "get_controlled_chat_migration_shadow_review_summary"
+  );
+}
+
+export async function checkControlledChatCutoverReadiness(
+  input: ControlledChatCutoverReadinessInput = {}
+): Promise<ControlledChatCutoverReadinessReport> {
+  return safeInvoke<ControlledChatCutoverReadinessReport>(
+    "check_controlled_chat_cutover_readiness",
+    { input }
   );
 }
 
