@@ -542,6 +542,63 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           latestDecisionPresent: true,
         },
       } as T);
+    case "check_default_chat_adapter_activation_implementation_gate":
+      return Promise.resolve({
+        implementationGateEligible: true,
+        draftReady: true,
+        latestDecision: {
+          evidenceId: "ev_activation_review_1",
+          decisionKind: "approve",
+          draftReady: true,
+          activationPlanDigest: "sha256:mock-activation-plan",
+          candidatePromotionReady: true,
+          currentMode: "legacy_stream",
+          automaticMigrationEnabled: false,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T10:11:12Z",
+        },
+        currentActivationPlanDigest: "sha256:mock-activation-plan",
+        activationPlanDigestMatched: true,
+        defaultChatUnchanged: true,
+        automaticMigrationEnabled: false,
+        currentMode: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationImplementationGate: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          implementationGateEligible: true,
+          activationPlanDigestMatched: true,
+        },
+      } as T);
+    case "get_default_chat_adapter_routing_status":
+      return Promise.resolve({
+        currentMode: "legacy_stream",
+        adapterScaffoldPresent: true,
+        controlledAdapterEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        activationImplementationGateEligible: true,
+        requiresSeparateCutoverImplementation: true,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          defaultChatAdapterRouting: "disabled_scaffold",
+          metadataSafe: true,
+          readOnly: true,
+          routingMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: true,
+          notAutomaticMigration: true,
+          requiresSeparateCutoverImplementation: true,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

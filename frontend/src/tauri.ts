@@ -40,6 +40,10 @@ import type {
   DefaultChatAdapterActivationReviewDecisionInput,
   DefaultChatAdapterActivationReviewDecisionResult,
   DefaultChatAdapterActivationReviewSummary,
+  DefaultChatAdapterActivationImplementationGateInput,
+  DefaultChatAdapterActivationImplementationGateReport,
+  DefaultChatAdapterRoutingStatusInput,
+  DefaultChatAdapterRoutingStatus,
   DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
@@ -424,6 +428,23 @@ export async function getDefaultChatAdapterActivationReviewSummary(): Promise<De
   return safeInvoke<DefaultChatAdapterActivationReviewSummary>(
     "get_default_chat_adapter_activation_review_summary"
   );
+}
+
+export async function checkDefaultChatAdapterActivationImplementationGate(
+  input: DefaultChatAdapterActivationImplementationGateInput = {}
+): Promise<DefaultChatAdapterActivationImplementationGateReport> {
+  return safeInvoke<DefaultChatAdapterActivationImplementationGateReport>(
+    "check_default_chat_adapter_activation_implementation_gate",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterRoutingStatus(
+  input: DefaultChatAdapterRoutingStatusInput = {}
+): Promise<DefaultChatAdapterRoutingStatus> {
+  return safeInvoke<DefaultChatAdapterRoutingStatus>("get_default_chat_adapter_routing_status", {
+    input,
+  });
 }
 
 export async function startStreamMessage(

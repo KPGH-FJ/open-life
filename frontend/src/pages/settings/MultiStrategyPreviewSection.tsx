@@ -17,10 +17,12 @@ import {
   checkControlledChatPilotEligibility,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
+  checkDefaultChatAdapterActivationImplementationGate,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
+  getDefaultChatAdapterRoutingStatus,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
   getControlledChatMigrationShadowReviewSummary,
@@ -42,6 +44,8 @@ import type {
   ControlledChatCutoverCandidatePromotionReadinessReport,
   ControlledChatCutoverReadinessReport,
   DefaultChatAdapterActivationPlanDraft,
+  DefaultChatAdapterActivationImplementationGateReport,
+  DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
   DefaultChatAdapterActivationReviewDecisionResult,
   DefaultChatAdapterActivationReviewSummary,
@@ -67,8 +71,10 @@ import type {
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
   "runtimeBoundary",
+  "defaultChatAdapterRouting",
   "activationPlan",
   "activationReview",
+  "activationImplementationGate",
   "cutoverReadinessGate",
   "promotionReadinessGate",
   "taskKind",
@@ -93,9 +99,16 @@ const SAFE_SUMMARY_KEYS = [
   "manualReviewRequired",
   "notAutomaticMigration",
   "requiresSeparateImplementation",
+  "requiresSeparateCutoverImplementation",
   "candidatePromotionReady",
   "currentMode",
+  "routingMode",
+  "adapterScaffoldPresent",
+  "controlledAdapterEnabled",
+  "defaultSendPath",
+  "startStreamPath",
   "controlledCandidateAvailable",
+  "activationImplementationGateEligible",
   "candidatePromotionReadinessRequired",
   "automaticMigrationEnabled",
   "ready",
@@ -113,6 +126,8 @@ const SAFE_SUMMARY_KEYS = [
   "observabilityPlanCount",
   "testPlanCount",
   "latestDecisionPresent",
+  "implementationGateEligible",
+  "activationPlanDigestMatched",
   "approvedCount",
   "rejectOrReworkCount",
   "implementationEligible",
@@ -129,6 +144,9 @@ const SAFE_SUMMARY_KEYS = [
   "memoryStorage",
   "evidenceStorage",
   "mcpAuditStorage",
+  "transcriptStorage",
+  "agentRunStorage",
+  "modelCallStorage",
 ];
 const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
   "defaultChatUnchanged",
@@ -291,6 +309,17 @@ export default function MultiStrategyPreviewSection() {
   );
   const [activationReviewSummary, setActivationReviewSummary] =
     useState<DefaultChatAdapterActivationReviewSummary | null>(null);
+  const [activationImplementationGateChecking, setActivationImplementationGateChecking] =
+    useState(false);
+  const [activationImplementationGateError, setActivationImplementationGateError] = useState<
+    string | null
+  >(null);
+  const [activationImplementationGateReport, setActivationImplementationGateReport] =
+    useState<DefaultChatAdapterActivationImplementationGateReport | null>(null);
+  const [adapterRoutingChecking, setAdapterRoutingChecking] = useState(false);
+  const [adapterRoutingError, setAdapterRoutingError] = useState<string | null>(null);
+  const [adapterRoutingStatus, setAdapterRoutingStatus] =
+    useState<DefaultChatAdapterRoutingStatus | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -650,6 +679,40 @@ export default function MultiStrategyPreviewSection() {
       setActivationReviewError(`Activation review recording failed: ${readableError(e)}`);
     } finally {
       setActivationReviewRecording(false);
+    }
+  };
+
+  const handleActivationImplementationGateCheck = async () => {
+    setActivationImplementationGateChecking(true);
+    setActivationImplementationGateError(null);
+    setActivationImplementationGateReport(null);
+    try {
+      const report = await checkDefaultChatAdapterActivationImplementationGate({
+        requiredApprovedCandidates: 1,
+      });
+      setActivationImplementationGateReport(report);
+    } catch (e) {
+      setActivationImplementationGateError(
+        `Activation implementation gate failed: ${readableError(e)}`
+      );
+    } finally {
+      setActivationImplementationGateChecking(false);
+    }
+  };
+
+  const handleAdapterRoutingRefresh = async () => {
+    setAdapterRoutingChecking(true);
+    setAdapterRoutingError(null);
+    setAdapterRoutingStatus(null);
+    try {
+      const status = await getDefaultChatAdapterRoutingStatus({
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterRoutingStatus(status);
+    } catch (e) {
+      setAdapterRoutingError(`Adapter routing status failed: ${readableError(e)}`);
+    } finally {
+      setAdapterRoutingChecking(false);
     }
   };
 
@@ -3095,6 +3158,291 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No default Chat adapter activation review summary loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Activation Implementation Gate
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W37 gate over the current W35 activation plan draft and W36 approval
+              evidence. Eligible means implementation discussion can continue; it does not activate
+              or migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleActivationImplementationGateCheck}
+            disabled={activationImplementationGateChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              activationImplementationGateChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={activationImplementationGateChecking ? "animate-spin" : undefined}
+            />
+            {activationImplementationGateChecking
+              ? "Checking..."
+              : "Check Activation Implementation Gate"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This gate reads existing metadata-safe evidence only. It does not write Evidence, run
+          runtime, call tools, create Chat messages, or change the default Chat path.
+        </div>
+
+        {activationImplementationGateError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {activationImplementationGateError}
+          </div>
+        )}
+
+        {activationImplementationGateReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                activationImplementationGateReport.implementationGateEligible
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {activationImplementationGateReport.implementationGateEligible
+                ? "Activation implementation gate eligible"
+                : "Activation implementation gate blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["draftReady", String(activationImplementationGateReport.draftReady)],
+                ["currentMode", activationImplementationGateReport.currentMode],
+                [
+                  "automaticMigrationEnabled",
+                  String(activationImplementationGateReport.automaticMigrationEnabled),
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(activationImplementationGateReport.defaultChatUnchanged),
+                ],
+                [
+                  "activationPlanDigestMatched",
+                  String(activationImplementationGateReport.activationPlanDigestMatched),
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            <div className="break-all rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700">
+              currentActivationPlanDigest:{" "}
+              {activationImplementationGateReport.currentActivationPlanDigest}
+            </div>
+
+            {activationImplementationGateReport.latestDecision && (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+                <div className="font-medium text-stone-900">Latest activation review decision</div>
+                <div className="mt-1">
+                  decisionKind: {activationImplementationGateReport.latestDecision.decisionKind}
+                </div>
+                <div>
+                  draftReady: {String(activationImplementationGateReport.latestDecision.draftReady)}
+                </div>
+                <div>
+                  candidatePromotionReady:{" "}
+                  {String(
+                    activationImplementationGateReport.latestDecision.candidatePromotionReady
+                  )}
+                </div>
+                <div>
+                  currentMode: {activationImplementationGateReport.latestDecision.currentMode}
+                </div>
+                <div>
+                  automaticMigrationEnabled:{" "}
+                  {String(
+                    activationImplementationGateReport.latestDecision.automaticMigrationEnabled
+                  )}
+                </div>
+                <div className="break-all">
+                  activationPlanDigest:{" "}
+                  {activationImplementationGateReport.latestDecision.activationPlanDigest}
+                </div>
+              </div>
+            )}
+
+            {safeSummaryEntries(activationImplementationGateReport.metadataSafeSummary).length >
+              0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(activationImplementationGateReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {activationImplementationGateReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {activationImplementationGateReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No activation implementation gate blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter activation implementation gate report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Routing Status
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W38 scaffold status. It verifies the adapter boundary is present but still
+              disabled, with both default Send and streaming pinned to the legacy path.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterRoutingRefresh}
+            disabled={adapterRoutingChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterRoutingChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={adapterRoutingChecking ? "animate-spin" : undefined} />
+            {adapterRoutingChecking ? "Refreshing..." : "Refresh Adapter Routing Status"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This status command only reads the W37 implementation gate. It does not create AgentRuns,
+          Evidence, Chat messages, proposals, LifeModel patches, memory writes, MCP audit rows, or
+          model calls.
+        </div>
+
+        {adapterRoutingError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterRoutingError}
+          </div>
+        )}
+
+        {adapterRoutingStatus ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterRoutingStatus.controlledAdapterEnabled
+                  ? "border-red-100 bg-red-50 text-red-700"
+                  : "border-emerald-100 bg-emerald-50 text-emerald-800"
+              )}
+            >
+              {adapterRoutingStatus.controlledAdapterEnabled
+                ? "Controlled adapter enabled"
+                : "Controlled adapter disabled"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["currentMode", adapterRoutingStatus.currentMode],
+                ["adapterScaffoldPresent", String(adapterRoutingStatus.adapterScaffoldPresent)],
+                ["controlledAdapterEnabled", String(adapterRoutingStatus.controlledAdapterEnabled)],
+                ["defaultSendPath", adapterRoutingStatus.defaultSendPath],
+                ["startStreamPath", adapterRoutingStatus.startStreamPath],
+                [
+                  "activationImplementationGateEligible",
+                  String(adapterRoutingStatus.activationImplementationGateEligible),
+                ],
+                [
+                  "requiresSeparateCutoverImplementation",
+                  String(adapterRoutingStatus.requiresSeparateCutoverImplementation),
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(adapterRoutingStatus.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterRoutingStatus.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterRoutingStatus.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterRoutingStatus.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No adapter routing blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter routing status loaded.
           </div>
         )}
       </section>

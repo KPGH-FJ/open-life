@@ -561,6 +561,58 @@ pub struct DefaultChatAdapterActivationReviewSummary {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationImplementationGateInput {
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationImplementationGateReport {
+    pub implementation_gate_eligible: bool,
+    pub draft_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterActivationReviewLatestDecision>,
+    pub current_activation_plan_digest: String,
+    pub activation_plan_digest_matched: bool,
+    pub default_chat_unchanged: bool,
+    pub automatic_migration_enabled: bool,
+    pub current_mode: String,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterRoutingStatusInput {
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterRoutingStatus {
+    pub current_mode: String,
+    pub adapter_scaffold_present: bool,
+    pub controlled_adapter_enabled: bool,
+    pub default_send_path: String,
+    pub start_stream_path: String,
+    pub activation_implementation_gate_eligible: bool,
+    pub requires_separate_cutover_implementation: bool,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -2336,7 +2388,7 @@ pub(crate) async fn record_default_chat_adapter_activation_review_decision_with_
         state,
     )
     .await?;
-    let activation_plan_digest = metadata_hash_for_serializable(&draft)?;
+    let activation_plan_digest = default_chat_adapter_activation_plan_digest(&draft)?;
     let created_at = chrono::Utc::now().to_rfc3339();
     let mut blocking_reasons = draft.blocking_reasons.clone();
 
@@ -2480,6 +2532,250 @@ pub(crate) async fn get_default_chat_adapter_activation_review_summary_with_stat
             "evidenceStorage": "read_only",
             "mcpAuditStorage": "none",
             "transcriptStorage": "none",
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn check_default_chat_adapter_activation_implementation_gate(
+    input: DefaultChatAdapterActivationImplementationGateInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterActivationImplementationGateReport, String> {
+    check_default_chat_adapter_activation_implementation_gate_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn check_default_chat_adapter_activation_implementation_gate_with_state(
+    input: DefaultChatAdapterActivationImplementationGateInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterActivationImplementationGateReport, String> {
+    let draft = draft_default_chat_adapter_activation_plan_with_state(
+        DefaultChatAdapterActivationPlanDraftInput {
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+            session_id: input.session_id,
+        },
+        state,
+    )
+    .await?;
+    let current_activation_plan_digest = default_chat_adapter_activation_plan_digest(&draft)?;
+    let review_summary =
+        get_default_chat_adapter_activation_review_summary_with_state(state).await?;
+    let latest_decision = review_summary.latest_decision.clone();
+    let mut blocking_reasons = Vec::new();
+
+    if !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "activation_plan_draft_not_ready".into(),
+        );
+        for reason in &draft.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+
+    let activation_plan_digest_matched = latest_decision
+        .as_ref()
+        .is_some_and(|decision| decision.activation_plan_digest == current_activation_plan_digest);
+
+    match latest_decision.as_ref() {
+        Some(decision) => {
+            if decision.decision_kind != "approve" {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    format!(
+                        "latest_activation_review_decision_is_{}",
+                        decision.decision_kind
+                    ),
+                );
+            }
+            if !decision.draft_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "activation_review_draft_not_ready".into(),
+                );
+            }
+            if !activation_plan_digest_matched {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "activation_plan_digest_mismatch".into(),
+                );
+            }
+            if !decision.candidate_promotion_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "activation_review_candidate_promotion_not_ready".into(),
+                );
+            }
+            if decision.current_mode != "legacy_stream" {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "activation_review_current_mode_not_legacy_stream".into(),
+                );
+            }
+            if decision.automatic_migration_enabled {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "activation_review_automatic_migration_enabled".into(),
+                );
+            }
+        }
+        None => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "activation_review_decision_missing".into(),
+            );
+        }
+    }
+
+    if draft.runtime_boundary_status.current_mode != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "default_chat_runtime_boundary_not_legacy_stream".into(),
+        );
+    }
+    if draft.runtime_boundary_status.automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+    if !draft.runtime_boundary_status.default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_changed".into());
+    }
+
+    let implementation_gate_eligible = draft.draft_ready
+        && latest_decision.as_ref().is_some_and(|decision| {
+            decision.decision_kind == "approve"
+                && decision.draft_ready
+                && decision.candidate_promotion_ready
+                && decision.current_mode == "legacy_stream"
+                && !decision.automatic_migration_enabled
+        })
+        && activation_plan_digest_matched
+        && draft.runtime_boundary_status.default_chat_unchanged
+        && draft.runtime_boundary_status.current_mode == "legacy_stream"
+        && !draft.runtime_boundary_status.automatic_migration_enabled
+        && blocking_reasons.is_empty();
+    let latest_decision_kind = latest_decision
+        .as_ref()
+        .map(|decision| decision.decision_kind.clone())
+        .unwrap_or_else(|| "none".into());
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterActivationImplementationGateReport {
+        implementation_gate_eligible,
+        draft_ready: draft.draft_ready,
+        latest_decision,
+        current_activation_plan_digest,
+        activation_plan_digest_matched,
+        default_chat_unchanged: draft.runtime_boundary_status.default_chat_unchanged,
+        automatic_migration_enabled: draft.runtime_boundary_status.automatic_migration_enabled,
+        current_mode: draft.runtime_boundary_status.current_mode.clone(),
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "activationImplementationGate": "default_chat_adapter_activation",
+            "metadataSafe": true,
+            "readOnly": true,
+            "notAutomaticMigration": true,
+            "requiresSeparateImplementation": true,
+            "implementationGateEligible": implementation_gate_eligible,
+            "draftReady": draft.draft_ready,
+            "latestDecisionKind": latest_decision_kind,
+            "activationPlanDigestMatched": activation_plan_digest_matched,
+            "candidatePromotionReady": draft.candidate_promotion_readiness_report.ready,
+            "currentMode": draft.runtime_boundary_status.current_mode,
+            "automaticMigrationEnabled": draft.runtime_boundary_status.automatic_migration_enabled,
+            "defaultChatUnchanged": draft.runtime_boundary_status.default_chat_unchanged,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_routing_status(
+    input: DefaultChatAdapterRoutingStatusInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterRoutingStatus, String> {
+    get_default_chat_adapter_routing_status_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn get_default_chat_adapter_routing_status_with_state(
+    input: DefaultChatAdapterRoutingStatusInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterRoutingStatus, String> {
+    let activation_gate = check_default_chat_adapter_activation_implementation_gate_with_state(
+        DefaultChatAdapterActivationImplementationGateInput {
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+            session_id: input.session_id,
+        },
+        state,
+    )
+    .await?;
+    let current_mode = "legacy_stream".to_string();
+    let adapter_scaffold_present = true;
+    let controlled_adapter_enabled = false;
+    let default_send_path = "legacy_stream".to_string();
+    let start_stream_path = "legacy_stream".to_string();
+    let requires_separate_cutover_implementation = true;
+    let mut blocking_reasons = Vec::new();
+
+    if !activation_gate.implementation_gate_eligible {
+        push_unique_string(
+            &mut blocking_reasons,
+            "activation_implementation_gate_not_eligible".into(),
+        );
+        for reason in &activation_gate.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterRoutingStatus {
+        current_mode,
+        adapter_scaffold_present,
+        controlled_adapter_enabled,
+        default_send_path,
+        start_stream_path,
+        activation_implementation_gate_eligible: activation_gate.implementation_gate_eligible,
+        requires_separate_cutover_implementation,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "defaultChatAdapterRouting": "disabled_scaffold",
+            "metadataSafe": true,
+            "readOnly": true,
+            "routingMode": "legacy_stream",
+            "adapterScaffoldPresent": adapter_scaffold_present,
+            "controlledAdapterEnabled": controlled_adapter_enabled,
+            "defaultSendPath": "legacy_stream",
+            "startStreamPath": "legacy_stream",
+            "activationImplementationGateEligible": activation_gate.implementation_gate_eligible,
+            "notAutomaticMigration": true,
+            "requiresSeparateCutoverImplementation": requires_separate_cutover_implementation,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
         }),
     })
 }
@@ -2696,6 +2992,20 @@ fn metadata_hash_for_serializable<T: Serialize>(value: &T) -> Result<String, Str
     let serialized = serde_json::to_string(value)
         .map_err(|e| format!("failed to serialize metadata-safe draft for hashing: {e}"))?;
     Ok(sha256_metadata_checksum(&serialized))
+}
+
+fn default_chat_adapter_activation_plan_digest(
+    draft: &DefaultChatAdapterActivationPlanDraft,
+) -> Result<String, String> {
+    let mut value = serde_json::to_value(draft)
+        .map_err(|e| format!("failed to serialize activation plan draft for hashing: {e}"))?;
+    if let Some(report) = value
+        .get_mut("candidatePromotionReadinessReport")
+        .and_then(Value::as_object_mut)
+    {
+        report.remove("checkedAt");
+    }
+    metadata_hash_for_serializable(&value)
 }
 
 fn sha256_metadata_checksum(value: &str) -> String {
@@ -8951,6 +9261,489 @@ mod tests {
         assert!(!serialized.contains("raw prompt"));
         assert!(!serialized.contains("rawPrompt"));
         assert!(!serialized.contains("raw assistant"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_blocks_without_activation_review()
+    {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-implementation-no-review",
+        )
+        .await;
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_gate_eligible);
+        assert!(report.draft_ready);
+        assert!(report.latest_decision.is_none());
+        assert!(!report.activation_plan_digest_matched);
+        assert!(report
+            .blocking_reasons
+            .contains(&"activation_review_decision_missing".to_string()));
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+        assert_eq!(report.metadata_safe_summary["notAutomaticMigration"], true);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_blocks_latest_reject_or_rework() {
+        for decision_kind in ["reject", "request_rework"] {
+            let state = preview_state().await;
+            seed_ready_default_chat_adapter_activation_plan(
+                &state,
+                &format!("run-candidate-activation-implementation-{decision_kind}"),
+            )
+            .await;
+            record_default_chat_adapter_activation_review_decision_with_state(
+                DefaultChatAdapterActivationReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                    optional_reviewer_note: Some("Human review did not approve.".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+                DefaultChatAdapterActivationImplementationGateInput {
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(!report.implementation_gate_eligible);
+            assert_eq!(
+                report
+                    .latest_decision
+                    .as_ref()
+                    .map(|decision| decision.decision_kind.as_str()),
+                Some(decision_kind)
+            );
+            assert!(report.blocking_reasons.contains(&format!(
+                "latest_activation_review_decision_is_{decision_kind}"
+            )));
+        }
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_blocks_when_current_draft_not_ready(
+    ) {
+        let state = preview_state().await;
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_gate_eligible);
+        assert!(!report.draft_ready);
+        assert!(report
+            .blocking_reasons
+            .contains(&"activation_plan_draft_not_ready".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"candidate_promotion_readiness_not_ready".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_blocks_digest_mismatch() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-implementation-original",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let second_run =
+            completed_cutover_candidate_review_run("run-candidate-activation-implementation-new");
+        insert_cutover_candidate_review_run(&state, &second_run).await;
+        record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-activation-implementation-new".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.implementation_gate_eligible);
+        assert!(report.draft_ready);
+        assert!(!report.activation_plan_digest_matched);
+        assert!(report
+            .blocking_reasons
+            .contains(&"activation_plan_digest_mismatch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_eligible_with_latest_approve_and_matching_digest(
+    ) {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-implementation-ready",
+        )
+        .await;
+        let review = record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Approved for implementation gate.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.implementation_gate_eligible);
+        assert!(report.draft_ready);
+        assert_eq!(
+            report.current_activation_plan_digest,
+            review.activation_plan_digest
+        );
+        assert!(report.activation_plan_digest_matched);
+        assert!(report.default_chat_unchanged);
+        assert_eq!(report.current_mode, "legacy_stream");
+        assert!(!report.automatic_migration_enabled);
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("approve")
+        );
+        assert_eq!(
+            report.metadata_safe_summary["implementationGateEligible"],
+            true
+        );
+        assert_eq!(
+            report.metadata_safe_summary["requiresSeparateImplementation"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_is_read_only_by_side_effect_counts(
+    ) {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-implementation-read-only",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.implementation_gate_eligible);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_implementation_gate_serialized_output_is_metadata_safe(
+    ) {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-implementation-safe",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Implementation gate note with secret@example.com and raw candidate output."
+                        .into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_activation_implementation_gate_with_state(
+            DefaultChatAdapterActivationImplementationGateInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("Implementation gate note"));
+        assert!(!serialized.contains("raw candidate output"));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("raw assistant"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("candidate output"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_routing_status_blocks_when_activation_gate_blocked() {
+        let state = preview_state().await;
+
+        let status = get_default_chat_adapter_routing_status_with_state(
+            DefaultChatAdapterRoutingStatusInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.current_mode, "legacy_stream");
+        assert!(status.adapter_scaffold_present);
+        assert!(!status.controlled_adapter_enabled);
+        assert_eq!(status.default_send_path, "legacy_stream");
+        assert_eq!(status.start_stream_path, "legacy_stream");
+        assert!(!status.activation_implementation_gate_eligible);
+        assert!(status.requires_separate_cutover_implementation);
+        assert!(status
+            .blocking_reasons
+            .contains(&"activation_implementation_gate_not_eligible".to_string()));
+        assert_eq!(status.metadata_safe_summary["routingMode"], "legacy_stream");
+        assert_eq!(
+            status.metadata_safe_summary["controlledAdapterEnabled"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_routing_status_keeps_legacy_stream_even_when_activation_gate_eligible(
+    ) {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-routing-status-ready",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let status = get_default_chat_adapter_routing_status_with_state(
+            DefaultChatAdapterRoutingStatusInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status.current_mode, "legacy_stream");
+        assert!(status.adapter_scaffold_present);
+        assert!(!status.controlled_adapter_enabled);
+        assert_eq!(status.default_send_path, "legacy_stream");
+        assert_eq!(status.start_stream_path, "legacy_stream");
+        assert!(status.activation_implementation_gate_eligible);
+        assert!(status.requires_separate_cutover_implementation);
+        assert!(status.blocking_reasons.is_empty());
+        assert_eq!(status.metadata_safe_summary["readOnly"], true);
+        assert_eq!(status.metadata_safe_summary["notAutomaticMigration"], true);
+        assert_eq!(
+            status.metadata_safe_summary["requiresSeparateCutoverImplementation"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_routing_status_is_read_only_by_side_effect_counts() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-routing-status-read-only",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let status = get_default_chat_adapter_routing_status_with_state(
+            DefaultChatAdapterRoutingStatusInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(status.activation_implementation_gate_eligible);
+        assert!(!status.controlled_adapter_enabled);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_routing_status_serialized_output_is_metadata_safe() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-routing-status-safe",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Routing status note with secret@example.com and raw output.".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let status = get_default_chat_adapter_routing_status_with_state(
+            DefaultChatAdapterRoutingStatusInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&status).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("Routing status note"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("rawPrompt"));
         assert!(!serialized.contains("rawAssistantOutput"));
         assert!(!serialized.contains("toolPayload"));
         assert!(!serialized.contains("userOutput"));

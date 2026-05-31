@@ -666,6 +666,43 @@ export interface DefaultChatAdapterActivationReviewSummary {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterActivationImplementationGateInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterActivationImplementationGateReport {
+  implementationGateEligible: boolean;
+  draftReady: boolean;
+  latestDecision?: DefaultChatAdapterActivationReviewLatestDecision | null;
+  currentActivationPlanDigest: string;
+  activationPlanDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  automaticMigrationEnabled: boolean;
+  currentMode: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterRoutingStatusInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterRoutingStatus {
+  currentMode: string;
+  adapterScaffoldPresent: boolean;
+  controlledAdapterEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  activationImplementationGateEligible: boolean;
+  requiresSeparateCutoverImplementation: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

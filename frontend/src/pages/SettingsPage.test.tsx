@@ -1805,6 +1805,236 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
   });
 
+  it("checks default chat adapter activation implementation gate without activation controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_activation_implementation_gate") {
+        return Promise.resolve({
+          implementationGateEligible: true,
+          draftReady: true,
+          latestDecision: {
+            evidenceId: "ev_activation_review_gate_1",
+            decisionKind: "approve",
+            draftReady: true,
+            activationPlanDigest: "sha256:activation-plan-gate",
+            candidatePromotionReady: true,
+            currentMode: "legacy_stream",
+            automaticMigrationEnabled: false,
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T12:13:14Z",
+          },
+          currentActivationPlanDigest: "sha256:activation-plan-gate",
+          activationPlanDigestMatched: true,
+          defaultChatUnchanged: true,
+          automaticMigrationEnabled: false,
+          currentMode: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            activationImplementationGate: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+            requiresSeparateImplementation: true,
+            implementationGateEligible: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Activation Implementation Gate")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Activation Implementation Gate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "check_default_chat_adapter_activation_implementation_gate",
+        {
+          input: { requiredApprovedCandidates: 1 },
+        }
+      );
+    });
+    expect(await screen.findByText("Activation implementation gate eligible")).toBeInTheDocument();
+    expect(screen.getAllByText("currentMode: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("activationPlanDigestMatched: true")).toBeInTheDocument();
+    expect(screen.getByText("decisionKind: approve")).toBeInTheDocument();
+    expect(
+      screen.getByText("activationImplementationGate: default_chat_adapter_activation")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter activation implementation gate blockers", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_activation_implementation_gate") {
+        return Promise.resolve({
+          implementationGateEligible: false,
+          draftReady: true,
+          latestDecision: {
+            evidenceId: "ev_activation_review_gate_2",
+            decisionKind: "request_rework",
+            draftReady: true,
+            activationPlanDigest: "sha256:old-activation-plan",
+            candidatePromotionReady: true,
+            currentMode: "legacy_stream",
+            automaticMigrationEnabled: false,
+            reviewerNoteChecksum: "sha256:note",
+            reviewerNoteLength: 16,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-05-31T12:14:15Z",
+          },
+          currentActivationPlanDigest: "sha256:new-activation-plan",
+          activationPlanDigestMatched: false,
+          defaultChatUnchanged: true,
+          automaticMigrationEnabled: false,
+          currentMode: "legacy_stream",
+          blockingReasons: [
+            "latest_activation_review_decision_is_request_rework",
+            "activation_plan_digest_mismatch",
+          ],
+          metadataSafeSummary: {
+            activationImplementationGate: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            implementationGateEligible: false,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Check Activation Implementation Gate" })
+    );
+
+    expect(await screen.findByText("Activation implementation gate blocked")).toBeInTheDocument();
+    expect(
+      screen.getByText("latest_activation_review_decision_is_request_rework")
+    ).toBeInTheDocument();
+    expect(screen.getByText("activation_plan_digest_mismatch")).toBeInTheDocument();
+    expect(screen.getByText("activationPlanDigestMatched: false")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("refreshes default chat adapter routing status as a disabled scaffold", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_default_chat_adapter_routing_status") {
+        return Promise.resolve({
+          currentMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: true,
+          requiresSeparateCutoverImplementation: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            defaultChatAdapterRouting: "disabled_scaffold",
+            metadataSafe: true,
+            readOnly: true,
+            routingMode: "legacy_stream",
+            adapterScaffoldPresent: true,
+            controlledAdapterEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            activationImplementationGateEligible: true,
+            requiresSeparateCutoverImplementation: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Adapter Routing Status")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Adapter Routing Status" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_default_chat_adapter_routing_status", {
+        input: { requiredApprovedCandidates: 1 },
+      });
+    });
+    expect(await screen.findByText("Controlled adapter disabled")).toBeInTheDocument();
+    expect(screen.getAllByText("currentMode: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("adapterScaffoldPresent: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("controlledAdapterEnabled: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("defaultSendPath: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("startStreamPath: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("activationImplementationGateEligible: true").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("requiresSeparateCutoverImplementation: true").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("defaultChatAdapterRouting: disabled_scaffold")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter routing blockers without enabling controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_default_chat_adapter_routing_status") {
+        return Promise.resolve({
+          currentMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: false,
+          requiresSeparateCutoverImplementation: true,
+          blockingReasons: [
+            "activation_implementation_gate_not_eligible",
+            "latest_activation_review_decision_missing",
+          ],
+          metadataSafeSummary: {
+            defaultChatAdapterRouting: "disabled_scaffold",
+            metadataSafe: true,
+            readOnly: true,
+            routingMode: "legacy_stream",
+            activationImplementationGateEligible: false,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh Adapter Routing Status" }));
+
+    expect(await screen.findByText("Controlled adapter disabled")).toBeInTheDocument();
+    expect(screen.getByText("activation_implementation_gate_not_eligible")).toBeInTheDocument();
+    expect(screen.getByText("latest_activation_review_decision_missing")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("activationImplementationGateEligible: false").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

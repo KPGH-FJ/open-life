@@ -13,7 +13,9 @@ import {
   checkControlledChatCutoverCandidatePromotionReadiness,
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
+  checkDefaultChatAdapterActivationImplementationGate,
   checkRuntimeMigrationGate,
+  getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
   draftDefaultChatAdapterActivationPlan,
   getDefaultChatAdapterActivationReviewSummary,
@@ -884,5 +886,90 @@ describe("tauri command argument aliases", () => {
     );
     expect(result.latestDecision?.decisionKind).toBe("request_rework");
     expect(result.rejectOrReworkCount).toBe(1);
+  });
+
+  it("invokes default chat adapter activation implementation gate as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      implementationGateEligible: true,
+      draftReady: true,
+      latestDecision: {
+        evidenceId: "ev_activation_review_3",
+        decisionKind: "approve",
+        draftReady: true,
+        activationPlanDigest: "sha256:activation-plan-3",
+        candidatePromotionReady: true,
+        currentMode: "legacy_stream",
+        automaticMigrationEnabled: false,
+        reviewerNoteChecksum: null,
+        reviewerNoteLength: 0,
+        reviewerNoteCategory: "none",
+        createdAt: "2026-05-31T12:13:14Z",
+      },
+      currentActivationPlanDigest: "sha256:activation-plan-3",
+      activationPlanDigestMatched: true,
+      defaultChatUnchanged: true,
+      automaticMigrationEnabled: false,
+      currentMode: "legacy_stream",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        activationImplementationGate: "default_chat_adapter_activation",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterActivationImplementationGate({
+      requiredApprovedCandidates: 1,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_default_chat_adapter_activation_implementation_gate",
+      {
+        input: {
+          requiredApprovedCandidates: 1,
+          sessionId: "session-1",
+        },
+      }
+    );
+    expect(result.implementationGateEligible).toBe(true);
+    expect(result.activationPlanDigestMatched).toBe(true);
+    expect(result.latestDecision?.decisionKind).toBe("approve");
+  });
+
+  it("invokes default chat adapter routing status as read-only disabled scaffold", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      currentMode: "legacy_stream",
+      adapterScaffoldPresent: true,
+      controlledAdapterEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      activationImplementationGateEligible: true,
+      requiresSeparateCutoverImplementation: true,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        defaultChatAdapterRouting: "disabled_scaffold",
+        metadataSafe: true,
+        readOnly: true,
+        routingMode: "legacy_stream",
+      },
+    });
+
+    const result = await getDefaultChatAdapterRoutingStatus({
+      requiredApprovedCandidates: 1,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("get_default_chat_adapter_routing_status", {
+      input: {
+        requiredApprovedCandidates: 1,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.currentMode).toBe("legacy_stream");
+    expect(result.adapterScaffoldPresent).toBe(true);
+    expect(result.controlledAdapterEnabled).toBe(false);
+    expect(result.defaultSendPath).toBe("legacy_stream");
+    expect(result.startStreamPath).toBe("legacy_stream");
   });
 });
