@@ -51,6 +51,8 @@ import type {
   DefaultChatAdapterDryRunReviewDecisionInput,
   DefaultChatAdapterDryRunReviewDecisionResult,
   DefaultChatAdapterDryRunReviewSummary,
+  DefaultChatAdapterControlledPreviewInput,
+  DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterImplementationReadinessInput,
   DefaultChatAdapterImplementationReadinessReport,
   DefaultChatRuntimeBoundaryStatus,
@@ -493,6 +495,15 @@ export async function checkDefaultChatAdapterImplementationReadiness(
 ): Promise<DefaultChatAdapterImplementationReadinessReport> {
   return safeInvoke<DefaultChatAdapterImplementationReadinessReport>(
     "check_default_chat_adapter_implementation_readiness",
+    { input }
+  );
+}
+
+export async function runDefaultChatAdapterControlledPreview(
+  input: DefaultChatAdapterControlledPreviewInput
+): Promise<DefaultChatAdapterControlledPreviewReport> {
+  return safeInvoke<DefaultChatAdapterControlledPreviewReport>(
+    "run_default_chat_adapter_controlled_preview",
     { input }
   );
 }

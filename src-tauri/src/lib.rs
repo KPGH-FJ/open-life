@@ -58,8 +58,8 @@ use commands::agent_runtime::{
     record_controlled_pilot_promotion_evidence,
     record_default_chat_adapter_activation_review_decision,
     record_default_chat_adapter_dry_run_review_decision, run_controlled_chat_cutover_candidate,
-    run_controlled_chat_migration_shadow_run, run_default_chat_adapter_dry_run,
-    run_multi_strategy_agent_preview,
+    run_controlled_chat_migration_shadow_run, run_default_chat_adapter_controlled_preview,
+    run_default_chat_adapter_dry_run, run_multi_strategy_agent_preview,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -3091,6 +3091,7 @@ pub fn run() {
             record_default_chat_adapter_dry_run_review_decision,
             get_default_chat_adapter_dry_run_review_summary,
             check_default_chat_adapter_implementation_readiness,
+            run_default_chat_adapter_controlled_preview,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

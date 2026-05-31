@@ -38,6 +38,7 @@ import {
   recordControlledChatMigrationShadowReviewDecision,
   runControlledChatCutoverCandidate,
   runControlledChatMigrationShadowRun,
+  runDefaultChatAdapterControlledPreview,
   runDefaultChatAdapterDryRun,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
@@ -51,6 +52,7 @@ import type {
   DefaultChatAdapterActivationPlanDraft,
   DefaultChatAdapterActivationImplementationGateReport,
   DefaultChatAdapterContractHarnessReport,
+  DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterDryRunReport,
   DefaultChatAdapterDryRunReviewDecisionKind,
   DefaultChatAdapterDryRunReviewDecisionResult,
@@ -87,6 +89,7 @@ const SAFE_SUMMARY_KEYS = [
   "adapterDryRun",
   "dryRunReview",
   "implementationReadiness",
+  "adapterPreview",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -101,6 +104,7 @@ const SAFE_SUMMARY_KEYS = [
   "candidateAdapter",
   "contractShape",
   "candidateReady",
+  "previewReady",
   "nonDefault",
   "allowWrites",
   "maxToolCalls",
@@ -373,6 +377,12 @@ export default function MultiStrategyPreviewSection() {
   >(null);
   const [adapterImplementationReadinessReport, setAdapterImplementationReadinessReport] =
     useState<DefaultChatAdapterImplementationReadinessReport | null>(null);
+  const [adapterControlledPreviewChecking, setAdapterControlledPreviewChecking] = useState(false);
+  const [adapterControlledPreviewError, setAdapterControlledPreviewError] = useState<string | null>(
+    null
+  );
+  const [adapterControlledPreviewReport, setAdapterControlledPreviewReport] =
+    useState<DefaultChatAdapterControlledPreviewReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -864,6 +874,24 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setAdapterImplementationReadinessChecking(false);
+    }
+  };
+
+  const handleAdapterControlledPreview = async () => {
+    setAdapterControlledPreviewChecking(true);
+    setAdapterControlledPreviewError(null);
+    setAdapterControlledPreviewReport(null);
+    try {
+      const report = await runDefaultChatAdapterControlledPreview({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterControlledPreviewReport(report);
+    } catch (e) {
+      setAdapterControlledPreviewError(`Adapter controlled preview failed: ${readableError(e)}`);
+    } finally {
+      setAdapterControlledPreviewChecking(false);
     }
   };
 
@@ -4244,6 +4272,152 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No default Chat adapter implementation readiness report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Controlled Preview
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Explicit W43 controlled implementation preview. It first checks implementation
+              readiness, then runs only a non-default, write-disabled, zero-tool preview. It does
+              not save to Chat, promote output, enable the adapter, or migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterControlledPreview}
+            disabled={adapterControlledPreviewChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterControlledPreviewChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <Play size={13} />
+            {adapterControlledPreviewChecking ? "Running..." : "Run Adapter Controlled Preview"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          The preview returns a Send-compatible shape for inspection only. It keeps
+          allowWrites=false, maxToolCalls=0, defaultSendPath=legacy_stream, and
+          startStreamPath=legacy_stream.
+        </div>
+
+        {adapterControlledPreviewError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterControlledPreviewError}
+          </div>
+        )}
+
+        {adapterControlledPreviewReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterControlledPreviewReport.previewReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterControlledPreviewReport.previewReady
+                ? "Controlled preview ready"
+                : "Controlled preview blocked"}
+            </div>
+
+            {adapterControlledPreviewReport.reply && (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-sm leading-6 text-stone-800">
+                {adapterControlledPreviewReport.reply}
+              </div>
+            )}
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["previewReady", String(adapterControlledPreviewReport.previewReady)],
+                ["blocked", String(adapterControlledPreviewReport.blocked)],
+                ["contractShape", adapterControlledPreviewReport.contractShape],
+                ["adapterPath", adapterControlledPreviewReport.adapterPath],
+                ["sourceSessionId", adapterControlledPreviewReport.sourceSessionId],
+                ["runId", adapterControlledPreviewReport.runId ?? "none"],
+                ["allowWrites", String(adapterControlledPreviewReport.allowWrites)],
+                ["maxToolCalls", String(adapterControlledPreviewReport.maxToolCalls)],
+                [
+                  "defaultChatPathUnchanged",
+                  String(adapterControlledPreviewReport.defaultChatPathUnchanged),
+                ],
+                ["chatMessageSaved", String(adapterControlledPreviewReport.chatMessageSaved)],
+                ["agentRunRecorded", String(adapterControlledPreviewReport.agentRunRecorded)],
+                ["implementationReady", String(adapterControlledPreviewReport.implementationReady)],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(adapterControlledPreviewReport.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterControlledPreviewReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            {adapterControlledPreviewReport.warnings.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-stone-700">Warnings</div>
+                <div className="mt-1 space-y-1">
+                  {adapterControlledPreviewReport.warnings.map(warning => (
+                    <div
+                      key={warning}
+                      className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-800"
+                    >
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterControlledPreviewReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterControlledPreviewReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No adapter controlled preview blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter controlled preview report loaded.
           </div>
         )}
       </section>

@@ -19,6 +19,7 @@ import {
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
+  runDefaultChatAdapterControlledPreview,
   runDefaultChatAdapterDryRun,
   getDefaultChatAdapterDryRunReviewSummary,
   recordDefaultChatAdapterDryRunReviewDecision,
@@ -1195,5 +1196,57 @@ describe("tauri command argument aliases", () => {
     });
     expect(result.implementationReady).toBe(true);
     expect(result.dryRunReviewApproved).toBe(true);
+  });
+
+  it("runs default chat adapter controlled preview", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      previewReady: true,
+      blocked: false,
+      contractShape: "send_message_compatible",
+      sourceSessionId: "session-1",
+      adapterPath: "controlled_adapter_preview",
+      reply: "Controlled adapter preview reply",
+      reasoningTrace: {
+        strategyResult: {
+          adapterPreview: "default_chat_adapter_controlled_preview",
+          metadataSafe: true,
+        },
+      },
+      toolCalls: [],
+      runId: "run-adapter-preview-1",
+      allowWrites: false,
+      maxToolCalls: 0,
+      defaultChatPathUnchanged: true,
+      chatMessageSaved: false,
+      agentRunRecorded: true,
+      implementationReady: true,
+      warnings: [],
+      blockingReasons: [],
+      metadataSafeSummary: {
+        adapterPreview: "default_chat_adapter_controlled_preview",
+        metadataSafe: true,
+        allowWrites: false,
+        maxToolCalls: 0,
+      },
+    });
+
+    const result = await runDefaultChatAdapterControlledPreview({
+      sourceSessionId: "session-1",
+      message: "implementation preview probe",
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_default_chat_adapter_controlled_preview", {
+      input: {
+        sourceSessionId: "session-1",
+        message: "implementation preview probe",
+        requiredApprovedCandidates: 1,
+      },
+    });
+    expect(result.previewReady).toBe(true);
+    expect(result.reply).toBe("Controlled adapter preview reply");
+    expect(result.metadataSafeSummary.adapterPreview).toBe(
+      "default_chat_adapter_controlled_preview"
+    );
   });
 });

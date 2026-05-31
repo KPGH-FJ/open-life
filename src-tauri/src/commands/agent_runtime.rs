@@ -774,6 +774,42 @@ pub struct DefaultChatAdapterImplementationReadinessReport {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewInput {
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterControlledPreviewReport {
+    pub preview_ready: bool,
+    pub blocked: bool,
+    pub contract_shape: String,
+    pub source_session_id: String,
+    pub adapter_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply: Option<String>,
+    pub reasoning_trace: ReasoningTrace,
+    pub tool_calls: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    pub allow_writes: bool,
+    pub max_tool_calls: u32,
+    pub default_chat_path_unchanged: bool,
+    pub chat_message_saved: bool,
+    pub agent_run_recorded: bool,
+    pub implementation_ready: bool,
+    pub warnings: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -3573,6 +3609,213 @@ pub(crate) async fn check_default_chat_adapter_implementation_readiness_with_sta
     })
 }
 
+#[tauri::command]
+pub async fn run_default_chat_adapter_controlled_preview(
+    input: DefaultChatAdapterControlledPreviewInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterControlledPreviewReport, String> {
+    run_default_chat_adapter_controlled_preview_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn run_default_chat_adapter_controlled_preview_with_state(
+    input: DefaultChatAdapterControlledPreviewInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterControlledPreviewReport, String> {
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let allow_writes = false;
+    let max_tool_calls = 0;
+    let default_chat_path_unchanged = true;
+    let chat_message_saved = false;
+
+    let readiness = check_default_chat_adapter_implementation_readiness_with_state(
+        DefaultChatAdapterImplementationReadinessInput {
+            source_session_id: source_session_id.clone(),
+            message: input.message.clone(),
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+        },
+        state,
+    )
+    .await?;
+
+    if !readiness.implementation_ready {
+        let mut blocking_reasons = readiness.blocking_reasons.clone();
+        push_unique_string(
+            &mut blocking_reasons,
+            "implementation_readiness_not_ready".into(),
+        );
+        let metadata_safe_summary =
+            default_chat_adapter_controlled_preview_blocked_summary(&readiness, &blocking_reasons);
+        let reasoning_trace = ReasoningTrace {
+            strategy_result: Some(metadata_safe_summary.clone()),
+            output: Some("default_chat_adapter_controlled_preview_blocked".into()),
+            stable_steps: vec![
+                "implementation_readiness_check".into(),
+                "blocked_before_runtime".into(),
+            ],
+            ..ReasoningTrace::default()
+        };
+        return Ok(DefaultChatAdapterControlledPreviewReport {
+            preview_ready: false,
+            blocked: true,
+            contract_shape: "blocked".into(),
+            source_session_id,
+            adapter_path: "blocked".into(),
+            reply: None,
+            reasoning_trace,
+            tool_calls: Vec::new(),
+            run_id: None,
+            allow_writes,
+            max_tool_calls,
+            default_chat_path_unchanged,
+            chat_message_saved,
+            agent_run_recorded: false,
+            implementation_ready: false,
+            warnings: Vec::new(),
+            blocking_reasons,
+            metadata_safe_summary,
+        });
+    }
+
+    let input_message_hash = sha256_metadata_checksum(&input.message);
+    let mut preview_run =
+        new_default_chat_adapter_controlled_preview_run(&source_session_id, &input_message_hash);
+    let preview_run_id = preview_run.id.clone();
+    create_default_chat_adapter_controlled_preview_run(state, &preview_run).await?;
+
+    let runtime_input = MultiStrategyAgentPreviewInput {
+        session_id: source_session_id.clone(),
+        user_text: input.message,
+        tools_prompt:
+            "No developer tools catalog supplied for this default Chat adapter controlled preview."
+                .into(),
+        allow_planning: false,
+        local_model_available: true,
+        layer: Some("L2".into()),
+        execution_budget: Some(MultiStrategyAgentPreviewExecutionBudgetInput {
+            max_steps: Some(2),
+            max_tool_calls: Some(max_tool_calls),
+            timeout_seconds: Some(30),
+            allow_cloud: Some(false),
+            allow_writes: Some(allow_writes),
+        }),
+    };
+
+    let execution =
+        execute_multi_strategy_agent_preview(runtime_input, state, &preview_run_id).await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            let safe_error = metadata_safe_default_chat_adapter_controlled_preview_error(&error);
+            fail_default_chat_adapter_controlled_preview_run(state, &mut preview_run, &safe_error)
+                .await;
+            let metadata_safe_summary =
+                default_chat_adapter_controlled_preview_failed_summary(&readiness, &safe_error);
+            let reasoning_trace = ReasoningTrace {
+                strategy_result: Some(metadata_safe_summary.clone()),
+                output: Some("default_chat_adapter_controlled_preview_failed".into()),
+                ..ReasoningTrace::default()
+            };
+            return Ok(DefaultChatAdapterControlledPreviewReport {
+                preview_ready: false,
+                blocked: false,
+                contract_shape: "failed".into(),
+                source_session_id,
+                adapter_path: "controlled_adapter_preview_failed".into(),
+                reply: None,
+                reasoning_trace,
+                tool_calls: Vec::new(),
+                run_id: Some(preview_run_id),
+                allow_writes,
+                max_tool_calls,
+                default_chat_path_unchanged,
+                chat_message_saved,
+                agent_run_recorded: true,
+                implementation_ready: true,
+                warnings: vec!["controlled adapter preview runtime failed".into()],
+                blocking_reasons: vec![safe_error],
+                metadata_safe_summary,
+            });
+        }
+    };
+
+    let contract_shape =
+        default_chat_adapter_controlled_preview_contract_shape(&execution.output).to_string();
+    let reply = default_chat_adapter_controlled_preview_reply(&execution.output);
+    let mut warnings = preview_output_warnings(&execution.output, &execution.warnings);
+    push_unique_string(
+        &mut warnings,
+        "controlled adapter preview forced allowWrites=false".into(),
+    );
+    let blocking_reasons =
+        default_chat_adapter_controlled_preview_contract_blockers(&execution.output);
+    let preview_ready = contract_shape == "send_message_compatible" && blocking_reasons.is_empty();
+    let output_digest = reply
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(sha256_metadata_checksum);
+    let metadata_safe_summary = default_chat_adapter_controlled_preview_metadata_safe_summary(
+        &execution.output,
+        &readiness,
+        &contract_shape,
+        preview_ready,
+        output_digest.as_deref(),
+    );
+    let audit = default_chat_adapter_controlled_preview_audit_summary(
+        &execution.output,
+        &readiness,
+        &contract_shape,
+        preview_ready,
+        output_digest.as_deref(),
+        &warnings,
+    );
+    complete_default_chat_adapter_controlled_preview_run(
+        state,
+        &mut preview_run,
+        DefaultChatAdapterControlledPreviewRunCompletion {
+            audit: audit.clone(),
+            warnings: warnings.clone(),
+            context_summary: execution.context_summary,
+            hs_selection_audit: execution.hs_selection_audit,
+            behavior_checks: execution.behavior_checks,
+        },
+    )
+    .await?;
+
+    let reasoning_trace = ReasoningTrace {
+        strategy_result: Some(audit),
+        output: Some("default_chat_adapter_controlled_preview".into()),
+        stable_steps: vec![
+            "implementation_readiness_check".into(),
+            "controlled_adapter_preview".into(),
+            "send_message_contract_shape_validation".into(),
+            "metadata_safe_audit".into(),
+        ],
+        ..ReasoningTrace::default()
+    };
+
+    Ok(DefaultChatAdapterControlledPreviewReport {
+        preview_ready,
+        blocked: !preview_ready,
+        contract_shape,
+        source_session_id,
+        adapter_path: "controlled_adapter_preview".into(),
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(preview_run_id),
+        allow_writes,
+        max_tool_calls,
+        default_chat_path_unchanged,
+        chat_message_saved,
+        agent_run_recorded: true,
+        implementation_ready: readiness.implementation_ready,
+        warnings,
+        blocking_reasons,
+        metadata_safe_summary,
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -4634,6 +4877,278 @@ fn cutover_candidate_audit_summary(
     })
 }
 
+fn default_chat_adapter_controlled_preview_blocked_summary(
+    readiness: &DefaultChatAdapterImplementationReadinessReport,
+    blocking_reasons: &[String],
+) -> Value {
+    json!({
+        "adapterPreview": "default_chat_adapter_controlled_preview",
+        "metadataSafe": true,
+        "nonDefault": true,
+        "blockedBeforeRuntime": true,
+        "implementationReady": readiness.implementation_ready,
+        "contractShape": "blocked",
+        "previewReady": false,
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "defaultChatPathUnchanged": true,
+        "chatMessageSaved": false,
+        "agentRunRecorded": false,
+        "defaultSendPath": readiness.default_send_path,
+        "startStreamPath": readiness.start_stream_path,
+        "notAutomaticMigration": true,
+        "requiresHumanReview": true,
+        "blockingReasonCount": blocking_reasons.len(),
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "read_only",
+        "mcpAuditStorage": "none",
+        "agentRunStorage": "none",
+        "runtimeCallStorage": "none",
+        "modelCallStorage": "none",
+        "externalWriteStorage": "none",
+        "transcriptStorage": "none",
+    })
+}
+
+fn default_chat_adapter_controlled_preview_failed_summary(
+    readiness: &DefaultChatAdapterImplementationReadinessReport,
+    safe_error: &str,
+) -> Value {
+    json!({
+        "adapterPreview": "default_chat_adapter_controlled_preview",
+        "metadataSafe": true,
+        "nonDefault": true,
+        "blockedBeforeRuntime": false,
+        "previewErrorCode": default_chat_adapter_controlled_preview_error_code(safe_error),
+        "implementationReady": readiness.implementation_ready,
+        "contractShape": "failed",
+        "previewReady": false,
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "defaultChatPathUnchanged": true,
+        "chatMessageSaved": false,
+        "agentRunRecorded": true,
+        "defaultSendPath": readiness.default_send_path,
+        "startStreamPath": readiness.start_stream_path,
+        "notAutomaticMigration": true,
+        "requiresHumanReview": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+        "externalWriteStorage": "none",
+        "transcriptStorage": "none",
+    })
+}
+
+fn default_chat_adapter_controlled_preview_metadata_safe_summary(
+    output: &MultiStrategyRuntimeOutput,
+    readiness: &DefaultChatAdapterImplementationReadinessReport,
+    contract_shape: &str,
+    preview_ready: bool,
+    output_digest: Option<&str>,
+) -> Value {
+    let metadata = &output.selection.metadata_safe_summary;
+    let governance_decision_kind = output
+        .selection
+        .governance_decision
+        .as_ref()
+        .map(|decision| preview_governance_decision_kind(decision.kind))
+        .unwrap_or("unknown");
+    json!({
+        "adapterPreview": "default_chat_adapter_controlled_preview",
+        "metadataSafe": true,
+        "nonDefault": true,
+        "implementationReady": readiness.implementation_ready,
+        "contractShape": contract_shape,
+        "previewReady": preview_ready,
+        "strategyKind": preview_strategy_kind(output.selection.kind),
+        "payloadKind": preview_payload_kind(&output.payload),
+        "governanceDecisionKind": governance_decision_kind,
+        "taskKind": metadata.get("taskKind").and_then(Value::as_str).unwrap_or("unknown"),
+        "reasonCode": metadata.get("reasonCode").and_then(Value::as_str).unwrap_or("unknown"),
+        "riskLevel": metadata.get("riskLevel").and_then(Value::as_str).unwrap_or("unknown"),
+        "hasHsPacket": metadata.get("hasHsPacket").and_then(Value::as_bool).unwrap_or(false),
+        "planStepCount": preview_plan_step_count(&output.payload),
+        "proposalIdCount": preview_proposal_ids(&output.payload).len(),
+        "blocked": matches!(output.payload, MultiStrategyRuntimePayload::Blocked),
+        "replyPresent": default_chat_adapter_controlled_preview_reply(output).is_some(),
+        "outputDigestPresent": output_digest.is_some(),
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "defaultChatPathUnchanged": true,
+        "chatMessageSaved": false,
+        "agentRunRecorded": true,
+        "defaultSendPath": readiness.default_send_path,
+        "startStreamPath": readiness.start_stream_path,
+        "notAutomaticMigration": true,
+        "requiresHumanReview": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+        "externalWriteStorage": "none",
+        "transcriptStorage": "none",
+    })
+}
+
+fn default_chat_adapter_controlled_preview_audit_summary(
+    output: &MultiStrategyRuntimeOutput,
+    readiness: &DefaultChatAdapterImplementationReadinessReport,
+    contract_shape: &str,
+    preview_ready: bool,
+    output_digest: Option<&str>,
+    warnings: &[String],
+) -> Value {
+    let mut write_control = preview_write_control(&output.payload);
+    if let Some(map) = write_control.as_object_mut() {
+        map.insert("allowWrites".into(), Value::Bool(false));
+    }
+    let metadata = default_chat_adapter_controlled_preview_metadata_safe_summary(
+        output,
+        readiness,
+        contract_shape,
+        preview_ready,
+        output_digest,
+    );
+    json!({
+        "adapterPreview": "default_chat_adapter_controlled_preview",
+        "strategyKind": metadata["strategyKind"],
+        "payloadKind": metadata["payloadKind"],
+        "contractShape": contract_shape,
+        "previewReady": preview_ready,
+        "governanceDecisionKind": metadata["governanceDecisionKind"],
+        "taskKind": metadata["taskKind"],
+        "reasonCode": metadata["reasonCode"],
+        "riskLevel": metadata["riskLevel"],
+        "hasHsPacket": metadata["hasHsPacket"],
+        "planStepCount": metadata["planStepCount"],
+        "planStepStatuses": preview_plan_step_statuses(&output.payload),
+        "proposalIdCount": metadata["proposalIdCount"],
+        "blocked": metadata["blocked"],
+        "replyPresent": metadata["replyPresent"],
+        "outputDigest": output_digest,
+        "warnings": warnings,
+        "metadataSafe": true,
+        "nonDefault": true,
+        "defaultChatPathUnchanged": true,
+        "runtimeLimits": {
+            "allowWrites": false,
+            "maxToolCalls": 0
+        },
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+        "externalWriteStorage": "none",
+        "writeControl": write_control,
+    })
+}
+
+fn default_chat_adapter_controlled_preview_reply(
+    output: &MultiStrategyRuntimeOutput,
+) -> Option<String> {
+    match &output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output)
+            if !runtime_output.user_output.trim().is_empty() =>
+        {
+            Some(runtime_output.user_output.clone())
+        }
+        MultiStrategyRuntimePayload::ReAct(_)
+        | MultiStrategyRuntimePayload::PlanExecute(_)
+        | MultiStrategyRuntimePayload::Blocked => None,
+    }
+}
+
+fn default_chat_adapter_controlled_preview_contract_shape(
+    output: &MultiStrategyRuntimeOutput,
+) -> &'static str {
+    match &output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output)
+            if !runtime_output.user_output.trim().is_empty()
+                && runtime_output.proposal_ids.is_empty() =>
+        {
+            "send_message_compatible"
+        }
+        MultiStrategyRuntimePayload::Blocked => "blocked",
+        MultiStrategyRuntimePayload::ReAct(_) | MultiStrategyRuntimePayload::PlanExecute(_) => {
+            "failed"
+        }
+    }
+}
+
+fn default_chat_adapter_controlled_preview_contract_blockers(
+    output: &MultiStrategyRuntimeOutput,
+) -> Vec<String> {
+    let mut blocking_reasons = Vec::new();
+    match &output.payload {
+        MultiStrategyRuntimePayload::Blocked => {
+            push_unique_string(&mut blocking_reasons, "preview_runtime_blocked".into());
+        }
+        MultiStrategyRuntimePayload::PlanExecute(_) => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "preview_runtime_returned_non_chat_payload".into(),
+            );
+        }
+        MultiStrategyRuntimePayload::ReAct(runtime_output) => {
+            if runtime_output.user_output.trim().is_empty() {
+                push_unique_string(&mut blocking_reasons, "preview_reply_missing".into());
+            }
+            if !runtime_output.proposal_ids.is_empty() {
+                push_unique_string(&mut blocking_reasons, "preview_proposal_ids_present".into());
+            }
+        }
+    }
+
+    let write_control = preview_write_control(&output.payload);
+    let declared_write_step_count = write_control
+        .get("declaredWriteStepCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let proposal_required_step_count = write_control
+        .get("proposalRequiredStepCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if declared_write_step_count > 0 || proposal_required_step_count > 0 {
+        push_unique_string(
+            &mut blocking_reasons,
+            "preview_write_or_proposal_step_present".into(),
+        );
+    }
+
+    blocking_reasons
+}
+
+fn default_chat_adapter_controlled_preview_audit_output_label(audit: &Value) -> String {
+    let strategy = audit
+        .get("strategyKind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let payload = audit
+        .get("payloadKind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    format!("Default Chat adapter controlled preview: {strategy} / {payload}")
+}
+
 fn shadow_review_decision_evidence_is_metadata_safe(
     record: &openlife_core::agent::EvidenceRecord,
 ) -> bool {
@@ -5624,6 +6139,14 @@ struct CutoverCandidateRunCompletion {
     behavior_checks: Vec<HSBehaviorCheckSummary>,
 }
 
+struct DefaultChatAdapterControlledPreviewRunCompletion {
+    audit: Value,
+    warnings: Vec<String>,
+    context_summary: ContextSummary,
+    hs_selection_audit: Option<HSSelectionAudit>,
+    behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
 async fn execute_multi_strategy_agent_preview(
     input: MultiStrategyAgentPreviewInput,
     state: &Arc<AppState>,
@@ -5830,6 +6353,44 @@ fn new_cutover_candidate_agent_run(
     run
 }
 
+fn new_default_chat_adapter_controlled_preview_run(
+    session_id: &str,
+    input_message_hash: &str,
+) -> AgentRun {
+    let mut run = AgentRun::new_chat_run(session_id, "");
+    run.user_input = None;
+    run.reasoning_strategy = Some("default_chat_adapter_controlled_preview".into());
+    run.output_preview = Some("Default Chat adapter controlled preview started".into());
+    run.context_summary = Some(ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: true,
+        redaction_level: RedactionLevel::Strict,
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(json!({
+            "adapterPreview": "default_chat_adapter_controlled_preview",
+            "status": "started",
+            "inputMessageHash": input_message_hash,
+            "allowWrites": false,
+            "maxToolCalls": 0,
+            "metadataSafe": true,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+        })),
+        output: Some("default_chat_adapter_controlled_preview_started".into()),
+        ..ReasoningTrace::default()
+    });
+    run
+}
+
 async fn create_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -5861,6 +6422,19 @@ async fn create_cutover_candidate_run(state: &Arc<AppState>, run: &AgentRun) -> 
     store
         .create_run(run)
         .map_err(|e| format!("failed to create cutover candidate AgentRun: {e}"))
+}
+
+async fn create_default_chat_adapter_controlled_preview_run(
+    state: &Arc<AppState>,
+    run: &AgentRun,
+) -> Result<(), String> {
+    let store_arc = state.agent_run_store.as_ref().ok_or_else(|| {
+        "AgentRun store not available for default Chat adapter controlled preview".to_string()
+    })?;
+    let store = store_arc.lock().await;
+    store.create_run(run).map_err(|e| {
+        format!("failed to create default Chat adapter controlled preview AgentRun: {e}")
+    })
 }
 
 async fn complete_preview_run(
@@ -5964,6 +6538,42 @@ async fn complete_cutover_candidate_run(
     update_cutover_candidate_run(state, run).await
 }
 
+async fn complete_default_chat_adapter_controlled_preview_run(
+    state: &Arc<AppState>,
+    run: &mut AgentRun,
+    completion: DefaultChatAdapterControlledPreviewRunCompletion,
+) -> Result<(), String> {
+    run.status = AgentRunStatus::Completed;
+    run.finished_at = Some(chrono::Utc::now());
+    run.generated_proposals = Vec::new();
+    run.warnings = completion.warnings;
+    run.hs_selection_audit = completion.hs_selection_audit;
+    run.behavior_checks = completion.behavior_checks;
+    run.output_preview = Some(default_chat_adapter_controlled_preview_audit_output_label(
+        &completion.audit,
+    ));
+    run.step_count = completion
+        .audit
+        .get("planStepCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default() as u32;
+    run.tool_call_count = 0;
+    run.context_summary = Some(completion.context_summary);
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(completion.audit),
+        output: Some("default_chat_adapter_controlled_preview".into()),
+        stable_steps: vec![
+            "implementation_readiness_check".into(),
+            "controlled_adapter_preview".into(),
+            "send_message_contract_shape_validation".into(),
+            "metadata_safe_audit".into(),
+        ],
+        ..ReasoningTrace::default()
+    });
+
+    update_default_chat_adapter_controlled_preview_run(state, run).await
+}
+
 async fn fail_preview_run(state: &Arc<AppState>, run: &mut AgentRun, error: &str) {
     run.fail(AgentRunError {
         message: metadata_safe_preview_error(error),
@@ -6058,6 +6668,48 @@ async fn fail_cutover_candidate_run(state: &Arc<AppState>, run: &mut AgentRun, s
     }
 }
 
+async fn fail_default_chat_adapter_controlled_preview_run(
+    state: &Arc<AppState>,
+    run: &mut AgentRun,
+    safe_error: &str,
+) {
+    run.fail(AgentRunError {
+        message: safe_error.to_string(),
+        phase: "default_chat_adapter_controlled_preview_failed".into(),
+        recoverable: false,
+    });
+    run.user_input = None;
+    run.reasoning_strategy = Some("default_chat_adapter_controlled_preview".into());
+    let audit = json!({
+        "adapterPreview": "default_chat_adapter_controlled_preview",
+        "status": "failed",
+        "errorCode": default_chat_adapter_controlled_preview_error_code(safe_error),
+        "contractShape": "failed",
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(audit),
+        output: Some("default_chat_adapter_controlled_preview_failed".into()),
+        ..ReasoningTrace::default()
+    });
+    run.output_preview = Some("Default Chat adapter controlled preview failed".into());
+
+    if let Err(e) = update_default_chat_adapter_controlled_preview_run(state, run).await {
+        log::warn!(
+            "[AgentRun] failed to update default Chat adapter controlled preview run after error: {}",
+            e
+        );
+    }
+}
+
 async fn update_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -6089,6 +6741,19 @@ async fn update_cutover_candidate_run(state: &Arc<AppState>, run: &AgentRun) -> 
     store
         .update_run(run)
         .map_err(|e| format!("failed to update cutover candidate AgentRun: {e}"))
+}
+
+async fn update_default_chat_adapter_controlled_preview_run(
+    state: &Arc<AppState>,
+    run: &AgentRun,
+) -> Result<(), String> {
+    let store_arc = state.agent_run_store.as_ref().ok_or_else(|| {
+        "AgentRun store not available for default Chat adapter controlled preview".to_string()
+    })?;
+    let store = store_arc.lock().await;
+    store.update_run(run).map_err(|e| {
+        format!("failed to update default Chat adapter controlled preview AgentRun: {e}")
+    })
 }
 
 fn metadata_safe_preview_error(error: &str) -> String {
@@ -6130,6 +6795,27 @@ fn cutover_candidate_error_code(error: &str) -> &'static str {
         "multi_strategy_runtime_failed"
     } else {
         "candidate_runtime_failed"
+    }
+}
+
+fn metadata_safe_default_chat_adapter_controlled_preview_error(error: &str) -> String {
+    format!(
+        "default Chat adapter controlled preview failed: {}",
+        default_chat_adapter_controlled_preview_error_code(error)
+    )
+}
+
+fn default_chat_adapter_controlled_preview_error_code(error: &str) -> &'static str {
+    if error.contains("unsupported preview runtime layer") {
+        "invalid_preview_layer"
+    } else if error.contains("failed to load LifeModel") {
+        "lifemodel_load_failed"
+    } else if error.contains("HS runtime packet build failed") {
+        "hs_packet_build_failed"
+    } else if error.contains("multi-strategy preview runtime failed") {
+        "multi_strategy_runtime_failed"
+    } else {
+        "controlled_preview_runtime_failed"
     }
 }
 
@@ -11553,6 +12239,203 @@ mod tests {
         assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
         assert_eq!(before.model_version, after.model_version);
         assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    async fn seed_default_chat_adapter_implementation_ready(
+        state: &Arc<crate::AppState>,
+        candidate_run_id: &str,
+        session_id: &str,
+        message: &str,
+    ) {
+        seed_ready_default_chat_adapter_activation_plan(state, candidate_run_id).await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some(session_id.into()),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+        record_default_chat_adapter_dry_run_review_decision_with_state(
+            DefaultChatAdapterDryRunReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: session_id.into(),
+                message: message.into(),
+                dry_run_summary_digest: None,
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_blocks_without_implementation_readiness() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let report = run_default_chat_adapter_controlled_preview_with_state(
+            DefaultChatAdapterControlledPreviewInput {
+                source_session_id: "session-preview-blocked".into(),
+                message: "Controlled preview probe.".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.preview_ready);
+        assert!(report.blocked);
+        assert!(report.run_id.is_none());
+        assert!(report.reply.is_none());
+        assert_eq!(report.contract_shape, "blocked");
+        assert_eq!(report.adapter_path, "blocked");
+        assert!(!report.implementation_ready);
+        assert!(!report.allow_writes);
+        assert_eq!(report.max_tool_calls, 0);
+        assert!(report.default_chat_path_unchanged);
+        assert!(!report.chat_message_saved);
+        assert!(!report.agent_run_recorded);
+        assert!(report
+            .blocking_reasons
+            .contains(&"implementation_readiness_not_ready".to_string()));
+        assert_eq!(
+            report.metadata_safe_summary["adapterPreview"],
+            "default_chat_adapter_controlled_preview"
+        );
+        assert_eq!(report.metadata_safe_summary["blockedBeforeRuntime"], true);
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_controlled_preview_returns_send_message_compatible_shape() {
+        let state = preview_state().await;
+        let message = "Provide a concise default Chat adapter controlled preview response.";
+        seed_default_chat_adapter_implementation_ready(
+            &state,
+            "run-candidate-controlled-preview-ready",
+            "session-preview-ready",
+            message,
+        )
+        .await;
+        let before = side_effect_counts(&state).await;
+
+        let report = run_default_chat_adapter_controlled_preview_with_state(
+            DefaultChatAdapterControlledPreviewInput {
+                source_session_id: "session-preview-ready".into(),
+                message: message.into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.preview_ready);
+        assert!(!report.blocked);
+        assert_eq!(report.contract_shape, "send_message_compatible");
+        assert_eq!(report.adapter_path, "controlled_adapter_preview");
+        assert_eq!(report.source_session_id, "session-preview-ready");
+        assert!(report
+            .reply
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(report.run_id.is_some());
+        assert!(report.tool_calls.is_empty());
+        assert!(report.reasoning_trace.strategy_result.is_some());
+        assert!(report.implementation_ready);
+        assert!(!report.allow_writes);
+        assert_eq!(report.max_tool_calls, 0);
+        assert!(report.default_chat_path_unchanged);
+        assert!(!report.chat_message_saved);
+        assert!(report.agent_run_recorded);
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report.metadata_safe_summary["adapterPreview"],
+            "default_chat_adapter_controlled_preview"
+        );
+        assert_eq!(report.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(report.metadata_safe_summary["allowWrites"], false);
+        assert_eq!(report.metadata_safe_summary["maxToolCalls"], 0);
+        assert_eq!(report.metadata_safe_summary["chatHistoryStorage"], "none");
+        assert_eq!(
+            report.metadata_safe_summary["defaultSendPath"],
+            "legacy_stream"
+        );
+        assert_eq!(
+            report.metadata_safe_summary["startStreamPath"],
+            "legacy_stream"
+        );
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count + 1, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+
+        let run = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store
+                .get_run(report.run_id.as_deref().unwrap())
+                .unwrap()
+                .expect("controlled preview AgentRun should be persisted")
+        };
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(
+            run.reasoning_strategy.as_deref(),
+            Some("default_chat_adapter_controlled_preview")
+        );
+        assert_eq!(run.user_input, None);
+        assert!(run.actions.is_empty());
+        assert!(run.observations.is_empty());
+        assert_eq!(run.tool_call_count, 0);
+        assert!(run.generated_proposals.is_empty());
+
+        let audit = preview_audit(&run);
+        assert_eq!(
+            audit["adapterPreview"],
+            "default_chat_adapter_controlled_preview"
+        );
+        assert_eq!(audit["metadataSafe"], true);
+        assert_eq!(audit["runtimeLimits"]["allowWrites"], false);
+        assert_eq!(audit["runtimeLimits"]["maxToolCalls"], 0);
+        assert_eq!(audit["contentStorage"], "none");
+        assert_eq!(audit["toolStorage"], "none");
+        assert_eq!(audit["chatHistoryStorage"], "none");
+        assert_eq!(audit["proposalStorage"], "none");
+        assert_eq!(audit["lifeModelPatchStorage"], "none");
+        assert_eq!(audit["memoryStorage"], "none");
+
+        let serialized_report = serde_json::to_string(&report).unwrap();
+        let serialized_run = serde_json::to_string(&run).unwrap();
+        assert!(!serialized_run.contains(message));
+        for serialized in [serialized_report, serialized_run] {
+            assert!(!serialized.contains("rawUserInput"));
+            assert!(!serialized.contains("rawAssistantOutput"));
+            assert!(!serialized.contains("toolPayload"));
+            assert!(!serialized.contains("full tool payload"));
+        }
     }
 
     #[tokio::test]

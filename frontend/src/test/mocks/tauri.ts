@@ -758,6 +758,40 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           startStreamPath: "legacy_stream",
         },
       } as T);
+    case "run_default_chat_adapter_controlled_preview":
+      return Promise.resolve({
+        previewReady: true,
+        blocked: false,
+        contractShape: "send_message_compatible",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        adapterPath: "controlled_adapter_preview",
+        reply: "Controlled adapter preview reply",
+        reasoningTrace: {
+          strategyResult: {
+            adapterPreview: "default_chat_adapter_controlled_preview",
+            metadataSafe: true,
+          },
+        },
+        toolCalls: [],
+        runId: "run-adapter-preview-1",
+        allowWrites: false,
+        maxToolCalls: 0,
+        defaultChatPathUnchanged: true,
+        chatMessageSaved: false,
+        agentRunRecorded: true,
+        implementationReady: true,
+        warnings: [],
+        blockingReasons: [],
+        metadataSafeSummary: {
+          adapterPreview: "default_chat_adapter_controlled_preview",
+          metadataSafe: true,
+          allowWrites: false,
+          maxToolCalls: 0,
+          chatHistoryStorage: "none",
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

@@ -825,6 +825,34 @@ export interface DefaultChatAdapterImplementationReadinessReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterControlledPreviewInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterControlledPreviewReport {
+  previewReady: boolean;
+  blocked: boolean;
+  contractShape: string;
+  sourceSessionId: string;
+  adapterPath: string;
+  reply?: string | null;
+  reasoningTrace: Record<string, unknown>;
+  toolCalls: unknown[];
+  runId?: string | null;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  defaultChatPathUnchanged: boolean;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  implementationReady: boolean;
+  warnings: string[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;
