@@ -703,6 +703,104 @@ export interface DefaultChatAdapterRoutingStatus {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterContractHarnessInput {
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  sessionId?: string;
+}
+
+export interface DefaultChatAdapterContractCheck {
+  name: string;
+  ready: boolean;
+  expectedPath: string;
+  actualPath: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterContractHarnessReport {
+  contractHarnessReady: boolean;
+  contractShape: string;
+  adapterDisabled: boolean;
+  activationImplementationGateEligible: boolean;
+  routingStatus: DefaultChatAdapterRoutingStatus;
+  sendMessageContract: DefaultChatAdapterContractCheck;
+  streamMessageContract: DefaultChatAdapterContractCheck;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface DefaultChatAdapterDryRunInput {
+  sessionId: string;
+  message: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterDryRunReport {
+  dryRunReady: boolean;
+  blocked: boolean;
+  contractShape: string;
+  sourceSessionId: string;
+  adapterPath: string;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  defaultChatPathUnchanged: boolean;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  contractHarnessReady: boolean;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  userOutputPreview?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export type DefaultChatAdapterDryRunReviewDecisionKind = "approve" | "reject" | "request_rework";
+
+export interface DefaultChatAdapterDryRunReviewDecisionInput {
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  dryRunSummaryDigest?: string;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterDryRunReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  contractShape: string;
+  dryRunReady: boolean;
+  dryRunSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterDryRunReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterDryRunReviewDecisionKind;
+  sourceSessionId: string;
+  contractShape: string;
+  dryRunReady: boolean;
+  dryRunSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterDryRunReviewSummary {
+  latestDecision?: DefaultChatAdapterDryRunReviewLatestDecision | null;
+  approvedCount: number;
+  rejectOrReworkCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

@@ -632,6 +632,24 @@ describe("ChatPage", () => {
         .mocked(invoke)
         .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_routing_status")
     ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "check_default_chat_adapter_contract_harness")
+    ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_default_chat_adapter_dry_run")
+    ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "record_default_chat_adapter_dry_run_review_decision")
+    ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_dry_run_review_summary")
+    ).toBe(false);
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {

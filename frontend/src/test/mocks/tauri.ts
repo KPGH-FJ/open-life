@@ -599,6 +599,122 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           requiresSeparateCutoverImplementation: true,
         },
       } as T);
+    case "check_default_chat_adapter_contract_harness":
+      return Promise.resolve({
+        contractHarnessReady: true,
+        contractShape: "disabled_adapter_legacy_stream_contract",
+        adapterDisabled: true,
+        activationImplementationGateEligible: true,
+        routingStatus: {
+          currentMode: "legacy_stream",
+          adapterScaffoldPresent: true,
+          controlledAdapterEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          activationImplementationGateEligible: true,
+          requiresSeparateCutoverImplementation: true,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            defaultChatAdapterRouting: "disabled_scaffold",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        sendMessageContract: {
+          name: "send_message",
+          ready: true,
+          expectedPath: "legacy_stream",
+          actualPath: "legacy_stream",
+          blockingReasons: [],
+        },
+        streamMessageContract: {
+          name: "start_stream_message",
+          ready: true,
+          expectedPath: "legacy_stream",
+          actualPath: "legacy_stream",
+          blockingReasons: [],
+        },
+        blockingReasons: [],
+        metadataSafeSummary: {
+          contractHarness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          contractHarnessReady: true,
+          contractShape: "disabled_adapter_legacy_stream_contract",
+          adapterDisabled: true,
+          activationImplementationGateEligible: true,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          controlledAdapterEnabled: false,
+        },
+      } as T);
+    case "run_default_chat_adapter_dry_run":
+      return Promise.resolve({
+        dryRunReady: true,
+        blocked: false,
+        contractShape: "default_chat_adapter_dry_run_contract",
+        sourceSessionId: _args?.input?.sessionId ?? "settings-dry-run",
+        adapterPath: "controlled_adapter_dry_run",
+        allowWrites: false,
+        maxToolCalls: 0,
+        defaultChatPathUnchanged: true,
+        chatMessageSaved: false,
+        agentRunRecorded: false,
+        contractHarnessReady: true,
+        inputMessageLength: 31,
+        inputMessageHash: "abc123",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          adapterDryRun: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          dryRunReady: true,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          adapterPath: "controlled_adapter_dry_run",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+        },
+      } as T);
+    case "record_default_chat_adapter_dry_run_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_dry_run_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        contractShape: "default_chat_adapter_dry_run_contract",
+        dryRunReady: true,
+        dryRunSummaryDigest: "sha256:dryrunreview",
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_dry_run_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_dry_run_review_1",
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          contractShape: "default_chat_adapter_dry_run_contract",
+          dryRunReady: true,
+          dryRunSummaryDigest: "sha256:dryrunreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          dryRunReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W38 completion/status index. This is not a second roadmap.
+   - Compact W1-W41 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W38 through sustained Runtime Migration
+Current implementation has completed W1-W41 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -57,11 +57,14 @@ plus a read-only cutover candidate promotion readiness gate plus a read-only
 default Chat runtime boundary status plus a human-review-only default Chat
 adapter activation plan draft plus metadata-safe activation review decision
 evidence plus a read-only default Chat adapter activation implementation gate
-plus a read-only default Chat adapter disabled routing scaffold.
+plus a read-only default Chat adapter disabled routing scaffold plus a read-only
+default Chat adapter contract harness plus a write-disabled default Chat adapter
+dry-run invocation boundary plus metadata-safe default Chat adapter dry-run
+review evidence.
 The next practical sequence is:
 
 ```text
-use default Chat adapter disabled routing scaffold only for boundary observation; default Chat remains unchanged
+use default Chat adapter dry-run review evidence only for human review of the write-disabled invocation contract; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -70,7 +73,7 @@ use default Chat adapter disabled routing scaffold only for boundary observation
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W38 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W41 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -320,6 +323,41 @@ MCP audit rows, chat messages, runtime/tool/model calls, feature flags, or
 default Chat routing changes. Default Send, `send_message`, and
 `start_stream_message` must not call adapter routing status. W38 is disabled
 routing scaffold observability, not default Chat migration.
+
+W39 adds only `check_default_chat_adapter_contract_harness` and the Settings
+Default Chat Adapter Contract Harness panel. The command is read-only: it calls
+W38 routing status and validates the disabled adapter contract, including
+`send_message` and `start_stream_message` remaining on `legacy_stream`,
+controlled adapter disabled, and activation implementation gate eligibility. It
+must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
+audit rows, chat messages, runtime/tool/model calls, feature flags, or default
+Chat routing changes. Default Send, `send_message`, and `start_stream_message`
+must not call contract harness. W39 is contract observability, not default Chat
+migration.
+
+W40 adds only `run_default_chat_adapter_dry_run` and the Settings Default Chat
+Adapter Dry Run panel. The command is explicit and non-default: it calls the W39
+contract harness first, blocks without dry-run output when the harness is not
+ready, and when ready returns only a metadata-safe invocation contract result
+with `allowWrites=false`, `maxToolCalls=0`, and
+`defaultChatPathUnchanged=true`. It must not create AgentRuns, Evidence,
+Proposals, Memory, LifeModel patches, MCP audit rows, chat messages,
+runtime/tool/model calls, external writes, feature flags, or default Chat
+routing changes. Default Send, `send_message`, and `start_stream_message` must
+not call adapter dry run. W40 is write-disabled invocation contract
+observability, not default Chat migration.
+
+W41 adds only `record_default_chat_adapter_dry_run_review_decision`,
+`get_default_chat_adapter_dry_run_review_summary`, and the Settings Default Chat
+Adapter Dry Run Review panel. The record command re-runs W40 dry run before
+recording evidence. `approve` records only when dry run is ready; blocked dry-run
+approval writes no evidence. `reject` and `request_rework` record only
+metadata-safe evidence. Reviewer notes are reduced to checksum, length, and
+bounded category. It must not create AgentRuns, Proposals, Memory, LifeModel
+patches, MCP audit rows, chat messages, runtime/tool/model calls, external
+writes, feature flags, or default Chat routing changes. Default Send,
+`send_message`, and `start_stream_message` must not call dry-run review commands.
+W41 is dry-run review evidence, not default Chat migration.
 
 ## 6. Agent Rules
 

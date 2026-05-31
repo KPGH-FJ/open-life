@@ -14,9 +14,13 @@ import {
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkDefaultChatAdapterActivationImplementationGate,
+  checkDefaultChatAdapterContractHarness,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
+  runDefaultChatAdapterDryRun,
+  getDefaultChatAdapterDryRunReviewSummary,
+  recordDefaultChatAdapterDryRunReviewDecision,
   draftDefaultChatAdapterActivationPlan,
   getDefaultChatAdapterActivationReviewSummary,
   recordDefaultChatAdapterActivationReviewDecision,
@@ -971,5 +975,175 @@ describe("tauri command argument aliases", () => {
     expect(result.controlledAdapterEnabled).toBe(false);
     expect(result.defaultSendPath).toBe("legacy_stream");
     expect(result.startStreamPath).toBe("legacy_stream");
+  });
+
+  it("invokes default chat adapter contract harness as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      contractHarnessReady: true,
+      contractShape: "disabled_adapter_legacy_stream_contract",
+      adapterDisabled: true,
+      activationImplementationGateEligible: true,
+      routingStatus: {
+        currentMode: "legacy_stream",
+        adapterScaffoldPresent: true,
+        controlledAdapterEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        activationImplementationGateEligible: true,
+        requiresSeparateCutoverImplementation: true,
+        blockingReasons: [],
+        metadataSafeSummary: {},
+      },
+      sendMessageContract: {
+        name: "send_message",
+        ready: true,
+        expectedPath: "legacy_stream",
+        actualPath: "legacy_stream",
+        blockingReasons: [],
+      },
+      streamMessageContract: {
+        name: "start_stream_message",
+        ready: true,
+        expectedPath: "legacy_stream",
+        actualPath: "legacy_stream",
+        blockingReasons: [],
+      },
+      blockingReasons: [],
+      metadataSafeSummary: {
+        contractHarness: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterContractHarness({
+      requiredApprovedCandidates: 1,
+      sessionId: "session-1",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_contract_harness", {
+      input: {
+        requiredApprovedCandidates: 1,
+        sessionId: "session-1",
+      },
+    });
+    expect(result.contractHarnessReady).toBe(true);
+    expect(result.adapterDisabled).toBe(true);
+    expect(result.sendMessageContract.actualPath).toBe("legacy_stream");
+    expect(result.streamMessageContract.actualPath).toBe("legacy_stream");
+  });
+
+  it("invokes default chat adapter dry run as write-disabled", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      dryRunReady: true,
+      blocked: false,
+      contractShape: "default_chat_adapter_dry_run_contract",
+      sourceSessionId: "session-1",
+      adapterPath: "controlled_adapter_dry_run",
+      allowWrites: false,
+      maxToolCalls: 0,
+      defaultChatPathUnchanged: true,
+      chatMessageSaved: false,
+      agentRunRecorded: false,
+      contractHarnessReady: true,
+      inputMessageLength: 13,
+      inputMessageHash: "abc123",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        adapterDryRun: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await runDefaultChatAdapterDryRun({
+      sessionId: "session-1",
+      message: "dry run probe",
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_default_chat_adapter_dry_run", {
+      input: {
+        sessionId: "session-1",
+        message: "dry run probe",
+        requiredApprovedCandidates: 1,
+      },
+    });
+    expect(result.dryRunReady).toBe(true);
+    expect(result.allowWrites).toBe(false);
+    expect(result.maxToolCalls).toBe(0);
+    expect(result.chatMessageSaved).toBe(false);
+  });
+
+  it("records default chat adapter dry-run review decision", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_dry_run_review_1",
+      decisionKind: "approve",
+      sourceSessionId: "session-1",
+      contractShape: "default_chat_adapter_dry_run_contract",
+      dryRunReady: true,
+      dryRunSummaryDigest: "sha256:abc123",
+      createdAt: "2026-05-31T00:00:00Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordDefaultChatAdapterDryRunReviewDecision({
+      decisionKind: "approve",
+      sourceSessionId: "session-1",
+      message: "dry run probe",
+      dryRunSummaryDigest: "sha256:abc123",
+      requiredApprovedCandidates: 1,
+      optionalReviewerNote: "reviewed",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("record_default_chat_adapter_dry_run_review_decision", {
+      input: {
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        message: "dry run probe",
+        dryRunSummaryDigest: "sha256:abc123",
+        requiredApprovedCandidates: 1,
+        optionalReviewerNote: "reviewed",
+      },
+    });
+    expect(result.recorded).toBe(true);
+    expect(result.dryRunReady).toBe(true);
+    expect(result.evidenceId).toBe("ev_dry_run_review_1");
+  });
+
+  it("reads default chat adapter dry-run review summary", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_dry_run_review_1",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        contractShape: "default_chat_adapter_dry_run_contract",
+        dryRunReady: true,
+        dryRunSummaryDigest: "sha256:abc123",
+        reviewerNoteChecksum: "sha256:def456",
+        reviewerNoteLength: 8,
+        reviewerNoteCategory: "short",
+        createdAt: "2026-05-31T00:00:00Z",
+      },
+      approvedCount: 1,
+      rejectOrReworkCount: 0,
+      latestTimestamp: "2026-05-31T00:00:00Z",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        dryRunReview: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await getDefaultChatAdapterDryRunReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_default_chat_adapter_dry_run_review_summary",
+      undefined
+    );
+    expect(result.latestDecision?.decisionKind).toBe("approve");
+    expect(result.approvedCount).toBe(1);
   });
 });

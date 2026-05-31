@@ -44,6 +44,13 @@ import type {
   DefaultChatAdapterActivationImplementationGateReport,
   DefaultChatAdapterRoutingStatusInput,
   DefaultChatAdapterRoutingStatus,
+  DefaultChatAdapterContractHarnessInput,
+  DefaultChatAdapterContractHarnessReport,
+  DefaultChatAdapterDryRunInput,
+  DefaultChatAdapterDryRunReport,
+  DefaultChatAdapterDryRunReviewDecisionInput,
+  DefaultChatAdapterDryRunReviewDecisionResult,
+  DefaultChatAdapterDryRunReviewSummary,
   DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
@@ -445,6 +452,38 @@ export async function getDefaultChatAdapterRoutingStatus(
   return safeInvoke<DefaultChatAdapterRoutingStatus>("get_default_chat_adapter_routing_status", {
     input,
   });
+}
+
+export async function checkDefaultChatAdapterContractHarness(
+  input: DefaultChatAdapterContractHarnessInput = {}
+): Promise<DefaultChatAdapterContractHarnessReport> {
+  return safeInvoke<DefaultChatAdapterContractHarnessReport>(
+    "check_default_chat_adapter_contract_harness",
+    { input }
+  );
+}
+
+export async function runDefaultChatAdapterDryRun(
+  input: DefaultChatAdapterDryRunInput
+): Promise<DefaultChatAdapterDryRunReport> {
+  return safeInvoke<DefaultChatAdapterDryRunReport>("run_default_chat_adapter_dry_run", {
+    input,
+  });
+}
+
+export async function recordDefaultChatAdapterDryRunReviewDecision(
+  input: DefaultChatAdapterDryRunReviewDecisionInput
+): Promise<DefaultChatAdapterDryRunReviewDecisionResult> {
+  return safeInvoke<DefaultChatAdapterDryRunReviewDecisionResult>(
+    "record_default_chat_adapter_dry_run_review_decision",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterDryRunReviewSummary(): Promise<DefaultChatAdapterDryRunReviewSummary> {
+  return safeInvoke<DefaultChatAdapterDryRunReviewSummary>(
+    "get_default_chat_adapter_dry_run_review_summary"
+  );
 }
 
 export async function startStreamMessage(

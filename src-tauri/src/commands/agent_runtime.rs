@@ -28,6 +28,8 @@ const CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.controlled_chat.cutover_candidate_review_decision";
 const DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.default_chat.adapter_activation_review_decision";
+const DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.default_chat.adapter_dry_run_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -609,6 +611,134 @@ pub struct DefaultChatAdapterRoutingStatus {
     pub start_stream_path: String,
     pub activation_implementation_gate_eligible: bool,
     pub requires_separate_cutover_implementation: bool,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterContractHarnessInput {
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterContractCheck {
+    pub name: String,
+    pub ready: bool,
+    pub expected_path: String,
+    pub actual_path: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterContractHarnessReport {
+    pub contract_harness_ready: bool,
+    pub contract_shape: String,
+    pub adapter_disabled: bool,
+    pub activation_implementation_gate_eligible: bool,
+    pub routing_status: DefaultChatAdapterRoutingStatus,
+    pub send_message_contract: DefaultChatAdapterContractCheck,
+    pub stream_message_contract: DefaultChatAdapterContractCheck,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunInput {
+    pub session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunReport {
+    pub dry_run_ready: bool,
+    pub blocked: bool,
+    pub contract_shape: String,
+    pub source_session_id: String,
+    pub adapter_path: String,
+    pub allow_writes: bool,
+    pub max_tool_calls: u32,
+    pub default_chat_path_unchanged: bool,
+    pub chat_message_saved: bool,
+    pub agent_run_recorded: bool,
+    pub contract_harness_ready: bool,
+    pub input_message_length: usize,
+    pub input_message_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_output_preview: Option<String>,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunReviewDecisionInput {
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub dry_run_summary_digest: Option<String>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub contract_shape: String,
+    pub dry_run_ready: bool,
+    pub dry_run_summary_digest: String,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunReviewLatestDecision {
+    pub evidence_id: String,
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub contract_shape: String,
+    pub dry_run_ready: bool,
+    pub dry_run_summary_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_note_checksum: Option<String>,
+    pub reviewer_note_length: usize,
+    pub reviewer_note_category: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterDryRunReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterDryRunReviewLatestDecision>,
+    pub approved_count: usize,
+    pub reject_or_rework_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
     pub metadata_safe_summary: Value,
 }
@@ -2780,6 +2910,436 @@ pub(crate) async fn get_default_chat_adapter_routing_status_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn check_default_chat_adapter_contract_harness(
+    input: DefaultChatAdapterContractHarnessInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterContractHarnessReport, String> {
+    check_default_chat_adapter_contract_harness_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn check_default_chat_adapter_contract_harness_with_state(
+    input: DefaultChatAdapterContractHarnessInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterContractHarnessReport, String> {
+    let routing_status = get_default_chat_adapter_routing_status_with_state(
+        DefaultChatAdapterRoutingStatusInput {
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+            session_id: input.session_id,
+        },
+        state,
+    )
+    .await?;
+
+    let expected_path = "legacy_stream".to_string();
+    let mut send_blocking_reasons = Vec::new();
+    if routing_status.default_send_path != expected_path {
+        push_unique_string(
+            &mut send_blocking_reasons,
+            "default_send_path_drifted".into(),
+        );
+    }
+    let send_message_contract = DefaultChatAdapterContractCheck {
+        name: "send_message".into(),
+        ready: send_blocking_reasons.is_empty(),
+        expected_path: expected_path.clone(),
+        actual_path: routing_status.default_send_path.clone(),
+        blocking_reasons: send_blocking_reasons,
+    };
+
+    let mut stream_blocking_reasons = Vec::new();
+    if routing_status.start_stream_path != expected_path {
+        push_unique_string(
+            &mut stream_blocking_reasons,
+            "start_stream_path_drifted".into(),
+        );
+    }
+    let stream_message_contract = DefaultChatAdapterContractCheck {
+        name: "start_stream_message".into(),
+        ready: stream_blocking_reasons.is_empty(),
+        expected_path,
+        actual_path: routing_status.start_stream_path.clone(),
+        blocking_reasons: stream_blocking_reasons,
+    };
+
+    let mut blocking_reasons = routing_status.blocking_reasons.clone();
+    if !routing_status.adapter_scaffold_present {
+        push_unique_string(&mut blocking_reasons, "adapter_scaffold_missing".into());
+    }
+    if routing_status.controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if routing_status.current_mode != "legacy_stream" {
+        push_unique_string(&mut blocking_reasons, "default_chat_mode_drifted".into());
+    }
+    for reason in &send_message_contract.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+    for reason in &stream_message_contract.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+
+    let adapter_disabled = routing_status.adapter_scaffold_present
+        && !routing_status.controlled_adapter_enabled
+        && routing_status.current_mode == "legacy_stream"
+        && routing_status.default_send_path == "legacy_stream"
+        && routing_status.start_stream_path == "legacy_stream";
+    let contract_shape = "disabled_adapter_legacy_stream_contract".to_string();
+    let activation_implementation_gate_eligible =
+        routing_status.activation_implementation_gate_eligible;
+    let contract_harness_ready = adapter_disabled
+        && activation_implementation_gate_eligible
+        && send_message_contract.ready
+        && stream_message_contract.ready
+        && blocking_reasons.is_empty();
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterContractHarnessReport {
+        contract_harness_ready,
+        contract_shape: contract_shape.clone(),
+        adapter_disabled,
+        activation_implementation_gate_eligible,
+        routing_status,
+        send_message_contract,
+        stream_message_contract,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "contractHarness": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "contractHarnessReady": contract_harness_ready,
+            "contractShape": contract_shape,
+            "adapterDisabled": adapter_disabled,
+            "activationImplementationGateEligible": activation_implementation_gate_eligible,
+            "currentMode": "legacy_stream",
+            "defaultSendPath": "legacy_stream",
+            "startStreamPath": "legacy_stream",
+            "controlledAdapterEnabled": false,
+            "notAutomaticMigration": true,
+            "requiresSeparateCutoverImplementation": true,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn run_default_chat_adapter_dry_run(
+    input: DefaultChatAdapterDryRunInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterDryRunReport, String> {
+    run_default_chat_adapter_dry_run_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn run_default_chat_adapter_dry_run_with_state(
+    input: DefaultChatAdapterDryRunInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterDryRunReport, String> {
+    let source_session_id = safe_internal_id(&input.session_id, "sessionId")?;
+    let input_message_length = input.message.chars().count();
+    let input_message_hash = sha256_hex(&input.message);
+    let contract_shape = "default_chat_adapter_dry_run_contract".to_string();
+    let allow_writes = false;
+    let max_tool_calls = 0;
+    let default_chat_path_unchanged = true;
+    let chat_message_saved = false;
+    let agent_run_recorded = false;
+
+    let contract_harness = check_default_chat_adapter_contract_harness_with_state(
+        DefaultChatAdapterContractHarnessInput {
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+            session_id: Some(source_session_id.clone()),
+        },
+        state,
+    )
+    .await?;
+
+    let mut blocking_reasons = contract_harness.blocking_reasons.clone();
+    if !contract_harness.contract_harness_ready {
+        push_unique_string(&mut blocking_reasons, "contract_harness_not_ready".into());
+    }
+
+    let dry_run_ready = contract_harness.contract_harness_ready && blocking_reasons.is_empty();
+    let blocked = !dry_run_ready;
+    let adapter_path = if dry_run_ready {
+        "controlled_adapter_dry_run"
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterDryRunReport {
+        dry_run_ready,
+        blocked,
+        contract_shape: contract_shape.clone(),
+        source_session_id,
+        adapter_path: adapter_path.clone(),
+        allow_writes,
+        max_tool_calls,
+        default_chat_path_unchanged,
+        chat_message_saved,
+        agent_run_recorded,
+        contract_harness_ready: contract_harness.contract_harness_ready,
+        input_message_length,
+        input_message_hash,
+        user_output_preview: None,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "adapterDryRun": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "dryRunReady": dry_run_ready,
+            "blocked": blocked,
+            "contractShape": contract_shape,
+            "adapterPath": adapter_path,
+            "contractHarnessReady": contract_harness.contract_harness_ready,
+            "allowWrites": allow_writes,
+            "maxToolCalls": max_tool_calls,
+            "defaultChatPathUnchanged": default_chat_path_unchanged,
+            "chatMessageSaved": chat_message_saved,
+            "agentRunRecorded": agent_run_recorded,
+            "runtimeCallStorage": "none",
+            "modelCallStorage": "none",
+            "contentStorage": "length_checksum_only",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+            "notAutomaticMigration": true,
+            "defaultSendPath": "legacy_stream",
+            "startStreamPath": "legacy_stream",
+            "blockingReasonCount": blocking_reason_count,
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn record_default_chat_adapter_dry_run_review_decision(
+    input: DefaultChatAdapterDryRunReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterDryRunReviewDecisionResult, String> {
+    record_default_chat_adapter_dry_run_review_decision_with_state(input, &state.inner().clone())
+        .await
+}
+
+pub(crate) async fn record_default_chat_adapter_dry_run_review_decision_with_state(
+    input: DefaultChatAdapterDryRunReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterDryRunReviewDecisionResult, String> {
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let expected_digest = input
+        .dry_run_summary_digest
+        .as_deref()
+        .map(|value| safe_checksum_field(value, "dryRunSummaryDigest"))
+        .transpose()?;
+
+    let dry_run = run_default_chat_adapter_dry_run_with_state(
+        DefaultChatAdapterDryRunInput {
+            session_id: source_session_id.clone(),
+            message: input.message,
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+        },
+        state,
+    )
+    .await?;
+    let dry_run_summary_digest = metadata_hash_for_serializable(&dry_run)?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut blocking_reasons = dry_run.blocking_reasons.clone();
+
+    if expected_digest
+        .as_ref()
+        .is_some_and(|expected| expected != &dry_run_summary_digest)
+    {
+        push_unique_string(
+            &mut blocking_reasons,
+            "dry_run_summary_digest_mismatch".into(),
+        );
+        return Ok(DefaultChatAdapterDryRunReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            decision_kind,
+            source_session_id,
+            contract_shape: dry_run.contract_shape,
+            dry_run_ready: dry_run.dry_run_ready,
+            dry_run_summary_digest,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    if decision_kind == "approve" && !dry_run.dry_run_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "dry_run_not_ready_for_approval".into(),
+        );
+        return Ok(DefaultChatAdapterDryRunReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            decision_kind,
+            source_session_id,
+            contract_shape: dry_run.contract_shape,
+            dry_run_ready: false,
+            dry_run_summary_digest,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note_fields(input.optional_reviewer_note.as_deref());
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    );
+    evidence_draft.run_metadata = json!({
+        "evidenceKind": "default_chat_adapter_dry_run_review_decision",
+        "decisionKind": decision_kind.clone(),
+        "sourceSessionId": source_session_id.clone(),
+        "contractShape": dry_run.contract_shape.clone(),
+        "dryRunReady": dry_run.dry_run_ready,
+        "dryRunSummaryDigest": dry_run_summary_digest.clone(),
+        "reviewerNoteChecksum": reviewer_note_metadata.checksum,
+        "reviewerNoteLength": reviewer_note_metadata.length,
+        "reviewerNoteCategory": reviewer_note_metadata.category,
+        "createdAt": created_at.clone(),
+    });
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store.create_evidence(evidence_draft).map_err(|e| {
+            format!("failed to record default Chat adapter dry-run review decision evidence: {e}")
+        })?
+    };
+
+    Ok(DefaultChatAdapterDryRunReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        decision_kind,
+        source_session_id,
+        contract_shape: dry_run.contract_shape,
+        dry_run_ready: dry_run.dry_run_ready,
+        dry_run_summary_digest,
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_dry_run_review_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterDryRunReviewSummary, String> {
+    get_default_chat_adapter_dry_run_review_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_default_chat_adapter_dry_run_review_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterDryRunReviewSummary, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| {
+                format!("failed to read default Chat adapter dry-run review evidence: {e}")
+            })?
+    };
+    let records = records
+        .into_iter()
+        .filter(default_chat_adapter_dry_run_review_decision_evidence_is_metadata_safe)
+        .collect::<Vec<_>>();
+
+    let approved_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_dry_run_review_decision_kind(record) == Some("approve")
+        })
+        .count();
+    let reject_or_rework_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                default_chat_adapter_dry_run_review_decision_kind(record),
+                Some("reject" | "request_rework")
+            )
+        })
+        .count();
+    let latest_decision = records
+        .first()
+        .and_then(default_chat_adapter_dry_run_review_latest_decision);
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+    let latest_decision_present = latest_decision.is_some();
+    let blocking_reasons = if latest_decision_present {
+        Vec::new()
+    } else {
+        vec!["dry_run_review_decision_missing".into()]
+    };
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterDryRunReviewSummary {
+        latest_decision,
+        approved_count,
+        reject_or_rework_count,
+        latest_timestamp,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "dryRunReview": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "approvedCount": approved_count,
+            "rejectOrReworkCount": reject_or_rework_count,
+            "latestDecisionPresent": latest_decision_present,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "reviewerNoteStorage": "length_checksum_category_only",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+        }),
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -3012,6 +3572,12 @@ fn sha256_metadata_checksum(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
+}
+
+fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn metadata_safe_reviewer_note(note: Option<&str>) -> Value {
@@ -4168,6 +4734,125 @@ fn default_chat_adapter_activation_review_latest_decision(
             .get("automaticMigrationEnabled")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        reviewer_note_checksum: record
+            .run_metadata
+            .get("reviewerNoteChecksum")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        reviewer_note_length: record
+            .run_metadata
+            .get("reviewerNoteLength")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        reviewer_note_category: record
+            .run_metadata
+            .get("reviewerNoteCategory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339()),
+    })
+}
+
+fn default_chat_adapter_dry_run_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || record.summary.is_some()
+        || !record.source_refs.is_empty()
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(metadata) = record.run_metadata.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "evidenceKind",
+        "decisionKind",
+        "sourceSessionId",
+        "contractShape",
+        "dryRunReady",
+        "dryRunSummaryDigest",
+        "reviewerNoteChecksum",
+        "reviewerNoteLength",
+        "reviewerNoteCategory",
+        "createdAt",
+    ];
+    if metadata.len() != allowed.len()
+        || !metadata.keys().all(|key| allowed.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    record
+        .run_metadata
+        .get("evidenceKind")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "default_chat_adapter_dry_run_review_decision")
+        && metadata_string_is_safe(&record.run_metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && metadata_string_is_safe(&record.run_metadata, "sourceSessionId", safe_internal_id)
+        && metadata_string_is_safe(&record.run_metadata, "contractShape", safe_internal_id)
+        && record
+            .run_metadata
+            .get("dryRunReady")
+            .and_then(Value::as_bool)
+            .is_some()
+        && metadata_string_is_safe(&record.run_metadata, "dryRunSummaryDigest", |value, _| {
+            safe_checksum_field(value, "dryRunSummaryDigest")
+        })
+        && reviewer_note_flat_metadata_is_safe(&record.run_metadata)
+        && record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && !contains_unsafe_promotion_metadata(&record.run_metadata)
+}
+
+fn default_chat_adapter_dry_run_review_decision_kind(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn default_chat_adapter_dry_run_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<DefaultChatAdapterDryRunReviewLatestDecision> {
+    Some(DefaultChatAdapterDryRunReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        decision_kind: default_chat_adapter_dry_run_review_decision_kind(record)?.to_string(),
+        source_session_id: record
+            .run_metadata
+            .get("sourceSessionId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        contract_shape: record
+            .run_metadata
+            .get("contractShape")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        dry_run_ready: record
+            .run_metadata
+            .get("dryRunReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        dry_run_summary_digest: record
+            .run_metadata
+            .get("dryRunSummaryDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
         reviewer_note_checksum: record
             .run_metadata
             .get("reviewerNoteChecksum")
@@ -9747,6 +10432,603 @@ mod tests {
         assert!(!serialized.contains("rawAssistantOutput"));
         assert!(!serialized.contains("toolPayload"));
         assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_contract_harness_blocks_when_routing_gate_blocked() {
+        let state = preview_state().await;
+
+        let report = check_default_chat_adapter_contract_harness_with_state(
+            DefaultChatAdapterContractHarnessInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.contract_harness_ready);
+        assert_eq!(
+            report.contract_shape,
+            "disabled_adapter_legacy_stream_contract"
+        );
+        assert!(report.adapter_disabled);
+        assert!(!report.activation_implementation_gate_eligible);
+        assert_eq!(report.routing_status.current_mode, "legacy_stream");
+        assert!(report
+            .blocking_reasons
+            .contains(&"activation_implementation_gate_not_eligible".to_string()));
+        assert_eq!(
+            report.metadata_safe_summary["contractHarness"],
+            "default_chat_adapter"
+        );
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_contract_harness_ready_when_routing_is_eligible_and_disabled() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-contract-harness-ready",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_contract_harness_with_state(
+            DefaultChatAdapterContractHarnessInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.contract_harness_ready);
+        assert!(report.adapter_disabled);
+        assert!(report.activation_implementation_gate_eligible);
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(report.send_message_contract.actual_path, "legacy_stream");
+        assert_eq!(report.stream_message_contract.actual_path, "legacy_stream");
+        assert!(report.send_message_contract.ready);
+        assert!(report.stream_message_contract.ready);
+        assert_eq!(report.metadata_safe_summary["adapterDisabled"], true);
+        assert_eq!(
+            report.metadata_safe_summary["contractShape"],
+            "disabled_adapter_legacy_stream_contract"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_contract_harness_is_read_only_by_side_effect_counts() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-contract-harness-read-only",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = check_default_chat_adapter_contract_harness_with_state(
+            DefaultChatAdapterContractHarnessInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.contract_harness_ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_contract_harness_serialized_output_is_metadata_safe() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-contract-harness-safe",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Contract harness note with secret@example.com and raw output.".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_contract_harness_with_state(
+            DefaultChatAdapterContractHarnessInput {
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("Contract harness note"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_blocks_when_contract_harness_blocked() {
+        let state = preview_state().await;
+
+        let report = run_default_chat_adapter_dry_run_with_state(
+            DefaultChatAdapterDryRunInput {
+                session_id: "session-1".into(),
+                message: "Should not run dry run while harness is blocked.".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.dry_run_ready);
+        assert_eq!(
+            report.contract_shape,
+            "default_chat_adapter_dry_run_contract"
+        );
+        assert_eq!(report.source_session_id, "session-1");
+        assert_eq!(report.adapter_path, "blocked");
+        assert!(!report.allow_writes);
+        assert_eq!(report.max_tool_calls, 0);
+        assert!(report.default_chat_path_unchanged);
+        assert!(!report.chat_message_saved);
+        assert!(!report.agent_run_recorded);
+        assert!(!report.contract_harness_ready);
+        assert!(report
+            .blocking_reasons
+            .contains(&"contract_harness_not_ready".to_string()));
+        assert_eq!(
+            report.metadata_safe_summary["adapterDryRun"],
+            "default_chat_adapter"
+        );
+        assert_eq!(report.metadata_safe_summary["dryRunReady"], false);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_returns_contract_shaped_metadata_safe_result() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(&state, "run-candidate-dry-run-ready")
+            .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let message = "Private dry-run prompt with secret@example.com".to_string();
+        let report = run_default_chat_adapter_dry_run_with_state(
+            DefaultChatAdapterDryRunInput {
+                session_id: "session-1".into(),
+                message: message.clone(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.dry_run_ready);
+        assert_eq!(
+            report.contract_shape,
+            "default_chat_adapter_dry_run_contract"
+        );
+        assert_eq!(report.source_session_id, "session-1");
+        assert_eq!(report.adapter_path, "controlled_adapter_dry_run");
+        assert!(!report.allow_writes);
+        assert_eq!(report.max_tool_calls, 0);
+        assert!(report.default_chat_path_unchanged);
+        assert!(!report.chat_message_saved);
+        assert!(!report.agent_run_recorded);
+        assert!(report.contract_harness_ready);
+        assert_eq!(report.input_message_length, message.chars().count());
+        assert_eq!(report.input_message_hash.len(), 64);
+        assert!(report.user_output_preview.is_none());
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report.metadata_safe_summary["contractShape"],
+            "default_chat_adapter_dry_run_contract"
+        );
+        assert_eq!(report.metadata_safe_summary["allowWrites"], false);
+        assert_eq!(report.metadata_safe_summary["maxToolCalls"], 0);
+        assert_eq!(
+            report.metadata_safe_summary["defaultChatPathUnchanged"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_has_no_side_effects() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-dry-run-no-side-effects",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = run_default_chat_adapter_dry_run_with_state(
+            DefaultChatAdapterDryRunInput {
+                session_id: "session-1".into(),
+                message: "No persistence should happen from this dry run.".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.dry_run_ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_serialized_output_is_metadata_safe() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(&state, "run-candidate-dry-run-safe").await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Dry run review note with reviewer-secret@example.com.".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = run_default_chat_adapter_dry_run_with_state(
+            DefaultChatAdapterDryRunInput {
+                session_id: "session-1".into(),
+                message: "Dry run raw prompt with user-secret@example.com and tool payload.".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("user-secret@example.com"));
+        assert!(!serialized.contains("reviewer-secret@example.com"));
+        assert!(!serialized.contains("Dry run raw prompt"));
+        assert!(!serialized.contains("tool payload"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_review_blocks_approve_when_dry_run_not_ready() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let result = record_default_chat_adapter_dry_run_review_decision_with_state(
+            DefaultChatAdapterDryRunReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-1".into(),
+                message: "Dry run review should be blocked.".into(),
+                dry_run_summary_digest: None,
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some("Do not store this raw reviewer note.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert_eq!(result.decision_kind, "approve");
+        assert!(!result.dry_run_ready);
+        assert_eq!(
+            result.contract_shape,
+            "default_chat_adapter_dry_run_contract"
+        );
+        assert_eq!(result.dry_run_summary_digest.len(), 71);
+        assert!(result
+            .blocking_reasons
+            .contains(&"dry_run_not_ready_for_approval".to_string()));
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_review_records_ready_approve_metadata_safe_evidence() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-dry-run-review-approve",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let result = record_default_chat_adapter_dry_run_review_decision_with_state(
+            DefaultChatAdapterDryRunReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-1".into(),
+                message: "Dry run review ready probe.".into(),
+                dry_run_summary_digest: None,
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some(
+                    "Approve note with private-reviewer@example.com".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.recorded);
+        assert!(result.evidence_id.is_some());
+        assert_eq!(result.decision_kind, "approve");
+        assert!(result.dry_run_ready);
+        assert_eq!(
+            result.contract_shape,
+            "default_chat_adapter_dry_run_contract"
+        );
+        assert!(result.blocking_reasons.is_empty());
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count + 1, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+
+        let summary = get_default_chat_adapter_dry_run_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.reject_or_rework_count, 0);
+        let latest = summary.latest_decision.unwrap();
+        assert_eq!(latest.decision_kind, "approve");
+        assert_eq!(latest.source_session_id, "session-1");
+        assert!(latest.dry_run_ready);
+        assert_eq!(
+            latest.contract_shape,
+            "default_chat_adapter_dry_run_contract"
+        );
+
+        let serialized = {
+            let store = state.evidence_store.lock().await;
+            let records = store
+                .query(EvidenceQuery {
+                    affected_path: Some(
+                        DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                    ),
+                    evidence_type: Some(EvidenceType::RuntimeBehavior),
+                    ..EvidenceQuery::default()
+                })
+                .unwrap();
+            serde_json::to_string(&records).unwrap()
+        };
+        assert!(!serialized.contains("private-reviewer@example.com"));
+        assert!(!serialized.contains("Approve note"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_review_records_reject_and_rework_metadata_safe() {
+        let state = preview_state().await;
+
+        for decision_kind in ["reject", "request_rework"] {
+            let result = record_default_chat_adapter_dry_run_review_decision_with_state(
+                DefaultChatAdapterDryRunReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    source_session_id: "session-1".into(),
+                    message: "Blocked dry run can be rejected or marked for rework.".into(),
+                    dry_run_summary_digest: None,
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    optional_reviewer_note: Some("private raw reviewer text".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.recorded);
+            assert_eq!(result.decision_kind, decision_kind);
+            assert!(!result.dry_run_ready);
+            assert!(result
+                .blocking_reasons
+                .contains(&"contract_harness_not_ready".to_string()));
+        }
+
+        let summary = get_default_chat_adapter_dry_run_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.reject_or_rework_count, 2);
+        assert_eq!(
+            summary.latest_decision.unwrap().decision_kind,
+            "request_rework"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_review_blocks_digest_mismatch_without_evidence() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-dry-run-review-mismatch",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let result = record_default_chat_adapter_dry_run_review_decision_with_state(
+            DefaultChatAdapterDryRunReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-1".into(),
+                message: "Dry run review digest mismatch probe.".into(),
+                dry_run_summary_digest: Some("sha256:wrongdigest".into()),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result
+            .blocking_reasons
+            .contains(&"dry_run_summary_digest_mismatch".to_string()));
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_dry_run_review_summary_is_read_only() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let summary = get_default_chat_adapter_dry_run_review_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.reject_or_rework_count, 0);
+        assert!(summary.latest_decision.is_none());
+        assert!(summary
+            .blocking_reasons
+            .contains(&"dry_run_review_decision_missing".to_string()));
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
     }
 
     #[tokio::test]

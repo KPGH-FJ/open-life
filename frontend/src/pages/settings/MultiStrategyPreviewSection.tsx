@@ -18,10 +18,12 @@ import {
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkDefaultChatAdapterActivationImplementationGate,
+  checkDefaultChatAdapterContractHarness,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
+  getDefaultChatAdapterDryRunReviewSummary,
   getDefaultChatAdapterRoutingStatus,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -29,11 +31,13 @@ import {
   getControlledPilotPromotionEvidenceSummary,
   getDefaultChatRuntimeBoundaryStatus,
   recordDefaultChatAdapterActivationReviewDecision,
+  recordDefaultChatAdapterDryRunReviewDecision,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
   runControlledChatCutoverCandidate,
   runControlledChatMigrationShadowRun,
+  runDefaultChatAdapterDryRun,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
@@ -45,6 +49,11 @@ import type {
   ControlledChatCutoverReadinessReport,
   DefaultChatAdapterActivationPlanDraft,
   DefaultChatAdapterActivationImplementationGateReport,
+  DefaultChatAdapterContractHarnessReport,
+  DefaultChatAdapterDryRunReport,
+  DefaultChatAdapterDryRunReviewDecisionKind,
+  DefaultChatAdapterDryRunReviewDecisionResult,
+  DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
   DefaultChatAdapterActivationReviewDecisionResult,
@@ -72,6 +81,9 @@ const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
   "runtimeBoundary",
   "defaultChatAdapterRouting",
+  "contractHarness",
+  "adapterDryRun",
+  "dryRunReview",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -93,7 +105,16 @@ const SAFE_SUMMARY_KEYS = [
   "planningOnly",
   "requiredEvidenceReady",
   "defaultChatUnchanged",
+  "defaultChatPathUnchanged",
   "readOnly",
+  "contractHarnessReady",
+  "dryRunReady",
+  "blocked",
+  "adapterPath",
+  "adapterDisabled",
+  "chatMessageSaved",
+  "agentRunRecorded",
+  "reviewerNoteStorage",
   "humanReviewOnly",
   "draftReady",
   "manualReviewRequired",
@@ -146,7 +167,9 @@ const SAFE_SUMMARY_KEYS = [
   "mcpAuditStorage",
   "transcriptStorage",
   "agentRunStorage",
+  "runtimeCallStorage",
   "modelCallStorage",
+  "externalWriteStorage",
 ];
 const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
   "defaultChatUnchanged",
@@ -320,6 +343,26 @@ export default function MultiStrategyPreviewSection() {
   const [adapterRoutingError, setAdapterRoutingError] = useState<string | null>(null);
   const [adapterRoutingStatus, setAdapterRoutingStatus] =
     useState<DefaultChatAdapterRoutingStatus | null>(null);
+  const [contractHarnessChecking, setContractHarnessChecking] = useState(false);
+  const [contractHarnessError, setContractHarnessError] = useState<string | null>(null);
+  const [contractHarnessReport, setContractHarnessReport] =
+    useState<DefaultChatAdapterContractHarnessReport | null>(null);
+  const [adapterDryRunChecking, setAdapterDryRunChecking] = useState(false);
+  const [adapterDryRunError, setAdapterDryRunError] = useState<string | null>(null);
+  const [adapterDryRunReport, setAdapterDryRunReport] =
+    useState<DefaultChatAdapterDryRunReport | null>(null);
+  const [adapterDryRunReviewNote, setAdapterDryRunReviewNote] = useState("");
+  const [adapterDryRunReviewRecording, setAdapterDryRunReviewRecording] = useState(false);
+  const [adapterDryRunReviewError, setAdapterDryRunReviewError] = useState<string | null>(null);
+  const [adapterDryRunReviewResult, setAdapterDryRunReviewResult] =
+    useState<DefaultChatAdapterDryRunReviewDecisionResult | null>(null);
+  const [adapterDryRunReviewSummaryChecking, setAdapterDryRunReviewSummaryChecking] =
+    useState(false);
+  const [adapterDryRunReviewSummaryError, setAdapterDryRunReviewSummaryError] = useState<
+    string | null
+  >(null);
+  const [adapterDryRunReviewSummary, setAdapterDryRunReviewSummary] =
+    useState<DefaultChatAdapterDryRunReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -713,6 +756,84 @@ export default function MultiStrategyPreviewSection() {
       setAdapterRoutingError(`Adapter routing status failed: ${readableError(e)}`);
     } finally {
       setAdapterRoutingChecking(false);
+    }
+  };
+
+  const handleContractHarnessCheck = async () => {
+    setContractHarnessChecking(true);
+    setContractHarnessError(null);
+    setContractHarnessReport(null);
+    try {
+      const report = await checkDefaultChatAdapterContractHarness({
+        requiredApprovedCandidates: 1,
+      });
+      setContractHarnessReport(report);
+    } catch (e) {
+      setContractHarnessError(`Adapter contract harness failed: ${readableError(e)}`);
+    } finally {
+      setContractHarnessChecking(false);
+    }
+  };
+
+  const handleAdapterDryRun = async () => {
+    setAdapterDryRunChecking(true);
+    setAdapterDryRunError(null);
+    setAdapterDryRunReport(null);
+    setAdapterDryRunReviewError(null);
+    setAdapterDryRunReviewResult(null);
+    try {
+      const report = await runDefaultChatAdapterDryRun({
+        sessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterDryRunReport(report);
+    } catch (e) {
+      setAdapterDryRunError(`Adapter dry run failed: ${readableError(e)}`);
+    } finally {
+      setAdapterDryRunChecking(false);
+    }
+  };
+
+  const handleAdapterDryRunReviewSummaryRefresh = async () => {
+    setAdapterDryRunReviewSummaryChecking(true);
+    setAdapterDryRunReviewSummaryError(null);
+    try {
+      const summary = await getDefaultChatAdapterDryRunReviewSummary();
+      setAdapterDryRunReviewSummary(summary);
+    } catch (e) {
+      setAdapterDryRunReviewSummaryError(
+        `Adapter dry-run review summary failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterDryRunReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordAdapterDryRunReviewDecision = async (
+    decisionKind: DefaultChatAdapterDryRunReviewDecisionKind
+  ) => {
+    setAdapterDryRunReviewRecording(true);
+    setAdapterDryRunReviewError(null);
+    setAdapterDryRunReviewResult(null);
+    try {
+      const trimmedNote = adapterDryRunReviewNote.trim();
+      const result = await recordDefaultChatAdapterDryRunReviewDecision({
+        decisionKind,
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedCandidates: 1,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setAdapterDryRunReviewResult(result);
+      if (result.recorded) {
+        setAdapterDryRunReviewNote("");
+        await handleAdapterDryRunReviewSummaryRefresh();
+      }
+    } catch (e) {
+      setAdapterDryRunReviewError(`Adapter dry-run review recording failed: ${readableError(e)}`);
+    } finally {
+      setAdapterDryRunReviewRecording(false);
     }
   };
 
@@ -3445,6 +3566,477 @@ export default function MultiStrategyPreviewSection() {
             No default Chat adapter routing status loaded.
           </div>
         )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Contract Harness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W39 contract harness over W38 routing status. It checks that the future
+              adapter contract still maps both send paths to legacy stream while the controlled
+              adapter remains disabled.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleContractHarnessCheck}
+            disabled={contractHarnessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              contractHarnessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={contractHarnessChecking ? "animate-spin" : undefined} />
+            {contractHarnessChecking ? "Checking..." : "Check Adapter Contract Harness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          The harness calls only the routing status command. It does not route Chat traffic, run
+          runtime, call tools or models, create evidence, or persist any transcript.
+        </div>
+
+        {contractHarnessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {contractHarnessError}
+          </div>
+        )}
+
+        {contractHarnessReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                contractHarnessReport.contractHarnessReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {contractHarnessReport.contractHarnessReady
+                ? "Adapter contract harness ready"
+                : "Adapter contract harness blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["contractShape", contractHarnessReport.contractShape],
+                ["adapterDisabled", String(contractHarnessReport.adapterDisabled)],
+                [
+                  "activationImplementationGateEligible",
+                  String(contractHarnessReport.activationImplementationGateEligible),
+                ],
+                ["currentMode", contractHarnessReport.routingStatus.currentMode],
+                [
+                  "controlledAdapterEnabled",
+                  String(contractHarnessReport.routingStatus.controlledAdapterEnabled),
+                ],
+                ["defaultSendPath", contractHarnessReport.routingStatus.defaultSendPath],
+                ["startStreamPath", contractHarnessReport.routingStatus.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              {[
+                contractHarnessReport.sendMessageContract,
+                contractHarnessReport.streamMessageContract,
+              ].map(contract => (
+                <div
+                  key={contract.name}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700"
+                >
+                  <div className="font-medium text-stone-900">{contract.name}</div>
+                  <div className="mt-1 font-mono">ready: {String(contract.ready)}</div>
+                  <div className="font-mono">expectedPath: {contract.expectedPath}</div>
+                  <div className="font-mono">actualPath: {contract.actualPath}</div>
+                  {contract.blockingReasons.length > 0 && (
+                    <div className="mt-1 space-y-1">
+                      {contract.blockingReasons.map(reason => (
+                        <div
+                          key={reason}
+                          className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                        >
+                          {reason}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(contractHarnessReport.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(contractHarnessReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {contractHarnessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {contractHarnessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No adapter contract blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter contract harness report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Default Chat Adapter Dry Run</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Explicit W40 dry-run boundary for the future adapter invocation contract. It requires
+              the W39 harness, stays write-disabled, and keeps default Chat on legacy stream.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterDryRun}
+            disabled={adapterDryRunChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterDryRunChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <Play size={13} />
+            {adapterDryRunChecking ? "Running..." : "Run Adapter Dry Run"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          The dry run sends only a bounded probe descriptor to the adapter boundary. It does not
+          save chat messages, call tools or models, create evidence, or switch routing.
+        </div>
+
+        {adapterDryRunError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterDryRunError}
+          </div>
+        )}
+
+        {adapterDryRunReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterDryRunReport.dryRunReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterDryRunReport.dryRunReady
+                ? "Adapter dry run ready"
+                : "Adapter dry run blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["contractShape", adapterDryRunReport.contractShape],
+                ["sourceSessionId", adapterDryRunReport.sourceSessionId],
+                ["adapterPath", adapterDryRunReport.adapterPath],
+                ["allowWrites", String(adapterDryRunReport.allowWrites)],
+                ["maxToolCalls", String(adapterDryRunReport.maxToolCalls)],
+                ["defaultChatPathUnchanged", String(adapterDryRunReport.defaultChatPathUnchanged)],
+                ["chatMessageSaved", String(adapterDryRunReport.chatMessageSaved)],
+                ["agentRunRecorded", String(adapterDryRunReport.agentRunRecorded)],
+                ["contractHarnessReady", String(adapterDryRunReport.contractHarnessReady)],
+                ["inputMessageLength", String(adapterDryRunReport.inputMessageLength)],
+                ["inputMessageHash", adapterDryRunReport.inputMessageHash],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(adapterDryRunReport.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterDryRunReport.metadataSafeSummary).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterDryRunReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterDryRunReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No adapter dry run blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter dry run report loaded.
+          </div>
+        )}
+
+        <div className="mt-5 border-t border-stone-100 pt-4">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-stone-900">
+                Default Chat Adapter Dry Run Review
+              </div>
+              <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+                Explicit W41 human review evidence for the dry-run result. Approve requires a ready
+                dry run; all notes are stored as checksum, length, and bounded category only.
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleAdapterDryRunReviewSummaryRefresh}
+              disabled={adapterDryRunReviewSummaryChecking}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                adapterDryRunReviewSummaryChecking
+                  ? "bg-stone-100 text-stone-400"
+                  : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+              )}
+            >
+              <RefreshCw
+                size={13}
+                className={adapterDryRunReviewSummaryChecking ? "animate-spin" : undefined}
+              />
+              {adapterDryRunReviewSummaryChecking
+                ? "Refreshing..."
+                : "Refresh Dry Run Review Summary"}
+            </button>
+          </div>
+
+          <label className="mt-4 block">
+            <span className="text-xs font-medium text-stone-700">Dry-run reviewer note</span>
+            <textarea
+              value={adapterDryRunReviewNote}
+              onChange={event => setAdapterDryRunReviewNote(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-stone-500"
+              placeholder="Optional dry-run review note; only metadata is stored."
+            />
+          </label>
+
+          <div className="mt-3 flex flex-wrap gap-2">
+            {[
+              ["approve", "Approve Dry Run Review"],
+              ["reject", "Reject Dry Run Review"],
+              ["request_rework", "Request Dry Run Rework"],
+            ].map(([decisionKind, label]) => (
+              <button
+                key={decisionKind}
+                type="button"
+                onClick={() =>
+                  handleRecordAdapterDryRunReviewDecision(
+                    decisionKind as DefaultChatAdapterDryRunReviewDecisionKind
+                  )
+                }
+                disabled={adapterDryRunReviewRecording || !adapterDryRunReport}
+                className={classNames(
+                  "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                  adapterDryRunReviewRecording || !adapterDryRunReport
+                    ? "bg-stone-100 text-stone-400"
+                    : decisionKind === "approve"
+                      ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                      : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                )}
+              >
+                {decisionKind === "approve" ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {adapterDryRunReviewError && (
+            <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {adapterDryRunReviewError}
+            </div>
+          )}
+
+          {adapterDryRunReviewSummaryError && (
+            <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {adapterDryRunReviewSummaryError}
+            </div>
+          )}
+
+          {adapterDryRunReviewResult && (
+            <div className="mt-4 space-y-2 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+              <div className="font-medium text-stone-900">
+                {adapterDryRunReviewResult.recorded
+                  ? "Dry-run review evidence recorded"
+                  : "Dry-run review not recorded"}
+              </div>
+              <div>decisionKind: {adapterDryRunReviewResult.decisionKind}</div>
+              <div>sourceSessionId: {adapterDryRunReviewResult.sourceSessionId}</div>
+              <div>contractShape: {adapterDryRunReviewResult.contractShape}</div>
+              <div>reviewDryRunReady: {String(adapterDryRunReviewResult.dryRunReady)}</div>
+              <div className="break-all">
+                dryRunSummaryDigest: {adapterDryRunReviewResult.dryRunSummaryDigest}
+              </div>
+              {adapterDryRunReviewResult.evidenceId && (
+                <div>evidenceId: {adapterDryRunReviewResult.evidenceId}</div>
+              )}
+              {adapterDryRunReviewResult.blockingReasons.length > 0 && (
+                <div className="space-y-1">
+                  {adapterDryRunReviewResult.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {adapterDryRunReviewSummary ? (
+            <div className="mt-4 space-y-3">
+              <div className="grid gap-2 md:grid-cols-3">
+                {[
+                  ["approvedCount", String(adapterDryRunReviewSummary.approvedCount)],
+                  ["rejectOrReworkCount", String(adapterDryRunReviewSummary.rejectOrReworkCount)],
+                  ["latestTimestamp", adapterDryRunReviewSummary.latestTimestamp ?? "none"],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                  >
+                    {label}: {value}
+                  </div>
+                ))}
+              </div>
+
+              {adapterDryRunReviewSummary.latestDecision && (
+                <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+                  <div className="font-medium text-stone-900">Latest dry-run review decision</div>
+                  <div className="mt-1">
+                    latestDecisionKind: {adapterDryRunReviewSummary.latestDecision.decisionKind}
+                  </div>
+                  <div>
+                    sourceSessionId: {adapterDryRunReviewSummary.latestDecision.sourceSessionId}
+                  </div>
+                  <div>
+                    contractShape: {adapterDryRunReviewSummary.latestDecision.contractShape}
+                  </div>
+                  <div>
+                    latestDryRunReady:{" "}
+                    {String(adapterDryRunReviewSummary.latestDecision.dryRunReady)}
+                  </div>
+                  <div className="break-all">
+                    dryRunSummaryDigest:{" "}
+                    {adapterDryRunReviewSummary.latestDecision.dryRunSummaryDigest}
+                  </div>
+                  <div>
+                    reviewerNoteCategory:{" "}
+                    {adapterDryRunReviewSummary.latestDecision.reviewerNoteCategory}
+                  </div>
+                  <div>
+                    reviewerNoteLength:{" "}
+                    {adapterDryRunReviewSummary.latestDecision.reviewerNoteLength}
+                  </div>
+                </div>
+              )}
+
+              {safeSummaryEntries(adapterDryRunReviewSummary.metadataSafeSummary).length > 0 && (
+                <div className="flex flex-wrap gap-2 text-xs">
+                  {safeSummaryEntries(adapterDryRunReviewSummary.metadataSafeSummary).map(
+                    ([key, value]) => (
+                      <span
+                        key={key}
+                        className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                      >
+                        {key}: {value}
+                      </span>
+                    )
+                  )}
+                </div>
+              )}
+
+              <div>
+                <div className="text-xs font-medium text-stone-700">Review blockers</div>
+                {adapterDryRunReviewSummary.blockingReasons.length > 0 ? (
+                  <div className="mt-1 space-y-1">
+                    {adapterDryRunReviewSummary.blockingReasons.map(reason => (
+                      <div
+                        key={reason}
+                        className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                      >
+                        {reason}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-1 text-xs text-stone-500">
+                    No dry-run review blockers returned.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-3 text-xs text-stone-500">
+              No default Chat adapter dry-run review summary loaded.
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">

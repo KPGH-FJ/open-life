@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W38 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W41 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -62,7 +62,17 @@ Chat migration. W38 adds a read-only default Chat adapter disabled routing
 scaffold that reports the adapter boundary is present but controlled adapter
 routing is still disabled and both default Send and streaming remain on
 `legacy_stream`. It is disabled scaffold observability, not default Chat
-migration.
+migration. W39 adds a read-only default Chat adapter contract harness over W38
+routing status. It checks the disabled adapter contract for send and stream
+paths without changing default Chat routing. It is contract observability, not
+default Chat migration. W40 adds an explicit non-default default Chat adapter
+dry-run invocation boundary over W39. It returns only a metadata-safe,
+write-disabled contract result and keeps default Chat on `legacy_stream`. It is
+invocation contract observability, not default Chat migration. W41 adds explicit
+human review evidence over W40 dry-run output. It records
+approve/reject/request_rework as metadata-safe evidence only; approve requires a
+currently ready dry run, and blocked dry-run approval writes no evidence. It is
+dry-run review evidence, not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -315,6 +325,38 @@ The key boundary is unchanged:
   flags or routing, and Default Send / `send_message` / `start_stream_message`
   do not call it. Routing status is disabled scaffold observability, not
   default Chat migration.
+- W39 Default Chat Adapter Contract Harness adds
+  `check_default_chat_adapter_contract_harness` and the Settings Default Chat
+  Adapter Contract Harness panel. It only reads W38 routing status and checks
+  that send_message and start_stream_message contracts remain on
+  `legacy_stream`, controlled adapter remains disabled, and activation
+  implementation gate is eligible. It creates no records, runs no
+  runtime/tool/model calls, changes no feature flags or routing, and Default
+  Send / `send_message` / `start_stream_message` do not call it. Contract
+  harness readiness is adapter contract observability, not default Chat
+  migration.
+- W40 Default Chat Adapter Dry-Run Invocation Boundary adds
+  `run_default_chat_adapter_dry_run` and the Settings Default Chat Adapter Dry
+  Run panel. It checks W39 first, blocks without dry-run output when contract
+  harness is not ready, and when ready returns only metadata-safe invocation
+  contract fields with `allowWrites=false`, `maxToolCalls=0`, and
+  `defaultChatPathUnchanged=true`. It creates no AgentRun/Evidence/Proposal/
+  Memory/LifeModel/MCP audit/chat/external write records, runs no
+  runtime/tool/model call, changes no feature flags or routing, and Default
+  Send / `send_message` / `start_stream_message` do not call it. Dry-run
+  readiness is invocation contract observability, not default Chat migration.
+- W41 Default Chat Adapter Dry-Run Review Evidence adds
+  `record_default_chat_adapter_dry_run_review_decision`,
+  `get_default_chat_adapter_dry_run_review_summary`, and the Settings Default
+  Chat Adapter Dry Run Review panel. The record command re-runs W40 dry run
+  before recording evidence. Approve requires a ready dry run; blocked dry-run
+  approve writes no evidence. Reject and request_rework record only
+  metadata-safe evidence. Reviewer notes are stored only as checksum, length,
+  and bounded category. It creates no AgentRun/Proposal/Memory/LifeModel/MCP
+  audit/chat/external write records, runs no runtime/tool/model call, changes
+  no feature flags or routing, and Default Send / `send_message` /
+  `start_stream_message` do not call it. Dry-run review approval is evidence for
+  later implementation discussion, not default Chat migration.
 
 ## Work Package Status
 
@@ -358,11 +400,14 @@ The key boundary is unchanged:
 | W36 Default Chat Adapter Activation Review Decision Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_activation_review_decision` and read-only summary. The record command calls W35 first; blocked draft approve writes no evidence, while ready draft approve/reject/request_rework writes only metadata-safe evidence with activationPlanDigest and reviewer-note checksum/length/category. Summary is read-only, creates no records, and normal Send / `send_message` / `start_stream_message` do not call W36 commands. This is activation review evidence, not default Chat migration. |
 | W37 Default Chat Adapter Activation Implementation Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_activation_implementation_gate`. It compares the current W35 stable activation plan digest with latest W36 metadata-safe activation review evidence and requires latest approve, draft ready, digest match, candidate promotion ready, default Chat unchanged, `currentMode=legacy_stream`, and automatic migration disabled. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat records, runs no runtime/tool/model call, and normal Send / `send_message` / `start_stream_message` do not call it. This is implementation gate readiness, not default Chat migration. |
 | W38 Default Chat Adapter Disabled Routing Scaffold | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `get_default_chat_adapter_routing_status`. It calls W37 implementation gate and reports the adapter scaffold as present but disabled: `currentMode=legacy_stream`, `adapterScaffoldPresent=true`, `controlledAdapterEnabled=false`, `defaultSendPath=legacy_stream`, and `startStreamPath=legacy_stream`. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is disabled scaffold observability, not default Chat migration. |
+| W39 Default Chat Adapter Contract Harness | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_contract_harness`. It calls W38 routing status and validates a disabled adapter contract where send_message and start_stream_message both remain on `legacy_stream`, controlled adapter remains disabled, and activation implementation gate is eligible. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is contract observability, not default Chat migration. |
+| W40 Default Chat Adapter Dry-Run Invocation Boundary | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit non-default `run_default_chat_adapter_dry_run`. It calls W39 contract harness first, blocks without dry-run output when harness is not ready, and when ready returns a metadata-safe dry-run contract result with `allowWrites=false`, `maxToolCalls=0`, `defaultChatPathUnchanged=true`, and checksum-only input metadata. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is invocation contract observability, not default Chat migration. |
+| W41 Default Chat Adapter Dry-Run Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_dry_run_review_decision` and read-only summary. The record command re-runs W40 dry run first; approve requires dry-run ready, blocked approve writes no evidence, and reject/request_rework write only metadata-safe evidence. Evidence stores only decision/source session/contract shape/dry-run readiness/digest/reviewer-note checksum-length-category/timestamp metadata. It creates no AgentRun/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is dry-run review evidence, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use default Chat adapter disabled routing scaffold only for boundary observation; default Chat remains unchanged
+use default Chat adapter dry-run review evidence only for human review of the write-disabled invocation contract; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -381,7 +426,10 @@ records metadata-safe human candidate review evidence, W33 only checks
 candidate promotion readiness, W34 only observes the default Chat boundary, W35
 only drafts a human-review activation plan, W36 only records activation review
 evidence, W37 only checks activation implementation gate readiness, and W38
-only observes disabled adapter routing scaffold state. Default
+only observes disabled adapter routing scaffold state, W39 only checks the
+disabled adapter contract harness, W40 only runs an explicit write-disabled
+adapter dry-run contract boundary, and W41 only records metadata-safe human
+review evidence over that dry run. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

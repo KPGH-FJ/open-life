@@ -2035,6 +2035,427 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("checks default chat adapter contract harness without routing controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_contract_harness") {
+        return Promise.resolve({
+          contractHarnessReady: true,
+          contractShape: "disabled_adapter_legacy_stream_contract",
+          adapterDisabled: true,
+          activationImplementationGateEligible: true,
+          routingStatus: {
+            currentMode: "legacy_stream",
+            adapterScaffoldPresent: true,
+            controlledAdapterEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            activationImplementationGateEligible: true,
+            requiresSeparateCutoverImplementation: true,
+            blockingReasons: [],
+            metadataSafeSummary: {
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          sendMessageContract: {
+            name: "send_message",
+            ready: true,
+            expectedPath: "legacy_stream",
+            actualPath: "legacy_stream",
+            blockingReasons: [],
+          },
+          streamMessageContract: {
+            name: "start_stream_message",
+            ready: true,
+            expectedPath: "legacy_stream",
+            actualPath: "legacy_stream",
+            blockingReasons: [],
+          },
+          blockingReasons: [],
+          metadataSafeSummary: {
+            contractHarness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            contractHarnessReady: true,
+            contractShape: "disabled_adapter_legacy_stream_contract",
+            adapterDisabled: true,
+            activationImplementationGateEligible: true,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            controlledAdapterEnabled: false,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Adapter Contract Harness")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Adapter Contract Harness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("check_default_chat_adapter_contract_harness", {
+        input: { requiredApprovedCandidates: 1 },
+      });
+    });
+    expect(await screen.findByText("Adapter contract harness ready")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("contractShape: disabled_adapter_legacy_stream_contract").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("adapterDisabled: true").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("activationImplementationGateEligible: true").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("controlledAdapterEnabled: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("defaultSendPath: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("startStreamPath: legacy_stream").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("send_message")).toBeInTheDocument();
+    expect(screen.getByText("start_stream_message")).toBeInTheDocument();
+    expect(screen.getAllByText("actualPath: legacy_stream").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("contractHarness: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter contract harness blockers", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_contract_harness") {
+        return Promise.resolve({
+          contractHarnessReady: false,
+          contractShape: "disabled_adapter_legacy_stream_contract",
+          adapterDisabled: true,
+          activationImplementationGateEligible: false,
+          routingStatus: {
+            currentMode: "legacy_stream",
+            adapterScaffoldPresent: true,
+            controlledAdapterEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            activationImplementationGateEligible: false,
+            requiresSeparateCutoverImplementation: true,
+            blockingReasons: ["activation_implementation_gate_not_eligible"],
+            metadataSafeSummary: {},
+          },
+          sendMessageContract: {
+            name: "send_message",
+            ready: true,
+            expectedPath: "legacy_stream",
+            actualPath: "legacy_stream",
+            blockingReasons: [],
+          },
+          streamMessageContract: {
+            name: "start_stream_message",
+            ready: true,
+            expectedPath: "legacy_stream",
+            actualPath: "legacy_stream",
+            blockingReasons: [],
+          },
+          blockingReasons: ["activation_implementation_gate_not_eligible"],
+          metadataSafeSummary: {
+            contractHarness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            contractHarnessReady: false,
+            activationImplementationGateEligible: false,
+            blockingReasonCount: 1,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Check Adapter Contract Harness" }));
+
+    expect(await screen.findByText("Adapter contract harness blocked")).toBeInTheDocument();
+    expect(screen.getByText("activation_implementation_gate_not_eligible")).toBeInTheDocument();
+    expect(screen.getAllByText("contractHarnessReady: false").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("activationImplementationGateEligible: false").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("runs default chat adapter dry run without enabling routing controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_default_chat_adapter_dry_run") {
+        return Promise.resolve({
+          dryRunReady: true,
+          blocked: false,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          sourceSessionId: args?.input?.sessionId ?? "settings-dry-run",
+          adapterPath: "controlled_adapter_dry_run",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+          contractHarnessReady: true,
+          inputMessageLength: 31,
+          inputMessageHash: "abc123",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            adapterDryRun: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            dryRunReady: true,
+            contractShape: "default_chat_adapter_dry_run_contract",
+            adapterPath: "controlled_adapter_dry_run",
+            allowWrites: false,
+            maxToolCalls: 0,
+            defaultChatPathUnchanged: true,
+            chatMessageSaved: false,
+            agentRunRecorded: false,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Adapter Dry Run")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Run Adapter Dry Run" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_default_chat_adapter_dry_run", {
+        input: {
+          sessionId: "settings-dry-run",
+          message: "Settings adapter dry-run probe.",
+          requiredApprovedCandidates: 1,
+        },
+      });
+    });
+    expect(await screen.findByText("Adapter dry run ready")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("contractShape: default_chat_adapter_dry_run_contract").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("adapterPath: controlled_adapter_dry_run").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("allowWrites: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("maxToolCalls: 0").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("defaultChatPathUnchanged: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("chatMessageSaved: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("agentRunRecorded: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("adapterDryRun: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter dry run blockers", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_default_chat_adapter_dry_run") {
+        return Promise.resolve({
+          dryRunReady: false,
+          blocked: true,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          sourceSessionId: "settings-dry-run",
+          adapterPath: "blocked",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+          contractHarnessReady: false,
+          inputMessageLength: 31,
+          inputMessageHash: "abc123",
+          blockingReasons: [
+            "contract_harness_not_ready",
+            "activation_implementation_gate_not_eligible",
+          ],
+          metadataSafeSummary: {
+            adapterDryRun: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            dryRunReady: false,
+            blocked: true,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Adapter Dry Run" }));
+
+    expect(await screen.findByText("Adapter dry run blocked")).toBeInTheDocument();
+    expect(screen.getByText("contract_harness_not_ready")).toBeInTheDocument();
+    expect(screen.getByText("activation_implementation_gate_not_eligible")).toBeInTheDocument();
+    expect(screen.getAllByText("dryRunReady: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("blocked: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("records default chat adapter dry-run review decision from Settings", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_default_chat_adapter_dry_run") {
+        return Promise.resolve({
+          dryRunReady: true,
+          blocked: false,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          sourceSessionId: "settings-dry-run",
+          adapterPath: "controlled_adapter_dry_run",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+          contractHarnessReady: true,
+          inputMessageLength: 31,
+          inputMessageHash: "abc123",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            adapterDryRun: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            dryRunReady: true,
+          },
+        });
+      }
+      if (cmd === "record_default_chat_adapter_dry_run_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_dry_run_review_1",
+          decisionKind: args?.input?.decisionKind ?? "approve",
+          sourceSessionId: args?.input?.sourceSessionId ?? "settings-dry-run",
+          contractShape: "default_chat_adapter_dry_run_contract",
+          dryRunReady: true,
+          dryRunSummaryDigest: "sha256:abc123",
+          createdAt: "2026-05-31T00:00:00Z",
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "get_default_chat_adapter_dry_run_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_dry_run_review_1",
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            contractShape: "default_chat_adapter_dry_run_contract",
+            dryRunReady: true,
+            dryRunSummaryDigest: "sha256:abc123",
+            reviewerNoteChecksum: "sha256:def456",
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T00:00:00Z",
+          },
+          approvedCount: 1,
+          rejectOrReworkCount: 0,
+          latestTimestamp: "2026-05-31T00:00:00Z",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            dryRunReview: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            approvedCount: 1,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Adapter Dry Run" }));
+    expect(await screen.findByText("Adapter dry run ready")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve Dry Run Review" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("record_default_chat_adapter_dry_run_review_decision", {
+        input: {
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          message: "Settings adapter dry-run probe.",
+          requiredApprovedCandidates: 1,
+        },
+      });
+    });
+    expect(await screen.findByText("Dry-run review evidence recorded")).toBeInTheDocument();
+    expect(screen.getByText("decisionKind: approve")).toBeInTheDocument();
+    expect(screen.getByText("dryRunReady: true")).toBeInTheDocument();
+    expect(screen.getByText("dryRunReview: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("blocks default chat adapter dry-run approval evidence when dry run is blocked", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_default_chat_adapter_dry_run") {
+        return Promise.resolve({
+          dryRunReady: false,
+          blocked: true,
+          contractShape: "default_chat_adapter_dry_run_contract",
+          sourceSessionId: "settings-dry-run",
+          adapterPath: "blocked",
+          allowWrites: false,
+          maxToolCalls: 0,
+          defaultChatPathUnchanged: true,
+          chatMessageSaved: false,
+          agentRunRecorded: false,
+          contractHarnessReady: false,
+          inputMessageLength: 31,
+          inputMessageHash: "abc123",
+          blockingReasons: ["contract_harness_not_ready"],
+          metadataSafeSummary: {
+            adapterDryRun: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            dryRunReady: false,
+          },
+        });
+      }
+      if (cmd === "record_default_chat_adapter_dry_run_review_decision") {
+        return Promise.resolve({
+          recorded: false,
+          decisionKind: args?.input?.decisionKind ?? "approve",
+          sourceSessionId: "settings-dry-run",
+          contractShape: "default_chat_adapter_dry_run_contract",
+          dryRunReady: false,
+          dryRunSummaryDigest: "sha256:blocked",
+          createdAt: "2026-05-31T00:00:00Z",
+          blockingReasons: ["contract_harness_not_ready", "dry_run_not_ready_for_approval"],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Adapter Dry Run" }));
+    expect(await screen.findByText("Adapter dry run blocked")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve Dry Run Review" }));
+
+    expect(await screen.findByText("Dry-run review not recorded")).toBeInTheDocument();
+    expect(screen.getByText("dry_run_not_ready_for_approval")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {
