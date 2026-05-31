@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W27 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W28 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -26,7 +26,10 @@ draft when readiness passes. W26 adds an explicit manual review decision stage
 that records approve/reject/request_rework as metadata-safe decision evidence
 only. W27 adds a read-only implementation gate that checks whether latest
 metadata-safe approval, current W25 draft hash, and current W24 readiness are
-aligned before implementation discussion can begin.
+aligned before implementation discussion can begin. W28 adds an explicit
+non-default controlled migration shadow run that can execute only after W27
+eligibility and returns metadata-safe readiness comparison output without
+writing Chat, Proposal, Memory, LifeModel, Evidence, or external tool results.
 
 The key boundary is unchanged:
 
@@ -131,6 +134,19 @@ The key boundary is unchanged:
   does not migrate Chat, replace default Chat, modify feature flags, write
   evidence, create AgentRuns/Proposals/Memory/LifeModel patches, or invoke
   external tools.
+- W28 Non-Default Controlled Migration Shadow Run adds
+  `run_controlled_chat_migration_shadow_run`, an explicit Settings-only
+  migration comparison entry. It first calls W27 implementation gate; blocked
+  gates return blockers and do not execute runtime. Eligible gates run a
+  bounded controlled runtime preview with `allowWrites=false`, using a bounded
+  prompt descriptor rather than raw prompt text. The returned output contains
+  `shadowRunReady`, the implementation gate report, strategy/payload kind,
+  metadata-safe summary, warnings, and blockers only. It may create a
+  metadata-safe `controlled_migration_shadow_run` AgentRun audit, but it does
+  not save assistant output to Chat history, create Proposal/Memory/LifeModel
+  patch/Evidence records, or write external tool results. It does not expose
+  raw user prompt, raw assistant output, or full tool payload, and default
+  Send / `send_message` / `start_stream_message` do not call it.
 
 ## Work Package Status
 
@@ -163,11 +179,12 @@ The key boundary is unchanged:
 | W25 Reviewed Migration Plan Draft Generator | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `draft_controlled_chat_migration_plan` as a read-only command over W24 readiness output. Blocked readiness returns `draftReady=false` and blockers with empty plan sections; passed readiness returns human-review-only scope, preconditions, rollback, fallback, and test plan with `manualReviewRequired=true` and `notAutomaticMigration=true`. It does not replace default Chat, modify default runtime feature flags, create evidence/runs/proposals/memory/lifemodel patches, or expose raw user/assistant/tool payload content. |
 | W26 Manual Migration Review Decision Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds explicit approve/reject/request_rework review decision recording after W25 draft. Blocked-draft approve returns blockers and writes no evidence; ready drafts write only metadata-safe `migration_review_decision` evidence with readiness counts, draft hash, createdAt, and sanitized reviewer-note metadata. Summary is read-only and normal Send / `send_message` / `start_stream_message` do not call these commands. |
 | W27 Approved Migration Implementation Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_migration_implementation_gate` as a read-only gate over W24 readiness, W25 current draft hash, and W26 metadata-safe review decision evidence. It requires the latest metadata-safe decision to be approve, blocks latest reject/request_rework, blocks draft hash mismatch, blocks current readiness failure, creates no evidence/runs/proposals/memory/lifemodel patches, and normal Send / `send_message` / `start_stream_message` do not call it. |
+| W28 Non-Default Controlled Migration Shadow Run | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `run_controlled_chat_migration_shadow_run` as an explicit non-default shadow command. It calls W27 implementation gate first, blocks without runtime when ineligible, runs bounded controlled runtime preview only when eligible with `allowWrites=false`, returns metadata-safe strategy/payload/summary/warnings/blockers, may create a metadata-safe shadow AgentRun audit, and writes no Chat message, Proposal, Memory, LifeModel patch, Evidence, or external tool result. Normal Send / `send_message` / `start_stream_message` do not call it. |
 
 ## Next Recommended Sequence
 
 ```text
-separate implementation discussion only after explicit implementation gate eligibility
+use shadow readiness only as explicit comparison; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -176,8 +193,9 @@ W22 only added source binding plus target-session validation for that promotion
 step, W23 only records/reads metadata-safe promotion evidence, W24 only checks
 readiness for discussing the next migration step, W25 only generates a
 read-only human-review draft, and W26 only records metadata-safe manual review
-decision evidence, and W27 only checks whether current evidence qualifies for
-implementation discussion. Default `Send`, `send_message`, and
+decision evidence, W27 only checks whether current evidence qualifies for
+implementation discussion, and W28 only runs a non-default write-disabled
+shadow comparison after W27 eligibility. Default `Send`, `send_message`, and
 `start_stream_message` remain unchanged until a later reviewed migration stage
 with separate implementation work and explicit human approval.
 

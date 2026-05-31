@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W27 completion/status index. This is not a second roadmap.
+   - Compact W1-W28 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,16 +43,17 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W27 through sustained Runtime Migration
+Current implementation has completed W1-W28 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
 read-only promotion readiness gate, and a reviewed migration plan draft
 generator plus metadata-safe manual migration review decision evidence and a
-read-only implementation gate. The next practical sequence is:
+read-only implementation gate plus a non-default controlled migration shadow
+run. The next practical sequence is:
 
 ```text
-separate implementation discussion only after explicit implementation gate eligibility
+use shadow readiness only as explicit comparison; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -61,7 +62,7 @@ separate implementation discussion only after explicit implementation gate eligi
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W27 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W28 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -166,6 +167,18 @@ must block. It must not replace default Chat, modify feature flags, create new
 review evidence, create AgentRuns, Proposals, Memory writes, LifeModel patches,
 or invoke external tools. Eligible means controlled migration implementation
 discussion only; it is not permission to switch default Chat.
+
+W28 adds only `run_controlled_chat_migration_shadow_run` and the Settings
+Shadow Run panel. The command first calls the W27 implementation gate. If the
+gate is blocked, it returns blockers and does not execute runtime. If eligible,
+it runs a bounded non-default controlled runtime preview with `allowWrites=false`
+and returns only `shadowRunReady`, the implementation gate report,
+strategy/payload kind, metadata-safe summary, warnings, and blockers. It may
+create a metadata-safe `controlled_migration_shadow_run` AgentRun audit, but it
+must not create Proposal, Memory, LifeModel patch, Evidence, chat message, or
+external tool result records. It must not expose raw user prompt, raw assistant
+output, or full tool payload. Default Send, `send_message`, and
+`start_stream_message` must not call the shadow run command.
 
 ## 6. Agent Rules
 

@@ -21,6 +21,8 @@ import type {
   ControlledChatMigrationReviewDecisionSummary,
   ControlledChatMigrationImplementationGateInput,
   ControlledChatMigrationImplementationGateReport,
+  ControlledChatMigrationShadowRunInput,
+  ControlledChatMigrationShadowRunOutput,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -309,6 +311,15 @@ export async function checkControlledChatMigrationImplementationGate(
 ): Promise<ControlledChatMigrationImplementationGateReport> {
   return safeInvoke<ControlledChatMigrationImplementationGateReport>(
     "check_controlled_chat_migration_implementation_gate",
+    { input }
+  );
+}
+
+export async function runControlledChatMigrationShadowRun(
+  input: ControlledChatMigrationShadowRunInput
+): Promise<ControlledChatMigrationShadowRunOutput> {
+  return safeInvoke<ControlledChatMigrationShadowRunOutput>(
+    "run_controlled_chat_migration_shadow_run",
     { input }
   );
 }

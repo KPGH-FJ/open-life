@@ -407,6 +407,29 @@ export interface ControlledChatMigrationImplementationGateReport {
   blockingReasons: string[];
 }
 
+export type ControlledChatMigrationShadowRunDescriptor =
+  | "default_readiness_probe"
+  | "planning_readiness_probe"
+  | "sensitive_local_only_probe";
+
+export interface ControlledChatMigrationShadowRunInput {
+  sessionId: string;
+  userInputChecksum?: string;
+  boundedTestPromptDescriptor?: ControlledChatMigrationShadowRunDescriptor;
+  requiredPromotions?: number;
+}
+
+export interface ControlledChatMigrationShadowRunOutput {
+  shadowRunReady: boolean;
+  shadowRunId?: string | null;
+  implementationGateReport: ControlledChatMigrationImplementationGateReport;
+  strategyKind: string;
+  payloadKind: string;
+  metadataSafeSummary: Record<string, unknown>;
+  warnings: string[];
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

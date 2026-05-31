@@ -20,6 +20,7 @@ import {
   getControlledChatMigrationReviewDecisionSummary,
   getControlledPilotPromotionEvidenceSummary,
   recordControlledChatMigrationReviewDecision,
+  runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
@@ -28,6 +29,8 @@ import type {
   ControlledChatMigrationReviewDecisionKind,
   ControlledChatMigrationReviewDecisionResult,
   ControlledChatMigrationReviewDecisionSummary,
+  ControlledChatMigrationShadowRunDescriptor,
+  ControlledChatMigrationShadowRunOutput,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessReport,
@@ -43,6 +46,9 @@ const SAFE_SUMMARY_KEYS = [
   "riskLevel",
   "hasHsPacket",
   "policyReasonCode",
+  "descriptorKind",
+  "allowWrites",
+  "metadataSafe",
 ];
 const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
   "defaultChatUnchanged",
@@ -141,6 +147,12 @@ export default function MultiStrategyPreviewSection() {
   const [implementationGateError, setImplementationGateError] = useState<string | null>(null);
   const [implementationGateReport, setImplementationGateReport] =
     useState<ControlledChatMigrationImplementationGateReport | null>(null);
+  const [shadowDescriptor, setShadowDescriptor] =
+    useState<ControlledChatMigrationShadowRunDescriptor>("default_readiness_probe");
+  const [shadowRunChecking, setShadowRunChecking] = useState(false);
+  const [shadowRunError, setShadowRunError] = useState<string | null>(null);
+  const [shadowRunResult, setShadowRunResult] =
+    useState<ControlledChatMigrationShadowRunOutput | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -304,6 +316,24 @@ export default function MultiStrategyPreviewSection() {
       setImplementationGateError(`Implementation gate check failed: ${readableError(e)}`);
     } finally {
       setImplementationGateChecking(false);
+    }
+  };
+
+  const handleShadowRun = async () => {
+    setShadowRunChecking(true);
+    setShadowRunError(null);
+    setShadowRunResult(null);
+    try {
+      const result = await runControlledChatMigrationShadowRun({
+        sessionId: `settings-shadow-run-${Date.now()}`,
+        boundedTestPromptDescriptor: shadowDescriptor,
+        requiredPromotions: 3,
+      });
+      setShadowRunResult(result);
+    } catch (e) {
+      setShadowRunError(`Shadow run failed: ${readableError(e)}`);
+    } finally {
+      setShadowRunChecking(false);
     }
   };
 
@@ -1202,6 +1232,161 @@ export default function MultiStrategyPreviewSection() {
           </div>
         ) : (
           <div className="mt-3 text-xs text-stone-500">No implementation gate report loaded.</div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Shadow Run</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Non-default controlled migration shadow run. It first checks the implementation gate,
+              then runs a bounded metadata-safe runtime probe with writes disabled. It does not save
+              to Chat, does not change feature flags, and cannot switch default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleShadowRun}
+            disabled={shadowRunChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              shadowRunChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <Play size={13} />
+            {shadowRunChecking ? "Running..." : "Run Shadow Run"}
+          </button>
+        </div>
+
+        <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+          <label className="block">
+            <span className="text-xs font-medium text-stone-700">Shadow prompt descriptor</span>
+            <select
+              value={shadowDescriptor}
+              onChange={event =>
+                setShadowDescriptor(
+                  event.target.value as ControlledChatMigrationShadowRunDescriptor
+                )
+              }
+              className="mt-1 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-900 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
+            >
+              <option value="default_readiness_probe">default_readiness_probe</option>
+              <option value="planning_readiness_probe">planning_readiness_probe</option>
+              <option value="sensitive_local_only_probe">sensitive_local_only_probe</option>
+            </select>
+          </label>
+          <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+            Uses a bounded descriptor instead of raw prompt text.
+          </div>
+        </div>
+
+        <div className="mt-3 rounded-md border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-900">
+          Not saved to Chat history and does not switch default Chat.
+        </div>
+
+        {shadowRunError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {shadowRunError}
+          </div>
+        )}
+
+        {shadowRunResult ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  shadowRunResult.shadowRunReady
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {shadowRunResult.shadowRunReady ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {shadowRunResult.shadowRunReady ? "Shadow ready" : "Shadow blocked"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  shadowRunResult.implementationGateReport.implementationEligible
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                implementationGateEligible:{" "}
+                {shadowRunResult.implementationGateReport.implementationEligible ? "true" : "false"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 text-xs font-medium text-stone-700">
+                {shadowRunResult.shadowRunId ?? "no shadow audit"}
+              </span>
+            </div>
+
+            <div className="grid gap-2 text-xs md:grid-cols-2">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-stone-700">
+                Strategy: {shadowRunResult.strategyKind}
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-stone-700">
+                Payload: {shadowRunResult.payloadKind}
+              </div>
+            </div>
+
+            {safeSummaryEntries(shadowRunResult.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(shadowRunResult.metadataSafeSummary).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Warnings</div>
+              {shadowRunResult.warnings.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {shadowRunResult.warnings.map(warning => (
+                    <div
+                      key={warning}
+                      className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-800"
+                    >
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No shadow warnings returned.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {shadowRunResult.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {shadowRunResult.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No shadow run blockers returned.</div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No shadow run loaded.</div>
         )}
       </section>
 

@@ -236,6 +236,32 @@ pub struct ControlledChatMigrationImplementationGateReport {
     pub blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationShadowRunInput {
+    pub session_id: String,
+    #[serde(default)]
+    pub user_input_checksum: Option<String>,
+    #[serde(default)]
+    pub bounded_test_prompt_descriptor: Option<String>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatMigrationShadowRunOutput {
+    pub shadow_run_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shadow_run_id: Option<String>,
+    pub implementation_gate_report: ControlledChatMigrationImplementationGateReport,
+    pub strategy_kind: String,
+    pub payload_kind: String,
+    pub metadata_safe_summary: Value,
+    pub warnings: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -852,6 +878,141 @@ pub(crate) async fn check_controlled_chat_migration_implementation_gate_with_sta
     })
 }
 
+#[tauri::command]
+pub async fn run_controlled_chat_migration_shadow_run(
+    input: ControlledChatMigrationShadowRunInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatMigrationShadowRunOutput, String> {
+    run_controlled_chat_migration_shadow_run_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn run_controlled_chat_migration_shadow_run_with_state(
+    input: ControlledChatMigrationShadowRunInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatMigrationShadowRunOutput, String> {
+    let normalized = normalize_shadow_run_input(input)?;
+    let implementation_gate_report =
+        check_controlled_chat_migration_implementation_gate_with_state(
+            ControlledChatMigrationImplementationGateInput {
+                required_promotions: normalized.required_promotions,
+                session_id: Some(normalized.session_id.clone()),
+            },
+            state,
+        )
+        .await?;
+
+    if !implementation_gate_report.implementation_eligible {
+        let mut blocking_reasons = vec!["implementation_gate_blocked".to_string()];
+        for reason in &implementation_gate_report.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+        return Ok(ControlledChatMigrationShadowRunOutput {
+            shadow_run_ready: false,
+            shadow_run_id: None,
+            metadata_safe_summary: shadow_blocked_summary(
+                &normalized.descriptor_kind,
+                normalized.user_input_checksum.as_deref(),
+            ),
+            implementation_gate_report,
+            strategy_kind: "notRun".into(),
+            payload_kind: "notRun".into(),
+            warnings: Vec::new(),
+            blocking_reasons,
+        });
+    }
+
+    let mut shadow_run = new_shadow_agent_run(
+        &normalized.session_id,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+    );
+    let shadow_run_id = shadow_run.id.clone();
+    create_shadow_run(state, &shadow_run).await?;
+
+    let runtime_input = MultiStrategyAgentPreviewInput {
+        session_id: normalized.session_id.clone(),
+        user_text: shadow_prompt_for_descriptor(&normalized.descriptor_kind).into(),
+        tools_prompt: "No developer tools catalog supplied for this shadow run.".into(),
+        allow_planning: normalized.descriptor_kind == "planning_readiness_probe",
+        local_model_available: normalized.descriptor_kind != "sensitive_local_only_probe",
+        layer: Some("L2".into()),
+        execution_budget: Some(MultiStrategyAgentPreviewExecutionBudgetInput {
+            max_steps: Some(3),
+            max_tool_calls: Some(0),
+            timeout_seconds: Some(30),
+            allow_cloud: Some(false),
+            allow_writes: Some(false),
+        }),
+    };
+
+    let execution =
+        execute_multi_strategy_agent_preview(runtime_input, state, &shadow_run_id).await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            let safe_error = metadata_safe_shadow_error(&error);
+            fail_shadow_run(state, &mut shadow_run, &safe_error).await;
+            return Ok(ControlledChatMigrationShadowRunOutput {
+                shadow_run_ready: false,
+                shadow_run_id: Some(shadow_run_id),
+                implementation_gate_report,
+                strategy_kind: "notRun".into(),
+                payload_kind: "notRun".into(),
+                metadata_safe_summary: shadow_failed_summary(
+                    &normalized.descriptor_kind,
+                    normalized.user_input_checksum.as_deref(),
+                    &safe_error,
+                ),
+                warnings: vec!["shadow runtime failed before readiness comparison".into()],
+                blocking_reasons: vec![safe_error],
+            });
+        }
+    };
+
+    let strategy_kind = preview_strategy_kind(execution.output.selection.kind).to_string();
+    let payload_kind = preview_payload_kind(&execution.output.payload).to_string();
+    let mut warnings = preview_output_warnings(&execution.output, &execution.warnings);
+    push_unique_string(
+        &mut warnings,
+        "shadow runtime forced allowWrites=false".to_string(),
+    );
+    let metadata_safe_summary = shadow_metadata_safe_summary(
+        &execution.output,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+    );
+    let audit = shadow_audit_summary(
+        &execution.output,
+        &warnings,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+    );
+
+    complete_shadow_run(
+        state,
+        &mut shadow_run,
+        ShadowRunCompletion {
+            audit,
+            warnings: warnings.clone(),
+            context_summary: execution.context_summary,
+            hs_selection_audit: execution.hs_selection_audit,
+            behavior_checks: execution.behavior_checks,
+        },
+    )
+    .await?;
+
+    Ok(ControlledChatMigrationShadowRunOutput {
+        shadow_run_ready: true,
+        shadow_run_id: Some(shadow_run_id),
+        implementation_gate_report,
+        strategy_kind,
+        payload_kind,
+        metadata_safe_summary,
+        warnings,
+        blocking_reasons: Vec::new(),
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -862,6 +1023,13 @@ struct NormalizedPromotionEvidenceInput {
     promoted_message_length: usize,
     promoted_message_hash: String,
     promoted_at: String,
+}
+
+struct NormalizedShadowRunInput {
+    session_id: String,
+    user_input_checksum: Option<String>,
+    descriptor_kind: String,
+    required_promotions: Option<usize>,
 }
 
 fn normalize_promotion_evidence_input(
@@ -917,6 +1085,47 @@ fn normalize_promotion_evidence_input(
     })
 }
 
+fn normalize_shadow_run_input(
+    input: ControlledChatMigrationShadowRunInput,
+) -> Result<NormalizedShadowRunInput, String> {
+    let session_id = safe_internal_id(&input.session_id, "sessionId")?;
+    let user_input_checksum = input
+        .user_input_checksum
+        .as_deref()
+        .map(|value| safe_checksum_field(value, "userInputChecksum"))
+        .transpose()?;
+    let descriptor_kind = match input
+        .bounded_test_prompt_descriptor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => safe_enum_value(
+            value,
+            "boundedTestPromptDescriptor",
+            &[
+                "default_readiness_probe",
+                "planning_readiness_probe",
+                "sensitive_local_only_probe",
+            ],
+        )?,
+        None if user_input_checksum.is_some() => "default_readiness_probe".into(),
+        None => {
+            return Err(
+                "userInputChecksum or boundedTestPromptDescriptor is required for shadow run"
+                    .into(),
+            )
+        }
+    };
+
+    Ok(NormalizedShadowRunInput {
+        session_id,
+        user_input_checksum,
+        descriptor_kind,
+        required_promotions: input.required_promotions,
+    })
+}
+
 fn safe_internal_id(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -952,12 +1161,16 @@ fn safe_enum_value(value: &str, field: &str, allowed: &[&str]) -> Result<String,
 }
 
 fn safe_checksum(value: &str) -> Result<String, String> {
+    safe_checksum_field(value, "promotedMessageHash")
+}
+
+fn safe_checksum_field(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Err("promotedMessageHash is required".into());
+        return Err(format!("{field} is required"));
     }
     if trimmed.len() > 160 || !trimmed.chars().all(is_safe_checksum_char) {
-        return Err("promotedMessageHash must be a metadata-safe checksum".into());
+        return Err(format!("{field} must be a metadata-safe checksum"));
     }
     Ok(trimmed.to_string())
 }
@@ -1236,6 +1449,144 @@ fn promotion_metadata_key_is_raw_content(key: &str) -> bool {
     )
 }
 
+fn shadow_blocked_summary(descriptor_kind: &str, user_input_checksum: Option<&str>) -> Value {
+    json!({
+        "shadowRunRuntime": "controlled_chat_migration",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "blockedBeforeRuntime": true,
+        "allowWrites": false,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+    })
+}
+
+fn shadow_failed_summary(
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+    safe_error: &str,
+) -> Value {
+    json!({
+        "shadowRunRuntime": "controlled_chat_migration",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "shadowErrorCode": shadow_error_code(safe_error),
+        "allowWrites": false,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+    })
+}
+
+fn shadow_metadata_safe_summary(
+    output: &MultiStrategyRuntimeOutput,
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+) -> Value {
+    let metadata = &output.selection.metadata_safe_summary;
+    let governance_decision_kind = output
+        .selection
+        .governance_decision
+        .as_ref()
+        .map(|decision| preview_governance_decision_kind(decision.kind))
+        .unwrap_or("unknown");
+    json!({
+        "shadowRunRuntime": "controlled_chat_migration",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "strategyKind": preview_strategy_kind(output.selection.kind),
+        "payloadKind": preview_payload_kind(&output.payload),
+        "governanceDecisionKind": governance_decision_kind,
+        "taskKind": metadata.get("taskKind").and_then(Value::as_str).unwrap_or("unknown"),
+        "reasonCode": metadata.get("reasonCode").and_then(Value::as_str).unwrap_or("unknown"),
+        "riskLevel": metadata.get("riskLevel").and_then(Value::as_str).unwrap_or("unknown"),
+        "hasHsPacket": metadata.get("hasHsPacket").and_then(Value::as_bool).unwrap_or(false),
+        "planStepCount": preview_plan_step_count(&output.payload),
+        "blocked": matches!(output.payload, MultiStrategyRuntimePayload::Blocked),
+        "allowWrites": false,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+    })
+}
+
+fn shadow_audit_summary(
+    output: &MultiStrategyRuntimeOutput,
+    warnings: &[String],
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+) -> Value {
+    let mut write_control = preview_write_control(&output.payload);
+    if let Some(map) = write_control.as_object_mut() {
+        map.insert("allowWrites".into(), Value::Bool(false));
+    }
+    let metadata = shadow_metadata_safe_summary(output, descriptor_kind, user_input_checksum);
+    json!({
+        "shadowRunRuntime": "controlled_chat_migration",
+        "strategyKind": metadata["strategyKind"],
+        "payloadKind": metadata["payloadKind"],
+        "governanceDecisionKind": metadata["governanceDecisionKind"],
+        "taskKind": metadata["taskKind"],
+        "reasonCode": metadata["reasonCode"],
+        "riskLevel": metadata["riskLevel"],
+        "hasHsPacket": metadata["hasHsPacket"],
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "planStepCount": metadata["planStepCount"],
+        "planStepStatuses": preview_plan_step_statuses(&output.payload),
+        "proposalIdCount": preview_proposal_ids(&output.payload).len(),
+        "blocked": metadata["blocked"],
+        "warnings": warnings,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "writeControl": write_control,
+    })
+}
+
+fn shadow_prompt_for_descriptor(descriptor_kind: &str) -> &'static str {
+    match descriptor_kind {
+        "planning_readiness_probe" => "Plan a controlled migration comparison.",
+        "sensitive_local_only_probe" => "Discuss a sensitive local-only readiness check.",
+        "default_readiness_probe" => {
+            "Compare default chat contract with controlled runtime readiness."
+        }
+        _ => "Compare default chat contract with controlled runtime readiness.",
+    }
+}
+
+fn metadata_safe_shadow_error(error: &str) -> String {
+    format!(
+        "controlled migration shadow run failed: {}",
+        shadow_error_code(error)
+    )
+}
+
+fn shadow_error_code(error: &str) -> &'static str {
+    if error.contains("invalid_shadow_descriptor") {
+        "invalid_shadow_descriptor"
+    } else if error.contains("failed to load LifeModel") {
+        "lifemodel_load_failed"
+    } else if error.contains("HS runtime packet build failed") {
+        "hs_packet_build_failed"
+    } else if error.contains("multi-strategy preview runtime failed") {
+        "multi_strategy_runtime_failed"
+    } else {
+        "shadow_runtime_failed"
+    }
+}
+
 fn normalize_metadata_key(key: &str) -> String {
     key.chars()
         .filter(|ch| ch.is_ascii_alphanumeric())
@@ -1402,6 +1753,14 @@ struct PreviewRunCompletion {
     behavior_checks: Vec<HSBehaviorCheckSummary>,
 }
 
+struct ShadowRunCompletion {
+    audit: Value,
+    warnings: Vec<String>,
+    context_summary: ContextSummary,
+    hs_selection_audit: Option<HSSelectionAudit>,
+    behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
 async fn execute_multi_strategy_agent_preview(
     input: MultiStrategyAgentPreviewInput,
     state: &Arc<AppState>,
@@ -1532,6 +1891,42 @@ fn new_preview_agent_run(session_id: &str) -> AgentRun {
     run
 }
 
+fn new_shadow_agent_run(
+    session_id: &str,
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+) -> AgentRun {
+    let mut run = AgentRun::new_chat_run(session_id, "");
+    run.user_input = None;
+    run.reasoning_strategy = Some("controlled_migration_shadow_run".into());
+    run.output_preview = Some("Controlled migration shadow run started".into());
+    run.context_summary = Some(ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: true,
+        redaction_level: RedactionLevel::Strict,
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(json!({
+            "shadowRunRuntime": "controlled_chat_migration",
+            "descriptorKind": descriptor_kind,
+            "userInputChecksumPresent": user_input_checksum.is_some(),
+            "status": "started",
+            "allowWrites": false,
+            "metadataSafe": true,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+        })),
+        output: Some("controlled_migration_shadow_run".into()),
+        ..ReasoningTrace::default()
+    });
+    run
+}
+
 async fn create_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -1541,6 +1936,17 @@ async fn create_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(),
     store
         .create_run(run)
         .map_err(|e| format!("failed to create preview AgentRun: {e}"))
+}
+
+async fn create_shadow_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for shadow runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .create_run(run)
+        .map_err(|e| format!("failed to create shadow AgentRun: {e}"))
 }
 
 async fn complete_preview_run(
@@ -1576,6 +1982,40 @@ async fn complete_preview_run(
     update_preview_run(state, run).await
 }
 
+async fn complete_shadow_run(
+    state: &Arc<AppState>,
+    run: &mut AgentRun,
+    completion: ShadowRunCompletion,
+) -> Result<(), String> {
+    run.status = AgentRunStatus::Completed;
+    run.finished_at = Some(chrono::Utc::now());
+    run.generated_proposals = Vec::new();
+    run.warnings = completion.warnings;
+    run.hs_selection_audit = completion.hs_selection_audit;
+    run.behavior_checks = completion.behavior_checks;
+    run.output_preview = Some(shadow_output_label(&completion.audit));
+    run.step_count = completion
+        .audit
+        .get("planStepCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default() as u32;
+    run.tool_call_count = 0;
+    run.context_summary = Some(completion.context_summary);
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(completion.audit),
+        output: Some("controlled_migration_shadow_run".into()),
+        stable_steps: vec![
+            "implementation_gate_check".into(),
+            "shadow_strategy_selection".into(),
+            "write_disabled_runtime_preview".into(),
+            "metadata_safe_summary".into(),
+        ],
+        ..ReasoningTrace::default()
+    });
+
+    update_shadow_run(state, run).await
+}
+
 async fn fail_preview_run(state: &Arc<AppState>, run: &mut AgentRun, error: &str) {
     run.fail(AgentRunError {
         message: metadata_safe_preview_error(error),
@@ -1602,6 +2042,36 @@ async fn fail_preview_run(state: &Arc<AppState>, run: &mut AgentRun, error: &str
     }
 }
 
+async fn fail_shadow_run(state: &Arc<AppState>, run: &mut AgentRun, safe_error: &str) {
+    run.fail(AgentRunError {
+        message: safe_error.to_string(),
+        phase: "controlled_migration_shadow_runtime_failed".into(),
+        recoverable: false,
+    });
+    run.user_input = None;
+    run.reasoning_strategy = Some("controlled_migration_shadow_run".into());
+    let audit = json!({
+        "shadowRunRuntime": "controlled_chat_migration",
+        "status": "failed",
+        "errorCode": shadow_error_code(safe_error),
+        "allowWrites": false,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(audit),
+        output: Some("controlled_migration_shadow_run_failed".into()),
+        ..ReasoningTrace::default()
+    });
+    run.output_preview = Some("Controlled migration shadow run failed".into());
+
+    if let Err(e) = update_shadow_run(state, run).await {
+        log::warn!("[AgentRun] failed to update shadow run after error: {}", e);
+    }
+}
+
 async fn update_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -1611,6 +2081,17 @@ async fn update_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(),
     store
         .update_run(run)
         .map_err(|e| format!("failed to update preview AgentRun: {e}"))
+}
+
+async fn update_shadow_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for shadow runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .update_run(run)
+        .map_err(|e| format!("failed to update shadow AgentRun: {e}"))
 }
 
 fn metadata_safe_preview_error(error: &str) -> String {
@@ -1632,6 +2113,18 @@ fn preview_error_code(error: &str) -> &'static str {
     } else {
         "preview_runtime_failed"
     }
+}
+
+fn shadow_output_label(audit: &Value) -> String {
+    let strategy = audit
+        .get("strategyKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let payload = audit
+        .get("payloadKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    format!("Controlled migration shadow run: {strategy} / {payload}")
 }
 
 fn preview_output_label(audit: &Value) -> String {
@@ -3137,6 +3630,7 @@ mod tests {
         pending_proposal_count: usize,
         evidence_count: usize,
         patch_count: usize,
+        mcp_audit_count: usize,
         model_version: String,
         messages_json: String,
     }
@@ -3163,6 +3657,10 @@ mod tests {
             let store = state.patch_store.as_ref().unwrap().lock().await;
             store.patch_count().unwrap()
         };
+        let mcp_audit_count = {
+            let store = state.mcp_audit_store.lock().await;
+            store.list_logs(100).unwrap().len()
+        };
         let model_version = {
             let manager = state.life_model_manager.lock().await;
             manager.load().unwrap().metadata.version
@@ -3177,6 +3675,7 @@ mod tests {
             pending_proposal_count,
             evidence_count,
             patch_count,
+            mcp_audit_count,
             model_version,
             messages_json,
         }
@@ -3388,8 +3887,142 @@ mod tests {
         assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
         assert_eq!(before.evidence_count, after.evidence_count);
         assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
         assert_eq!(before.model_version, after.model_version);
         assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn shadow_run_blocks_when_implementation_gate_is_blocked_without_running_runtime() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let output = run_controlled_chat_migration_shadow_run_with_state(
+            ControlledChatMigrationShadowRunInput {
+                session_id: "session-1".into(),
+                user_input_checksum: Some("sha256:raw-user-input-checksum".into()),
+                bounded_test_prompt_descriptor: Some("default_readiness_probe".into()),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.shadow_run_ready);
+        assert!(!output.implementation_gate_report.implementation_eligible);
+        assert_eq!(output.strategy_kind, "notRun");
+        assert_eq!(output.payload_kind, "notRun");
+        assert!(output
+            .blocking_reasons
+            .contains(&"implementation_gate_blocked".to_string()));
+        assert!(output
+            .blocking_reasons
+            .contains(&"metadata_safe_approve_decision_missing".to_string()));
+
+        let serialized = serde_json::to_string(&output).unwrap();
+        assert!(!serialized.contains("raw user"));
+        assert!(!serialized.contains("raw assistant"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("full tool payload"));
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn shadow_run_executes_when_implementation_gate_is_eligible_with_write_disabled_audit() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Ready for a shadow run.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let output = run_controlled_chat_migration_shadow_run_with_state(
+            ControlledChatMigrationShadowRunInput {
+                session_id: "session-1".into(),
+                user_input_checksum: Some("sha256:raw-user-input-checksum".into()),
+                bounded_test_prompt_descriptor: Some("planning_readiness_probe".into()),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(output.shadow_run_ready);
+        assert!(output.implementation_gate_report.implementation_eligible);
+        assert_eq!(output.strategy_kind, "planExecute");
+        assert_eq!(output.payload_kind, "planExecute");
+        assert!(output.blocking_reasons.is_empty());
+        assert_eq!(
+            output.metadata_safe_summary["descriptorKind"],
+            "planning_readiness_probe"
+        );
+        assert_eq!(output.metadata_safe_summary["allowWrites"], false);
+        assert_eq!(output.metadata_safe_summary["metadataSafe"], true);
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count + 1, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+
+        let shadow_runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs_for_session("session-1", 20).unwrap()
+        };
+        let shadow_run = shadow_runs
+            .iter()
+            .find(|run| {
+                run.reasoning_strategy.as_deref() == Some("controlled_migration_shadow_run")
+            })
+            .expect("shadow run audit should be persisted separately from preview evidence");
+        assert_eq!(shadow_run.status, AgentRunStatus::Completed);
+        assert_eq!(shadow_run.user_input, None);
+        assert!(shadow_run.actions.is_empty());
+        assert!(shadow_run.observations.is_empty());
+        assert_eq!(shadow_run.tool_call_count, 0);
+        assert!(shadow_run.generated_proposals.is_empty());
+
+        let audit = preview_audit(shadow_run);
+        assert_eq!(audit["shadowRunRuntime"], "controlled_chat_migration");
+        assert_eq!(audit["metadataSafe"], true);
+        assert_eq!(audit["writeControl"]["allowWrites"], false);
+        assert_eq!(audit["contentStorage"], "none");
+        assert_eq!(audit["toolStorage"], "none");
+        assert_eq!(audit["chatHistoryStorage"], "none");
+
+        let serialized_output = serde_json::to_string(&output).unwrap();
+        let serialized_run = serde_json::to_string(shadow_run).unwrap();
+        for serialized in [serialized_output, serialized_run] {
+            assert!(!serialized.contains("raw user"));
+            assert!(!serialized.contains("rawUserInput"));
+            assert!(!serialized.contains("raw assistant"));
+            assert!(!serialized.contains("rawAssistantOutput"));
+            assert!(!serialized.contains("toolPayload"));
+            assert!(!serialized.contains("full tool payload"));
+            assert!(!serialized.contains("Plan a controlled migration comparison."));
+            assert!(!serialized.contains("Pilot-only answer"));
+        }
     }
 
     #[tokio::test]

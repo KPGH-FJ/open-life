@@ -841,6 +841,139 @@ describe("SettingsPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("runs controlled migration shadow run explicitly and renders metadata-safe success", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_migration_shadow_run") {
+        return Promise.resolve({
+          shadowRunReady: true,
+          shadowRunId: "run-shadow-settings-1",
+          implementationGateReport: {
+            implementationEligible: true,
+            latestDecision: {
+              evidenceId: "ev_review_decision_2",
+              decisionKind: "approve",
+              draftReady: true,
+              draftHash: "sha256:mock-migration-draft",
+              createdAt: "2026-05-31T02:03:04Z",
+            },
+            readinessReport: {
+              ready: true,
+              requiredPromotions: 3,
+              promotedCount: 3,
+              recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+              latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+              sourceTargetMismatchBlockCount: 0,
+              metadataSafeEvidenceReady: true,
+              defaultChatUnchanged: true,
+              blockingReasons: [],
+            },
+            draftHashMatched: true,
+            approvedAfterLatestDraft: true,
+            blockingReasons: [],
+          },
+          strategyKind: "planExecute",
+          payloadKind: "planExecute",
+          metadataSafeSummary: {
+            descriptorKind: "planning_readiness_probe",
+            allowWrites: false,
+            metadataSafe: true,
+            rawAssistantOutput: "must not render",
+          },
+          warnings: ["shadow runtime forced allowWrites=false"],
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Shadow Run")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Shadow prompt descriptor"), {
+      target: { value: "planning_readiness_probe" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Run Shadow Run" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_controlled_chat_migration_shadow_run", {
+        input: expect.objectContaining({
+          sessionId: expect.stringMatching(/^settings-shadow-run-/),
+          boundedTestPromptDescriptor: "planning_readiness_probe",
+          requiredPromotions: 3,
+        }),
+      });
+    });
+
+    expect(await screen.findByText("Shadow ready")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Payload: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("descriptorKind: planning_readiness_probe")).toBeInTheDocument();
+    expect(screen.getByText("allowWrites: false")).toBeInTheDocument();
+    expect(screen.getByText("shadow runtime forced allowWrites=false")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Not saved to Chat history and does not switch default Chat/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText("must not render")).not.toBeInTheDocument();
+    expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
+  });
+
+  it("renders shadow run gate blockers without controlled runtime success", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_migration_shadow_run") {
+        return Promise.resolve({
+          shadowRunReady: false,
+          implementationGateReport: {
+            implementationEligible: false,
+            latestDecision: null,
+            readinessReport: {
+              ready: false,
+              requiredPromotions: 3,
+              promotedCount: 1,
+              recentPromotedPilotRunIds: ["run-controlled-pilot-1"],
+              latestPromotionTimestamp: "2026-05-30T01:02:03Z",
+              sourceTargetMismatchBlockCount: 0,
+              metadataSafeEvidenceReady: true,
+              defaultChatUnchanged: true,
+              blockingReasons: ["insufficient_promotion_evidence: required 3 promotions, found 1"],
+            },
+            draftHashMatched: false,
+            approvedAfterLatestDraft: false,
+            blockingReasons: ["metadata_safe_approve_decision_missing"],
+          },
+          strategyKind: "notRun",
+          payloadKind: "notRun",
+          metadataSafeSummary: {
+            blockedBeforeRuntime: true,
+            metadataSafe: true,
+          },
+          warnings: [],
+          blockingReasons: [
+            "implementation_gate_blocked",
+            "metadata_safe_approve_decision_missing",
+          ],
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.reject(new Error("preview must not run from shadow panel"));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Shadow Run" }));
+
+    expect(await screen.findByText("Shadow blocked")).toBeInTheDocument();
+    expect(screen.getByText("implementation_gate_blocked")).toBeInTheDocument();
+    expect(screen.getByText("metadata_safe_approve_decision_missing")).toBeInTheDocument();
+    expect(screen.getByText("Strategy: notRun")).toBeInTheDocument();
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+  });
+
   it("clears stale runtime migration gate evidence when starting a new preview", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_runtime_migration_gate") {

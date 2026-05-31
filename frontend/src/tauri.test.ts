@@ -15,6 +15,7 @@ import {
   draftControlledChatMigrationPlan,
   getControlledChatMigrationReviewDecisionSummary,
   recordControlledChatMigrationReviewDecision,
+  runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
   saveChatMessage,
@@ -391,5 +392,63 @@ describe("tauri command argument aliases", () => {
     expect(result.implementationEligible).toBe(true);
     expect(result.latestDecision?.decisionKind).toBe("approve");
     expect(result.draftHashMatched).toBe(true);
+  });
+
+  it("invokes controlled chat migration shadow run as explicit non-default command", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      shadowRunReady: true,
+      shadowRunId: "run-shadow-1",
+      implementationGateReport: {
+        implementationEligible: true,
+        latestDecision: {
+          evidenceId: "ev_review_2",
+          decisionKind: "approve",
+          draftReady: true,
+          draftHash: "sha256:test-draft",
+          createdAt: "2026-05-31T02:03:04Z",
+        },
+        readinessReport: {
+          ready: true,
+          requiredPromotions: 3,
+          promotedCount: 3,
+          recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+          latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+          sourceTargetMismatchBlockCount: 0,
+          metadataSafeEvidenceReady: true,
+          defaultChatUnchanged: true,
+          blockingReasons: [],
+        },
+        draftHashMatched: true,
+        approvedAfterLatestDraft: true,
+        blockingReasons: [],
+      },
+      strategyKind: "planExecute",
+      payloadKind: "planExecute",
+      metadataSafeSummary: {
+        descriptorKind: "planning_readiness_probe",
+        allowWrites: false,
+        metadataSafe: true,
+      },
+      warnings: ["shadow runtime forced allowWrites=false"],
+      blockingReasons: [],
+    });
+
+    const result = await runControlledChatMigrationShadowRun({
+      sessionId: "session-1",
+      userInputChecksum: "sha256:raw-user-input-checksum",
+      boundedTestPromptDescriptor: "planning_readiness_probe",
+      requiredPromotions: 3,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_controlled_chat_migration_shadow_run", {
+      input: {
+        sessionId: "session-1",
+        userInputChecksum: "sha256:raw-user-input-checksum",
+        boundedTestPromptDescriptor: "planning_readiness_probe",
+        requiredPromotions: 3,
+      },
+    });
+    expect(result.shadowRunReady).toBe(true);
+    expect(result.metadataSafeSummary.allowWrites).toBe(false);
   });
 });
