@@ -23,10 +23,12 @@ import {
   getControlledPilotPromotionEvidenceSummary,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
+  runControlledChatCutoverCandidate,
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
 import type {
+  ControlledChatCutoverCandidateOutput,
   ControlledChatCutoverReadinessReport,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
@@ -55,7 +57,12 @@ const SAFE_SUMMARY_KEYS = [
   "hasHsPacket",
   "policyReasonCode",
   "descriptorKind",
+  "candidateAdapter",
+  "contractShape",
+  "candidateReady",
+  "nonDefault",
   "allowWrites",
+  "maxToolCalls",
   "metadataSafe",
   "planningOnly",
   "requiredEvidenceReady",
@@ -63,8 +70,17 @@ const SAFE_SUMMARY_KEYS = [
   "implementationEligible",
   "latestShadowReviewDecisionKind",
   "shadowRunReady",
+  "blockedBeforeRuntime",
+  "userOutputPresent",
+  "outputDigestPresent",
   "contentStorage",
   "toolStorage",
+  "chatHistoryStorage",
+  "proposalStorage",
+  "lifeModelPatchStorage",
+  "memoryStorage",
+  "evidenceStorage",
+  "mcpAuditStorage",
 ];
 const GATE_FIELDS: Array<keyof Omit<RuntimeMigrationGateReport, "blockingReasons">> = [
   "defaultChatUnchanged",
@@ -182,6 +198,10 @@ export default function MultiStrategyPreviewSection() {
   const [cutoverReadinessError, setCutoverReadinessError] = useState<string | null>(null);
   const [cutoverReadinessReport, setCutoverReadinessReport] =
     useState<ControlledChatCutoverReadinessReport | null>(null);
+  const [cutoverCandidateChecking, setCutoverCandidateChecking] = useState(false);
+  const [cutoverCandidateError, setCutoverCandidateError] = useState<string | null>(null);
+  const [cutoverCandidateResult, setCutoverCandidateResult] =
+    useState<ControlledChatCutoverCandidateOutput | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -422,6 +442,24 @@ export default function MultiStrategyPreviewSection() {
       setCutoverReadinessError(`Cutover readiness check failed: ${readableError(e)}`);
     } finally {
       setCutoverReadinessChecking(false);
+    }
+  };
+
+  const handleCutoverCandidateRun = async () => {
+    setCutoverCandidateChecking(true);
+    setCutoverCandidateError(null);
+    setCutoverCandidateResult(null);
+    try {
+      const result = await runControlledChatCutoverCandidate({
+        sessionId: `settings-cutover-candidate-${Date.now()}`,
+        boundedTestPromptDescriptor: "default_contract_probe",
+        requiredPromotions: 3,
+      });
+      setCutoverCandidateResult(result);
+    } catch (e) {
+      setCutoverCandidateError(`Cutover candidate failed: ${readableError(e)}`);
+    } finally {
+      setCutoverCandidateChecking(false);
     }
   };
 
@@ -1841,6 +1879,149 @@ export default function MultiStrategyPreviewSection() {
           </div>
         ) : (
           <div className="mt-3 text-xs text-stone-500">No cutover readiness report loaded.</div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Cutover Candidate</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Non-default controlled Chat cutover candidate. It first checks W30 readiness, then
+              runs one write-disabled runtime probe for contract-shape validation only. It cannot
+              save to Chat, promote output, or switch default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleCutoverCandidateRun}
+            disabled={cutoverCandidateChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              cutoverCandidateChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <Play size={13} />
+            {cutoverCandidateChecking ? "Running..." : "Run Cutover Candidate"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          Uses a bounded descriptor instead of raw prompt text. The backend forces allowWrites=false
+          and maxToolCalls=0, and only a metadata-safe AgentRun audit may be created.
+        </div>
+
+        {cutoverCandidateError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {cutoverCandidateError}
+          </div>
+        )}
+
+        {cutoverCandidateResult ? (
+          <div className="mt-4 space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={classNames(
+                  "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                  cutoverCandidateResult.candidateReady
+                    ? "bg-emerald-100 text-emerald-800"
+                    : "bg-red-100 text-red-700"
+                )}
+              >
+                {cutoverCandidateResult.candidateReady ? (
+                  <CheckCircle2 size={13} />
+                ) : (
+                  <XCircle size={13} />
+                )}
+                {cutoverCandidateResult.candidateReady ? "Candidate ready" : "Candidate blocked"}
+              </span>
+              <span
+                className={classNames(
+                  "rounded-full px-2.5 py-1 text-xs font-medium",
+                  cutoverCandidateResult.contractShape === "send_message_compatible"
+                    ? "bg-emerald-50 text-emerald-700"
+                    : "bg-red-50 text-red-700"
+                )}
+              >
+                {cutoverCandidateResult.contractShape}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2.5 py-1 font-mono text-xs font-medium text-stone-700">
+                {cutoverCandidateResult.candidateRunId ?? "no candidate audit"}
+              </span>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Output preview</div>
+                <div className="mt-1 text-xs text-stone-700">
+                  {cutoverCandidateResult.outputPreview ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">User output</div>
+                <div className="mt-1 text-xs text-stone-700">
+                  {cutoverCandidateResult.userOutput ? "returned to UI only" : "none"}
+                </div>
+              </div>
+            </div>
+
+            {safeSummaryEntries(cutoverCandidateResult.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(cutoverCandidateResult.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Warnings</div>
+              {cutoverCandidateResult.warnings.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {cutoverCandidateResult.warnings.map(warning => (
+                    <div
+                      key={warning}
+                      className="rounded-md border border-amber-100 bg-amber-50 px-2 py-1 text-xs text-amber-800"
+                    >
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No cutover candidate warnings.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {cutoverCandidateResult.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {cutoverCandidateResult.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No cutover candidate blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No cutover candidate result loaded.</div>
         )}
       </section>
 

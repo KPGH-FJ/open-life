@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W30 completion/status index. This is not a second roadmap.
+   - Compact W1-W31 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W30 through sustained Runtime Migration
+Current implementation has completed W1-W31 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -51,11 +51,11 @@ read-only promotion readiness gate, and a reviewed migration plan draft
 generator plus metadata-safe manual migration review decision evidence and a
 read-only implementation gate plus a non-default controlled migration shadow
 run plus metadata-safe manual shadow review evidence and a read-only cutover
-planning readiness gate. The next practical
-sequence is:
+planning readiness gate plus a non-default cutover candidate adapter for Chat
+contract-shape validation. The next practical sequence is:
 
 ```text
-use cutover readiness only for implementation discussion; default Chat remains unchanged
+use cutover candidate only for explicit non-default contract validation; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -64,7 +64,7 @@ use cutover readiness only for implementation discussion; default Chat remains u
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W30 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W31 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -208,6 +208,21 @@ blockers. It must not create AgentRuns, Evidence, Proposals, Memory writes,
 LifeModel patches, MCP audit rows, or chat messages; it must not run ReAct,
 PlanExecute, preview, or shadow run. W30 is cutover planning readiness for
 implementation discussion, not default Chat migration.
+
+W31 adds only `run_controlled_chat_cutover_candidate` and the Settings Cutover
+Candidate panel. The command first calls W30 cutover readiness; if it is not
+eligible, W31 returns blocked output and must not execute runtime. Only after
+W30 is eligible may it run one non-default controlled runtime candidate with
+`allowWrites=false`, `maxToolCalls=0`, no proposal apply, no Memory write, no
+LifeModel patch, and no external write. The result is for Chat contract-shape
+validation only: `candidateReady`, `candidateRunId`, `outputPreview` or
+`userOutput`, `contractShape`, metadata-safe summary, warnings, and blockers.
+It may create a metadata-safe `controlled_chat_cutover_candidate` AgentRun
+audit, but must not save raw user prompt, raw assistant output, tool payload,
+Chat message, Proposal, Memory, LifeModel patch, Evidence, MCP audit, or
+external tool result. Default Send, `send_message`, and
+`start_stream_message` must not call this command. W31 is a non-default
+candidate adapter, not default Chat migration.
 
 ## 6. Agent Rules
 

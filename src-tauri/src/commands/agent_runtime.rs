@@ -338,6 +338,34 @@ pub struct ControlledChatCutoverReadinessReport {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateInput {
+    pub session_id: String,
+    #[serde(default)]
+    pub user_input_checksum: Option<String>,
+    #[serde(default)]
+    pub bounded_test_prompt_descriptor: Option<String>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateOutput {
+    pub candidate_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_output: Option<String>,
+    pub contract_shape: String,
+    pub metadata_safe_summary: Value,
+    pub warnings: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -1342,6 +1370,153 @@ pub(crate) async fn check_controlled_chat_cutover_readiness_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn run_controlled_chat_cutover_candidate(
+    input: ControlledChatCutoverCandidateInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatCutoverCandidateOutput, String> {
+    run_controlled_chat_cutover_candidate_with_state(input, &state.inner().clone()).await
+}
+
+pub(crate) async fn run_controlled_chat_cutover_candidate_with_state(
+    input: ControlledChatCutoverCandidateInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatCutoverCandidateOutput, String> {
+    let normalized = normalize_cutover_candidate_input(input)?;
+    let readiness = check_controlled_chat_cutover_readiness_with_state(
+        ControlledChatCutoverReadinessInput {
+            required_promotions: normalized.required_promotions,
+            session_id: Some(normalized.session_id.clone()),
+        },
+        state,
+    )
+    .await?;
+
+    if !readiness.cutover_planning_eligible {
+        let mut blocking_reasons = vec!["cutover_readiness_not_eligible".to_string()];
+        for reason in &readiness.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+        return Ok(ControlledChatCutoverCandidateOutput {
+            candidate_ready: false,
+            candidate_run_id: None,
+            output_preview: Some("Candidate blocked before runtime".into()),
+            user_output: None,
+            contract_shape: "blocked".into(),
+            metadata_safe_summary: cutover_candidate_blocked_summary(
+                &normalized.descriptor_kind,
+                normalized.user_input_checksum.as_deref(),
+            ),
+            warnings: Vec::new(),
+            blocking_reasons,
+        });
+    }
+
+    let mut candidate_run = new_cutover_candidate_agent_run(
+        &normalized.session_id,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+    );
+    let candidate_run_id = candidate_run.id.clone();
+    create_cutover_candidate_run(state, &candidate_run).await?;
+
+    let runtime_input = MultiStrategyAgentPreviewInput {
+        session_id: normalized.session_id.clone(),
+        user_text: cutover_candidate_prompt_for_descriptor(&normalized.descriptor_kind).into(),
+        tools_prompt: "No developer tools catalog supplied for this cutover candidate.".into(),
+        allow_planning: false,
+        local_model_available: true,
+        layer: Some("L2".into()),
+        execution_budget: Some(MultiStrategyAgentPreviewExecutionBudgetInput {
+            max_steps: Some(2),
+            max_tool_calls: Some(0),
+            timeout_seconds: Some(30),
+            allow_cloud: Some(false),
+            allow_writes: Some(false),
+        }),
+    };
+
+    let execution =
+        execute_multi_strategy_agent_preview(runtime_input, state, &candidate_run_id).await;
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            let safe_error = metadata_safe_cutover_candidate_error(&error);
+            fail_cutover_candidate_run(state, &mut candidate_run, &safe_error).await;
+            return Ok(ControlledChatCutoverCandidateOutput {
+                candidate_ready: false,
+                candidate_run_id: Some(candidate_run_id),
+                output_preview: Some("Candidate failed before contract validation".into()),
+                user_output: None,
+                contract_shape: "failed".into(),
+                metadata_safe_summary: cutover_candidate_failed_summary(
+                    &normalized.descriptor_kind,
+                    normalized.user_input_checksum.as_deref(),
+                    &safe_error,
+                ),
+                warnings: vec!["candidate runtime failed before contract validation".into()],
+                blocking_reasons: vec![safe_error],
+            });
+        }
+    };
+
+    let contract_shape = cutover_candidate_contract_shape(&execution.output).to_string();
+    let candidate_ready = contract_shape == "send_message_compatible";
+    let user_output = cutover_candidate_user_output(&execution.output);
+    let output_preview = cutover_candidate_output_label(&execution.output);
+    let mut warnings = preview_output_warnings(&execution.output, &execution.warnings);
+    push_unique_string(
+        &mut warnings,
+        "candidate runtime forced allowWrites=false".to_string(),
+    );
+    let blocking_reasons = cutover_candidate_contract_blockers(&execution.output, &contract_shape);
+    let output_digest = user_output
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(sha256_metadata_checksum);
+    let metadata_safe_summary = cutover_candidate_metadata_safe_summary(
+        &execution.output,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+        &contract_shape,
+        candidate_ready,
+        output_digest.as_deref(),
+    );
+    let audit = cutover_candidate_audit_summary(
+        &execution.output,
+        &warnings,
+        &normalized.descriptor_kind,
+        normalized.user_input_checksum.as_deref(),
+        &contract_shape,
+        candidate_ready,
+        output_digest.as_deref(),
+    );
+
+    complete_cutover_candidate_run(
+        state,
+        &mut candidate_run,
+        CutoverCandidateRunCompletion {
+            audit,
+            warnings: warnings.clone(),
+            context_summary: execution.context_summary,
+            hs_selection_audit: execution.hs_selection_audit,
+            behavior_checks: execution.behavior_checks,
+        },
+    )
+    .await?;
+
+    Ok(ControlledChatCutoverCandidateOutput {
+        candidate_ready,
+        candidate_run_id: Some(candidate_run_id),
+        output_preview: Some(output_preview),
+        user_output,
+        contract_shape,
+        metadata_safe_summary,
+        warnings,
+        blocking_reasons,
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -1355,6 +1530,13 @@ struct NormalizedPromotionEvidenceInput {
 }
 
 struct NormalizedShadowRunInput {
+    session_id: String,
+    user_input_checksum: Option<String>,
+    descriptor_kind: String,
+    required_promotions: Option<usize>,
+}
+
+struct NormalizedCutoverCandidateInput {
     session_id: String,
     user_input_checksum: Option<String>,
     descriptor_kind: String,
@@ -1448,6 +1630,37 @@ fn normalize_shadow_run_input(
     };
 
     Ok(NormalizedShadowRunInput {
+        session_id,
+        user_input_checksum,
+        descriptor_kind,
+        required_promotions: input.required_promotions,
+    })
+}
+
+fn normalize_cutover_candidate_input(
+    input: ControlledChatCutoverCandidateInput,
+) -> Result<NormalizedCutoverCandidateInput, String> {
+    let session_id = safe_internal_id(&input.session_id, "sessionId")?;
+    let user_input_checksum = input
+        .user_input_checksum
+        .as_deref()
+        .map(|value| safe_checksum_field(value, "userInputChecksum"))
+        .transpose()?;
+    let descriptor_kind = match input
+        .bounded_test_prompt_descriptor
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => safe_enum_value(
+            value,
+            "boundedTestPromptDescriptor",
+            &["default_contract_probe", "concise_response_probe"],
+        )?,
+        None => "default_contract_probe".into(),
+    };
+
+    Ok(NormalizedCutoverCandidateInput {
         session_id,
         user_input_checksum,
         descriptor_kind,
@@ -1947,6 +2160,171 @@ fn cutover_readiness_metadata_safe_summary(
     })
 }
 
+fn cutover_candidate_blocked_summary(
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+) -> Value {
+    json!({
+        "candidateAdapter": "controlled_chat_cutover_candidate",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "candidateReady": false,
+        "contractShape": "blocked",
+        "blockedBeforeRuntime": true,
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "metadataSafe": true,
+        "nonDefault": true,
+        "defaultChatUnchanged": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+    })
+}
+
+fn cutover_candidate_failed_summary(
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+    safe_error: &str,
+) -> Value {
+    json!({
+        "candidateAdapter": "controlled_chat_cutover_candidate",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "candidateReady": false,
+        "contractShape": "failed",
+        "candidateErrorCode": cutover_candidate_error_code(safe_error),
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "metadataSafe": true,
+        "nonDefault": true,
+        "defaultChatUnchanged": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+    })
+}
+
+fn cutover_candidate_metadata_safe_summary(
+    output: &MultiStrategyRuntimeOutput,
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+    contract_shape: &str,
+    candidate_ready: bool,
+    output_digest: Option<&str>,
+) -> Value {
+    let metadata = &output.selection.metadata_safe_summary;
+    let governance_decision_kind = output
+        .selection
+        .governance_decision
+        .as_ref()
+        .map(|decision| preview_governance_decision_kind(decision.kind))
+        .unwrap_or("unknown");
+    json!({
+        "candidateAdapter": "controlled_chat_cutover_candidate",
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "contractShape": contract_shape,
+        "candidateReady": candidate_ready,
+        "strategyKind": preview_strategy_kind(output.selection.kind),
+        "payloadKind": preview_payload_kind(&output.payload),
+        "governanceDecisionKind": governance_decision_kind,
+        "taskKind": metadata.get("taskKind").and_then(Value::as_str).unwrap_or("unknown"),
+        "reasonCode": metadata.get("reasonCode").and_then(Value::as_str).unwrap_or("unknown"),
+        "riskLevel": metadata.get("riskLevel").and_then(Value::as_str).unwrap_or("unknown"),
+        "hasHsPacket": metadata.get("hasHsPacket").and_then(Value::as_bool).unwrap_or(false),
+        "planStepCount": preview_plan_step_count(&output.payload),
+        "proposalIdCount": preview_proposal_ids(&output.payload).len(),
+        "blocked": matches!(output.payload, MultiStrategyRuntimePayload::Blocked),
+        "userOutputPresent": cutover_candidate_user_output(output).is_some(),
+        "outputDigestPresent": output_digest.is_some(),
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "metadataSafe": true,
+        "nonDefault": true,
+        "defaultChatUnchanged": true,
+        "proposalApply": false,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+    })
+}
+
+fn cutover_candidate_audit_summary(
+    output: &MultiStrategyRuntimeOutput,
+    warnings: &[String],
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+    contract_shape: &str,
+    candidate_ready: bool,
+    output_digest: Option<&str>,
+) -> Value {
+    let mut write_control = preview_write_control(&output.payload);
+    if let Some(map) = write_control.as_object_mut() {
+        map.insert("allowWrites".into(), Value::Bool(false));
+    }
+    let metadata = cutover_candidate_metadata_safe_summary(
+        output,
+        descriptor_kind,
+        user_input_checksum,
+        contract_shape,
+        candidate_ready,
+        output_digest,
+    );
+    json!({
+        "candidateAdapter": "controlled_chat_cutover_candidate",
+        "strategyKind": metadata["strategyKind"],
+        "payloadKind": metadata["payloadKind"],
+        "contractShape": contract_shape,
+        "candidateReady": candidate_ready,
+        "governanceDecisionKind": metadata["governanceDecisionKind"],
+        "taskKind": metadata["taskKind"],
+        "reasonCode": metadata["reasonCode"],
+        "riskLevel": metadata["riskLevel"],
+        "hasHsPacket": metadata["hasHsPacket"],
+        "descriptorKind": descriptor_kind,
+        "userInputChecksumPresent": user_input_checksum.is_some(),
+        "planStepCount": metadata["planStepCount"],
+        "planStepStatuses": preview_plan_step_statuses(&output.payload),
+        "proposalIdCount": metadata["proposalIdCount"],
+        "blocked": metadata["blocked"],
+        "userOutputPresent": metadata["userOutputPresent"],
+        "outputDigest": output_digest,
+        "warnings": warnings,
+        "metadataSafe": true,
+        "nonDefault": true,
+        "defaultChatUnchanged": true,
+        "runtimeLimits": {
+            "allowWrites": false,
+            "maxToolCalls": 0
+        },
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+        "evidenceStorage": "none",
+        "mcpAuditStorage": "none",
+        "writeControl": write_control,
+    })
+}
+
 fn shadow_review_decision_evidence_is_metadata_safe(
     record: &openlife_core::agent::EvidenceRecord,
 ) -> bool {
@@ -2258,6 +2636,108 @@ fn shadow_prompt_for_descriptor(descriptor_kind: &str) -> &'static str {
     }
 }
 
+fn cutover_candidate_prompt_for_descriptor(descriptor_kind: &str) -> &'static str {
+    match descriptor_kind {
+        "concise_response_probe" => "Provide a concise default Chat compatible response.",
+        "default_contract_probe" => {
+            "Provide a concise default Chat compatible response for a controlled runtime probe."
+        }
+        _ => "Provide a concise default Chat compatible response for a controlled runtime probe.",
+    }
+}
+
+fn cutover_candidate_user_output(output: &MultiStrategyRuntimeOutput) -> Option<String> {
+    match &output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output)
+            if !runtime_output.user_output.trim().is_empty() =>
+        {
+            Some(runtime_output.user_output.clone())
+        }
+        MultiStrategyRuntimePayload::ReAct(_)
+        | MultiStrategyRuntimePayload::PlanExecute(_)
+        | MultiStrategyRuntimePayload::Blocked => None,
+    }
+}
+
+fn cutover_candidate_contract_shape(output: &MultiStrategyRuntimeOutput) -> &'static str {
+    match &output.payload {
+        MultiStrategyRuntimePayload::ReAct(runtime_output)
+            if !runtime_output.user_output.trim().is_empty()
+                && runtime_output.proposal_ids.is_empty() =>
+        {
+            "send_message_compatible"
+        }
+        MultiStrategyRuntimePayload::Blocked => "blocked",
+        MultiStrategyRuntimePayload::ReAct(_) | MultiStrategyRuntimePayload::PlanExecute(_) => {
+            "failed"
+        }
+    }
+}
+
+fn cutover_candidate_contract_blockers(
+    output: &MultiStrategyRuntimeOutput,
+    contract_shape: &str,
+) -> Vec<String> {
+    let mut blocking_reasons = Vec::new();
+    match &output.payload {
+        MultiStrategyRuntimePayload::Blocked => {
+            push_unique_string(&mut blocking_reasons, "candidate_runtime_blocked".into());
+        }
+        MultiStrategyRuntimePayload::PlanExecute(_) => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "candidate_runtime_returned_non_chat_payload".into(),
+            );
+        }
+        MultiStrategyRuntimePayload::ReAct(runtime_output) => {
+            if runtime_output.user_output.trim().is_empty() {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "candidate_user_output_missing".into(),
+                );
+            }
+            if !runtime_output.proposal_ids.is_empty() {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "candidate_proposal_ids_present".into(),
+                );
+            }
+        }
+    }
+
+    let write_control = preview_write_control(&output.payload);
+    let declared_write_step_count = write_control
+        .get("declaredWriteStepCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let proposal_required_step_count = write_control
+        .get("proposalRequiredStepCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if declared_write_step_count > 0 || proposal_required_step_count > 0 {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_write_or_proposal_step_present".into(),
+        );
+    }
+    if contract_shape == "failed" && blocking_reasons.is_empty() {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_contract_shape_failed".into(),
+        );
+    }
+
+    blocking_reasons
+}
+
+fn cutover_candidate_output_label(output: &MultiStrategyRuntimeOutput) -> String {
+    format!(
+        "Cutover candidate: {} / {}",
+        preview_strategy_kind(output.selection.kind),
+        preview_payload_kind(&output.payload)
+    )
+}
+
 fn metadata_safe_shadow_error(error: &str) -> String {
     format!(
         "controlled migration shadow run failed: {}",
@@ -2453,6 +2933,14 @@ struct ShadowRunCompletion {
     behavior_checks: Vec<HSBehaviorCheckSummary>,
 }
 
+struct CutoverCandidateRunCompletion {
+    audit: Value,
+    warnings: Vec<String>,
+    context_summary: ContextSummary,
+    hs_selection_audit: Option<HSSelectionAudit>,
+    behavior_checks: Vec<HSBehaviorCheckSummary>,
+}
+
 async fn execute_multi_strategy_agent_preview(
     input: MultiStrategyAgentPreviewInput,
     state: &Arc<AppState>,
@@ -2619,6 +3107,46 @@ fn new_shadow_agent_run(
     run
 }
 
+fn new_cutover_candidate_agent_run(
+    session_id: &str,
+    descriptor_kind: &str,
+    user_input_checksum: Option<&str>,
+) -> AgentRun {
+    let mut run = AgentRun::new_chat_run(session_id, "");
+    run.user_input = None;
+    run.reasoning_strategy = Some("controlled_chat_cutover_candidate".into());
+    run.output_preview = Some("Controlled chat cutover candidate started".into());
+    run.context_summary = Some(ContextSummary {
+        life_model_empty: false,
+        included_life_model_sections: Vec::new(),
+        memory_hit_count: 0,
+        memory_sources: Vec::new(),
+        used_tools_prompt: false,
+        redaction_applied: true,
+        redaction_level: RedactionLevel::Strict,
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(json!({
+            "candidateAdapter": "controlled_chat_cutover_candidate",
+            "descriptorKind": descriptor_kind,
+            "userInputChecksumPresent": user_input_checksum.is_some(),
+            "status": "started",
+            "allowWrites": false,
+            "maxToolCalls": 0,
+            "metadataSafe": true,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+        })),
+        output: Some("controlled_chat_cutover_candidate".into()),
+        ..ReasoningTrace::default()
+    });
+    run
+}
+
 async fn create_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -2639,6 +3167,17 @@ async fn create_shadow_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), 
     store
         .create_run(run)
         .map_err(|e| format!("failed to create shadow AgentRun: {e}"))
+}
+
+async fn create_cutover_candidate_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for cutover candidate runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .create_run(run)
+        .map_err(|e| format!("failed to create cutover candidate AgentRun: {e}"))
 }
 
 async fn complete_preview_run(
@@ -2708,6 +3247,40 @@ async fn complete_shadow_run(
     update_shadow_run(state, run).await
 }
 
+async fn complete_cutover_candidate_run(
+    state: &Arc<AppState>,
+    run: &mut AgentRun,
+    completion: CutoverCandidateRunCompletion,
+) -> Result<(), String> {
+    run.status = AgentRunStatus::Completed;
+    run.finished_at = Some(chrono::Utc::now());
+    run.generated_proposals = Vec::new();
+    run.warnings = completion.warnings;
+    run.hs_selection_audit = completion.hs_selection_audit;
+    run.behavior_checks = completion.behavior_checks;
+    run.output_preview = Some(cutover_candidate_audit_output_label(&completion.audit));
+    run.step_count = completion
+        .audit
+        .get("planStepCount")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default() as u32;
+    run.tool_call_count = 0;
+    run.context_summary = Some(completion.context_summary);
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(completion.audit),
+        output: Some("controlled_chat_cutover_candidate".into()),
+        stable_steps: vec![
+            "cutover_readiness_check".into(),
+            "candidate_strategy_selection".into(),
+            "send_message_contract_shape_validation".into(),
+            "metadata_safe_audit".into(),
+        ],
+        ..ReasoningTrace::default()
+    });
+
+    update_cutover_candidate_run(state, run).await
+}
+
 async fn fail_preview_run(state: &Arc<AppState>, run: &mut AgentRun, error: &str) {
     run.fail(AgentRunError {
         message: metadata_safe_preview_error(error),
@@ -2764,6 +3337,44 @@ async fn fail_shadow_run(state: &Arc<AppState>, run: &mut AgentRun, safe_error: 
     }
 }
 
+async fn fail_cutover_candidate_run(state: &Arc<AppState>, run: &mut AgentRun, safe_error: &str) {
+    run.fail(AgentRunError {
+        message: safe_error.to_string(),
+        phase: "controlled_chat_cutover_candidate_failed".into(),
+        recoverable: false,
+    });
+    run.user_input = None;
+    run.reasoning_strategy = Some("controlled_chat_cutover_candidate".into());
+    let audit = json!({
+        "candidateAdapter": "controlled_chat_cutover_candidate",
+        "status": "failed",
+        "errorCode": cutover_candidate_error_code(safe_error),
+        "contractShape": "failed",
+        "allowWrites": false,
+        "maxToolCalls": 0,
+        "metadataSafe": true,
+        "contentStorage": "none",
+        "toolStorage": "none",
+        "chatHistoryStorage": "none",
+        "proposalStorage": "none",
+        "lifeModelPatchStorage": "none",
+        "memoryStorage": "none",
+    });
+    run.reasoning_trace = Some(ReasoningTrace {
+        strategy_result: Some(audit),
+        output: Some("controlled_chat_cutover_candidate_failed".into()),
+        ..ReasoningTrace::default()
+    });
+    run.output_preview = Some("Controlled chat cutover candidate failed".into());
+
+    if let Err(e) = update_cutover_candidate_run(state, run).await {
+        log::warn!(
+            "[AgentRun] failed to update cutover candidate run after error: {}",
+            e
+        );
+    }
+}
+
 async fn update_preview_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
     let store_arc = state
         .agent_run_store
@@ -2784,6 +3395,17 @@ async fn update_shadow_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), 
     store
         .update_run(run)
         .map_err(|e| format!("failed to update shadow AgentRun: {e}"))
+}
+
+async fn update_cutover_candidate_run(state: &Arc<AppState>, run: &AgentRun) -> Result<(), String> {
+    let store_arc = state
+        .agent_run_store
+        .as_ref()
+        .ok_or_else(|| "AgentRun store not available for cutover candidate runtime".to_string())?;
+    let store = store_arc.lock().await;
+    store
+        .update_run(run)
+        .map_err(|e| format!("failed to update cutover candidate AgentRun: {e}"))
 }
 
 fn metadata_safe_preview_error(error: &str) -> String {
@@ -2807,6 +3429,27 @@ fn preview_error_code(error: &str) -> &'static str {
     }
 }
 
+fn metadata_safe_cutover_candidate_error(error: &str) -> String {
+    format!(
+        "controlled chat cutover candidate failed: {}",
+        cutover_candidate_error_code(error)
+    )
+}
+
+fn cutover_candidate_error_code(error: &str) -> &'static str {
+    if error.contains("unsupported preview runtime layer") {
+        "invalid_candidate_layer"
+    } else if error.contains("failed to load LifeModel") {
+        "lifemodel_load_failed"
+    } else if error.contains("HS runtime packet build failed") {
+        "hs_packet_build_failed"
+    } else if error.contains("multi-strategy preview runtime failed") {
+        "multi_strategy_runtime_failed"
+    } else {
+        "candidate_runtime_failed"
+    }
+}
+
 fn shadow_output_label(audit: &Value) -> String {
     let strategy = audit
         .get("strategyKind")
@@ -2817,6 +3460,18 @@ fn shadow_output_label(audit: &Value) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
     format!("Controlled migration shadow run: {strategy} / {payload}")
+}
+
+fn cutover_candidate_audit_output_label(audit: &Value) -> String {
+    let strategy = audit
+        .get("strategyKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    let payload = audit
+        .get("payloadKind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown");
+    format!("Cutover candidate: {strategy} / {payload}")
 }
 
 fn preview_output_label(audit: &Value) -> String {
@@ -5393,6 +6048,174 @@ mod tests {
         assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
         assert_eq!(before.model_version, after.model_version);
         assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_blocks_when_w30_readiness_is_not_eligible_without_runtime() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let output = run_controlled_chat_cutover_candidate_with_state(
+            ControlledChatCutoverCandidateInput {
+                session_id: "session-candidate-blocked".into(),
+                bounded_test_prompt_descriptor: Some("default_contract_probe".into()),
+                user_input_checksum: Some("sha256:candidate-input".into()),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!output.candidate_ready);
+        assert!(output.candidate_run_id.is_none());
+        assert_eq!(output.contract_shape, "blocked");
+        assert_eq!(
+            output.output_preview.as_deref(),
+            Some("Candidate blocked before runtime")
+        );
+        assert!(output.user_output.is_none());
+        assert!(output
+            .blocking_reasons
+            .contains(&"cutover_readiness_not_eligible".to_string()));
+        assert_eq!(output.metadata_safe_summary["blockedBeforeRuntime"], true);
+        assert_eq!(output.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(output.metadata_safe_summary["allowWrites"], false);
+        assert_eq!(output.metadata_safe_summary["maxToolCalls"], 0);
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_runs_only_when_w30_eligible_and_writes_metadata_safe_audit() {
+        let state = preview_state().await;
+        seed_ready_migration_review_promotions(&state).await;
+        record_controlled_chat_migration_review_decision_with_state(
+            ControlledChatMigrationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let run = completed_shadow_review_run("run-shadow-cutover-candidate-ready");
+        insert_shadow_review_run(&state, &run).await;
+        record_controlled_chat_migration_shadow_review_decision_with_state(
+            ControlledChatMigrationShadowReviewDecisionInput {
+                shadow_run_id: "run-shadow-cutover-candidate-ready".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let output = run_controlled_chat_cutover_candidate_with_state(
+            ControlledChatCutoverCandidateInput {
+                session_id: "session-candidate-ready".into(),
+                bounded_test_prompt_descriptor: Some("default_contract_probe".into()),
+                user_input_checksum: Some("sha256:candidate-input".into()),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(output.candidate_ready);
+        assert_eq!(output.contract_shape, "send_message_compatible");
+        assert!(output.candidate_run_id.is_some());
+        assert!(output
+            .user_output
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()));
+        assert!(output
+            .output_preview
+            .as_deref()
+            .is_some_and(|value| value.starts_with("Cutover candidate: ")));
+        assert!(output.blocking_reasons.is_empty());
+        assert_eq!(
+            output.metadata_safe_summary["candidateAdapter"],
+            "controlled_chat_cutover_candidate"
+        );
+        assert_eq!(output.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(output.metadata_safe_summary["nonDefault"], true);
+        assert_eq!(output.metadata_safe_summary["allowWrites"], false);
+        assert_eq!(output.metadata_safe_summary["maxToolCalls"], 0);
+        assert_eq!(output.metadata_safe_summary["chatHistoryStorage"], "none");
+        assert_eq!(output.metadata_safe_summary["proposalStorage"], "none");
+        assert_eq!(output.metadata_safe_summary["memoryStorage"], "none");
+        assert!(output
+            .warnings
+            .contains(&"candidate runtime forced allowWrites=false".to_string()));
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count + 1, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+
+        let candidate_run = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store
+                .get_run(output.candidate_run_id.as_deref().unwrap())
+                .unwrap()
+                .expect("candidate AgentRun audit should be persisted")
+        };
+        assert_eq!(candidate_run.status, AgentRunStatus::Completed);
+        assert_eq!(
+            candidate_run.reasoning_strategy.as_deref(),
+            Some("controlled_chat_cutover_candidate")
+        );
+        assert_eq!(candidate_run.user_input, None);
+        assert!(candidate_run.actions.is_empty());
+        assert!(candidate_run.observations.is_empty());
+        assert_eq!(candidate_run.tool_call_count, 0);
+        assert!(candidate_run.generated_proposals.is_empty());
+
+        let audit = preview_audit(&candidate_run);
+        assert_eq!(
+            audit["candidateAdapter"],
+            "controlled_chat_cutover_candidate"
+        );
+        assert_eq!(audit["metadataSafe"], true);
+        assert_eq!(audit["writeControl"]["allowWrites"], false);
+        assert_eq!(audit["runtimeLimits"]["maxToolCalls"], 0);
+        assert_eq!(audit["contentStorage"], "none");
+        assert_eq!(audit["toolStorage"], "none");
+        assert_eq!(audit["chatHistoryStorage"], "none");
+        assert_eq!(audit["proposalStorage"], "none");
+        assert_eq!(audit["lifeModelPatchStorage"], "none");
+        assert_eq!(audit["memoryStorage"], "none");
+
+        let serialized_output = serde_json::to_string(&output).unwrap();
+        let serialized_run = serde_json::to_string(&candidate_run).unwrap();
+        assert!(!serialized_run.contains(output.user_output.as_deref().unwrap()));
+        for serialized in [serialized_output, serialized_run] {
+            assert!(!serialized.contains("raw user"));
+            assert!(!serialized.contains("rawUserInput"));
+            assert!(!serialized.contains("raw assistant"));
+            assert!(!serialized.contains("rawAssistantOutput"));
+            assert!(!serialized.contains("toolPayload"));
+            assert!(!serialized.contains("full tool payload"));
+            assert!(!serialized.contains("Provide a concise default Chat contract response"));
+            assert!(!serialized.contains("Candidate-only answer"));
+        }
     }
 
     #[tokio::test]

@@ -487,6 +487,33 @@ export interface ControlledChatCutoverReadinessReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export type ControlledChatCutoverCandidateDescriptor =
+  | "default_contract_probe"
+  | "concise_response_probe";
+
+export type ControlledChatCutoverCandidateContractShape =
+  | "send_message_compatible"
+  | "blocked"
+  | "failed";
+
+export interface ControlledChatCutoverCandidateInput {
+  sessionId: string;
+  userInputChecksum?: string;
+  boundedTestPromptDescriptor?: ControlledChatCutoverCandidateDescriptor;
+  requiredPromotions?: number;
+}
+
+export interface ControlledChatCutoverCandidateOutput {
+  candidateReady: boolean;
+  candidateRunId?: string | null;
+  outputPreview?: string | null;
+  userOutput?: string | null;
+  contractShape: ControlledChatCutoverCandidateContractShape;
+  metadataSafeSummary: Record<string, unknown>;
+  warnings: string[];
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

@@ -23,6 +23,8 @@ import type {
   ControlledChatMigrationImplementationGateReport,
   ControlledChatCutoverReadinessInput,
   ControlledChatCutoverReadinessReport,
+  ControlledChatCutoverCandidateInput,
+  ControlledChatCutoverCandidateOutput,
   ControlledChatMigrationShadowRunInput,
   ControlledChatMigrationShadowRunOutput,
   ControlledChatMigrationShadowReviewDecisionInput,
@@ -351,6 +353,14 @@ export async function checkControlledChatCutoverReadiness(
     "check_controlled_chat_cutover_readiness",
     { input }
   );
+}
+
+export async function runControlledChatCutoverCandidate(
+  input: ControlledChatCutoverCandidateInput
+): Promise<ControlledChatCutoverCandidateOutput> {
+  return safeInvoke<ControlledChatCutoverCandidateOutput>("run_controlled_chat_cutover_candidate", {
+    input,
+  });
 }
 
 export async function startStreamMessage(

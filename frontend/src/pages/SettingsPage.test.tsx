@@ -1191,6 +1191,104 @@ describe("SettingsPage", () => {
     ).toBe(false);
   });
 
+  it("runs cutover candidate explicitly and renders contract-shaped metadata", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_cutover_candidate") {
+        return Promise.resolve({
+          candidateReady: true,
+          candidateRunId: "run-candidate-settings-1",
+          outputPreview: "Cutover candidate: react / react",
+          userOutput: "Candidate-only answer",
+          contractShape: "send_message_compatible",
+          metadataSafeSummary: {
+            candidateAdapter: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            nonDefault: true,
+            allowWrites: false,
+            maxToolCalls: 0,
+            chatHistoryStorage: "none",
+            proposalStorage: "none",
+            memoryStorage: "none",
+            rawOutput: "must not render",
+          },
+          warnings: ["candidate runtime forced allowWrites=false"],
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Cutover Candidate")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Run Cutover Candidate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_controlled_chat_cutover_candidate", {
+        input: expect.objectContaining({
+          boundedTestPromptDescriptor: "default_contract_probe",
+          requiredPromotions: 3,
+        }),
+      });
+    });
+
+    expect(await screen.findByText("Candidate ready")).toBeInTheDocument();
+    expect(screen.getByText("send_message_compatible")).toBeInTheDocument();
+    expect(screen.getByText("run-candidate-settings-1")).toBeInTheDocument();
+    expect(screen.getByText("Cutover candidate: react / react")).toBeInTheDocument();
+    expect(screen.getByText("candidate runtime forced allowWrites=false")).toBeInTheDocument();
+    expect(screen.getByText("allowWrites: false")).toBeInTheDocument();
+    expect(screen.getByText("maxToolCalls: 0")).toBeInTheDocument();
+    expect(screen.getByText("chatHistoryStorage: none")).toBeInTheDocument();
+    expect(screen.getByText("No cutover candidate blockers returned.")).toBeInTheDocument();
+    expect(screen.queryByText("must not render")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+  });
+
+  it("renders cutover candidate blocked state without runtime success UI", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_cutover_candidate") {
+        return Promise.resolve({
+          candidateReady: false,
+          candidateRunId: null,
+          outputPreview: "Candidate blocked before runtime",
+          userOutput: null,
+          contractShape: "blocked",
+          metadataSafeSummary: {
+            candidateAdapter: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            blockedBeforeRuntime: true,
+            allowWrites: false,
+            maxToolCalls: 0,
+          },
+          warnings: [],
+          blockingReasons: ["cutover_readiness_not_eligible"],
+        });
+      }
+      if (cmd === "run_multi_strategy_agent_preview") {
+        return Promise.reject(new Error("blocked candidate must not call preview command"));
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Cutover Candidate" }));
+
+    expect(await screen.findByText("Candidate blocked")).toBeInTheDocument();
+    expect(screen.getByText("blocked")).toBeInTheDocument();
+    expect(screen.getByText("Candidate blocked before runtime")).toBeInTheDocument();
+    expect(screen.getByText("cutover_readiness_not_eligible")).toBeInTheDocument();
+    expect(screen.queryByText("Candidate ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("send_message_compatible")).not.toBeInTheDocument();
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
+    ).toBe(false);
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

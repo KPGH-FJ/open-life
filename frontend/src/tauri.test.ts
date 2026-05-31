@@ -18,6 +18,7 @@ import {
   getControlledChatMigrationShadowReviewSummary,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
+  runControlledChatCutoverCandidate,
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
@@ -574,5 +575,38 @@ describe("tauri command argument aliases", () => {
     expect(result.cutoverPlanningEligible).toBe(true);
     expect(result.verifiedShadowRunId).toBe("run-shadow-2");
     expect(result.metadataSafeSummary.metadataSafe).toBe(true);
+  });
+
+  it("invokes controlled chat cutover candidate as an explicit non-default adapter", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      candidateReady: true,
+      candidateRunId: "run-candidate-1",
+      outputPreview: "Cutover candidate: react / react",
+      userOutput: "Candidate-only answer",
+      contractShape: "send_message_compatible",
+      metadataSafeSummary: {
+        metadataSafe: true,
+        candidateAdapter: "controlled_chat_cutover_candidate",
+      },
+      warnings: ["candidate runtime forced allowWrites=false"],
+      blockingReasons: [],
+    });
+
+    const result = await runControlledChatCutoverCandidate({
+      sessionId: "session-candidate-1",
+      boundedTestPromptDescriptor: "default_contract_probe",
+      requiredPromotions: 3,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_controlled_chat_cutover_candidate", {
+      input: {
+        sessionId: "session-candidate-1",
+        boundedTestPromptDescriptor: "default_contract_probe",
+        requiredPromotions: 3,
+      },
+    });
+    expect(result.candidateReady).toBe(true);
+    expect(result.contractShape).toBe("send_message_compatible");
+    expect(result.candidateRunId).toBe("run-candidate-1");
   });
 });

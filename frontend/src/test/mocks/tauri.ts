@@ -683,6 +683,26 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           toolStorage: "none",
         },
       } as T);
+    case "run_controlled_chat_cutover_candidate":
+      return Promise.resolve({
+        candidateReady: true,
+        candidateRunId: "run-candidate-1",
+        outputPreview: "Cutover candidate: react / react",
+        userOutput: "Candidate-only answer",
+        contractShape: "send_message_compatible",
+        metadataSafeSummary: {
+          candidateAdapter: "controlled_chat_cutover_candidate",
+          metadataSafe: true,
+          nonDefault: true,
+          allowWrites: false,
+          maxToolCalls: 0,
+          chatHistoryStorage: "none",
+          proposalStorage: "none",
+          memoryStorage: "none",
+        },
+        warnings: ["candidate runtime forced allowWrites=false"],
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

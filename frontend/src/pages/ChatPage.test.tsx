@@ -576,6 +576,9 @@ describe("ChatPage", () => {
         .mocked(invoke)
         .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_cutover_readiness")
     ).toBe(false);
+    expect(
+      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_controlled_chat_cutover_candidate")
+    ).toBe(false);
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {
