@@ -23,6 +23,7 @@ import {
   getControlledChatMigrationReviewDecisionSummary,
   getControlledChatMigrationShadowReviewSummary,
   getControlledPilotPromotionEvidenceSummary,
+  getDefaultChatRuntimeBoundaryStatus,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
@@ -50,6 +51,7 @@ import type {
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessReport,
+  DefaultChatRuntimeBoundaryStatus,
   MultiStrategyAgentPreviewLayer,
   MultiStrategyAgentPreviewOutput,
   RuntimeMigrationGateReport,
@@ -57,6 +59,7 @@ import type {
 
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
+  "runtimeBoundary",
   "cutoverReadinessGate",
   "promotionReadinessGate",
   "taskKind",
@@ -77,6 +80,10 @@ const SAFE_SUMMARY_KEYS = [
   "defaultChatUnchanged",
   "readOnly",
   "notAutomaticMigration",
+  "currentMode",
+  "controlledCandidateAvailable",
+  "candidatePromotionReadinessRequired",
+  "automaticMigrationEnabled",
   "ready",
   "cutoverReadinessEligible",
   "requiredApprovedCandidates",
@@ -164,6 +171,11 @@ export default function MultiStrategyPreviewSection() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MultiStrategyAgentPreviewOutput | null>(null);
+  const [boundaryChecking, setBoundaryChecking] = useState(false);
+  const [boundaryError, setBoundaryError] = useState<string | null>(null);
+  const [boundaryStatus, setBoundaryStatus] = useState<DefaultChatRuntimeBoundaryStatus | null>(
+    null
+  );
   const [gateChecking, setGateChecking] = useState(false);
   const [gateError, setGateError] = useState<string | null>(null);
   const [gateReport, setGateReport] = useState<RuntimeMigrationGateReport | null>(null);
@@ -281,6 +293,20 @@ export default function MultiStrategyPreviewSection() {
       setError(`Preview failed: ${readableError(e)}`);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDefaultChatBoundaryRefresh = async () => {
+    setBoundaryChecking(true);
+    setBoundaryError(null);
+    setBoundaryStatus(null);
+    try {
+      const status = await getDefaultChatRuntimeBoundaryStatus();
+      setBoundaryStatus(status);
+    } catch (e) {
+      setBoundaryError(`Default Chat boundary refresh failed: ${readableError(e)}`);
+    } finally {
+      setBoundaryChecking(false);
     }
   };
 
@@ -581,6 +607,100 @@ export default function MultiStrategyPreviewSection() {
           </div>
         </div>
       </div>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Runtime Boundary
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only boundary status for the current default Chat runtime. It reports the legacy
+              stream path and does not start a candidate, readiness gate, migration, tool call,
+              model call, or write path.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleDefaultChatBoundaryRefresh}
+            disabled={boundaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              boundaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw size={13} className={boundaryChecking ? "animate-spin" : undefined} />
+            {boundaryChecking ? "Refreshing..." : "Refresh Default Chat Boundary"}
+          </button>
+        </div>
+
+        {boundaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {boundaryError}
+          </div>
+        )}
+
+        {boundaryStatus && (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-2">
+              {[
+                ["currentMode", boundaryStatus.currentMode],
+                ["defaultChatUnchanged", String(boundaryStatus.defaultChatUnchanged)],
+                ["automaticMigrationEnabled", String(boundaryStatus.automaticMigrationEnabled)],
+                [
+                  "candidatePromotionReadinessRequired",
+                  String(boundaryStatus.candidatePromotionReadinessRequired),
+                ],
+                [
+                  "controlledCandidateAvailable",
+                  String(boundaryStatus.controlledCandidateAvailable),
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {boundaryStatus.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {boundaryStatus.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">No boundary blockers returned.</div>
+              )}
+            </div>
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Metadata-safe summary</div>
+              <div className="mt-1 flex flex-wrap gap-1.5">
+                {safeSummaryEntries(boundaryStatus.metadataSafeSummary).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-stone-50 px-2 py-1 font-mono text-xs text-stone-700"
+                  >
+                    summary.{key}: {value}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
 
       <section className="rounded-lg border border-stone-200 bg-white p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">

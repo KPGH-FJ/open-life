@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W33 completion/status index. This is not a second roadmap.
+   - Compact W1-W34 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W33 through sustained Runtime Migration
+Current implementation has completed W1-W34 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -53,11 +53,12 @@ read-only implementation gate plus a non-default controlled migration shadow
 run plus metadata-safe manual shadow review evidence and a read-only cutover
 planning readiness gate plus a non-default cutover candidate adapter for Chat
 contract-shape validation plus metadata-safe cutover candidate review evidence
-plus a read-only cutover candidate promotion readiness gate.
+plus a read-only cutover candidate promotion readiness gate plus a read-only
+default Chat runtime boundary status.
 The next practical sequence is:
 
 ```text
-use candidate promotion readiness only for explicit implementation planning; default Chat remains unchanged
+use default Chat runtime boundary status only for explicit activation planning; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -66,7 +67,7 @@ use candidate promotion readiness only for explicit implementation planning; def
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W33 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness boundary. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W34 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary boundary. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -255,6 +256,17 @@ Memory, LifeModel patches, MCP audit rows, chat messages, or runtime/tool/model
 calls. Default Send, `send_message`, and `start_stream_message` must not call
 candidate promotion readiness. W33 is implementation-planning readiness, not
 default Chat migration.
+
+W34 adds only `get_default_chat_runtime_boundary_status` and the Settings
+Default Chat Runtime Boundary panel. The command is read-only and reports that
+the current default Chat runtime remains `legacy_stream`, that automatic
+migration is disabled, that no controlled candidate is available on the default
+path, and that candidate promotion readiness remains required before any future
+activation planning. It must not call W19-W33 gates, run runtime/tool/model
+paths, or create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
+audit rows, or chat messages. Default Send, `send_message`, and
+`start_stream_message` must not call default Chat boundary status. W34 is
+boundary observability, not default Chat migration.
 
 ## 6. Agent Rules
 

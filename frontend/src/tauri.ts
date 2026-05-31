@@ -35,6 +35,7 @@ import type {
   ControlledChatMigrationShadowReviewDecisionInput,
   ControlledChatMigrationShadowReviewDecisionResult,
   ControlledChatMigrationShadowReviewSummary,
+  DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
 } from "./types";
@@ -260,6 +261,10 @@ export async function checkRuntimeMigrationGate(
   input: RuntimeMigrationGateCheckInput = {}
 ): Promise<RuntimeMigrationGateReport> {
   return safeInvoke<RuntimeMigrationGateReport>("check_runtime_migration_gate", { input });
+}
+
+export async function getDefaultChatRuntimeBoundaryStatus(): Promise<DefaultChatRuntimeBoundaryStatus> {
+  return safeInvoke<DefaultChatRuntimeBoundaryStatus>("get_default_chat_runtime_boundary_status");
 }
 
 export async function checkControlledChatPilotEligibility(

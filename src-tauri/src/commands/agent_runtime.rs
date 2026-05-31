@@ -458,6 +458,18 @@ pub struct ControlledChatCutoverCandidatePromotionReadinessReport {
     pub checked_at: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatRuntimeBoundaryStatus {
+    pub current_mode: String,
+    pub controlled_candidate_available: bool,
+    pub default_chat_unchanged: bool,
+    pub candidate_promotion_readiness_required: bool,
+    pub automatic_migration_enabled: bool,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -1969,6 +1981,44 @@ pub(crate) async fn check_controlled_chat_cutover_candidate_promotion_readiness_
         blocking_reasons,
         metadata_safe_summary,
         checked_at,
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_runtime_boundary_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatRuntimeBoundaryStatus, String> {
+    get_default_chat_runtime_boundary_status_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_default_chat_runtime_boundary_status_with_state(
+    _state: &Arc<AppState>,
+) -> Result<DefaultChatRuntimeBoundaryStatus, String> {
+    Ok(DefaultChatRuntimeBoundaryStatus {
+        current_mode: "legacy_stream".into(),
+        controlled_candidate_available: false,
+        default_chat_unchanged: true,
+        candidate_promotion_readiness_required: true,
+        automatic_migration_enabled: false,
+        blocking_reasons: Vec::new(),
+        metadata_safe_summary: json!({
+            "runtimeBoundary": "default_chat",
+            "metadataSafe": true,
+            "readOnly": true,
+            "currentMode": "legacy_stream",
+            "controlledCandidateAvailable": false,
+            "defaultChatUnchanged": true,
+            "candidatePromotionReadinessRequired": true,
+            "automaticMigrationEnabled": false,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "none",
+            "mcpAuditStorage": "none",
+        }),
     })
 }
 
@@ -7777,6 +7827,59 @@ mod tests {
         .unwrap();
 
         assert!(report.ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_runtime_boundary_status_reports_legacy_stream_and_metadata_safe() {
+        let state = preview_state().await;
+
+        let report = get_default_chat_runtime_boundary_status_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(report.current_mode, "legacy_stream");
+        assert!(!report.controlled_candidate_available);
+        assert!(report.default_chat_unchanged);
+        assert!(report.candidate_promotion_readiness_required);
+        assert!(!report.automatic_migration_enabled);
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report.metadata_safe_summary["runtimeBoundary"],
+            "default_chat"
+        );
+        assert_eq!(report.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+        assert_eq!(report.metadata_safe_summary["currentMode"], "legacy_stream");
+        assert_eq!(
+            report.metadata_safe_summary["automaticMigrationEnabled"],
+            false
+        );
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("toolPayload"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_runtime_boundary_status_is_read_only_by_side_effect_counts() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let report = get_default_chat_runtime_boundary_status_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(report.current_mode, "legacy_stream");
+        assert!(!report.automatic_migration_enabled);
         let after = side_effect_counts(&state).await;
         assert_eq!(before.run_count, after.run_count);
         assert_eq!(before.pending_proposal_count, after.pending_proposal_count);

@@ -282,6 +282,16 @@ export interface RuntimeMigrationGateReport {
   blockingReasons: string[];
 }
 
+export interface DefaultChatRuntimeBoundaryStatus {
+  currentMode: "legacy_stream";
+  controlledCandidateAvailable: boolean;
+  defaultChatUnchanged: boolean;
+  candidatePromotionReadinessRequired: boolean;
+  automaticMigrationEnabled: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface ControlledChatPilotEligibilityCheckInput {
   requiredCleanRuns?: number;
   sessionId?: string;

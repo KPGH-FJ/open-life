@@ -14,6 +14,7 @@ import {
   checkControlledChatMigrationImplementationGate,
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
+  getDefaultChatRuntimeBoundaryStatus,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -728,5 +729,30 @@ describe("tauri command argument aliases", () => {
     expect(result.ready).toBe(true);
     expect(result.approvedCandidateCount).toBe(1);
     expect(result.approvedCandidates[0].candidateRunId).toBe("run-candidate-3");
+  });
+
+  it("invokes default chat runtime boundary status as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      currentMode: "legacy_stream",
+      controlledCandidateAvailable: false,
+      defaultChatUnchanged: true,
+      candidatePromotionReadinessRequired: true,
+      automaticMigrationEnabled: false,
+      blockingReasons: [],
+      metadataSafeSummary: {
+        runtimeBoundary: "default_chat",
+        metadataSafe: true,
+        readOnly: true,
+        currentMode: "legacy_stream",
+        automaticMigrationEnabled: false,
+      },
+    });
+
+    const result = await getDefaultChatRuntimeBoundaryStatus();
+
+    expect(invoke).toHaveBeenCalledWith("get_default_chat_runtime_boundary_status", undefined);
+    expect(result.currentMode).toBe("legacy_stream");
+    expect(result.controlledCandidateAvailable).toBe(false);
+    expect(result.automaticMigrationEnabled).toBe(false);
   });
 });

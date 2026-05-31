@@ -423,6 +423,25 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         proposalFirstPreserved: true,
         blockingReasons: [],
       } as T);
+    case "get_default_chat_runtime_boundary_status":
+      return Promise.resolve({
+        currentMode: "legacy_stream",
+        controlledCandidateAvailable: false,
+        defaultChatUnchanged: true,
+        candidatePromotionReadinessRequired: true,
+        automaticMigrationEnabled: false,
+        blockingReasons: [],
+        metadataSafeSummary: {
+          runtimeBoundary: "default_chat",
+          metadataSafe: true,
+          readOnly: true,
+          currentMode: "legacy_stream",
+          controlledCandidateAvailable: false,
+          defaultChatUnchanged: true,
+          candidatePromotionReadinessRequired: true,
+          automaticMigrationEnabled: false,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

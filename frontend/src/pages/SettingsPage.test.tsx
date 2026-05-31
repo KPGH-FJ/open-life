@@ -1465,6 +1465,48 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
   });
 
+  it("refreshes and renders default chat runtime boundary status without activation controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_default_chat_runtime_boundary_status") {
+        return Promise.resolve({
+          currentMode: "legacy_stream",
+          controlledCandidateAvailable: false,
+          defaultChatUnchanged: true,
+          candidatePromotionReadinessRequired: true,
+          automaticMigrationEnabled: false,
+          blockingReasons: [],
+          metadataSafeSummary: {
+            runtimeBoundary: "default_chat",
+            metadataSafe: true,
+            readOnly: true,
+            currentMode: "legacy_stream",
+            automaticMigrationEnabled: false,
+            controlledCandidateAvailable: false,
+            candidatePromotionReadinessRequired: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Runtime Boundary")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Default Chat Boundary" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_default_chat_runtime_boundary_status", undefined);
+    });
+    expect(await screen.findByText("currentMode: legacy_stream")).toBeInTheDocument();
+    expect(screen.getByText("defaultChatUnchanged: true")).toBeInTheDocument();
+    expect(screen.getByText("automaticMigrationEnabled: false")).toBeInTheDocument();
+    expect(screen.getByText("candidatePromotionReadinessRequired: true")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {
