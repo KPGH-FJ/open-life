@@ -14,7 +14,9 @@ import {
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
   getControlledChatMigrationReviewDecisionSummary,
+  getControlledChatMigrationShadowReviewSummary,
   recordControlledChatMigrationReviewDecision,
+  recordControlledChatMigrationShadowReviewDecision,
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
@@ -450,5 +452,62 @@ describe("tauri command argument aliases", () => {
     });
     expect(result.shadowRunReady).toBe(true);
     expect(result.metadataSafeSummary.allowWrites).toBe(false);
+  });
+
+  it("records controlled chat migration shadow review decision through explicit wrapper", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_shadow_review_1",
+      shadowRunId: "run-shadow-1",
+      decisionKind: "approve",
+      readinessSummaryDigest: "sha256:shadow-readiness",
+      createdAt: "2026-05-31T04:05:06Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordControlledChatMigrationShadowReviewDecision({
+      shadowRunId: "run-shadow-1",
+      decisionKind: "approve",
+      optionalReviewerNote: "Reviewer note stays checksum-only.",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("record_controlled_chat_migration_shadow_review_decision", {
+      input: {
+        shadowRunId: "run-shadow-1",
+        decisionKind: "approve",
+        optionalReviewerNote: "Reviewer note stays checksum-only.",
+      },
+    });
+    expect(result.recorded).toBe(true);
+    expect(result.evidenceId).toBe("ev_shadow_review_1");
+  });
+
+  it("reads controlled chat migration shadow review summary through explicit wrapper", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_shadow_review_2",
+        shadowRunId: "run-shadow-2",
+        decisionKind: "request_rework",
+        reviewerNoteChecksum: "sha256:reviewer-note",
+        reviewerNoteLength: 19,
+        reviewerNoteCategory: "brief",
+        readinessSummaryDigest: "sha256:shadow-readiness-2",
+        createdAt: "2026-05-31T05:06:07Z",
+      },
+      approvedCount: 1,
+      reworkRejectCount: 2,
+      latestTimestamp: "2026-05-31T05:06:07Z",
+      blockingReasons: [],
+    });
+
+    const result = await getControlledChatMigrationShadowReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_controlled_chat_migration_shadow_review_summary",
+      undefined
+    );
+    expect(result.latestDecision?.decisionKind).toBe("request_rework");
+    expect(result.latestDecision?.shadowRunId).toBe("run-shadow-2");
+    expect(result.reworkRejectCount).toBe(2);
   });
 });

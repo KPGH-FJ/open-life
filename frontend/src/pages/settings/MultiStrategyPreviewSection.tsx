@@ -18,8 +18,10 @@ import {
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
   getControlledChatMigrationReviewDecisionSummary,
+  getControlledChatMigrationShadowReviewSummary,
   getControlledPilotPromotionEvidenceSummary,
   recordControlledChatMigrationReviewDecision,
+  recordControlledChatMigrationShadowReviewDecision,
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
 } from "../../tauri";
@@ -31,6 +33,9 @@ import type {
   ControlledChatMigrationReviewDecisionSummary,
   ControlledChatMigrationShadowRunDescriptor,
   ControlledChatMigrationShadowRunOutput,
+  ControlledChatMigrationShadowReviewDecisionKind,
+  ControlledChatMigrationShadowReviewDecisionResult,
+  ControlledChatMigrationShadowReviewSummary,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceSummary,
   ControlledPilotPromotionReadinessReport,
@@ -153,6 +158,15 @@ export default function MultiStrategyPreviewSection() {
   const [shadowRunError, setShadowRunError] = useState<string | null>(null);
   const [shadowRunResult, setShadowRunResult] =
     useState<ControlledChatMigrationShadowRunOutput | null>(null);
+  const [shadowReviewNote, setShadowReviewNote] = useState("");
+  const [shadowReviewRecording, setShadowReviewRecording] = useState(false);
+  const [shadowReviewError, setShadowReviewError] = useState<string | null>(null);
+  const [shadowReviewResult, setShadowReviewResult] =
+    useState<ControlledChatMigrationShadowReviewDecisionResult | null>(null);
+  const [shadowReviewSummaryChecking, setShadowReviewSummaryChecking] = useState(false);
+  const [shadowReviewSummaryError, setShadowReviewSummaryError] = useState<string | null>(null);
+  const [shadowReviewSummary, setShadowReviewSummary] =
+    useState<ControlledChatMigrationShadowReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -323,6 +337,8 @@ export default function MultiStrategyPreviewSection() {
     setShadowRunChecking(true);
     setShadowRunError(null);
     setShadowRunResult(null);
+    setShadowReviewError(null);
+    setShadowReviewResult(null);
     try {
       const result = await runControlledChatMigrationShadowRun({
         sessionId: `settings-shadow-run-${Date.now()}`,
@@ -334,6 +350,49 @@ export default function MultiStrategyPreviewSection() {
       setShadowRunError(`Shadow run failed: ${readableError(e)}`);
     } finally {
       setShadowRunChecking(false);
+    }
+  };
+
+  const handleShadowReviewSummaryRefresh = async () => {
+    setShadowReviewSummaryChecking(true);
+    setShadowReviewSummaryError(null);
+    try {
+      const summary = await getControlledChatMigrationShadowReviewSummary();
+      setShadowReviewSummary(summary);
+    } catch (e) {
+      setShadowReviewSummaryError(`Shadow review summary failed: ${readableError(e)}`);
+    } finally {
+      setShadowReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordShadowReviewDecision = async (
+    decisionKind: ControlledChatMigrationShadowReviewDecisionKind
+  ) => {
+    const shadowRunId = shadowRunResult?.shadowRunReady ? shadowRunResult.shadowRunId : null;
+    if (!shadowRunId) {
+      setShadowReviewError("Shadow review recording requires a ready shadow run id.");
+      return;
+    }
+
+    setShadowReviewRecording(true);
+    setShadowReviewError(null);
+    setShadowReviewResult(null);
+    try {
+      const trimmedNote = shadowReviewNote.trim();
+      const result = await recordControlledChatMigrationShadowReviewDecision({
+        shadowRunId,
+        decisionKind,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setShadowReviewResult(result);
+      if (result.recorded) {
+        setShadowReviewNote("");
+      }
+    } catch (e) {
+      setShadowReviewError(`Shadow review recording failed: ${readableError(e)}`);
+    } finally {
+      setShadowReviewRecording(false);
     }
   };
 
@@ -1388,6 +1447,218 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">No shadow run loaded.</div>
         )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Shadow Review</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Manual review evidence for ready shadow runs. Evidence stores only the shadow run id,
+              decision, note checksum metadata, readiness digest, and timestamp.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleShadowReviewSummaryRefresh}
+            disabled={shadowReviewSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              shadowReviewSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={shadowReviewSummaryChecking ? "animate-spin" : undefined}
+            />
+            {shadowReviewSummaryChecking ? "Refreshing..." : "Refresh Shadow Review Summary"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This area never starts a shadow run and never promotes output to Chat.
+        </div>
+
+        {shadowReviewSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {shadowReviewSummaryError}
+          </div>
+        )}
+
+        {shadowReviewSummary ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest shadow decision</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {shadowReviewSummary.latestDecision?.decisionKind ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Approved shadow reviews</div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {shadowReviewSummary.approvedCount}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">
+                  Shadow rework/reject count
+                </div>
+                <div className="mt-1 text-sm font-semibold text-stone-900">
+                  {shadowReviewSummary.reworkRejectCount}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Shadow run id</div>
+                <div className="mt-1 break-all font-mono text-xs text-stone-900">
+                  {shadowReviewSummary.latestDecision?.shadowRunId ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Readiness summary digest</div>
+                <div className="mt-1 break-all font-mono text-xs text-stone-900">
+                  {shadowReviewSummary.latestDecision?.readinessSummaryDigest ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Latest timestamp</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {shadowReviewSummary.latestTimestamp ?? "none"}
+                </div>
+              </div>
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+                <div className="text-[10px] uppercase text-stone-400">Reviewer note category</div>
+                <div className="mt-1 font-mono text-xs text-stone-900">
+                  {shadowReviewSummary.latestDecision?.reviewerNoteCategory ?? "none"}
+                </div>
+              </div>
+            </div>
+
+            {shadowReviewSummary.blockingReasons.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+                <div className="mt-1 space-y-1">
+                  {shadowReviewSummary.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">No shadow review summary loaded.</div>
+        )}
+
+        <div className="mt-4 space-y-3">
+          {shadowRunResult?.shadowRunReady && shadowRunResult.shadowRunId ? (
+            <>
+              <label className="block">
+                <span className="text-xs font-medium text-stone-700">Shadow reviewer note</span>
+                <textarea
+                  value={shadowReviewNote}
+                  onChange={event => setShadowReviewNote(event.target.value)}
+                  rows={2}
+                  className="mt-1 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-900 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
+                  placeholder="Optional note. Stored as checksum metadata only."
+                />
+              </label>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleRecordShadowReviewDecision("approve")}
+                  disabled={shadowReviewRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    shadowReviewRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-emerald-700 text-white hover:bg-emerald-800"
+                  )}
+                >
+                  <CheckCircle2 size={13} />
+                  Approve Shadow Review
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRecordShadowReviewDecision("reject")}
+                  disabled={shadowReviewRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    shadowReviewRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-red-700 text-white hover:bg-red-800"
+                  )}
+                >
+                  <XCircle size={13} />
+                  Reject Shadow Review
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleRecordShadowReviewDecision("request_rework")}
+                  disabled={shadowReviewRecording}
+                  className={classNames(
+                    "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                    shadowReviewRecording
+                      ? "bg-stone-100 text-stone-400"
+                      : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                  )}
+                >
+                  <RefreshCw size={13} />
+                  Request Rework Shadow Review
+                </button>
+              </div>
+            </>
+          ) : (
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+              A ready shadow run is required before recording shadow review evidence.
+            </div>
+          )}
+
+          {shadowReviewError && (
+            <div className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {shadowReviewError}
+            </div>
+          )}
+
+          {shadowReviewResult && (
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-xs leading-5",
+                shadowReviewResult.recorded
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              <div className="font-medium">
+                {shadowReviewResult.recorded ? "Shadow review recorded" : "Shadow review blocked"}
+              </div>
+              <div className="mt-1">
+                {shadowReviewResult.decisionKind} · {shadowReviewResult.shadowRunId} ·{" "}
+                {shadowReviewResult.evidenceId ?? "no evidence"}
+              </div>
+              <div className="mt-1 break-all font-mono">
+                {shadowReviewResult.readinessSummaryDigest}
+              </div>
+              {shadowReviewResult.blockingReasons.length > 0 && (
+                <div className="mt-1 space-y-1">
+                  {shadowReviewResult.blockingReasons.map(reason => (
+                    <div key={reason}>{reason}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       </section>
 
       <section className="rounded-lg border border-stone-200 bg-white">

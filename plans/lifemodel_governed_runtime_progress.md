@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W28 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W29 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -30,6 +30,9 @@ aligned before implementation discussion can begin. W28 adds an explicit
 non-default controlled migration shadow run that can execute only after W27
 eligibility and returns metadata-safe readiness comparison output without
 writing Chat, Proposal, Memory, LifeModel, Evidence, or external tool results.
+W29 adds an explicit human shadow review evidence loop that records
+approve/reject/request_rework decisions for existing shadow runs using only
+metadata-safe whitelisted fields. It is review evidence, not Chat migration.
 
 The key boundary is unchanged:
 
@@ -147,6 +150,22 @@ The key boundary is unchanged:
   patch/Evidence records, or write external tool results. It does not expose
   raw user prompt, raw assistant output, or full tool payload, and default
   Send / `send_message` / `start_stream_message` do not call it.
+- W29 Controlled Chat Migration Shadow Review Evidence adds
+  `record_controlled_chat_migration_shadow_review_decision` and
+  `get_controlled_chat_migration_shadow_review_summary`. It reads existing
+  shadow AgentRuns and records explicit human `approve`, `reject`, or
+  `request_rework` decisions as metadata-safe EvidenceStore records only.
+  Every decision is blocked unless the AgentRun exists, has
+  `reasoning_strategy=controlled_migration_shadow_run`, is completed, has
+  `allowWrites=false`, has `metadataSafe=true`, and has no Chat message,
+  Proposal, Memory, LifeModel patch, or external-write side effects. The
+  evidence metadata whitelist is exactly `shadowRunId`, `decisionKind`,
+  `reviewerNoteChecksum`, `reviewerNoteLength`, `reviewerNoteCategory`,
+  `readinessSummaryDigest`, and `createdAt`; reviewer raw text, shadow prompt,
+  shadow output, and tool payload are not stored. The Settings Shadow Review
+  panel only triggers record/summary commands by explicit user action. Default
+  Send / `send_message` / `start_stream_message` do not call shadow review
+  commands.
 
 ## Work Package Status
 
@@ -180,11 +199,12 @@ The key boundary is unchanged:
 | W26 Manual Migration Review Decision Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds explicit approve/reject/request_rework review decision recording after W25 draft. Blocked-draft approve returns blockers and writes no evidence; ready drafts write only metadata-safe `migration_review_decision` evidence with readiness counts, draft hash, createdAt, and sanitized reviewer-note metadata. Summary is read-only and normal Send / `send_message` / `start_stream_message` do not call these commands. |
 | W27 Approved Migration Implementation Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `check_controlled_chat_migration_implementation_gate` as a read-only gate over W24 readiness, W25 current draft hash, and W26 metadata-safe review decision evidence. It requires the latest metadata-safe decision to be approve, blocks latest reject/request_rework, blocks draft hash mismatch, blocks current readiness failure, creates no evidence/runs/proposals/memory/lifemodel patches, and normal Send / `send_message` / `start_stream_message` do not call it. |
 | W28 Non-Default Controlled Migration Shadow Run | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds `run_controlled_chat_migration_shadow_run` as an explicit non-default shadow command. It calls W27 implementation gate first, blocks without runtime when ineligible, runs bounded controlled runtime preview only when eligible with `allowWrites=false`, returns metadata-safe strategy/payload/summary/warnings/blockers, may create a metadata-safe shadow AgentRun audit, and writes no Chat message, Proposal, Memory, LifeModel patch, Evidence, or external tool result. Normal Send / `send_message` / `start_stream_message` do not call it. |
+| W29 Controlled Chat Migration Shadow Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds explicit `approve`/`reject`/`request_rework` review evidence for existing shadow runs. Every decision is blocked unless the shadow AgentRun is completed, write-disabled, metadata-safe, and side-effect-free. Evidence stores only shadowRunId, decisionKind, reviewer-note checksum/length/category, readiness digest, and createdAt. Summary is read-only and normal Send / `send_message` / `start_stream_message` do not call shadow review commands. This is review evidence, not Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use shadow readiness only as explicit comparison; default Chat remains unchanged
+use shadow review evidence only for human review; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -192,10 +212,11 @@ added an explicit review-and-confirm promotion step for successful pilot output,
 W22 only added source binding plus target-session validation for that promotion
 step, W23 only records/reads metadata-safe promotion evidence, W24 only checks
 readiness for discussing the next migration step, W25 only generates a
-read-only human-review draft, and W26 only records metadata-safe manual review
+read-only human-review draft, W26 only records metadata-safe manual review
 decision evidence, W27 only checks whether current evidence qualifies for
-implementation discussion, and W28 only runs a non-default write-disabled
-shadow comparison after W27 eligibility. Default `Send`, `send_message`, and
+implementation discussion, W28 only runs a non-default write-disabled shadow
+comparison after W27 eligibility, and W29 only records metadata-safe human
+shadow review evidence. Default `Send`, `send_message`, and
 `start_stream_message` remain unchanged until a later reviewed migration stage
 with separate implementation work and explicit human approval.
 

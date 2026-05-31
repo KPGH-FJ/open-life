@@ -918,6 +918,118 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Pilot-only answer")).not.toBeInTheDocument();
   });
 
+  it("records shadow review decision explicitly and renders shadow review summary", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_migration_shadow_run") {
+        return Promise.resolve({
+          shadowRunReady: true,
+          shadowRunId: "run-shadow-settings-1",
+          implementationGateReport: {
+            implementationEligible: true,
+            latestDecision: {
+              evidenceId: "ev_review_decision_2",
+              decisionKind: "approve",
+              draftReady: true,
+              draftHash: "sha256:mock-migration-draft",
+              createdAt: "2026-05-31T02:03:04Z",
+            },
+            readinessReport: {
+              ready: true,
+              requiredPromotions: 3,
+              promotedCount: 3,
+              recentPromotedPilotRunIds: ["run-controlled-pilot-3"],
+              latestPromotionTimestamp: "2026-05-30T03:04:05Z",
+              sourceTargetMismatchBlockCount: 0,
+              metadataSafeEvidenceReady: true,
+              defaultChatUnchanged: true,
+              blockingReasons: [],
+            },
+            draftHashMatched: true,
+            approvedAfterLatestDraft: true,
+            blockingReasons: [],
+          },
+          strategyKind: "react",
+          payloadKind: "react",
+          metadataSafeSummary: {
+            descriptorKind: "default_readiness_probe",
+            allowWrites: false,
+            metadataSafe: true,
+          },
+          warnings: ["shadow runtime forced allowWrites=false"],
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "record_controlled_chat_migration_shadow_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_shadow_review_1",
+          shadowRunId: args?.input?.shadowRunId,
+          decisionKind: args?.input?.decisionKind,
+          readinessSummaryDigest: "sha256:shadow-readiness",
+          createdAt: "2026-05-31T04:05:06Z",
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "get_controlled_chat_migration_shadow_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_shadow_review_1",
+            shadowRunId: "run-shadow-settings-1",
+            decisionKind: "approve",
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 22,
+            reviewerNoteCategory: "brief",
+            readinessSummaryDigest: "sha256:shadow-readiness",
+            createdAt: "2026-05-31T04:05:06Z",
+          },
+          approvedCount: 1,
+          reworkRejectCount: 0,
+          latestTimestamp: "2026-05-31T04:05:06Z",
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Shadow Run" }));
+    expect(await screen.findByText("Shadow ready")).toBeInTheDocument();
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(
+          ([cmd]) => cmd === "record_controlled_chat_migration_shadow_review_decision"
+        )
+    ).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Shadow Review Summary" }));
+    expect(await screen.findByText("sha256:shadow-readiness")).toBeInTheDocument();
+    expect(screen.getAllByText("run-shadow-settings-1").length).toBeGreaterThan(0);
+    expect(screen.getByText("Approved shadow reviews")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Shadow reviewer note"), {
+      target: { value: "Looks ready to approve" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve Shadow Review" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_controlled_chat_migration_shadow_review_decision",
+        {
+          input: {
+            shadowRunId: "run-shadow-settings-1",
+            decisionKind: "approve",
+            optionalReviewerNote: "Looks ready to approve",
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Shadow review recorded")).toBeInTheDocument();
+    expect(screen.getByText(/approve · run-shadow-settings-1/)).toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

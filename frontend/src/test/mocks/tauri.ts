@@ -599,6 +599,33 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         warnings: ["shadow runtime forced allowWrites=false"],
         blockingReasons: [],
       } as T);
+    case "record_controlled_chat_migration_shadow_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_shadow_review_1",
+        shadowRunId: _args?.input?.shadowRunId ?? "run-shadow-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        readinessSummaryDigest: "sha256:mock-shadow-readiness",
+        createdAt: "2026-05-31T04:05:06Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_migration_shadow_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_shadow_review_1",
+          shadowRunId: "run-shadow-1",
+          decisionKind: "approve",
+          reviewerNoteChecksum: "sha256:reviewer-note",
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          readinessSummaryDigest: "sha256:mock-shadow-readiness",
+          createdAt: "2026-05-31T04:05:06Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 0,
+        latestTimestamp: "2026-05-31T04:05:06Z",
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

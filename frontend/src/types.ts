@@ -430,6 +430,46 @@ export interface ControlledChatMigrationShadowRunOutput {
   blockingReasons: string[];
 }
 
+export type ControlledChatMigrationShadowReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface ControlledChatMigrationShadowReviewDecisionInput {
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatMigrationShadowReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  readinessSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatMigrationShadowReviewLatestDecision {
+  evidenceId: string;
+  shadowRunId: string;
+  decisionKind: ControlledChatMigrationShadowReviewDecisionKind;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  readinessSummaryDigest: string;
+  createdAt: string;
+}
+
+export interface ControlledChatMigrationShadowReviewSummary {
+  latestDecision?: ControlledChatMigrationShadowReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

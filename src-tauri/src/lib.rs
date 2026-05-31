@@ -41,9 +41,12 @@ use commands::agent_runtime::{
     check_controlled_chat_migration_implementation_gate, check_controlled_chat_pilot_eligibility,
     check_controlled_pilot_promotion_readiness, check_runtime_migration_gate,
     draft_controlled_chat_migration_plan, get_controlled_chat_migration_review_decision_summary,
+    get_controlled_chat_migration_shadow_review_summary,
     get_controlled_pilot_promotion_evidence_summary,
-    record_controlled_chat_migration_review_decision, record_controlled_pilot_promotion_evidence,
-    run_controlled_chat_migration_shadow_run, run_multi_strategy_agent_preview,
+    record_controlled_chat_migration_review_decision,
+    record_controlled_chat_migration_shadow_review_decision,
+    record_controlled_pilot_promotion_evidence, run_controlled_chat_migration_shadow_run,
+    run_multi_strategy_agent_preview,
 };
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
@@ -3055,6 +3058,8 @@ pub fn run() {
             get_controlled_chat_migration_review_decision_summary,
             check_controlled_chat_migration_implementation_gate,
             run_controlled_chat_migration_shadow_run,
+            record_controlled_chat_migration_shadow_review_decision,
+            get_controlled_chat_migration_shadow_review_summary,
             record_controlled_pilot_promotion_evidence,
             get_controlled_pilot_promotion_evidence_summary,
             get_pending_proposals,
