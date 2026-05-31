@@ -1289,6 +1289,113 @@ describe("SettingsPage", () => {
     ).toBe(false);
   });
 
+  it("records cutover candidate review decision explicitly from Settings", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "run_controlled_chat_cutover_candidate") {
+        return Promise.resolve({
+          candidateReady: true,
+          candidateRunId: "run-candidate-settings-review",
+          outputPreview: "Cutover candidate: react / react",
+          userOutput: "Candidate-only answer",
+          contractShape: "send_message_compatible",
+          metadataSafeSummary: {
+            candidateAdapter: "controlled_chat_cutover_candidate",
+            metadataSafe: true,
+            allowWrites: false,
+            maxToolCalls: 0,
+          },
+          warnings: [],
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "record_controlled_chat_cutover_candidate_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_candidate_review_1",
+          candidateRunId: args?.input?.candidateRunId,
+          decisionKind: args?.input?.decisionKind,
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:candidate-summary",
+          createdAt: "2026-05-31T06:07:08Z",
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Run Cutover Candidate" }));
+    expect(await screen.findByText("Candidate ready")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("candidate review note"), {
+      target: { value: "Approved after manual candidate review." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve Candidate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_controlled_chat_cutover_candidate_review_decision",
+        {
+          input: {
+            candidateRunId: "run-candidate-settings-review",
+            decisionKind: "approve",
+            optionalReviewerNote: "Approved after manual candidate review.",
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Candidate review recorded")).toBeInTheDocument();
+    expect(screen.getByText(/ev_candidate_review_1/)).toBeInTheDocument();
+    expect(screen.getByText("sha256:candidate-summary")).toBeInTheDocument();
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "save_chat_message")).toBe(false);
+    expect(screen.queryByRole("button", { name: /feature flag/i })).not.toBeInTheDocument();
+  });
+
+  it("refreshes and renders cutover candidate review summary", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_controlled_chat_cutover_candidate_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_candidate_review_2",
+            candidateRunId: "run-candidate-summary-1",
+            decisionKind: "request_rework",
+            contractShape: "send_message_compatible",
+            candidateSummaryDigest: "sha256:candidate-summary-2",
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 18,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-05-31T07:08:09Z",
+          },
+          approvedCount: 1,
+          reworkRejectCount: 2,
+          latestTimestamp: "2026-05-31T07:08:09Z",
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Cutover Candidate Review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Candidate Review Summary" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_controlled_chat_cutover_candidate_review_summary",
+        undefined
+      );
+    });
+    expect(await screen.findByText("request_rework")).toBeInTheDocument();
+    expect(screen.getByText("run-candidate-summary-1")).toBeInTheDocument();
+    expect(screen.getByText("sha256:candidate-summary-2")).toBeInTheDocument();
+    expect(screen.getByText("Approved: 1")).toBeInTheDocument();
+    expect(screen.getByText("Rework / Reject: 2")).toBeInTheDocument();
+    expect(screen.getByText("brief")).toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

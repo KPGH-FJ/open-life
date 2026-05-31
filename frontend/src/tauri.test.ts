@@ -14,8 +14,10 @@ import {
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
+  getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
   getControlledChatMigrationShadowReviewSummary,
+  recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
   runControlledChatCutoverCandidate,
@@ -608,5 +610,67 @@ describe("tauri command argument aliases", () => {
     expect(result.candidateReady).toBe(true);
     expect(result.contractShape).toBe("send_message_compatible");
     expect(result.candidateRunId).toBe("run-candidate-1");
+  });
+
+  it("invokes controlled chat cutover candidate review decision explicitly", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_candidate_review_1",
+      candidateRunId: "run-candidate-1",
+      decisionKind: "approve",
+      contractShape: "send_message_compatible",
+      candidateSummaryDigest: "sha256:candidate-summary",
+      createdAt: "2026-05-31T06:07:08Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordControlledChatCutoverCandidateReviewDecision({
+      candidateRunId: "run-candidate-1",
+      decisionKind: "approve",
+      optionalReviewerNote: "Approved manually.",
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "record_controlled_chat_cutover_candidate_review_decision",
+      {
+        input: {
+          candidateRunId: "run-candidate-1",
+          decisionKind: "approve",
+          optionalReviewerNote: "Approved manually.",
+        },
+      }
+    );
+    expect(result.recorded).toBe(true);
+    expect(result.candidateSummaryDigest).toBe("sha256:candidate-summary");
+  });
+
+  it("invokes controlled chat cutover candidate review summary as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_candidate_review_2",
+        candidateRunId: "run-candidate-2",
+        decisionKind: "request_rework",
+        contractShape: "send_message_compatible",
+        candidateSummaryDigest: "sha256:candidate-summary-2",
+        reviewerNoteChecksum: "sha256:reviewer-note",
+        reviewerNoteLength: 18,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-05-31T07:08:09Z",
+      },
+      approvedCount: 1,
+      reworkRejectCount: 2,
+      latestTimestamp: "2026-05-31T07:08:09Z",
+      blockingReasons: [],
+    });
+
+    const result = await getControlledChatCutoverCandidateReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_controlled_chat_cutover_candidate_review_summary",
+      undefined
+    );
+    expect(result.latestDecision?.decisionKind).toBe("request_rework");
+    expect(result.latestDecision?.candidateRunId).toBe("run-candidate-2");
+    expect(result.reworkRejectCount).toBe(2);
   });
 });

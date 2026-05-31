@@ -514,6 +514,48 @@ export interface ControlledChatCutoverCandidateOutput {
   blockingReasons: string[];
 }
 
+export type ControlledChatCutoverCandidateReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface ControlledChatCutoverCandidateReviewDecisionInput {
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  optionalReviewerNote?: string;
+}
+
+export interface ControlledChatCutoverCandidateReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface ControlledChatCutoverCandidateReviewLatestDecision {
+  evidenceId: string;
+  candidateRunId: string;
+  decisionKind: ControlledChatCutoverCandidateReviewDecisionKind;
+  contractShape: string;
+  candidateSummaryDigest: string;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface ControlledChatCutoverCandidateReviewSummary {
+  latestDecision?: ControlledChatCutoverCandidateReviewLatestDecision | null;
+  approvedCount: number;
+  reworkRejectCount: number;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

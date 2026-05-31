@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W31 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W32 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -39,7 +39,10 @@ state before allowing implementation discussion. It is cutover planning
 readiness, not Chat migration. W31 adds a non-default cutover candidate adapter
 that first checks W30 readiness and, only when eligible, runs one
 write-disabled zero-tool candidate to validate Chat-compatible contract shape.
-It is a candidate adapter, not default Chat migration.
+It is a candidate adapter, not default Chat migration. W32 adds a manual
+cutover candidate review evidence loop that records approve/reject/request_rework
+with metadata-safe whitelisted fields only. It is candidate review evidence,
+not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -204,6 +207,25 @@ The key boundary is unchanged:
   results. The Settings Cutover Candidate panel only runs it on explicit click,
   and default Send / `send_message` / `start_stream_message` do not call it.
   Candidate ready means contract validation only, not default Chat migration.
+- W32 Controlled Chat Cutover Candidate Review Evidence adds
+  `record_controlled_chat_cutover_candidate_review_decision`,
+  `get_controlled_chat_cutover_candidate_review_summary`, and the Settings
+  Cutover Candidate Review panel. The record command reads an existing W31
+  candidate AgentRun and records human `approve` / `reject` / `request_rework`
+  decisions as metadata-safe EvidenceStore evidence only. Approve requires the
+  AgentRun to exist, be completed, have
+  `reasoning_strategy=controlled_chat_cutover_candidate`,
+  `contractShape=send_message_compatible`, `candidateReady=true`,
+  `allowWrites=false`, `maxToolCalls=0`, `metadataSafe=true`, and no
+  Chat/Proposal/Memory/LifeModel/Evidence/MCP audit/external write side
+  effects. Evidence metadata is strictly limited to `candidateRunId`,
+  `decisionKind`, `contractShape`, `candidateSummaryDigest`,
+  `reviewerNoteChecksum`, `reviewerNoteLength`, `reviewerNoteCategory`, and
+  `createdAt`; it does not store reviewer raw text, candidate userOutput, raw
+  prompt, raw assistant output, tool payload, or candidate output. The summary
+  command is read-only. Default Send / `send_message` /
+  `start_stream_message` do not call candidate review commands. Candidate review
+  approval is evidence only, not default Chat migration.
 
 ## Work Package Status
 
@@ -240,11 +262,12 @@ The key boundary is unchanged:
 | W29 Controlled Chat Migration Shadow Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds explicit `approve`/`reject`/`request_rework` review evidence for existing shadow runs. Every decision is blocked unless the shadow AgentRun is completed, write-disabled, metadata-safe, and side-effect-free. Evidence stores only shadowRunId, decisionKind, reviewer-note checksum/length/category, readiness digest, and createdAt. Summary is read-only and normal Send / `send_message` / `start_stream_message` do not call shadow review commands. This is review evidence, not Chat migration. |
 | W30 Controlled Chat Cutover Planning Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend/Rust tests, docs | Adds read-only `check_controlled_chat_cutover_readiness`. It requires current W27 eligible, latest W29 shadow review approve, and the approved shadow AgentRun to still be completed/write-disabled/metadata-safe/side-effect-free. It returns metadata-safe readiness fields and blockers only, creates no records, runs no runtime, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover planning readiness for implementation discussion, not default Chat migration. |
 | W31 Non-Default Controlled Chat Cutover Candidate Adapter | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `run_controlled_chat_cutover_candidate`. It calls W30 readiness first, blocks without runtime when ineligible, and only then runs one controlled runtime candidate with `allowWrites=false`, `maxToolCalls=0`, no proposal apply, no Memory write, no LifeModel patch, and no external write. It returns Chat-compatible contract-shape fields and metadata-safe summary, may create metadata-safe candidate AgentRun audit, and writes no Chat/Proposal/Memory/LifeModel/Evidence/MCP audit/external tool result. Normal Send / `send_message` / `start_stream_message` do not call it. This is a non-default candidate adapter, not default Chat migration. |
+| W32 Controlled Chat Cutover Candidate Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_controlled_chat_cutover_candidate_review_decision` and read-only summary. Approve requires a completed, ready, send_message-compatible, write-disabled, zero-tool, metadata-safe, side-effect-free candidate AgentRun. Evidence stores only candidateRunId, decisionKind, contractShape, candidateSummaryDigest, reviewer-note checksum/length/category, and createdAt; it stores no reviewer raw text, candidate output, raw prompt/output, or tool payload. Normal Send / `send_message` / `start_stream_message` do not call it. This is candidate review evidence, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use cutover candidate only for explicit non-default contract validation; default Chat remains unchanged
+use cutover candidate review only for explicit human evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -257,8 +280,9 @@ decision evidence, W27 only checks whether current evidence qualifies for
 implementation discussion, W28 only runs a non-default write-disabled shadow
 comparison after W27 eligibility, W29 only records metadata-safe human shadow
 review evidence, W30 only checks cutover planning readiness for entering
-implementation discussion, and W31 only runs an explicit non-default cutover
-candidate for contract-shape validation after W30 eligibility. Default `Send`,
+implementation discussion, W31 only runs an explicit non-default cutover
+candidate for contract-shape validation after W30 eligibility, and W32 only
+records metadata-safe human candidate review evidence. Default `Send`,
 `send_message`, and `start_stream_message` remain unchanged until a later
 reviewed migration stage with separate implementation work and explicit human
 approval.

@@ -24,6 +24,8 @@ const CONTROLLED_CHAT_MIGRATION_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.controlled_chat.migration_review_decision";
 const CONTROLLED_CHAT_MIGRATION_SHADOW_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.controlled_chat.migration_shadow_review_decision";
+const CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.controlled_chat.cutover_candidate_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -363,6 +365,56 @@ pub struct ControlledChatCutoverCandidateOutput {
     pub contract_shape: String,
     pub metadata_safe_summary: Value,
     pub warnings: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateReviewDecisionInput {
+    pub candidate_run_id: String,
+    pub decision_kind: String,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub candidate_run_id: String,
+    pub decision_kind: String,
+    pub contract_shape: String,
+    pub candidate_summary_digest: String,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateReviewLatestDecision {
+    pub evidence_id: String,
+    pub candidate_run_id: String,
+    pub decision_kind: String,
+    pub contract_shape: String,
+    pub candidate_summary_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_note_checksum: Option<String>,
+    pub reviewer_note_length: usize,
+    pub reviewer_note_category: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledChatCutoverCandidateReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<ControlledChatCutoverCandidateReviewLatestDecision>,
+    pub approved_count: usize,
+    pub rework_reject_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
 }
 
@@ -1517,6 +1569,156 @@ pub(crate) async fn run_controlled_chat_cutover_candidate_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn record_controlled_chat_cutover_candidate_review_decision(
+    input: ControlledChatCutoverCandidateReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatCutoverCandidateReviewDecisionResult, String> {
+    record_controlled_chat_cutover_candidate_review_decision_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn record_controlled_chat_cutover_candidate_review_decision_with_state(
+    input: ControlledChatCutoverCandidateReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<ControlledChatCutoverCandidateReviewDecisionResult, String> {
+    let candidate_run_id = safe_internal_id(&input.candidate_run_id, "candidateRunId")?;
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let run = load_cutover_candidate_review_run(state, &candidate_run_id).await?;
+    let readiness = cutover_candidate_review_readiness(run.as_ref())?;
+    let mut blocking_reasons = readiness.blocking_reasons.clone();
+
+    if decision_kind == "approve" {
+        if readiness.contract_shape != "send_message_compatible" {
+            push_unique_string(
+                &mut blocking_reasons,
+                "candidate_run_contract_shape_not_send_message_compatible".into(),
+            );
+        }
+        if !readiness.candidate_ready {
+            push_unique_string(
+                &mut blocking_reasons,
+                "candidate_run_not_ready_for_approval".into(),
+            );
+        }
+    }
+
+    if !blocking_reasons.is_empty() {
+        return Ok(ControlledChatCutoverCandidateReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            candidate_run_id,
+            decision_kind,
+            contract_shape: readiness.contract_shape,
+            candidate_summary_digest: readiness.digest,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note_fields(input.optional_reviewer_note.as_deref());
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    );
+    evidence_draft.run_metadata = json!({
+        "candidateRunId": candidate_run_id.clone(),
+        "decisionKind": decision_kind.clone(),
+        "contractShape": readiness.contract_shape.clone(),
+        "candidateSummaryDigest": readiness.digest.clone(),
+        "reviewerNoteChecksum": reviewer_note_metadata.checksum,
+        "reviewerNoteLength": reviewer_note_metadata.length,
+        "reviewerNoteCategory": reviewer_note_metadata.category,
+        "createdAt": created_at.clone(),
+    });
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store.create_evidence(evidence_draft).map_err(|e| {
+            format!("failed to record cutover candidate review decision evidence: {e}")
+        })?
+    };
+
+    Ok(ControlledChatCutoverCandidateReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        candidate_run_id,
+        decision_kind,
+        contract_shape: readiness.contract_shape,
+        candidate_summary_digest: readiness.digest,
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_controlled_chat_cutover_candidate_review_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ControlledChatCutoverCandidateReviewSummary, String> {
+    get_controlled_chat_cutover_candidate_review_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_controlled_chat_cutover_candidate_review_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<ControlledChatCutoverCandidateReviewSummary, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| format!("failed to read cutover candidate review evidence: {e}"))?
+    };
+    let records = records
+        .into_iter()
+        .filter(cutover_candidate_review_decision_evidence_is_metadata_safe)
+        .collect::<Vec<_>>();
+
+    let approved_count = records
+        .iter()
+        .filter(|record| cutover_candidate_review_decision_kind(record) == Some("approve"))
+        .count();
+    let rework_reject_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                cutover_candidate_review_decision_kind(record),
+                Some("reject" | "request_rework")
+            )
+        })
+        .count();
+    let latest_decision = records
+        .first()
+        .and_then(cutover_candidate_review_latest_decision);
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+
+    Ok(ControlledChatCutoverCandidateReviewSummary {
+        latest_decision,
+        approved_count,
+        rework_reject_count,
+        latest_timestamp,
+        blocking_reasons: Vec::new(),
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -1977,6 +2179,13 @@ struct ShadowReviewReadiness {
     blocking_reasons: Vec<String>,
 }
 
+struct CutoverCandidateReviewReadiness {
+    digest: String,
+    contract_shape: String,
+    candidate_ready: bool,
+    blocking_reasons: Vec<String>,
+}
+
 async fn load_shadow_review_run(
     state: &Arc<AppState>,
     shadow_run_id: &str,
@@ -2115,6 +2324,192 @@ fn shadow_review_readiness(run: Option<&AgentRun>) -> Result<ShadowReviewReadine
 
     Ok(ShadowReviewReadiness {
         digest: metadata_hash_for_serializable(&summary)?,
+        blocking_reasons,
+    })
+}
+
+async fn load_cutover_candidate_review_run(
+    state: &Arc<AppState>,
+    candidate_run_id: &str,
+) -> Result<Option<AgentRun>, String> {
+    let Some(store_arc) = state.agent_run_store.as_ref() else {
+        return Ok(None);
+    };
+    let store = store_arc.lock().await;
+    store
+        .get_run(candidate_run_id)
+        .map_err(|e| format!("failed to read cutover candidate AgentRun for review: {e}"))
+}
+
+fn cutover_candidate_review_readiness(
+    run: Option<&AgentRun>,
+) -> Result<CutoverCandidateReviewReadiness, String> {
+    let Some(run) = run else {
+        let summary = json!({
+            "runFound": false,
+            "metadataSafe": true,
+            "sideEffectAuditReady": false,
+        });
+        return Ok(CutoverCandidateReviewReadiness {
+            digest: metadata_hash_for_serializable(&summary)?,
+            contract_shape: "missing".into(),
+            candidate_ready: false,
+            blocking_reasons: vec!["candidate_run_missing".into()],
+        });
+    };
+
+    let audit = run
+        .reasoning_trace
+        .as_ref()
+        .and_then(|trace| trace.strategy_result.as_ref());
+    let metadata_safe = audit_bool(audit, "metadataSafe").unwrap_or(false);
+    let contract_shape = audit_string(audit, "contractShape")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| "missing".into());
+    let contract_shape_allowed = matches!(
+        contract_shape.as_str(),
+        "send_message_compatible" | "blocked" | "failed"
+    );
+    let candidate_ready = audit_bool(audit, "candidateReady").unwrap_or(false);
+    let allow_writes = cutover_candidate_review_allow_writes(audit);
+    let max_tool_calls = cutover_candidate_review_max_tool_calls(audit);
+    let storage = |key: &str| audit_string(audit, key).unwrap_or("missing");
+    let declared_write_step_count =
+        audit_u64_at(audit, &["writeControl", "declaredWriteStepCount"]).unwrap_or_default();
+    let proposal_required_step_count =
+        audit_u64_at(audit, &["writeControl", "proposalRequiredStepCount"]).unwrap_or_default();
+    let proposal_id_count = audit_u64(audit, "proposalIdCount").unwrap_or_default();
+
+    let side_effects_absent = run.user_input.is_none()
+        && run.generated_proposals.is_empty()
+        && run.actions.is_empty()
+        && run.observations.is_empty()
+        && run.tool_call_count == 0
+        && proposal_id_count == 0
+        && declared_write_step_count == 0
+        && proposal_required_step_count == 0
+        && allow_writes == Some(false)
+        && max_tool_calls == Some(0);
+
+    let summary = json!({
+        "runFound": true,
+        "candidateRunId": run.id,
+        "reasoningStrategy": run.reasoning_strategy.as_deref().unwrap_or("missing"),
+        "status": run.status.to_string(),
+        "contractShape": contract_shape.clone(),
+        "candidateReady": candidate_ready,
+        "metadataSafe": metadata_safe,
+        "allowWrites": allow_writes,
+        "maxToolCalls": max_tool_calls,
+        "contentStorage": storage("contentStorage"),
+        "toolStorage": storage("toolStorage"),
+        "chatHistoryStorage": storage("chatHistoryStorage"),
+        "proposalStorage": storage("proposalStorage"),
+        "lifeModelPatchStorage": storage("lifeModelPatchStorage"),
+        "memoryStorage": storage("memoryStorage"),
+        "evidenceStorage": storage("evidenceStorage"),
+        "mcpAuditStorage": storage("mcpAuditStorage"),
+        "userInputStored": run.user_input.is_some(),
+        "generatedProposalCount": run.generated_proposals.len(),
+        "actionCount": run.actions.len(),
+        "observationCount": run.observations.len(),
+        "toolCallCount": run.tool_call_count,
+        "proposalIdCount": proposal_id_count,
+        "declaredWriteStepCount": declared_write_step_count,
+        "proposalRequiredStepCount": proposal_required_step_count,
+        "sideEffectsAbsent": side_effects_absent,
+    });
+    let mut blocking_reasons = Vec::new();
+
+    if run.reasoning_strategy.as_deref() != Some("controlled_chat_cutover_candidate") {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_strategy_mismatch".into(),
+        );
+    }
+    if run.status != AgentRunStatus::Completed {
+        push_unique_string(&mut blocking_reasons, "candidate_run_not_completed".into());
+    }
+    if audit.is_none() {
+        push_unique_string(&mut blocking_reasons, "candidate_run_audit_missing".into());
+    }
+    if !contract_shape_allowed {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_contract_shape_invalid".into(),
+        );
+    }
+    if !metadata_safe {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_metadata_not_safe".into(),
+        );
+    }
+    if allow_writes != Some(false) {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_allow_writes_not_false".into(),
+        );
+    }
+    if max_tool_calls != Some(0) {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_max_tool_calls_not_zero".into(),
+        );
+    }
+    for (key, reason) in [
+        ("contentStorage", "candidate_run_content_storage_not_none"),
+        ("toolStorage", "candidate_run_tool_storage_not_none"),
+        (
+            "chatHistoryStorage",
+            "candidate_run_chat_history_storage_not_none",
+        ),
+        ("proposalStorage", "candidate_run_proposal_storage_not_none"),
+        (
+            "lifeModelPatchStorage",
+            "candidate_run_life_model_patch_storage_not_none",
+        ),
+        ("memoryStorage", "candidate_run_memory_storage_not_none"),
+        ("evidenceStorage", "candidate_run_evidence_storage_not_none"),
+        (
+            "mcpAuditStorage",
+            "candidate_run_mcp_audit_storage_not_none",
+        ),
+    ] {
+        if audit_string(audit, key) != Some("none") {
+            push_unique_string(&mut blocking_reasons, reason.into());
+        }
+    }
+    if run.user_input.is_some() {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_user_input_persisted".into(),
+        );
+    }
+    if !run.generated_proposals.is_empty()
+        || proposal_id_count > 0
+        || proposal_required_step_count > 0
+    {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_proposal_side_effects_present".into(),
+        );
+    }
+    if !run.actions.is_empty()
+        || !run.observations.is_empty()
+        || run.tool_call_count > 0
+        || declared_write_step_count > 0
+    {
+        push_unique_string(
+            &mut blocking_reasons,
+            "candidate_run_external_write_side_effects_present".into(),
+        );
+    }
+
+    Ok(CutoverCandidateReviewReadiness {
+        digest: metadata_hash_for_serializable(&summary)?,
+        contract_shape,
+        candidate_ready,
         blocking_reasons,
     })
 }
@@ -2438,9 +2833,130 @@ fn shadow_review_latest_decision(
     })
 }
 
+fn cutover_candidate_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || record.summary.is_some()
+        || !record.source_refs.is_empty()
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(metadata) = record.run_metadata.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "candidateRunId",
+        "decisionKind",
+        "contractShape",
+        "candidateSummaryDigest",
+        "reviewerNoteChecksum",
+        "reviewerNoteLength",
+        "reviewerNoteCategory",
+        "createdAt",
+    ];
+    if metadata.len() != allowed.len()
+        || !metadata.keys().all(|key| allowed.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    metadata_string_is_safe(&record.run_metadata, "candidateRunId", safe_internal_id)
+        && metadata_string_is_safe(&record.run_metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && metadata_string_is_safe(&record.run_metadata, "contractShape", |value, field| {
+            safe_enum_value(
+                value,
+                field,
+                &["send_message_compatible", "blocked", "failed"],
+            )
+        })
+        && metadata_string_is_safe(
+            &record.run_metadata,
+            "candidateSummaryDigest",
+            |value, _| safe_checksum(value),
+        )
+        && reviewer_note_flat_metadata_is_safe(&record.run_metadata)
+        && record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && !contains_unsafe_promotion_metadata(&record.run_metadata)
+}
+
+fn cutover_candidate_review_decision_kind(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn cutover_candidate_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<ControlledChatCutoverCandidateReviewLatestDecision> {
+    Some(ControlledChatCutoverCandidateReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        candidate_run_id: record
+            .run_metadata
+            .get("candidateRunId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        decision_kind: cutover_candidate_review_decision_kind(record)?.to_string(),
+        contract_shape: record
+            .run_metadata
+            .get("contractShape")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        candidate_summary_digest: record
+            .run_metadata
+            .get("candidateSummaryDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        reviewer_note_checksum: record
+            .run_metadata
+            .get("reviewerNoteChecksum")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        reviewer_note_length: record
+            .run_metadata
+            .get("reviewerNoteLength")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        reviewer_note_category: record
+            .run_metadata
+            .get("reviewerNoteCategory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339()),
+    })
+}
+
 fn shadow_review_allow_writes(audit: Option<&Value>) -> Option<bool> {
     audit_bool_at(audit, &["writeControl", "allowWrites"])
         .or_else(|| audit_bool(audit, "allowWrites"))
+}
+
+fn cutover_candidate_review_allow_writes(audit: Option<&Value>) -> Option<bool> {
+    audit_bool_at(audit, &["runtimeLimits", "allowWrites"])
+        .or_else(|| audit_bool_at(audit, &["writeControl", "allowWrites"]))
+        .or_else(|| audit_bool(audit, "allowWrites"))
+}
+
+fn cutover_candidate_review_max_tool_calls(audit: Option<&Value>) -> Option<u64> {
+    audit_u64_at(audit, &["runtimeLimits", "maxToolCalls"])
+        .or_else(|| audit_u64(audit, "maxToolCalls"))
 }
 
 fn audit_bool(audit: Option<&Value>, key: &str) -> Option<bool> {
@@ -6216,6 +6732,421 @@ mod tests {
             assert!(!serialized.contains("Provide a concise default Chat contract response"));
             assert!(!serialized.contains("Candidate-only answer"));
         }
+    }
+
+    fn completed_cutover_candidate_review_run(run_id: &str) -> AgentRun {
+        let mut run = AgentRun::new_chat_run("session-1", "raw prompt should not persist");
+        run.id = run_id.to_string();
+        run.status = AgentRunStatus::Completed;
+        run.user_input = None;
+        run.reasoning_strategy = Some("controlled_chat_cutover_candidate".into());
+        run.output_preview = Some("Cutover candidate: react / react".into());
+        run.generated_proposals = Vec::new();
+        run.actions = Vec::new();
+        run.observations = Vec::new();
+        run.tool_call_count = 0;
+        run.finished_at = Some(chrono::Utc::now());
+        run.reasoning_trace = Some(ReasoningTrace {
+            strategy_result: Some(json!({
+                "candidateAdapter": "controlled_chat_cutover_candidate",
+                "strategyKind": "react",
+                "payloadKind": "react",
+                "contractShape": "send_message_compatible",
+                "candidateReady": true,
+                "descriptorKind": "default_contract_probe",
+                "metadataSafe": true,
+                "nonDefault": true,
+                "defaultChatUnchanged": true,
+                "runtimeLimits": {
+                    "allowWrites": false,
+                    "maxToolCalls": 0
+                },
+                "contentStorage": "none",
+                "toolStorage": "none",
+                "chatHistoryStorage": "none",
+                "proposalStorage": "none",
+                "lifeModelPatchStorage": "none",
+                "memoryStorage": "none",
+                "evidenceStorage": "none",
+                "mcpAuditStorage": "none",
+                "proposalIdCount": 0,
+                "writeControl": {
+                    "allowWrites": false,
+                    "declaredWriteStepCount": 0,
+                    "proposalRequiredStepCount": 0,
+                    "blockedStepCount": 0
+                }
+            })),
+            output: Some("controlled_chat_cutover_candidate".into()),
+            ..ReasoningTrace::default()
+        });
+        run
+    }
+
+    async fn insert_cutover_candidate_review_run(state: &Arc<crate::AppState>, run: &AgentRun) {
+        let store = state.agent_run_store.as_ref().unwrap().lock().await;
+        store.create_run(run).unwrap();
+    }
+
+    async fn cutover_candidate_review_evidence_records(
+        state: &Arc<crate::AppState>,
+    ) -> Vec<openlife_core::agent::EvidenceRecord> {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    "runtime.controlled_chat.cutover_candidate_review_decision".into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_blocks_missing_candidate_run_without_evidence() {
+        let state = preview_state().await;
+
+        let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-missing".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: Some("Do not store reviewer@example.com".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert_eq!(result.candidate_run_id, "run-candidate-missing");
+        assert_eq!(result.decision_kind, "approve");
+        assert!(result
+            .blocking_reasons
+            .contains(&"candidate_run_missing".to_string()));
+        assert!(cutover_candidate_review_evidence_records(&state)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_blocks_non_candidate_run_without_evidence() {
+        let state = preview_state().await;
+        let mut run = completed_cutover_candidate_review_run("run-not-candidate");
+        run.reasoning_strategy = Some("controlled_migration_shadow_run".into());
+        insert_cutover_candidate_review_run(&state, &run).await;
+
+        let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-not-candidate".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert!(result
+            .blocking_reasons
+            .contains(&"candidate_run_strategy_mismatch".to_string()));
+        assert!(cutover_candidate_review_evidence_records(&state)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_blocks_unfinished_candidate_run_without_evidence() {
+        let state = preview_state().await;
+        let mut run = completed_cutover_candidate_review_run("run-candidate-running");
+        run.status = AgentRunStatus::Running;
+        run.finished_at = None;
+        insert_cutover_candidate_review_run(&state, &run).await;
+
+        let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-running".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert!(result
+            .blocking_reasons
+            .contains(&"candidate_run_not_completed".to_string()));
+        assert!(cutover_candidate_review_evidence_records(&state)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_blocks_approve_when_candidate_is_not_ready_or_not_compatible()
+    {
+        for (run_id, contract_shape, candidate_ready, expected_reason) in [
+            (
+                "run-candidate-not-ready",
+                "send_message_compatible",
+                false,
+                "candidate_run_not_ready_for_approval",
+            ),
+            (
+                "run-candidate-failed-shape",
+                "failed",
+                true,
+                "candidate_run_contract_shape_not_send_message_compatible",
+            ),
+        ] {
+            let state = preview_state().await;
+            let mut run = completed_cutover_candidate_review_run(run_id);
+            let audit = run
+                .reasoning_trace
+                .as_mut()
+                .and_then(|trace| trace.strategy_result.as_mut())
+                .and_then(Value::as_object_mut)
+                .unwrap();
+            audit.insert("contractShape".into(), json!(contract_shape));
+            audit.insert("candidateReady".into(), json!(candidate_ready));
+            insert_cutover_candidate_review_run(&state, &run).await;
+
+            let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+                ControlledChatCutoverCandidateReviewDecisionInput {
+                    candidate_run_id: run_id.into(),
+                    decision_kind: "approve".into(),
+                    optional_reviewer_note: None,
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(!result.recorded);
+            assert!(result.evidence_id.is_none());
+            assert!(result
+                .blocking_reasons
+                .contains(&expected_reason.to_string()));
+            assert!(cutover_candidate_review_evidence_records(&state)
+                .await
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_approve_records_only_metadata_safe_evidence() {
+        let state = preview_state().await;
+        let run = completed_cutover_candidate_review_run("run-candidate-review-approve");
+        insert_cutover_candidate_review_run(&state, &run).await;
+        let before = side_effect_counts(&state).await;
+        let raw_note = "Approve candidate, but never store raw-reviewer@example.com.";
+
+        let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-review-approve".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: Some(raw_note.into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.recorded);
+        assert!(result.evidence_id.is_some());
+        assert_eq!(result.decision_kind, "approve");
+        assert_eq!(result.contract_shape, "send_message_compatible");
+        assert!(result.candidate_summary_digest.starts_with("sha256:"));
+        assert!(result.blocking_reasons.is_empty());
+
+        let evidence = cutover_candidate_review_evidence_records(&state).await;
+        assert_eq!(evidence.len(), 1);
+        let record = &evidence[0];
+        assert!(record.summary.is_none());
+        assert!(record.source_refs.is_empty());
+        assert!(record.linked_agent_run_ids.is_empty());
+        assert!(record.linked_proposal_ids.is_empty());
+
+        let metadata = record.run_metadata.as_object().unwrap();
+        let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "candidateRunId",
+                "candidateSummaryDigest",
+                "contractShape",
+                "createdAt",
+                "decisionKind",
+                "reviewerNoteCategory",
+                "reviewerNoteChecksum",
+                "reviewerNoteLength"
+            ]
+        );
+        assert_eq!(
+            record.run_metadata["candidateRunId"],
+            "run-candidate-review-approve"
+        );
+        assert_eq!(record.run_metadata["decisionKind"], "approve");
+        assert_eq!(
+            record.run_metadata["contractShape"],
+            "send_message_compatible"
+        );
+        assert_eq!(
+            record.run_metadata["reviewerNoteLength"],
+            raw_note.chars().count()
+        );
+        assert!(record.run_metadata["reviewerNoteChecksum"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(record.run_metadata["reviewerNoteCategory"], "brief");
+        assert!(record.run_metadata["candidateSummaryDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert!(record.run_metadata["createdAt"].as_str().is_some());
+
+        let serialized = serde_json::to_string(record).unwrap();
+        assert!(!serialized.contains(raw_note));
+        assert!(!serialized.contains("raw-reviewer@example.com"));
+        assert!(!serialized.contains("reviewerNoteRaw"));
+        assert!(!serialized.contains("candidate userOutput"));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("toolPayload"));
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count + 1, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_reject_and_request_rework_can_be_recorded_metadata_safe() {
+        let state = preview_state().await;
+
+        for decision_kind in ["reject", "request_rework"] {
+            let run_id = format!("run-candidate-review-{decision_kind}");
+            let run = completed_cutover_candidate_review_run(&run_id);
+            insert_cutover_candidate_review_run(&state, &run).await;
+
+            let result = record_controlled_chat_cutover_candidate_review_decision_with_state(
+                ControlledChatCutoverCandidateReviewDecisionInput {
+                    candidate_run_id: run_id.clone(),
+                    decision_kind: decision_kind.into(),
+                    optional_reviewer_note: Some("Needs human follow-up.".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.recorded);
+            assert_eq!(result.decision_kind, decision_kind);
+            assert_eq!(result.candidate_run_id, run_id);
+            assert_eq!(result.contract_shape, "send_message_compatible");
+        }
+
+        let summary = get_controlled_chat_cutover_candidate_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.rework_reject_count, 2);
+        assert!(matches!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("reject" | "request_rework")
+        ));
+
+        for record in cutover_candidate_review_evidence_records(&state).await {
+            let serialized = serde_json::to_string(&record).unwrap();
+            assert!(!serialized.contains("Needs human follow-up."));
+            assert!(!serialized.contains("userOutput"));
+            assert!(!serialized.contains("rawPrompt"));
+            assert!(!serialized.contains("toolPayload"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cutover_candidate_review_summary_is_read_only() {
+        let state = preview_state().await;
+        let approve_run = completed_cutover_candidate_review_run("run-candidate-summary-approve");
+        insert_cutover_candidate_review_run(&state, &approve_run).await;
+        record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-summary-approve".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let rework_run = completed_cutover_candidate_review_run("run-candidate-summary-rework");
+        insert_cutover_candidate_review_run(&state, &rework_run).await;
+        record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: "run-candidate-summary-rework".into(),
+                decision_kind: "request_rework".into(),
+                optional_reviewer_note: Some("Needs rework.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let summary = get_controlled_chat_cutover_candidate_review_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.rework_reject_count, 1);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.candidate_run_id.as_str()),
+            Some("run-candidate-summary-rework")
+        );
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.contract_shape.as_str()),
+            Some("send_message_compatible")
+        );
+        assert!(summary.latest_timestamp.is_some());
+        assert!(summary.blocking_reasons.is_empty());
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
     }
 
     #[tokio::test]

@@ -18,9 +18,11 @@ import {
   checkControlledPilotPromotionReadiness,
   checkRuntimeMigrationGate,
   draftControlledChatMigrationPlan,
+  getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
   getControlledChatMigrationShadowReviewSummary,
   getControlledPilotPromotionEvidenceSummary,
+  recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
   runControlledChatCutoverCandidate,
@@ -29,6 +31,9 @@ import {
 } from "../../tauri";
 import type {
   ControlledChatCutoverCandidateOutput,
+  ControlledChatCutoverCandidateReviewDecisionKind,
+  ControlledChatCutoverCandidateReviewDecisionResult,
+  ControlledChatCutoverCandidateReviewSummary,
   ControlledChatCutoverReadinessReport,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
@@ -202,6 +207,20 @@ export default function MultiStrategyPreviewSection() {
   const [cutoverCandidateError, setCutoverCandidateError] = useState<string | null>(null);
   const [cutoverCandidateResult, setCutoverCandidateResult] =
     useState<ControlledChatCutoverCandidateOutput | null>(null);
+  const [cutoverCandidateReviewNote, setCutoverCandidateReviewNote] = useState("");
+  const [cutoverCandidateReviewRecording, setCutoverCandidateReviewRecording] = useState(false);
+  const [cutoverCandidateReviewError, setCutoverCandidateReviewError] = useState<string | null>(
+    null
+  );
+  const [cutoverCandidateReviewResult, setCutoverCandidateReviewResult] =
+    useState<ControlledChatCutoverCandidateReviewDecisionResult | null>(null);
+  const [cutoverCandidateReviewSummaryChecking, setCutoverCandidateReviewSummaryChecking] =
+    useState(false);
+  const [cutoverCandidateReviewSummaryError, setCutoverCandidateReviewSummaryError] = useState<
+    string | null
+  >(null);
+  const [cutoverCandidateReviewSummary, setCutoverCandidateReviewSummary] =
+    useState<ControlledChatCutoverCandidateReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -449,6 +468,8 @@ export default function MultiStrategyPreviewSection() {
     setCutoverCandidateChecking(true);
     setCutoverCandidateError(null);
     setCutoverCandidateResult(null);
+    setCutoverCandidateReviewError(null);
+    setCutoverCandidateReviewResult(null);
     try {
       const result = await runControlledChatCutoverCandidate({
         sessionId: `settings-cutover-candidate-${Date.now()}`,
@@ -460,6 +481,51 @@ export default function MultiStrategyPreviewSection() {
       setCutoverCandidateError(`Cutover candidate failed: ${readableError(e)}`);
     } finally {
       setCutoverCandidateChecking(false);
+    }
+  };
+
+  const handleCutoverCandidateReviewSummaryRefresh = async () => {
+    setCutoverCandidateReviewSummaryChecking(true);
+    setCutoverCandidateReviewSummaryError(null);
+    try {
+      const summary = await getControlledChatCutoverCandidateReviewSummary();
+      setCutoverCandidateReviewSummary(summary);
+    } catch (e) {
+      setCutoverCandidateReviewSummaryError(`Candidate review summary failed: ${readableError(e)}`);
+    } finally {
+      setCutoverCandidateReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordCutoverCandidateReviewDecision = async (
+    decisionKind: ControlledChatCutoverCandidateReviewDecisionKind
+  ) => {
+    const candidateRunId = cutoverCandidateResult?.candidateRunId;
+    if (!candidateRunId) {
+      setCutoverCandidateReviewError(
+        "Candidate review recording requires a candidate AgentRun id."
+      );
+      return;
+    }
+
+    setCutoverCandidateReviewRecording(true);
+    setCutoverCandidateReviewError(null);
+    setCutoverCandidateReviewResult(null);
+    try {
+      const trimmedNote = cutoverCandidateReviewNote.trim();
+      const result = await recordControlledChatCutoverCandidateReviewDecision({
+        candidateRunId,
+        decisionKind,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setCutoverCandidateReviewResult(result);
+      if (result.recorded) {
+        setCutoverCandidateReviewNote("");
+      }
+    } catch (e) {
+      setCutoverCandidateReviewError(`Candidate review recording failed: ${readableError(e)}`);
+    } finally {
+      setCutoverCandidateReviewRecording(false);
     }
   };
 
@@ -2022,6 +2088,219 @@ export default function MultiStrategyPreviewSection() {
           </div>
         ) : (
           <div className="mt-3 text-xs text-stone-500">No cutover candidate result loaded.</div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">Cutover Candidate Review</div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Manual candidate review evidence for W32. Decisions are recorded as metadata-only
+              evidence and do not save candidate output to Chat, promote output, migrate default
+              Chat, or change feature flags.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleCutoverCandidateReviewSummaryRefresh}
+            disabled={cutoverCandidateReviewSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              cutoverCandidateReviewSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={cutoverCandidateReviewSummaryChecking ? "animate-spin" : undefined}
+            />
+            {cutoverCandidateReviewSummaryChecking
+              ? "Refreshing..."
+              : "Refresh Candidate Review Summary"}
+          </button>
+        </div>
+
+        {cutoverCandidateReviewSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {cutoverCandidateReviewSummaryError}
+          </div>
+        )}
+
+        {cutoverCandidateReviewSummary ? (
+          <div className="mt-4 grid gap-2 md:grid-cols-2">
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Latest decision</div>
+              <div className="mt-1 text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestDecision?.decisionKind ?? "none"}
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Counts</div>
+              <div className="mt-1 flex flex-wrap gap-2 text-xs text-stone-800">
+                <span>Approved: {cutoverCandidateReviewSummary.approvedCount}</span>
+                <span>Rework / Reject: {cutoverCandidateReviewSummary.reworkRejectCount}</span>
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Candidate run</div>
+              <div className="mt-1 font-mono text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestDecision?.candidateRunId ?? "none"}
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Contract shape</div>
+              <div className="mt-1 text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestDecision?.contractShape ?? "none"}
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Summary digest</div>
+              <div className="mt-1 break-all font-mono text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestDecision?.candidateSummaryDigest ?? "none"}
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Latest timestamp</div>
+              <div className="mt-1 text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestTimestamp ?? "none"}
+              </div>
+            </div>
+            <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2">
+              <div className="text-[10px] uppercase text-stone-400">Reviewer note category</div>
+              <div className="mt-1 text-xs text-stone-800">
+                {cutoverCandidateReviewSummary.latestDecision?.reviewerNoteCategory ?? "none"}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No cutover candidate review summary loaded.
+          </div>
+        )}
+
+        {cutoverCandidateReviewSummary?.blockingReasons.length ? (
+          <div className="mt-3 space-y-1">
+            {cutoverCandidateReviewSummary.blockingReasons.map(reason => (
+              <div
+                key={reason}
+                className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+              >
+                {reason}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mt-4 border-t border-stone-100 pt-4">
+          <label className="block">
+            <span className="text-xs font-medium text-stone-700">candidate review note</span>
+            <textarea
+              value={cutoverCandidateReviewNote}
+              onChange={event => setCutoverCandidateReviewNote(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-900 focus:border-stone-900 focus:outline-none focus:ring-1 focus:ring-stone-900"
+              placeholder="Optional note; backend stores only length, checksum, and category."
+            />
+          </label>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => handleRecordCutoverCandidateReviewDecision("approve")}
+              disabled={cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId
+                  ? "bg-stone-100 text-stone-400"
+                  : "bg-emerald-700 text-white hover:bg-emerald-800"
+              )}
+            >
+              <CheckCircle2 size={13} />
+              Approve Candidate
+            </button>
+            <button
+              type="button"
+              onClick={() => handleRecordCutoverCandidateReviewDecision("reject")}
+              disabled={cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId
+                  ? "bg-stone-100 text-stone-400"
+                  : "bg-red-700 text-white hover:bg-red-800"
+              )}
+            >
+              <XCircle size={13} />
+              Reject Candidate
+            </button>
+            <button
+              type="button"
+              onClick={() => handleRecordCutoverCandidateReviewDecision("request_rework")}
+              disabled={cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId}
+              className={classNames(
+                "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                cutoverCandidateReviewRecording || !cutoverCandidateResult?.candidateRunId
+                  ? "bg-stone-100 text-stone-400"
+                  : "bg-amber-700 text-white hover:bg-amber-800"
+              )}
+            >
+              <ShieldCheck size={13} />
+              Request Candidate Rework
+            </button>
+          </div>
+          <div className="mt-2 text-xs text-stone-500">
+            {cutoverCandidateResult?.candidateRunId
+              ? `Review target: ${cutoverCandidateResult.candidateRunId}`
+              : "Run a cutover candidate before recording review evidence."}
+          </div>
+        </div>
+
+        {cutoverCandidateReviewError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {cutoverCandidateReviewError}
+          </div>
+        )}
+
+        {cutoverCandidateReviewResult && (
+          <div className="mt-4 rounded-md border border-stone-200 bg-stone-50 px-3 py-2">
+            <div
+              className={classNames(
+                "inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium",
+                cutoverCandidateReviewResult.recorded
+                  ? "bg-emerald-100 text-emerald-800"
+                  : "bg-red-100 text-red-700"
+              )}
+            >
+              {cutoverCandidateReviewResult.recorded ? (
+                <CheckCircle2 size={13} />
+              ) : (
+                <XCircle size={13} />
+              )}
+              {cutoverCandidateReviewResult.recorded
+                ? "Candidate review recorded"
+                : "Candidate review blocked"}
+            </div>
+            <div className="mt-2 text-xs text-stone-700">
+              {cutoverCandidateReviewResult.decisionKind} ·{" "}
+              {cutoverCandidateReviewResult.candidateRunId} ·{" "}
+              {cutoverCandidateReviewResult.evidenceId ?? "no evidence"}
+            </div>
+            <div className="mt-1 break-all font-mono text-xs text-stone-600">
+              {cutoverCandidateReviewResult.candidateSummaryDigest}
+            </div>
+            {cutoverCandidateReviewResult.blockingReasons.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {cutoverCandidateReviewResult.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </section>
 

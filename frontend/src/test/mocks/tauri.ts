@@ -703,6 +703,35 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         warnings: ["candidate runtime forced allowWrites=false"],
         blockingReasons: [],
       } as T);
+    case "record_controlled_chat_cutover_candidate_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_candidate_review_1",
+        candidateRunId: _args?.input?.candidateRunId ?? "run-candidate-1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        contractShape: "send_message_compatible",
+        candidateSummaryDigest: "sha256:mock-candidate-summary",
+        createdAt: "2026-05-31T06:07:08Z",
+        blockingReasons: [],
+      } as T);
+    case "get_controlled_chat_cutover_candidate_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_candidate_review_1",
+          candidateRunId: "run-candidate-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          candidateSummaryDigest: "sha256:mock-candidate-summary",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T06:07:08Z",
+        },
+        approvedCount: 1,
+        reworkRejectCount: 0,
+        latestTimestamp: "2026-05-31T06:07:08Z",
+        blockingReasons: [],
+      } as T);
     case "list_snapshots":
       return Promise.resolve(mockLifeModelVersions as T);
     case "get_agent_run":

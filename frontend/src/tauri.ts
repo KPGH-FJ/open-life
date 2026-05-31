@@ -25,6 +25,9 @@ import type {
   ControlledChatCutoverReadinessReport,
   ControlledChatCutoverCandidateInput,
   ControlledChatCutoverCandidateOutput,
+  ControlledChatCutoverCandidateReviewDecisionInput,
+  ControlledChatCutoverCandidateReviewDecisionResult,
+  ControlledChatCutoverCandidateReviewSummary,
   ControlledChatMigrationShadowRunInput,
   ControlledChatMigrationShadowRunOutput,
   ControlledChatMigrationShadowReviewDecisionInput,
@@ -361,6 +364,21 @@ export async function runControlledChatCutoverCandidate(
   return safeInvoke<ControlledChatCutoverCandidateOutput>("run_controlled_chat_cutover_candidate", {
     input,
   });
+}
+
+export async function recordControlledChatCutoverCandidateReviewDecision(
+  input: ControlledChatCutoverCandidateReviewDecisionInput
+): Promise<ControlledChatCutoverCandidateReviewDecisionResult> {
+  return safeInvoke<ControlledChatCutoverCandidateReviewDecisionResult>(
+    "record_controlled_chat_cutover_candidate_review_decision",
+    { input }
+  );
+}
+
+export async function getControlledChatCutoverCandidateReviewSummary(): Promise<ControlledChatCutoverCandidateReviewSummary> {
+  return safeInvoke<ControlledChatCutoverCandidateReviewSummary>(
+    "get_controlled_chat_cutover_candidate_review_summary"
+  );
 }
 
 export async function startStreamMessage(
