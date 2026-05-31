@@ -20,11 +20,13 @@ import {
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
+  getDefaultChatAdapterActivationReviewSummary,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
   getControlledChatMigrationShadowReviewSummary,
   getControlledPilotPromotionEvidenceSummary,
   getDefaultChatRuntimeBoundaryStatus,
+  recordDefaultChatAdapterActivationReviewDecision,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
@@ -40,6 +42,9 @@ import type {
   ControlledChatCutoverCandidatePromotionReadinessReport,
   ControlledChatCutoverReadinessReport,
   DefaultChatAdapterActivationPlanDraft,
+  DefaultChatAdapterActivationReviewDecisionKind,
+  DefaultChatAdapterActivationReviewDecisionResult,
+  DefaultChatAdapterActivationReviewSummary,
   ControlledChatMigrationImplementationGateReport,
   ControlledChatMigrationPlanDraft,
   ControlledChatMigrationReviewDecisionKind,
@@ -63,6 +68,7 @@ const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 const SAFE_SUMMARY_KEYS = [
   "runtimeBoundary",
   "activationPlan",
+  "activationReview",
   "cutoverReadinessGate",
   "promotionReadinessGate",
   "taskKind",
@@ -106,6 +112,9 @@ const SAFE_SUMMARY_KEYS = [
   "rollbackPlanCount",
   "observabilityPlanCount",
   "testPlanCount",
+  "latestDecisionPresent",
+  "approvedCount",
+  "rejectOrReworkCount",
   "implementationEligible",
   "latestShadowReviewDecisionKind",
   "shadowRunReady",
@@ -271,6 +280,17 @@ export default function MultiStrategyPreviewSection() {
   const [activationPlanError, setActivationPlanError] = useState<string | null>(null);
   const [activationPlanDraft, setActivationPlanDraft] =
     useState<DefaultChatAdapterActivationPlanDraft | null>(null);
+  const [activationReviewNote, setActivationReviewNote] = useState("");
+  const [activationReviewRecording, setActivationReviewRecording] = useState(false);
+  const [activationReviewError, setActivationReviewError] = useState<string | null>(null);
+  const [activationReviewResult, setActivationReviewResult] =
+    useState<DefaultChatAdapterActivationReviewDecisionResult | null>(null);
+  const [activationReviewSummaryChecking, setActivationReviewSummaryChecking] = useState(false);
+  const [activationReviewSummaryError, setActivationReviewSummaryError] = useState<string | null>(
+    null
+  );
+  const [activationReviewSummary, setActivationReviewSummary] =
+    useState<DefaultChatAdapterActivationReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -592,6 +612,44 @@ export default function MultiStrategyPreviewSection() {
       setActivationPlanError(`Activation plan draft failed: ${readableError(e)}`);
     } finally {
       setActivationPlanChecking(false);
+    }
+  };
+
+  const handleActivationReviewSummaryRefresh = async () => {
+    setActivationReviewSummaryChecking(true);
+    setActivationReviewSummaryError(null);
+    try {
+      const summary = await getDefaultChatAdapterActivationReviewSummary();
+      setActivationReviewSummary(summary);
+    } catch (e) {
+      setActivationReviewSummaryError(`Activation review summary failed: ${readableError(e)}`);
+    } finally {
+      setActivationReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordActivationReviewDecision = async (
+    decisionKind: DefaultChatAdapterActivationReviewDecisionKind
+  ) => {
+    setActivationReviewRecording(true);
+    setActivationReviewError(null);
+    setActivationReviewResult(null);
+    try {
+      const trimmedNote = activationReviewNote.trim();
+      const result = await recordDefaultChatAdapterActivationReviewDecision({
+        decisionKind,
+        requiredApprovedCandidates: 1,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setActivationReviewResult(result);
+      if (result.recorded) {
+        setActivationReviewNote("");
+        await handleActivationReviewSummaryRefresh();
+      }
+    } catch (e) {
+      setActivationReviewError(`Activation review recording failed: ${readableError(e)}`);
+    } finally {
+      setActivationReviewRecording(false);
     }
   };
 
@@ -2825,6 +2883,218 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No default Chat adapter activation draft loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Activation Review Decision
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Explicit W36 human review evidence for the W35 activation plan draft. It records
+              approve, reject, or request rework metadata only; it does not activate or migrate
+              default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleActivationReviewSummaryRefresh}
+            disabled={activationReviewSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              activationReviewSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={activationReviewSummaryChecking ? "animate-spin" : undefined}
+            />
+            {activationReviewSummaryChecking
+              ? "Refreshing..."
+              : "Refresh Activation Review Summary"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          Reviewer notes are never stored as raw text. Only checksum, length, and bounded category
+          metadata are persisted in EvidenceStore.
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <label className="block">
+            <span className="text-xs font-medium text-stone-700">Activation reviewer note</span>
+            <textarea
+              value={activationReviewNote}
+              onChange={event => setActivationReviewNote(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-stone-500"
+              placeholder="Optional private note; only metadata is stored."
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["approve", "Approve"],
+              ["reject", "Reject"],
+              ["request_rework", "Request Rework"],
+            ].map(([decisionKind, label]) => (
+              <button
+                key={decisionKind}
+                type="button"
+                onClick={() =>
+                  handleRecordActivationReviewDecision(
+                    decisionKind as DefaultChatAdapterActivationReviewDecisionKind
+                  )
+                }
+                disabled={activationReviewRecording}
+                className={classNames(
+                  "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                  activationReviewRecording
+                    ? "bg-stone-100 text-stone-400"
+                    : decisionKind === "approve"
+                      ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                      : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                )}
+              >
+                {decisionKind === "approve" ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {activationReviewError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {activationReviewError}
+          </div>
+        )}
+
+        {activationReviewSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {activationReviewSummaryError}
+          </div>
+        )}
+
+        {activationReviewResult && (
+          <div className="mt-4 space-y-2 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+            <div className="font-medium text-stone-900">
+              {activationReviewResult.recorded
+                ? "Activation review decision recorded"
+                : "Activation review decision blocked"}
+            </div>
+            <div>decisionKind: {activationReviewResult.decisionKind}</div>
+            <div>draftReady: {String(activationReviewResult.draftReady)}</div>
+            <div className="break-all">
+              activationPlanDigest: {activationReviewResult.activationPlanDigest}
+            </div>
+            {activationReviewResult.evidenceId && (
+              <div>evidenceId: {activationReviewResult.evidenceId}</div>
+            )}
+            {activationReviewResult.blockingReasons.length > 0 && (
+              <div className="space-y-1">
+                {activationReviewResult.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activationReviewSummary ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["approvedCount", String(activationReviewSummary.approvedCount)],
+                ["rejectOrReworkCount", String(activationReviewSummary.rejectOrReworkCount)],
+                ["latestTimestamp", activationReviewSummary.latestTimestamp ?? "none"],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {activationReviewSummary.latestDecision && (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+                <div className="font-medium text-stone-900">Latest decision</div>
+                <div className="mt-1">
+                  decisionKind: {activationReviewSummary.latestDecision.decisionKind}
+                </div>
+                <div>draftReady: {String(activationReviewSummary.latestDecision.draftReady)}</div>
+                <div>
+                  candidatePromotionReady:{" "}
+                  {String(activationReviewSummary.latestDecision.candidatePromotionReady)}
+                </div>
+                <div>currentMode: {activationReviewSummary.latestDecision.currentMode}</div>
+                <div>
+                  automaticMigrationEnabled:{" "}
+                  {String(activationReviewSummary.latestDecision.automaticMigrationEnabled)}
+                </div>
+                <div className="break-all">
+                  activationPlanDigest:{" "}
+                  {activationReviewSummary.latestDecision.activationPlanDigest}
+                </div>
+                <div>
+                  reviewerNoteCategory:{" "}
+                  {activationReviewSummary.latestDecision.reviewerNoteCategory}
+                </div>
+                <div>
+                  reviewerNoteLength: {activationReviewSummary.latestDecision.reviewerNoteLength}
+                </div>
+              </div>
+            )}
+
+            {safeSummaryEntries(activationReviewSummary.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(activationReviewSummary.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {activationReviewSummary.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {activationReviewSummary.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No activation review blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No default Chat adapter activation review summary loaded.
           </div>
         )}
       </section>

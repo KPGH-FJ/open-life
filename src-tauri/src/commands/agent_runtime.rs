@@ -26,6 +26,8 @@ const CONTROLLED_CHAT_MIGRATION_SHADOW_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.controlled_chat.migration_shadow_review_decision";
 const CONTROLLED_CHAT_CUTOVER_CANDIDATE_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.controlled_chat.cutover_candidate_review_decision";
+const DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.default_chat.adapter_activation_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -498,6 +500,63 @@ pub struct DefaultChatAdapterActivationPlanDraft {
     pub manual_review_required: bool,
     pub not_automatic_migration: bool,
     pub requires_separate_implementation: bool,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationReviewDecisionInput {
+    pub decision_kind: String,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub decision_kind: String,
+    pub draft_ready: bool,
+    pub activation_plan_digest: String,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationReviewLatestDecision {
+    pub evidence_id: String,
+    pub decision_kind: String,
+    pub draft_ready: bool,
+    pub activation_plan_digest: String,
+    pub candidate_promotion_ready: bool,
+    pub current_mode: String,
+    pub automatic_migration_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_note_checksum: Option<String>,
+    pub reviewer_note_length: usize,
+    pub reviewer_note_category: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterActivationReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterActivationReviewLatestDecision>,
+    pub approved_count: usize,
+    pub reject_or_rework_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
     pub metadata_safe_summary: Value,
 }
@@ -2249,6 +2308,182 @@ fn draft_default_chat_adapter_activation_plan_from_reports(
     }
 }
 
+#[tauri::command]
+pub async fn record_default_chat_adapter_activation_review_decision(
+    input: DefaultChatAdapterActivationReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterActivationReviewDecisionResult, String> {
+    record_default_chat_adapter_activation_review_decision_with_state(input, &state.inner().clone())
+        .await
+}
+
+pub(crate) async fn record_default_chat_adapter_activation_review_decision_with_state(
+    input: DefaultChatAdapterActivationReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterActivationReviewDecisionResult, String> {
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let session_id = normalize_optional_internal_id(input.session_id.as_deref(), "sessionId")?;
+    let draft = draft_default_chat_adapter_activation_plan_with_state(
+        DefaultChatAdapterActivationPlanDraftInput {
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+            session_id,
+        },
+        state,
+    )
+    .await?;
+    let activation_plan_digest = metadata_hash_for_serializable(&draft)?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut blocking_reasons = draft.blocking_reasons.clone();
+
+    if decision_kind == "approve" && !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "activation_plan_draft_not_ready_for_approval".into(),
+        );
+        return Ok(DefaultChatAdapterActivationReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            decision_kind,
+            draft_ready: false,
+            activation_plan_digest,
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note_fields(input.optional_reviewer_note.as_deref());
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    );
+    evidence_draft.run_metadata = json!({
+        "evidenceKind": "default_chat_adapter_activation_review_decision",
+        "decisionKind": decision_kind.clone(),
+        "draftReady": draft.draft_ready,
+        "activationPlanDigest": activation_plan_digest.clone(),
+        "candidatePromotionReady": draft.candidate_promotion_readiness_report.ready,
+        "currentMode": draft.runtime_boundary_status.current_mode,
+        "automaticMigrationEnabled": draft.runtime_boundary_status.automatic_migration_enabled,
+        "reviewerNoteChecksum": reviewer_note_metadata.checksum,
+        "reviewerNoteLength": reviewer_note_metadata.length,
+        "reviewerNoteCategory": reviewer_note_metadata.category,
+        "createdAt": created_at.clone(),
+    });
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store.create_evidence(evidence_draft).map_err(|e| {
+            format!(
+                "failed to record default Chat adapter activation review decision evidence: {e}"
+            )
+        })?
+    };
+
+    Ok(DefaultChatAdapterActivationReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        decision_kind,
+        draft_ready: draft.draft_ready,
+        activation_plan_digest,
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_activation_review_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterActivationReviewSummary, String> {
+    get_default_chat_adapter_activation_review_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_default_chat_adapter_activation_review_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterActivationReviewSummary, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| {
+                format!("failed to read default Chat adapter activation review evidence: {e}")
+            })?
+    };
+    let records = records
+        .into_iter()
+        .filter(default_chat_adapter_activation_review_decision_evidence_is_metadata_safe)
+        .collect::<Vec<_>>();
+
+    let approved_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_activation_review_decision_kind(record) == Some("approve")
+        })
+        .count();
+    let reject_or_rework_count = records
+        .iter()
+        .filter(|record| {
+            matches!(
+                default_chat_adapter_activation_review_decision_kind(record),
+                Some("reject" | "request_rework")
+            )
+        })
+        .count();
+    let latest_decision = records
+        .first()
+        .and_then(default_chat_adapter_activation_review_latest_decision);
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+    let latest_decision_present = latest_decision.is_some();
+    let blocking_reasons = if latest_decision_present {
+        Vec::new()
+    } else {
+        vec!["activation_review_decision_missing".into()]
+    };
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterActivationReviewSummary {
+        latest_decision,
+        approved_count,
+        reject_or_rework_count,
+        latest_timestamp,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "activationReview": "default_chat_adapter_activation",
+            "metadataSafe": true,
+            "readOnly": true,
+            "approvedCount": approved_count,
+            "rejectOrReworkCount": reject_or_rework_count,
+            "latestDecisionPresent": latest_decision_present,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+        }),
+    })
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -3489,6 +3724,140 @@ fn cutover_candidate_review_latest_decision(
             .get("candidateSummaryDigest")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)?,
+        reviewer_note_checksum: record
+            .run_metadata
+            .get("reviewerNoteChecksum")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        reviewer_note_length: record
+            .run_metadata
+            .get("reviewerNoteLength")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        reviewer_note_category: record
+            .run_metadata
+            .get("reviewerNoteCategory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339()),
+    })
+}
+
+fn default_chat_adapter_activation_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || record.summary.is_some()
+        || !record.source_refs.is_empty()
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(metadata) = record.run_metadata.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "evidenceKind",
+        "decisionKind",
+        "draftReady",
+        "activationPlanDigest",
+        "candidatePromotionReady",
+        "currentMode",
+        "automaticMigrationEnabled",
+        "reviewerNoteChecksum",
+        "reviewerNoteLength",
+        "reviewerNoteCategory",
+        "createdAt",
+    ];
+    if metadata.len() != allowed.len()
+        || !metadata.keys().all(|key| allowed.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    record
+        .run_metadata
+        .get("evidenceKind")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "default_chat_adapter_activation_review_decision")
+        && metadata_string_is_safe(&record.run_metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && record
+            .run_metadata
+            .get("draftReady")
+            .and_then(Value::as_bool)
+            .is_some()
+        && metadata_string_is_safe(&record.run_metadata, "activationPlanDigest", |value, _| {
+            safe_checksum(value)
+        })
+        && record
+            .run_metadata
+            .get("candidatePromotionReady")
+            .and_then(Value::as_bool)
+            .is_some()
+        && metadata_string_is_safe(&record.run_metadata, "currentMode", safe_internal_id)
+        && record
+            .run_metadata
+            .get("automaticMigrationEnabled")
+            .and_then(Value::as_bool)
+            .is_some()
+        && reviewer_note_flat_metadata_is_safe(&record.run_metadata)
+        && record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && !contains_unsafe_promotion_metadata(&record.run_metadata)
+}
+
+fn default_chat_adapter_activation_review_decision_kind(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn default_chat_adapter_activation_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<DefaultChatAdapterActivationReviewLatestDecision> {
+    Some(DefaultChatAdapterActivationReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        decision_kind: default_chat_adapter_activation_review_decision_kind(record)?.to_string(),
+        draft_ready: record
+            .run_metadata
+            .get("draftReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        activation_plan_digest: record
+            .run_metadata
+            .get("activationPlanDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        candidate_promotion_ready: record
+            .run_metadata
+            .get("candidatePromotionReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        current_mode: record
+            .run_metadata
+            .get("currentMode")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        automatic_migration_enabled: record
+            .run_metadata
+            .get("automaticMigrationEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         reviewer_note_checksum: record
             .run_metadata
             .get("reviewerNoteChecksum")
@@ -8117,6 +8486,40 @@ mod tests {
         assert_eq!(before.messages_json, after.messages_json);
     }
 
+    async fn seed_ready_default_chat_adapter_activation_plan(
+        state: &Arc<crate::AppState>,
+        candidate_run_id: &str,
+    ) {
+        seed_cutover_candidate_promotion_w30_ready(state).await;
+        let run = completed_cutover_candidate_review_run(candidate_run_id);
+        insert_cutover_candidate_review_run(state, &run).await;
+        record_controlled_chat_cutover_candidate_review_decision_with_state(
+            ControlledChatCutoverCandidateReviewDecisionInput {
+                candidate_run_id: candidate_run_id.into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn default_chat_adapter_activation_review_evidence_records(
+        state: &Arc<crate::AppState>,
+    ) -> Vec<openlife_core::agent::EvidenceRecord> {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_ACTIVATION_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn default_chat_adapter_activation_plan_blocks_when_w33_not_ready_without_sections() {
         let state = preview_state().await;
@@ -8357,6 +8760,198 @@ mod tests {
         assert!(!serialized.contains("raw assistant output"));
         assert!(!serialized.contains("rawAssistantResponse"));
         assert!(!serialized.contains("tool payload"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_review_blocks_approve_when_draft_not_ready_without_evidence(
+    ) {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let result = record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Approve should not store this blocked note.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert!(!result.draft_ready);
+        assert!(result
+            .blocking_reasons
+            .contains(&"activation_plan_draft_not_ready_for_approval".to_string()));
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_review_records_ready_decisions_as_metadata_safe_evidence(
+    ) {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-review-ready",
+        )
+        .await;
+
+        for decision_kind in ["approve", "reject", "request_rework"] {
+            let result = record_default_chat_adapter_activation_review_decision_with_state(
+                DefaultChatAdapterActivationReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    session_id: Some("session-1".into()),
+                    optional_reviewer_note: Some("Reviewed activation plan manually.".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+            assert!(result.recorded);
+            assert!(result.evidence_id.is_some());
+            assert!(result.draft_ready);
+            assert!(result.activation_plan_digest.starts_with("sha256:"));
+            assert!(result.blocking_reasons.is_empty());
+        }
+
+        let records = default_chat_adapter_activation_review_evidence_records(&state).await;
+        assert_eq!(records.len(), 3);
+        for record in &records {
+            assert!(
+                default_chat_adapter_activation_review_decision_evidence_is_metadata_safe(record)
+            );
+            assert_eq!(
+                record.run_metadata["evidenceKind"],
+                "default_chat_adapter_activation_review_decision"
+            );
+            assert_eq!(record.run_metadata["draftReady"], true);
+            assert_eq!(record.run_metadata["candidatePromotionReady"], true);
+            assert_eq!(record.run_metadata["currentMode"], "legacy_stream");
+            assert_eq!(record.run_metadata["automaticMigrationEnabled"], false);
+            assert_eq!(record.run_metadata["reviewerNoteCategory"], "brief");
+            assert!(record.run_metadata["reviewerNoteChecksum"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:"));
+            assert_eq!(record.run_metadata.as_object().unwrap().len(), 11);
+        }
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_review_summary_is_read_only() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-review-summary",
+        )
+        .await;
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "request_rework".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some("Needs one more implementation note.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let summary = get_default_chat_adapter_activation_review_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.reject_or_rework_count, 1);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+        assert!(summary.latest_timestamp.is_some());
+        assert!(summary.blocking_reasons.is_empty());
+        assert_eq!(summary.metadata_safe_summary["readOnly"], true);
+        assert_eq!(
+            summary.metadata_safe_summary["evidenceStorage"],
+            "read_only"
+        );
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_activation_review_does_not_store_raw_note_or_outputs() {
+        let state = preview_state().await;
+        seed_ready_default_chat_adapter_activation_plan(
+            &state,
+            "run-candidate-activation-review-safe",
+        )
+        .await;
+
+        let result = record_default_chat_adapter_activation_review_decision_with_state(
+            DefaultChatAdapterActivationReviewDecisionInput {
+                decision_kind: "approve".into(),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                session_id: Some("session-1".into()),
+                optional_reviewer_note: Some(
+                    "Reviewer raw note with secret@example.com and candidate output text.".into(),
+                ),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let summary = get_default_chat_adapter_activation_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        let records = default_chat_adapter_activation_review_evidence_records(&state).await;
+
+        let serialized = serde_json::to_string(&(result, summary, records)).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("Reviewer raw note"));
+        assert!(!serialized.contains("candidate output text"));
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("raw assistant"));
+        assert!(!serialized.contains("rawAssistantOutput"));
         assert!(!serialized.contains("toolPayload"));
         assert!(!serialized.contains("userOutput"));
     }

@@ -37,6 +37,9 @@ import type {
   ControlledChatMigrationShadowReviewSummary,
   DefaultChatAdapterActivationPlanDraftInput,
   DefaultChatAdapterActivationPlanDraft,
+  DefaultChatAdapterActivationReviewDecisionInput,
+  DefaultChatAdapterActivationReviewDecisionResult,
+  DefaultChatAdapterActivationReviewSummary,
   DefaultChatRuntimeBoundaryStatus,
   RuntimeMigrationGateCheckInput,
   RuntimeMigrationGateReport,
@@ -405,6 +408,21 @@ export async function draftDefaultChatAdapterActivationPlan(
   return safeInvoke<DefaultChatAdapterActivationPlanDraft>(
     "draft_default_chat_adapter_activation_plan",
     { input }
+  );
+}
+
+export async function recordDefaultChatAdapterActivationReviewDecision(
+  input: DefaultChatAdapterActivationReviewDecisionInput
+): Promise<DefaultChatAdapterActivationReviewDecisionResult> {
+  return safeInvoke<DefaultChatAdapterActivationReviewDecisionResult>(
+    "record_default_chat_adapter_activation_review_decision",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterActivationReviewSummary(): Promise<DefaultChatAdapterActivationReviewSummary> {
+  return safeInvoke<DefaultChatAdapterActivationReviewSummary>(
+    "get_default_chat_adapter_activation_review_summary"
   );
 }
 

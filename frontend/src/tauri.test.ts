@@ -16,6 +16,8 @@ import {
   checkRuntimeMigrationGate,
   getDefaultChatRuntimeBoundaryStatus,
   draftDefaultChatAdapterActivationPlan,
+  getDefaultChatAdapterActivationReviewSummary,
+  recordDefaultChatAdapterActivationReviewDecision,
   draftControlledChatMigrationPlan,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -819,5 +821,68 @@ describe("tauri command argument aliases", () => {
     expect(result.manualReviewRequired).toBe(true);
     expect(result.requiresSeparateImplementation).toBe(true);
     expect(result.activationScope[0]).toContain("human review");
+  });
+
+  it("invokes default chat adapter activation review decision explicitly", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "ev_activation_review_1",
+      decisionKind: "approve",
+      draftReady: true,
+      activationPlanDigest: "sha256:activation-plan",
+      createdAt: "2026-05-31T10:11:12Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordDefaultChatAdapterActivationReviewDecision({
+      decisionKind: "approve",
+      requiredApprovedCandidates: 1,
+      optionalReviewerNote: "Reviewed manually.",
+    });
+
+    expect(invoke).toHaveBeenCalledWith("record_default_chat_adapter_activation_review_decision", {
+      input: {
+        decisionKind: "approve",
+        requiredApprovedCandidates: 1,
+        optionalReviewerNote: "Reviewed manually.",
+      },
+    });
+    expect(result.recorded).toBe(true);
+    expect(result.activationPlanDigest).toBe("sha256:activation-plan");
+  });
+
+  it("invokes default chat adapter activation review summary as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "ev_activation_review_2",
+        decisionKind: "request_rework",
+        draftReady: true,
+        activationPlanDigest: "sha256:activation-plan-2",
+        candidatePromotionReady: true,
+        currentMode: "legacy_stream",
+        automaticMigrationEnabled: false,
+        reviewerNoteChecksum: "sha256:reviewer-note",
+        reviewerNoteLength: 18,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-05-31T11:12:13Z",
+      },
+      approvedCount: 1,
+      rejectOrReworkCount: 1,
+      latestTimestamp: "2026-05-31T11:12:13Z",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        activationReview: "default_chat_adapter_activation",
+        readOnly: true,
+      },
+    });
+
+    const result = await getDefaultChatAdapterActivationReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_default_chat_adapter_activation_review_summary",
+      undefined
+    );
+    expect(result.latestDecision?.decisionKind).toBe("request_rework");
+    expect(result.rejectOrReworkCount).toBe(1);
   });
 });

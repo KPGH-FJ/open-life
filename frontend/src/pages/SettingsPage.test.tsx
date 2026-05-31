@@ -1675,6 +1675,136 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
   });
 
+  it("records default chat adapter activation review decisions and refreshes summary", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "record_default_chat_adapter_activation_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_activation_review_1",
+          decisionKind: args?.input?.decisionKind ?? "approve",
+          draftReady: true,
+          activationPlanDigest: "sha256:activation-plan",
+          createdAt: "2026-05-31T10:11:12Z",
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "get_default_chat_adapter_activation_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_activation_review_1",
+            decisionKind: "approve",
+            draftReady: true,
+            activationPlanDigest: "sha256:activation-plan",
+            candidatePromotionReady: true,
+            currentMode: "legacy_stream",
+            automaticMigrationEnabled: false,
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: "2026-05-31T10:11:12Z",
+          },
+          approvedCount: 1,
+          rejectOrReworkCount: 0,
+          latestTimestamp: "2026-05-31T10:11:12Z",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            activationReview: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            approvedCount: 1,
+            rejectOrReworkCount: 0,
+            latestDecisionPresent: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Activation Review Decision")
+    ).toBeInTheDocument();
+    fireEvent.change(
+      screen.getByPlaceholderText("Optional private note; only metadata is stored."),
+      {
+        target: { value: "Approved by human reviewer." },
+      }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_default_chat_adapter_activation_review_decision",
+        {
+          input: {
+            decisionKind: "approve",
+            requiredApprovedCandidates: 1,
+            optionalReviewerNote: "Approved by human reviewer.",
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Activation review decision recorded")).toBeInTheDocument();
+    expect(await screen.findAllByText("decisionKind: approve")).toHaveLength(2);
+    expect(screen.getAllByText("approvedCount: 1").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("rejectOrReworkCount: 0").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getByText("activationReview: default_chat_adapter_activation")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
+  it("renders blocked activation review approval without activating default chat", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "record_default_chat_adapter_activation_review_decision") {
+        return Promise.resolve({
+          recorded: false,
+          evidenceId: null,
+          decisionKind: args?.input?.decisionKind ?? "approve",
+          draftReady: false,
+          activationPlanDigest: "sha256:blocked-activation-plan",
+          createdAt: "2026-05-31T10:12:13Z",
+          blockingReasons: [
+            "candidate_promotion_readiness_not_ready",
+            "activation_plan_draft_not_ready_for_approval",
+          ],
+        });
+      }
+      if (cmd === "get_default_chat_adapter_activation_review_summary") {
+        return Promise.resolve({
+          latestDecision: null,
+          approvedCount: 0,
+          rejectOrReworkCount: 0,
+          latestTimestamp: null,
+          blockingReasons: ["activation_review_decision_missing"],
+          metadataSafeSummary: {
+            activationReview: "default_chat_adapter_activation",
+            metadataSafe: true,
+            readOnly: true,
+            latestDecisionPresent: false,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Approve" }));
+
+    expect(await screen.findByText("Activation review decision blocked")).toBeInTheDocument();
+    expect(screen.getByText("candidate_promotion_readiness_not_ready")).toBeInTheDocument();
+    expect(screen.getByText("activation_plan_draft_not_ready_for_approval")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

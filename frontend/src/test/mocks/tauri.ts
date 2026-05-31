@@ -504,6 +504,44 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           requiresSeparateImplementation: true,
         },
       } as T);
+    case "record_default_chat_adapter_activation_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_activation_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        draftReady: true,
+        activationPlanDigest: "sha256:mock-activation-plan",
+        createdAt: "2026-05-31T10:11:12Z",
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_activation_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_activation_review_1",
+          decisionKind: "approve",
+          draftReady: true,
+          activationPlanDigest: "sha256:mock-activation-plan",
+          candidatePromotionReady: true,
+          currentMode: "legacy_stream",
+          automaticMigrationEnabled: false,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: "2026-05-31T10:11:12Z",
+        },
+        approvedCount: 1,
+        rejectOrReworkCount: 0,
+        latestTimestamp: "2026-05-31T10:11:12Z",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          activationReview: "default_chat_adapter_activation",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+          rejectOrReworkCount: 0,
+          latestDecisionPresent: true,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,
