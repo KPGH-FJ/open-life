@@ -20,6 +20,7 @@ import {
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
+  checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   checkDefaultChatAdapterImplementationReadiness,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterCutoverImplementationPlan,
@@ -60,6 +61,7 @@ import type {
   DefaultChatAdapterContractHarnessReport,
   DefaultChatAdapterControlledPreviewApprovalReadinessReport,
   DefaultChatAdapterCutoverImplementationPlanDraft,
+  DefaultChatAdapterCutoverPlanApprovalReadinessReport,
   DefaultChatAdapterCutoverPlanReviewDecisionKind,
   DefaultChatAdapterCutoverPlanReviewDecisionResult,
   DefaultChatAdapterCutoverPlanReviewSummary,
@@ -108,6 +110,7 @@ const SAFE_SUMMARY_KEYS = [
   "controlledPreviewApprovalReadiness",
   "cutoverImplementationPlan",
   "cutoverPlanReview",
+  "cutoverPlanApprovalReadiness",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -462,6 +465,14 @@ export default function MultiStrategyPreviewSection() {
   >(null);
   const [adapterCutoverPlanReviewSummary, setAdapterCutoverPlanReviewSummary] =
     useState<DefaultChatAdapterCutoverPlanReviewSummary | null>(null);
+  const [
+    adapterCutoverPlanApprovalReadinessChecking,
+    setAdapterCutoverPlanApprovalReadinessChecking,
+  ] = useState(false);
+  const [adapterCutoverPlanApprovalReadinessError, setAdapterCutoverPlanApprovalReadinessError] =
+    useState<string | null>(null);
+  const [adapterCutoverPlanApprovalReadinessReport, setAdapterCutoverPlanApprovalReadinessReport] =
+    useState<DefaultChatAdapterCutoverPlanApprovalReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1108,6 +1119,27 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setAdapterCutoverPlanReviewRecording(false);
+    }
+  };
+
+  const handleAdapterCutoverPlanApprovalReadinessCheck = async () => {
+    setAdapterCutoverPlanApprovalReadinessChecking(true);
+    setAdapterCutoverPlanApprovalReadinessError(null);
+    setAdapterCutoverPlanApprovalReadinessReport(null);
+    try {
+      const report = await checkDefaultChatAdapterCutoverPlanApprovalReadiness({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterCutoverPlanApprovalReadinessReport(report);
+    } catch (e) {
+      setAdapterCutoverPlanApprovalReadinessError(
+        `Adapter cutover plan approval readiness failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterCutoverPlanApprovalReadinessChecking(false);
     }
   };
 
@@ -5349,6 +5381,148 @@ export default function MultiStrategyPreviewSection() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Cutover Plan Approval Readiness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              W48 is a read-only gate over the current W46 plan draft and W47 human review evidence.
+              Ready means later adapter implementation discussion only.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterCutoverPlanApprovalReadinessCheck}
+            disabled={adapterCutoverPlanApprovalReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterCutoverPlanApprovalReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={adapterCutoverPlanApprovalReadinessChecking ? "animate-spin" : undefined}
+            />
+            {adapterCutoverPlanApprovalReadinessChecking
+              ? "Checking..."
+              : "Check Cutover Plan Approval"}
+          </button>
+        </div>
+
+        {adapterCutoverPlanApprovalReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterCutoverPlanApprovalReadinessError}
+          </div>
+        )}
+
+        {adapterCutoverPlanApprovalReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterCutoverPlanApprovalReadinessReport.ready
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterCutoverPlanApprovalReadinessReport.ready
+                ? "Cutover plan approval ready"
+                : "Cutover plan approval blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["ready", String(adapterCutoverPlanApprovalReadinessReport.ready)],
+                ["draftReady", String(adapterCutoverPlanApprovalReadinessReport.draftReady)],
+                ["w45Ready", String(adapterCutoverPlanApprovalReadinessReport.w45Ready)],
+                [
+                  "cutoverPlanReviewApproved",
+                  String(adapterCutoverPlanApprovalReadinessReport.cutoverPlanReviewApproved),
+                ],
+                [
+                  "cutoverPlanDigestMatched",
+                  String(adapterCutoverPlanApprovalReadinessReport.cutoverPlanDigestMatched),
+                ],
+                [
+                  "currentPlanDigest",
+                  adapterCutoverPlanApprovalReadinessReport.currentPlanDigest ?? "none",
+                ],
+                [
+                  "latestApprovedPlanDigest",
+                  adapterCutoverPlanApprovalReadinessReport.latestApprovedPlanDigest ?? "none",
+                ],
+                [
+                  "latestDecisionKind",
+                  adapterCutoverPlanApprovalReadinessReport.latestDecision?.decisionKind ?? "none",
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(adapterCutoverPlanApprovalReadinessReport.defaultChatUnchanged),
+                ],
+                [
+                  "controlledAdapterEnabled",
+                  String(adapterCutoverPlanApprovalReadinessReport.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(adapterCutoverPlanApprovalReadinessReport.automaticMigrationEnabled),
+                ],
+                ["defaultSendPath", adapterCutoverPlanApprovalReadinessReport.defaultSendPath],
+                ["startStreamPath", adapterCutoverPlanApprovalReadinessReport.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(adapterCutoverPlanApprovalReadinessReport.metadataSafeSummary)
+              .length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(
+                  adapterCutoverPlanApprovalReadinessReport.metadataSafeSummary
+                ).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {adapterCutoverPlanApprovalReadinessReport.blockingReasons.length > 0 ? (
+              <div className="space-y-1">
+                {adapterCutoverPlanApprovalReadinessReport.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                No cutover plan approval blockers returned.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+            No cutover plan approval readiness report loaded.
           </div>
         )}
       </section>

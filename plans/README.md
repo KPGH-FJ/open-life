@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W47 completion/status index. This is not a second roadmap.
+   - Compact W1-W48 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W47 through sustained Runtime Migration
+Current implementation has completed W1-W48 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -66,11 +66,12 @@ metadata-safe human review decision evidence over that controlled preview plus
 a read-only controlled preview approval readiness gate over W42/W44 evidence
 and the approved W43 preview AgentRun current safety state plus a read-only
 default Chat adapter cutover implementation plan draft over W45 readiness plus
-metadata-safe cutover plan review decision evidence over the current W46 draft.
+metadata-safe cutover plan review decision evidence over the current W46 draft
+plus a read-only cutover plan approval readiness gate over W46/W47 evidence.
 The next practical sequence is:
 
 ```text
-use cutover plan review evidence only as human-review planning evidence; default Chat remains unchanged
+use cutover plan approval readiness only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -79,7 +80,7 @@ use cutover plan review evidence only as human-review planning evidence; default
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W47 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W48 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -441,6 +442,20 @@ chat messages, controlled preview/runtime/tool/model calls, external writes,
 feature flags, or default Chat routing changes. Default Send, `send_message`,
 and `start_stream_message` must not call cutover plan review commands. W47 is
 cutover plan review evidence, not default Chat migration.
+
+W48 adds only `check_default_chat_adapter_cutover_plan_approval_readiness` and
+the Settings Default Chat Adapter Cutover Plan Approval Readiness panel. The
+command is read-only over the current W46 draft, W47 latest review decision
+evidence, plan digest match, W45 readiness, and default Chat isolation. Ready
+requires latest decision `approve`, current plan digest matching the approved
+evidence, W45 still ready, default Send and stream paths still `legacy_stream`,
+controlled adapter disabled, and automatic migration disabled. It must not
+create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP audit
+rows, chat messages, controlled preview/runtime/tool/model calls, external
+writes, feature flags, or default Chat routing changes. Default Send,
+`send_message`, and `start_stream_message` must not call the cutover plan
+approval readiness command. W48 is implementation-discussion readiness, not
+default Chat migration.
 
 ## 6. Agent Rules
 

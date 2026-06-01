@@ -17,6 +17,7 @@ import {
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterImplementationReadiness,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
+  checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   draftDefaultChatAdapterCutoverImplementationPlan,
   getDefaultChatAdapterCutoverPlanReviewSummary,
   recordDefaultChatAdapterCutoverPlanReviewDecision,
@@ -1516,5 +1517,64 @@ describe("tauri command argument aliases", () => {
     expect(result.recorded).toBe(true);
     expect(result.cutoverPlanDigest).toBe("sha256:plan123");
     expect(summary.latestApprovedPlanDigest).toBe("sha256:plan123");
+  });
+
+  it("checks default chat adapter cutover plan approval readiness", async () => {
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockResolvedValueOnce({
+      ready: true,
+      draftReady: true,
+      w45Ready: true,
+      cutoverPlanReviewApproved: true,
+      cutoverPlanDigestMatched: true,
+      currentPlanDigest: "sha256:plan123",
+      latestApprovedPlanDigest: "sha256:plan123",
+      latestDecision: {
+        evidenceId: "ev_cutover_plan_review_1",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        draftReady: true,
+        cutoverPlanDigest: "sha256:plan123",
+        planSectionCount: 9,
+        w45Ready: true,
+        reviewerNoteChecksum: "sha256:note123",
+        reviewerNoteLength: 12,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-06-01T00:00:00Z",
+      },
+      defaultChatUnchanged: true,
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        cutoverPlanApprovalReadiness: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const report = await checkDefaultChatAdapterCutoverPlanApprovalReadiness({
+      sourceSessionId: "session-1",
+      message: "cutover approval probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_default_chat_adapter_cutover_plan_approval_readiness",
+      {
+        input: {
+          sourceSessionId: "session-1",
+          message: "cutover approval probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+        },
+      }
+    );
+    expect(report.ready).toBe(true);
+    expect(report.cutoverPlanDigestMatched).toBe(true);
+    expect(report.currentPlanDigest).toBe("sha256:plan123");
   });
 });

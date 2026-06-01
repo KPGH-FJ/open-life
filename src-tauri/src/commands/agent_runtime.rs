@@ -1006,6 +1006,42 @@ pub struct DefaultChatAdapterCutoverPlanReviewSummary {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_previews: Option<usize>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanApprovalReadinessReport {
+    pub ready: bool,
+    pub draft_ready: bool,
+    pub w45_ready: bool,
+    pub cutover_plan_review_approved: bool,
+    pub cutover_plan_digest_matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_approved_plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterCutoverPlanReviewLatestDecision>,
+    pub default_chat_unchanged: bool,
+    pub controlled_adapter_enabled: bool,
+    pub automatic_migration_enabled: bool,
+    pub default_send_path: String,
+    pub start_stream_path: String,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[tauri::command]
 pub async fn check_runtime_migration_gate(
     input: RuntimeMigrationGateCheckInput,
@@ -4932,6 +4968,215 @@ pub(crate) async fn get_default_chat_adapter_cutover_plan_review_summary_with_st
             "evidenceStorage": "read_only",
             "mcpAuditStorage": "none",
             "agentRunStorage": "none",
+            "runtimeCallStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+            "notAutomaticMigration": true,
+        }),
+    })
+}
+
+#[tauri::command]
+pub async fn check_default_chat_adapter_cutover_plan_approval_readiness(
+    input: DefaultChatAdapterCutoverPlanApprovalReadinessInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterCutoverPlanApprovalReadinessReport, String> {
+    check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+    input: DefaultChatAdapterCutoverPlanApprovalReadinessInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterCutoverPlanApprovalReadinessReport, String> {
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let draft = draft_default_chat_adapter_cutover_implementation_plan_with_state(
+        DefaultChatAdapterCutoverImplementationPlanInput {
+            source_session_id,
+            message: input.message,
+            required_approved_previews: input.required_approved_previews,
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+        },
+        state,
+    )
+    .await?;
+    let review_summary =
+        get_default_chat_adapter_cutover_plan_review_summary_with_state(state).await?;
+    let latest_decision = review_summary.latest_decision.clone();
+    let current_plan_digest = draft.stable_plan_digest.clone();
+    let latest_approved_plan_digest = review_summary.latest_approved_plan_digest.clone();
+    let mut blocking_reasons = Vec::new();
+
+    for reason in &draft.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+    for reason in &review_summary.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+
+    let w45_ready = draft.controlled_preview_approval_readiness.ready;
+    let default_chat_unchanged = draft
+        .controlled_preview_approval_readiness
+        .default_chat_unchanged;
+    let controlled_adapter_enabled = draft
+        .controlled_preview_approval_readiness
+        .controlled_adapter_enabled;
+    let automatic_migration_enabled = draft
+        .controlled_preview_approval_readiness
+        .automatic_migration_enabled;
+    let default_send_path = draft
+        .controlled_preview_approval_readiness
+        .default_send_path
+        .clone();
+    let start_stream_path = draft
+        .controlled_preview_approval_readiness
+        .start_stream_path
+        .clone();
+
+    if !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "cutover_implementation_plan_not_ready".into(),
+        );
+    }
+    if !w45_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "controlled_preview_approval_readiness_not_ready".into(),
+        );
+    }
+    if !default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_changed".into());
+    }
+    if controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+    if default_send_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "default_send_path_not_legacy_stream".into(),
+        );
+    }
+    if start_stream_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "start_stream_path_not_legacy_stream".into(),
+        );
+    }
+
+    let mut cutover_plan_review_approved = false;
+    let mut cutover_plan_digest_matched = false;
+    match latest_decision.as_ref() {
+        Some(decision) if decision.decision_kind == "approve" => {
+            cutover_plan_review_approved = true;
+            cutover_plan_digest_matched = current_plan_digest.is_some()
+                && decision.cutover_plan_digest == current_plan_digest;
+            if !decision.draft_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_cutover_plan_draft_not_ready".into(),
+                );
+            }
+            if !decision.w45_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_cutover_plan_w45_not_ready".into(),
+                );
+            }
+            if decision.plan_section_count == 0 {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_cutover_plan_sections_missing".into(),
+                );
+            }
+            if !cutover_plan_digest_matched {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "cutover_plan_review_digest_mismatch".into(),
+                );
+            }
+        }
+        Some(_) => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "latest_cutover_plan_review_not_approve".into(),
+            );
+        }
+        None => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "cutover_plan_review_approval_missing".into(),
+            );
+        }
+    }
+
+    let latest_decision_kind = latest_decision
+        .as_ref()
+        .map(|decision| decision.decision_kind.clone())
+        .unwrap_or_else(|| "none".into());
+    let blocking_reason_count = blocking_reasons.len();
+    let ready = draft.draft_ready
+        && w45_ready
+        && cutover_plan_review_approved
+        && cutover_plan_digest_matched
+        && default_chat_unchanged
+        && !controlled_adapter_enabled
+        && !automatic_migration_enabled
+        && default_send_path == "legacy_stream"
+        && start_stream_path == "legacy_stream"
+        && blocking_reasons.is_empty();
+
+    Ok(DefaultChatAdapterCutoverPlanApprovalReadinessReport {
+        ready,
+        draft_ready: draft.draft_ready,
+        w45_ready,
+        cutover_plan_review_approved,
+        cutover_plan_digest_matched,
+        current_plan_digest: current_plan_digest.clone(),
+        latest_approved_plan_digest: latest_approved_plan_digest.clone(),
+        latest_decision,
+        default_chat_unchanged,
+        controlled_adapter_enabled,
+        automatic_migration_enabled,
+        default_send_path: default_send_path.clone(),
+        start_stream_path: start_stream_path.clone(),
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "cutoverPlanApprovalReadiness": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "ready": ready,
+            "draftReady": draft.draft_ready,
+            "w45Ready": w45_ready,
+            "cutoverPlanReviewApproved": cutover_plan_review_approved,
+            "cutoverPlanDigestMatched": cutover_plan_digest_matched,
+            "currentPlanDigestPresent": current_plan_digest.is_some(),
+            "latestApprovedPlanDigestPresent": latest_approved_plan_digest.is_some(),
+            "latestDecisionKind": latest_decision_kind,
+            "defaultChatUnchanged": default_chat_unchanged,
+            "controlledAdapterEnabled": controlled_adapter_enabled,
+            "automaticMigrationEnabled": automatic_migration_enabled,
+            "defaultSendPath": default_send_path,
+            "startStreamPath": start_stream_path,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "reviewerNoteStorage": "length_checksum_category_only",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "agentRunStorage": "read_only",
             "runtimeCallStorage": "none",
             "modelCallStorage": "none",
             "externalWriteStorage": "none",
@@ -15155,6 +15400,256 @@ mod tests {
             summary.metadata_safe_summary["reviewerNoteStorage"],
             "length_checksum_category_only"
         );
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_approval_readiness_blocks_without_review_approval() {
+        let state = preview_state().await;
+        let message = "Cutover plan approval missing probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-cutover-approval-missing",
+            "run-preview-cutover-approval-missing",
+            "session-cutover-approval",
+            message,
+        )
+        .await;
+
+        let report = check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+            DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.ready);
+        assert!(report.draft_ready);
+        assert!(report.w45_ready);
+        assert!(!report.cutover_plan_review_approved);
+        assert!(!report.cutover_plan_digest_matched);
+        assert!(report.latest_decision.is_none());
+        assert!(report.current_plan_digest.is_some());
+        assert!(report.latest_approved_plan_digest.is_none());
+        assert!(report
+            .blocking_reasons
+            .contains(&"cutover_plan_review_decision_missing".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"cutover_plan_review_approval_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_approval_readiness_blocks_latest_reject_or_rework() {
+        let state = preview_state().await;
+        let message = "Cutover plan approval latest decision probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-cutover-approval-rework",
+            "run-preview-cutover-approval-rework",
+            "session-cutover-approval",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "request_rework".into(),
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+            DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.ready);
+        assert_eq!(
+            report
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+        assert!(!report.cutover_plan_review_approved);
+        assert!(report
+            .blocking_reasons
+            .contains(&"latest_cutover_plan_review_not_approve".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_approval_readiness_blocks_digest_mismatch() {
+        let state = preview_state().await;
+        let message = "Cutover plan approval digest probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-cutover-approval-digest",
+            "run-preview-cutover-approval-digest-old",
+            "session-cutover-approval",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let run = completed_default_chat_adapter_controlled_preview_review_run(
+            "run-preview-cutover-approval-digest-new",
+        );
+        insert_default_chat_adapter_controlled_preview_review_run(&state, &run).await;
+        record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: "run-preview-cutover-approval-digest-new".into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+            DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.ready);
+        assert!(report.draft_ready);
+        assert!(report.cutover_plan_review_approved);
+        assert!(!report.cutover_plan_digest_matched);
+        assert_ne!(
+            report.current_plan_digest,
+            report.latest_approved_plan_digest
+        );
+        assert!(report
+            .blocking_reasons
+            .contains(&"cutover_plan_review_digest_mismatch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_approval_readiness_ready_with_current_approved_plan()
+    {
+        let state = preview_state().await;
+        let message = "Cutover plan approval ready probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-cutover-approval-ready",
+            "run-preview-cutover-approval-ready",
+            "session-cutover-approval",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some("Approved plan should be metadata only.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let before = side_effect_counts(&state).await;
+
+        let report = check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+            DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+                source_session_id: "session-cutover-approval".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.ready);
+        assert!(report.draft_ready);
+        assert!(report.w45_ready);
+        assert!(report.cutover_plan_review_approved);
+        assert!(report.cutover_plan_digest_matched);
+        assert!(report.default_chat_unchanged);
+        assert!(!report.controlled_adapter_enabled);
+        assert!(!report.automatic_migration_enabled);
+        assert_eq!(report.default_send_path, "legacy_stream");
+        assert_eq!(report.start_stream_path, "legacy_stream");
+        assert_eq!(report.blocking_reasons, Vec::<String>::new());
+        assert_eq!(
+            report.metadata_safe_summary["cutoverPlanApprovalReadiness"],
+            "default_chat_adapter"
+        );
+        assert_eq!(report.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+        assert_eq!(report.metadata_safe_summary["notAutomaticMigration"], true);
+
         let after = side_effect_counts(&state).await;
         assert_eq!(before.run_count, after.run_count);
         assert_eq!(before.pending_proposal_count, after.pending_proposal_count);

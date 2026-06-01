@@ -1004,6 +1004,32 @@ export interface DefaultChatAdapterCutoverPlanReviewSummary {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterCutoverPlanApprovalReadinessReport {
+  ready: boolean;
+  draftReady: boolean;
+  w45Ready: boolean;
+  cutoverPlanReviewApproved: boolean;
+  cutoverPlanDigestMatched: boolean;
+  currentPlanDigest?: string | null;
+  latestApprovedPlanDigest?: string | null;
+  latestDecision?: DefaultChatAdapterCutoverPlanReviewLatestDecision | null;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;
