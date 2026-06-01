@@ -22,6 +22,7 @@ import {
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterImplementationReadiness,
   checkRuntimeMigrationGate,
+  draftDefaultChatAdapterCutoverImplementationPlan,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
@@ -56,6 +57,7 @@ import type {
   DefaultChatAdapterActivationImplementationGateReport,
   DefaultChatAdapterContractHarnessReport,
   DefaultChatAdapterControlledPreviewApprovalReadinessReport,
+  DefaultChatAdapterCutoverImplementationPlanDraft,
   DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterControlledPreviewReviewDecisionKind,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
@@ -99,6 +101,7 @@ const SAFE_SUMMARY_KEYS = [
   "adapterPreview",
   "controlledPreviewReview",
   "controlledPreviewApprovalReadiness",
+  "cutoverImplementationPlan",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -136,6 +139,7 @@ const SAFE_SUMMARY_KEYS = [
   "manualReviewRequired",
   "notAutomaticMigration",
   "requiresSeparateImplementation",
+  "requiresSeparateCutoverReview",
   "requiresSeparateCutoverImplementation",
   "candidatePromotionReady",
   "currentMode",
@@ -152,6 +156,10 @@ const SAFE_SUMMARY_KEYS = [
   "requiredApprovedPreviews",
   "approvedPreviewCount",
   "verifiedPreviewRunCount",
+  "latestPreviewRunId",
+  "inputMessageLength",
+  "inputMessageHash",
+  "planSectionCount",
   "implementationReadinessReady",
   "previewReviewApproved",
   "previewDigestMatched",
@@ -428,6 +436,10 @@ export default function MultiStrategyPreviewSection() {
     adapterControlledPreviewApprovalReadinessReport,
     setAdapterControlledPreviewApprovalReadinessReport,
   ] = useState<DefaultChatAdapterControlledPreviewApprovalReadinessReport | null>(null);
+  const [adapterCutoverPlanDrafting, setAdapterCutoverPlanDrafting] = useState(false);
+  const [adapterCutoverPlanError, setAdapterCutoverPlanError] = useState<string | null>(null);
+  const [adapterCutoverPlanDraft, setAdapterCutoverPlanDraft] =
+    useState<DefaultChatAdapterCutoverImplementationPlanDraft | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1010,6 +1022,25 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setAdapterControlledPreviewApprovalReadinessChecking(false);
+    }
+  };
+
+  const handleAdapterCutoverPlanDraft = async () => {
+    setAdapterCutoverPlanDrafting(true);
+    setAdapterCutoverPlanError(null);
+    setAdapterCutoverPlanDraft(null);
+    try {
+      const draft = await draftDefaultChatAdapterCutoverImplementationPlan({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterCutoverPlanDraft(draft);
+    } catch (e) {
+      setAdapterCutoverPlanError(`Adapter cutover implementation plan failed: ${readableError(e)}`);
+    } finally {
+      setAdapterCutoverPlanDrafting(false);
     }
   };
 
@@ -4915,6 +4946,151 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No controlled preview approval readiness report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Cutover Implementation Plan
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              W46 read-only draft over W45 approval readiness. It produces human-review planning
+              material only and keeps default Chat on legacy stream.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterCutoverPlanDraft}
+            disabled={adapterCutoverPlanDrafting}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterCutoverPlanDrafting
+                ? "bg-stone-100 text-stone-400"
+                : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+            )}
+          >
+            <ShieldCheck size={13} />
+            {adapterCutoverPlanDrafting ? "Drafting..." : "Draft Cutover Implementation Plan"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This draft does not run controlled preview, runtime, tools, or model calls, and it does
+          not save Chat messages, create evidence, enable routing, or change feature flags.
+        </div>
+
+        {adapterCutoverPlanError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterCutoverPlanError}
+          </div>
+        )}
+
+        {adapterCutoverPlanDraft ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterCutoverPlanDraft.draftReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterCutoverPlanDraft.draftReady
+                ? "Cutover implementation plan ready"
+                : "Cutover implementation plan blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["draftReady", String(adapterCutoverPlanDraft.draftReady)],
+                ["manualReviewRequired", String(adapterCutoverPlanDraft.manualReviewRequired)],
+                ["notAutomaticMigration", String(adapterCutoverPlanDraft.notAutomaticMigration)],
+                [
+                  "requiresSeparateImplementation",
+                  String(adapterCutoverPlanDraft.requiresSeparateImplementation),
+                ],
+                [
+                  "requiresSeparateCutoverReview",
+                  String(adapterCutoverPlanDraft.requiresSeparateCutoverReview),
+                ],
+                ["sourceSessionId", adapterCutoverPlanDraft.sourceSessionId],
+                ["inputMessageLength", String(adapterCutoverPlanDraft.inputMessageLength)],
+                ["inputMessageHash", adapterCutoverPlanDraft.inputMessageHash],
+                ["stablePlanDigest", adapterCutoverPlanDraft.stablePlanDigest ?? "none"],
+                [
+                  "controlledPreviewApprovalReady",
+                  String(adapterCutoverPlanDraft.controlledPreviewApprovalReadiness.ready),
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {adapterCutoverPlanDraft.planSections.length > 0 && (
+              <div className="space-y-2">
+                {adapterCutoverPlanDraft.planSections.map(section => (
+                  <div
+                    key={section.sectionKey}
+                    className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2"
+                  >
+                    <div className="font-mono text-xs text-stone-500">{section.sectionKey}</div>
+                    <div className="mt-1 text-sm font-medium text-stone-800">{section.title}</div>
+                    <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-stone-600">
+                      {section.items.map(item => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {safeSummaryEntries(adapterCutoverPlanDraft.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterCutoverPlanDraft.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterCutoverPlanDraft.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterCutoverPlanDraft.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No cutover implementation plan blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No cutover implementation plan draft loaded.
           </div>
         )}
       </section>

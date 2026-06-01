@@ -55,6 +55,8 @@ import type {
   DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterControlledPreviewApprovalReadinessInput,
   DefaultChatAdapterControlledPreviewApprovalReadinessReport,
+  DefaultChatAdapterCutoverImplementationPlanInput,
+  DefaultChatAdapterCutoverImplementationPlanDraft,
   DefaultChatAdapterControlledPreviewReviewDecisionInput,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
   DefaultChatAdapterControlledPreviewReviewSummary,
@@ -533,6 +535,15 @@ export async function checkDefaultChatAdapterControlledPreviewApprovalReadiness(
 ): Promise<DefaultChatAdapterControlledPreviewApprovalReadinessReport> {
   return safeInvoke<DefaultChatAdapterControlledPreviewApprovalReadinessReport>(
     "check_default_chat_adapter_controlled_preview_approval_readiness",
+    { input }
+  );
+}
+
+export async function draftDefaultChatAdapterCutoverImplementationPlan(
+  input: DefaultChatAdapterCutoverImplementationPlanInput
+): Promise<DefaultChatAdapterCutoverImplementationPlanDraft> {
+  return safeInvoke<DefaultChatAdapterCutoverImplementationPlanDraft>(
+    "draft_default_chat_adapter_cutover_implementation_plan",
     { input }
   );
 }

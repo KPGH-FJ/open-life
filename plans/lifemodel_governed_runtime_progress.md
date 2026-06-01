@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W45 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W46 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -94,7 +94,12 @@ implementation readiness, W44 latest review approval evidence, and the approved
 W43 preview AgentRun's current safety/digest state. It creates no records, runs
 no runtime/tool/model call, changes no routing, and only indicates readiness for
 later adapter cutover implementation discussion. It is not default Chat
-migration.
+migration. W46 adds a read-only default Chat adapter cutover implementation plan
+draft over W45 readiness. Blocked readiness produces no plan sections; ready
+output only returns metadata-safe human-review planning sections, a stable plan
+digest, and fixed manual-review / not-automatic-migration flags. It creates no
+records, runs no preview/runtime/tool/model call, changes no routing, and is not
+default Chat migration.
 
 The key boundary is unchanged:
 
@@ -466,11 +471,12 @@ The key boundary is unchanged:
 | W43 Default Chat Adapter Controlled Preview | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit non-default `run_default_chat_adapter_controlled_preview`. It calls W42 readiness first, blocks without runtime/AgentRun when not ready, and when ready runs one `allowWrites=false`, `maxToolCalls=0` controlled preview returning SendMessageResult-compatible fields. It may create only metadata-safe adapter preview AgentRun audit, writes no Chat/Evidence/Proposal/Memory/LifeModel/MCP audit/external results, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is controlled preview, not default Chat migration. |
 | W44 Default Chat Adapter Controlled Preview Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_controlled_preview_review_decision` and read-only summary. Approve requires a completed, ready, send-message-compatible, write-disabled, zero-tool, metadata-safe, side-effect-free W43 preview AgentRun. Evidence stores only previewRunId, decisionKind, contractShape, previewSummaryDigest, reviewer-note checksum/length/category, and createdAt; it stores no reviewer raw text, preview output, raw prompt/output, or tool payload. Normal Send / `send_message` / `start_stream_message` do not call it. This is controlled preview review evidence, not default Chat migration. |
 | W45 Default Chat Adapter Controlled Preview Approval Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_controlled_preview_approval_readiness`. It combines current W42 implementation readiness, W44 latest metadata-safe review decision, required approved preview count, approved preview digest match, and approved W43 preview AgentRun current completed/send-message-compatible/previewReady/write-disabled/zero-tool/metadata-safe/side-effect-free state. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is approval readiness for later adapter cutover implementation discussion, not default Chat migration. |
+| W46 Default Chat Adapter Cutover Implementation Plan Draft | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `draft_default_chat_adapter_cutover_implementation_plan`. It calls W45 readiness only; blocked readiness returns `draftReady=false`, propagated blockers, and no plan sections, while ready output returns metadata-safe human-review implementation scope, adapter contract requirements, routing boundary, safety preconditions, fallback, rollback, observability, test plan, explicit non-goals, and a stable plan digest. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover implementation planning, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use controlled preview approval readiness only as non-default implementation evidence; default Chat remains unchanged
+use cutover implementation plan draft only as human-review planning evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -497,7 +503,8 @@ readiness over W37/W39/W40/W41 evidence, W43 only runs explicit non-default
 controlled preview after W42 readiness, and W44 only records metadata-safe human
 review evidence over that controlled preview, and W45 only checks read-only
 controlled preview approval readiness over W42/W44 evidence and the approved
-preview AgentRun's current safety state. Default
+preview AgentRun's current safety state, and W46 only drafts a metadata-safe
+human-review cutover implementation plan over W45 readiness. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

@@ -861,6 +861,69 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           notAutomaticMigration: true,
         },
       } as T);
+    case "draft_default_chat_adapter_cutover_implementation_plan":
+      return Promise.resolve({
+        draftReady: true,
+        controlledPreviewApprovalReadiness: {
+          ready: true,
+          requiredApprovedPreviews: _args?.input?.requiredApprovedPreviews ?? 1,
+          approvedPreviewCount: 1,
+          latestDecision: {
+            evidenceId: "ev_adapter_preview_review_1",
+            previewRunId: "run-adapter-preview-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            previewSummaryDigest: "sha256:adapterpreviewreview",
+            reviewerNoteChecksum: null,
+            reviewerNoteLength: 0,
+            reviewerNoteCategory: "none",
+            createdAt: new Date().toISOString(),
+          },
+          verifiedPreviewRunIds: ["run-adapter-preview-1"],
+          implementationReadinessReady: true,
+          previewReviewApproved: true,
+          previewDigestMatched: true,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            controlledPreviewApprovalReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        },
+        manualReviewRequired: true,
+        notAutomaticMigration: true,
+        requiresSeparateImplementation: true,
+        requiresSeparateCutoverReview: true,
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        inputMessageLength: 31,
+        inputMessageHash: "sha256:adaptercutovermessage",
+        stablePlanDigest: "sha256:adaptercutoverplan",
+        planSections: [
+          {
+            sectionKey: "implementationScope",
+            title: "Implementation Scope",
+            items: ["Keep default Chat unchanged."],
+          },
+          {
+            sectionKey: "explicitNonGoals",
+            title: "Explicit Non Goals",
+            items: ["Do not migrate default Chat."],
+          },
+        ],
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverImplementationPlan: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          draftReady: true,
+          notAutomaticMigration: true,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

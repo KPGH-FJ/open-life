@@ -2945,6 +2945,172 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("renders default chat adapter cutover implementation plan draft", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_default_chat_adapter_cutover_implementation_plan") {
+        return Promise.resolve({
+          draftReady: true,
+          controlledPreviewApprovalReadiness: {
+            ready: true,
+            requiredApprovedPreviews: args?.input?.requiredApprovedPreviews ?? 1,
+            approvedPreviewCount: 1,
+            latestDecision: {
+              evidenceId: "ev_adapter_preview_review_1",
+              previewRunId: "run-adapter-preview-review-1",
+              decisionKind: "approve",
+              contractShape: "send_message_compatible",
+              previewSummaryDigest: "sha256:preview123",
+              reviewerNoteChecksum: "sha256:note123",
+              reviewerNoteLength: 11,
+              reviewerNoteCategory: "brief",
+              createdAt: "2026-05-31T00:00:00Z",
+            },
+            verifiedPreviewRunIds: ["run-adapter-preview-review-1"],
+            implementationReadinessReady: true,
+            previewReviewApproved: true,
+            previewDigestMatched: true,
+            defaultChatUnchanged: true,
+            controlledAdapterEnabled: false,
+            automaticMigrationEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            blockingReasons: [],
+            metadataSafeSummary: {
+              controlledPreviewApprovalReadiness: "default_chat_adapter",
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          requiresSeparateCutoverReview: true,
+          sourceSessionId: "settings-dry-run",
+          inputMessageLength: 31,
+          inputMessageHash: "sha256:message123",
+          stablePlanDigest: "sha256:cutover-plan-123",
+          planSections: [
+            {
+              sectionKey: "implementationScope",
+              title: "Implementation Scope",
+              items: ["Keep default Chat unchanged."],
+            },
+            {
+              sectionKey: "explicitNonGoals",
+              title: "Explicit Non Goals",
+              items: ["Do not migrate default Chat."],
+            },
+          ],
+          blockingReasons: [],
+          metadataSafeSummary: {
+            cutoverImplementationPlan: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Cutover Implementation Plan")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Draft Cutover Implementation Plan" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "draft_default_chat_adapter_cutover_implementation_plan",
+        {
+          input: {
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Cutover implementation plan ready")).toBeInTheDocument();
+    expect(screen.getByText("stablePlanDigest: sha256:cutover-plan-123")).toBeInTheDocument();
+    expect(screen.getByText("implementationScope")).toBeInTheDocument();
+    expect(screen.getByText("Explicit Non Goals")).toBeInTheDocument();
+    expect(screen.getByText("cutoverImplementationPlan: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter cutover implementation plan blockers without sections", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_default_chat_adapter_cutover_implementation_plan") {
+        return Promise.resolve({
+          draftReady: false,
+          controlledPreviewApprovalReadiness: {
+            ready: false,
+            requiredApprovedPreviews: args?.input?.requiredApprovedPreviews ?? 1,
+            approvedPreviewCount: 0,
+            latestDecision: null,
+            verifiedPreviewRunIds: [],
+            implementationReadinessReady: true,
+            previewReviewApproved: false,
+            previewDigestMatched: false,
+            defaultChatUnchanged: true,
+            controlledAdapterEnabled: false,
+            automaticMigrationEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            blockingReasons: ["controlled_preview_review_approval_missing"],
+            metadataSafeSummary: {
+              controlledPreviewApprovalReadiness: "default_chat_adapter",
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          requiresSeparateCutoverReview: true,
+          sourceSessionId: "settings-dry-run",
+          inputMessageLength: 31,
+          inputMessageHash: "sha256:message123",
+          stablePlanDigest: null,
+          planSections: [],
+          blockingReasons: [
+            "controlled_preview_approval_readiness_not_ready",
+            "controlled_preview_review_approval_missing",
+          ],
+          metadataSafeSummary: {
+            cutoverImplementationPlan: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            draftReady: false,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Draft Cutover Implementation Plan" })
+    );
+
+    expect(await screen.findByText("Cutover implementation plan blocked")).toBeInTheDocument();
+    expect(screen.getByText("controlled_preview_approval_readiness_not_ready")).toBeInTheDocument();
+    expect(screen.getByText("controlled_preview_review_approval_missing")).toBeInTheDocument();
+    expect(screen.queryByText("Implementation Scope")).not.toBeInTheDocument();
+    expect(screen.getAllByText("draftReady: false").length).toBeGreaterThan(0);
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

@@ -17,6 +17,7 @@ import {
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterImplementationReadiness,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
+  draftDefaultChatAdapterCutoverImplementationPlan,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
@@ -1373,5 +1374,71 @@ describe("tauri command argument aliases", () => {
     expect(result.ready).toBe(true);
     expect(result.previewReviewApproved).toBe(true);
     expect(result.verifiedPreviewRunIds).toEqual(["run-adapter-preview-1"]);
+  });
+
+  it("drafts default chat adapter cutover implementation plan", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      draftReady: true,
+      controlledPreviewApprovalReadiness: {
+        ready: true,
+        requiredApprovedPreviews: 1,
+        approvedPreviewCount: 1,
+        latestDecision: null,
+        verifiedPreviewRunIds: ["run-adapter-preview-1"],
+        implementationReadinessReady: true,
+        previewReviewApproved: true,
+        previewDigestMatched: true,
+        defaultChatUnchanged: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          controlledPreviewApprovalReadiness: "default_chat_adapter",
+          metadataSafe: true,
+        },
+      },
+      manualReviewRequired: true,
+      notAutomaticMigration: true,
+      requiresSeparateImplementation: true,
+      requiresSeparateCutoverReview: true,
+      sourceSessionId: "session-1",
+      inputMessageLength: 22,
+      inputMessageHash: "sha256:message123",
+      stablePlanDigest: "sha256:plan123",
+      planSections: [
+        {
+          sectionKey: "implementationScope",
+          title: "Implementation Scope",
+          items: ["Keep default Chat unchanged."],
+        },
+      ],
+      blockingReasons: [],
+      metadataSafeSummary: {
+        cutoverImplementationPlan: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await draftDefaultChatAdapterCutoverImplementationPlan({
+      sourceSessionId: "session-1",
+      message: "cutover plan probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_cutover_implementation_plan", {
+      input: {
+        sourceSessionId: "session-1",
+        message: "cutover plan probe",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      },
+    });
+    expect(result.draftReady).toBe(true);
+    expect(result.stablePlanDigest).toBe("sha256:plan123");
+    expect(result.planSections[0].sectionKey).toBe("implementationScope");
   });
 });

@@ -922,6 +922,36 @@ export interface DefaultChatAdapterControlledPreviewApprovalReadinessReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterCutoverImplementationPlanInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterCutoverImplementationPlanSection {
+  sectionKey: string;
+  title: string;
+  items: string[];
+}
+
+export interface DefaultChatAdapterCutoverImplementationPlanDraft {
+  draftReady: boolean;
+  controlledPreviewApprovalReadiness: DefaultChatAdapterControlledPreviewApprovalReadinessReport;
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  requiresSeparateCutoverReview: boolean;
+  sourceSessionId: string;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  stablePlanDigest?: string | null;
+  planSections: DefaultChatAdapterCutoverImplementationPlanSection[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;
