@@ -12,7 +12,7 @@ reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.6", features = ["v4", "serde"] }
 anyhow = "1.0"
-dirs = "5.0"
+dirs = "6.0"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1.10"
 similar = "2.4"
