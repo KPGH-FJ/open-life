@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W50 completion/status index. This is not a second roadmap.
+   - Compact W1-W51 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W50 through sustained Runtime Migration
+Current implementation has completed W1-W51 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -71,11 +71,13 @@ plus a read-only cutover plan approval readiness gate over W46/W47 evidence
 plus a shared default Chat adapter route guard scaffold that keeps ordinary
 send/stream fail-closed on `legacy_stream` plus a pure default Chat adapter
 cutover invocation harness that keeps ordinary send/stream in `legacy_guarded`,
-write-disabled, zero-tool, no-runtime/no-model/no-tool/no-business-write mode.
+write-disabled, zero-tool, no-runtime/no-model/no-tool/no-business-write mode
+plus a pure default Chat adapter invocation plan that explicitly selects
+`legacy_stream` and keeps `controlled_adapter` as a disabled candidate.
 The next practical sequence is:
 
 ```text
-use cutover plan approval readiness, route guard scaffold, and cutover invocation harness only as implementation-discussion evidence; default Chat remains unchanged
+use cutover plan approval readiness, route guard scaffold, cutover invocation harness, and invocation plan only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -84,7 +86,7 @@ use cutover plan approval readiness, route guard scaffold, and cutover invocatio
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W50 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W51 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -480,6 +482,16 @@ no Chat/AgentRun/Evidence/business writes. It fails closed when the route drifts
 the adapter scaffold disappears, controlled adapter or automatic migration is
 enabled, or the separate cutover implementation requirement is removed. W50
 does not call W19-W49 readiness, review, preview, evidence, runtime, model, or
+tool commands, and it is not default Chat migration.
+
+W51 adds a pure default Chat adapter invocation plan in
+`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
+`start_stream_message` entries now call
+`ensure_default_chat_adapter_invocation_plan`, which reuses W50 and explicitly
+selects `legacy_stream`, keeps `controlled_adapter` as a disabled candidate,
+marks the controlled executor unattached, preserves send/stream-compatible
+contract shape labels, and keeps writes/tool/runtime/model calls disabled. W51
+does not call W19-W50 readiness, review, preview, evidence, runtime, model, or
 tool commands, and it is not default Chat migration.
 
 ## 6. Agent Rules

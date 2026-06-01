@@ -1,4 +1,5 @@
 pub(crate) const LEGACY_STREAM_PATH: &str = "legacy_stream";
+pub(crate) const CONTROLLED_ADAPTER_PATH: &str = "controlled_adapter";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DefaultChatAdapterRoute {
@@ -30,6 +31,30 @@ pub(crate) struct DefaultChatAdapterCutoverHarness {
     pub(crate) default_send_path: String,
     pub(crate) start_stream_path: String,
     pub(crate) requires_separate_cutover_implementation: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatAdapterInvocationPlan {
+    pub(crate) caller: String,
+    pub(crate) plan_ready: bool,
+    pub(crate) harness_ready: bool,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) fallback_adapter_path: String,
+    pub(crate) controlled_adapter_candidate_path: String,
+    pub(crate) controlled_adapter_invocation_allowed: bool,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) send_contract_shape: String,
+    pub(crate) stream_contract_shape: String,
+    pub(crate) runtime_call_enabled: bool,
+    pub(crate) model_call_enabled: bool,
+    pub(crate) tool_call_enabled: bool,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) chat_message_saved: bool,
+    pub(crate) agent_run_recorded: bool,
+    pub(crate) evidence_recorded: bool,
+    pub(crate) default_chat_path_unchanged: bool,
     pub(crate) blocking_reasons: Vec<String>,
 }
 
@@ -124,6 +149,66 @@ pub(crate) fn ensure_default_chat_cutover_harness(
         Err(format!(
             "{caller} blocked by default Chat adapter cutover harness: {}",
             harness.blocking_reasons.join(", ")
+        ))
+    }
+}
+
+pub(crate) fn plan_default_chat_adapter_invocation(
+    caller: &str,
+    route: &DefaultChatAdapterRoute,
+) -> DefaultChatAdapterInvocationPlan {
+    let harness = evaluate_default_chat_adapter_cutover_harness(caller, route);
+    let harness_guard_passed = ensure_default_chat_cutover_harness(caller, route).is_ok();
+    debug_assert_eq!(harness_guard_passed, harness.harness_ready);
+    let mut blocking_reasons = harness.blocking_reasons.clone();
+
+    if !harness_guard_passed {
+        blocking_reasons.insert(0, "cutover_harness_not_ready".into());
+    }
+
+    let plan_ready = harness_guard_passed && blocking_reasons.is_empty();
+
+    DefaultChatAdapterInvocationPlan {
+        caller: caller.into(),
+        plan_ready,
+        harness_ready: harness_guard_passed,
+        selected_adapter_path: if plan_ready {
+            LEGACY_STREAM_PATH
+        } else {
+            "blocked"
+        }
+        .into(),
+        fallback_adapter_path: LEGACY_STREAM_PATH.into(),
+        controlled_adapter_candidate_path: CONTROLLED_ADAPTER_PATH.into(),
+        controlled_adapter_invocation_allowed: false,
+        controlled_adapter_executor_attached: false,
+        send_contract_shape: "send_message_compatible".into(),
+        stream_contract_shape: "stream_message_compatible".into(),
+        runtime_call_enabled: false,
+        model_call_enabled: false,
+        tool_call_enabled: false,
+        allow_writes: false,
+        max_tool_calls: 0,
+        chat_message_saved: false,
+        agent_run_recorded: false,
+        evidence_recorded: false,
+        default_chat_path_unchanged: harness.default_chat_path_unchanged,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_default_chat_adapter_invocation_plan(
+    caller: &str,
+    route: &DefaultChatAdapterRoute,
+) -> Result<(), String> {
+    let plan = plan_default_chat_adapter_invocation(caller, route);
+
+    if plan.plan_ready {
+        Ok(())
+    } else {
+        Err(format!(
+            "{caller} blocked by default Chat adapter invocation plan: {}",
+            plan.blocking_reasons.join(", ")
         ))
     }
 }

@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W50 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W51 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -126,6 +126,13 @@ Evidence/business writes. It fails closed on route drift, missing adapter
 scaffold, controlled adapter or automatic migration enablement, or removal of
 the separate cutover implementation requirement. It is an invocation harness,
 not default Chat migration.
+W51 adds a pure default Chat adapter invocation plan in
+`src-tauri/src/default_chat_adapter.rs`. The ordinary Chat entries now call
+`ensure_default_chat_adapter_invocation_plan`, which reuses W50, explicitly
+selects `legacy_stream`, keeps `controlled_adapter` as a disabled candidate,
+marks the controlled executor unattached, preserves send/stream-compatible
+contract shape labels, and keeps writes, tool calls, runtime calls, and model
+calls disabled. It is an invocation plan, not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -502,11 +509,12 @@ The key boundary is unchanged:
 | W48 Default Chat Adapter Cutover Plan Approval Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_cutover_plan_approval_readiness`. It combines current W46 draft, W47 latest metadata-safe review decision evidence, current plan digest match, W45 readiness, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and legacy send/stream paths. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover plan approval readiness for later adapter implementation discussion, not default Chat migration. |
 | W49 Default Chat Adapter Cutover Route Guard Scaffold | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/commands/agent_runtime.rs`, Rust tests, docs | Adds a shared default Chat adapter route resolver and fail-closed guard. The resolver reports `legacy_stream`, scaffold present, controlled adapter disabled, automatic migration disabled, and separate cutover implementation required. `get_default_chat_adapter_routing_status`, `send_message`, and `start_stream_message` now use that same source-of-truth; ordinary Chat entries call no W19-W48 gate/review/preview/evidence command. If a future route is misconfigured as enabled or non-legacy before a reviewed cutover exists, the default Chat entry blocks instead of silently switching. This is route guard scaffolding, not default Chat migration. |
 | W50 Default Chat Adapter Cutover Invocation Harness | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Rust tests, docs | Adds pure `DefaultChatAdapterCutoverHarness`, `evaluate_default_chat_adapter_cutover_harness`, and `ensure_default_chat_cutover_harness`. Default `send_message` and `start_stream_message` now call the harness guard, which only allows `legacy_guarded` mode with writes disabled, zero tool calls, controlled adapter invocation disabled, runtime/model/tool calls disabled, and no Chat/AgentRun/Evidence/business writes. Route drift, scaffold removal, controlled adapter or automatic migration enablement, or removal of the separate cutover implementation requirement fail closed. It calls no W19-W49 readiness/review/preview/evidence/runtime/model/tool command and is not default Chat migration. |
+| W51 Default Chat Adapter Invocation Plan | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Rust tests, docs | Adds pure `DefaultChatAdapterInvocationPlan`, `plan_default_chat_adapter_invocation`, and `ensure_default_chat_adapter_invocation_plan`. Default `send_message` and `start_stream_message` now call the invocation plan guard, which reuses W50, selects `legacy_stream`, keeps `controlled_adapter` as a disabled candidate, marks the controlled executor unattached, preserves send/stream-compatible contract shape labels, and keeps writes, tool calls, runtime calls, model calls, Chat writes, AgentRun writes, and Evidence writes disabled. W50 harness blocking makes W51 plan blocking. It calls no W19-W50 readiness/review/preview/evidence/runtime/model/tool command and is not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use cutover plan approval readiness, route guard scaffold, and cutover invocation harness only as implementation-discussion evidence; default Chat remains unchanged
+use cutover plan approval readiness, route guard scaffold, cutover invocation harness, and invocation plan only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -539,7 +547,9 @@ metadata-safe human review evidence over that W46 draft, W48 only checks
 current approval readiness without side effects, W49 only adds a pure
 fail-closed route guard that keeps default Chat on `legacy_stream`, and W50
 only adds a pure cutover invocation harness that keeps default Chat
-`legacy_guarded`, write-disabled, zero-tool, and side-effect-free. Default
+`legacy_guarded`, write-disabled, zero-tool, and side-effect-free, and W51 only
+adds a pure invocation plan that selects `legacy_stream` while leaving
+`controlled_adapter` disabled and unattached. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

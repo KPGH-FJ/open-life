@@ -1060,7 +1060,10 @@ async fn send_message(
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_cutover_harness("send_message", &adapter_route)?;
+    default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
+        "send_message",
+        &adapter_route,
+    )?;
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -2215,7 +2218,7 @@ async fn start_stream_message(
     };
 
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_cutover_harness(
+    default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
         "start_stream_message",
         &adapter_route,
     )?;
@@ -3363,6 +3366,77 @@ mod hs_runtime_tests {
         assert!(error.contains("start_stream_message"));
         assert!(error.contains("adapter_scaffold_missing"));
         assert!(error.contains("separate_cutover_implementation_not_required"));
+    }
+
+    #[test]
+    fn default_chat_adapter_invocation_plan_selects_legacy_with_controlled_candidate_disabled() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let plan = crate::default_chat_adapter::plan_default_chat_adapter_invocation(
+            "send_message",
+            &route,
+        );
+
+        assert!(plan.plan_ready);
+        assert!(plan.harness_ready);
+        assert_eq!(plan.selected_adapter_path, "legacy_stream");
+        assert_eq!(plan.fallback_adapter_path, "legacy_stream");
+        assert_eq!(plan.controlled_adapter_candidate_path, "controlled_adapter");
+        assert!(!plan.controlled_adapter_invocation_allowed);
+        assert!(!plan.controlled_adapter_executor_attached);
+        assert_eq!(plan.send_contract_shape, "send_message_compatible");
+        assert_eq!(plan.stream_contract_shape, "stream_message_compatible");
+        assert!(!plan.runtime_call_enabled);
+        assert!(!plan.model_call_enabled);
+        assert!(!plan.tool_call_enabled);
+        assert!(!plan.allow_writes);
+        assert_eq!(plan.max_tool_calls, 0);
+        assert!(!plan.chat_message_saved);
+        assert!(!plan.agent_run_recorded);
+        assert!(!plan.evidence_recorded);
+        assert!(plan.default_chat_path_unchanged);
+        assert!(plan.blocking_reasons.is_empty());
+        crate::default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
+            "send_message",
+            &route,
+        )
+        .expect("default route must keep the invocation plan on legacy stream");
+    }
+
+    #[test]
+    fn default_chat_adapter_invocation_plan_blocks_when_harness_blocks() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.controlled_adapter_enabled = true;
+        route.default_send_path = "controlled_adapter".into();
+
+        let plan = crate::default_chat_adapter::plan_default_chat_adapter_invocation(
+            "send_message",
+            &route,
+        );
+
+        assert!(!plan.plan_ready);
+        assert!(!plan.harness_ready);
+        assert_eq!(plan.selected_adapter_path, "blocked");
+        assert_eq!(plan.fallback_adapter_path, "legacy_stream");
+        assert!(!plan.default_chat_path_unchanged);
+        assert!(plan
+            .blocking_reasons
+            .contains(&"cutover_harness_not_ready".to_string()));
+        assert!(plan
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+        assert!(plan
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+
+        let error = crate::default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
+            "send_message",
+            &route,
+        )
+        .expect_err("blocked harness must prevent default Chat invocation planning");
+        assert!(error.contains("send_message"));
+        assert!(error.contains("cutover_harness_not_ready"));
+        assert!(error.contains("controlled_adapter_enabled"));
     }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
