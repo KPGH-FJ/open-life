@@ -3153,12 +3153,13 @@ pub(crate) async fn get_default_chat_adapter_routing_status_with_state(
         state,
     )
     .await?;
-    let current_mode = "legacy_stream".to_string();
-    let adapter_scaffold_present = true;
-    let controlled_adapter_enabled = false;
-    let default_send_path = "legacy_stream".to_string();
-    let start_stream_path = "legacy_stream".to_string();
-    let requires_separate_cutover_implementation = true;
+    let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+    let current_mode = route.current_mode;
+    let adapter_scaffold_present = route.adapter_scaffold_present;
+    let controlled_adapter_enabled = route.controlled_adapter_enabled;
+    let default_send_path = route.default_send_path;
+    let start_stream_path = route.start_stream_path;
+    let requires_separate_cutover_implementation = route.requires_separate_cutover_implementation;
     let mut blocking_reasons = Vec::new();
 
     if !activation_gate.implementation_gate_eligible {
@@ -3173,11 +3174,11 @@ pub(crate) async fn get_default_chat_adapter_routing_status_with_state(
     let blocking_reason_count = blocking_reasons.len();
 
     Ok(DefaultChatAdapterRoutingStatus {
-        current_mode,
+        current_mode: current_mode.clone(),
         adapter_scaffold_present,
         controlled_adapter_enabled,
-        default_send_path,
-        start_stream_path,
+        default_send_path: default_send_path.clone(),
+        start_stream_path: start_stream_path.clone(),
         activation_implementation_gate_eligible: activation_gate.implementation_gate_eligible,
         requires_separate_cutover_implementation,
         blocking_reasons,
@@ -3185,11 +3186,11 @@ pub(crate) async fn get_default_chat_adapter_routing_status_with_state(
             "defaultChatAdapterRouting": "disabled_scaffold",
             "metadataSafe": true,
             "readOnly": true,
-            "routingMode": "legacy_stream",
+            "routingMode": current_mode,
             "adapterScaffoldPresent": adapter_scaffold_present,
             "controlledAdapterEnabled": controlled_adapter_enabled,
-            "defaultSendPath": "legacy_stream",
-            "startStreamPath": "legacy_stream",
+            "defaultSendPath": default_send_path,
+            "startStreamPath": start_stream_path,
             "activationImplementationGateEligible": activation_gate.implementation_gate_eligible,
             "notAutomaticMigration": true,
             "requiresSeparateCutoverImplementation": requires_separate_cutover_implementation,

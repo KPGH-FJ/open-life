@@ -18,6 +18,7 @@ pub mod a2a_server;
 pub mod a2a_sidecar;
 pub mod bootstrap;
 pub mod commands;
+pub(crate) mod default_chat_adapter;
 pub mod errors;
 pub mod scheduler_runner;
 pub mod state;
@@ -1058,6 +1059,9 @@ async fn send_message(
     state: State<'_, Arc<AppState>>,
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
+    let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
+    default_chat_adapter::ensure_default_chat_legacy_route("send_message", &adapter_route)?;
+
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
         if m.role == "user" {
@@ -2210,6 +2214,9 @@ async fn start_stream_message(
         )
     };
 
+    let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
+    default_chat_adapter::ensure_default_chat_legacy_route("start_stream_message", &adapter_route)?;
+
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
         if m.role == "user" {
@@ -3240,6 +3247,36 @@ pub fn run() {
 #[cfg(test)]
 mod hs_runtime_tests {
     use super::*;
+
+    #[test]
+    fn default_chat_adapter_cutover_route_guard_defaults_to_disabled_legacy_stream() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        assert_eq!(route.current_mode, "legacy_stream");
+        assert!(route.adapter_scaffold_present);
+        assert!(!route.controlled_adapter_enabled);
+        assert!(!route.automatic_migration_enabled);
+        assert_eq!(route.default_send_path, "legacy_stream");
+        assert_eq!(route.start_stream_path, "legacy_stream");
+        assert!(route.requires_separate_cutover_implementation);
+        crate::default_chat_adapter::ensure_default_chat_legacy_route("send_message", &route)
+            .expect("disabled scaffold must allow legacy send path");
+    }
+
+    #[test]
+    fn default_chat_adapter_cutover_route_guard_fails_closed_for_enabled_route() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.controlled_adapter_enabled = true;
+        route.default_send_path = "controlled_adapter".into();
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_legacy_route("send_message", &route)
+                .expect_err("enabled adapter route must fail closed until cutover is implemented");
+
+        assert!(error.contains("send_message"));
+        assert!(error.contains("controlled_adapter_enabled"));
+        assert!(error.contains("default_send_path_not_legacy_stream"));
+    }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
         openlife_core::agent::RuntimeHSPacket {

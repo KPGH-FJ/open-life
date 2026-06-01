@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W48 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W49 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -108,6 +108,15 @@ W47 latest review evidence, plan digest match, W45 readiness, and default Chat
 isolation. It creates no records, runs no preview/runtime/tool/model call,
 changes no routing, and only indicates readiness for later adapter
 implementation discussion. It is not default Chat migration.
+W49 adds a shared default Chat adapter route guard scaffold. The route resolver
+still returns `legacy_stream`, controlled adapter disabled, and automatic
+migration disabled, but `get_default_chat_adapter_routing_status`,
+`send_message`, and `start_stream_message` now read the same source-of-truth.
+The ordinary Chat entries call only this pure fail-closed guard, not W19-W48
+readiness/review/preview/evidence commands. If a future route drifts away from
+legacy stream before a reviewed implementation exists, default Chat blocks
+instead of silently switching. It is route guard scaffolding, not default Chat
+migration.
 
 The key boundary is unchanged:
 
@@ -482,11 +491,12 @@ The key boundary is unchanged:
 | W46 Default Chat Adapter Cutover Implementation Plan Draft | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `draft_default_chat_adapter_cutover_implementation_plan`. It calls W45 readiness only; blocked readiness returns `draftReady=false`, propagated blockers, and no plan sections, while ready output returns metadata-safe human-review implementation scope, adapter contract requirements, routing boundary, safety preconditions, fallback, rollback, observability, test plan, explicit non-goals, and a stable plan digest. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover implementation planning, not default Chat migration. |
 | W47 Default Chat Adapter Cutover Plan Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_cutover_plan_review_decision` and read-only `get_default_chat_adapter_cutover_plan_review_summary`. The record command calls W46 first; blocked draft approve writes no evidence, while reject/request_rework can write metadata-safe evidence. Evidence stores only decision/source session/draftReady/W45 readiness/cutover plan digest/plan section count/reviewer-note checksum-length-category/timestamp metadata. It creates no AgentRun/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no feature flags or routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover plan review evidence, not default Chat migration. |
 | W48 Default Chat Adapter Cutover Plan Approval Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_cutover_plan_approval_readiness`. It combines current W46 draft, W47 latest metadata-safe review decision evidence, current plan digest match, W45 readiness, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and legacy send/stream paths. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is cutover plan approval readiness for later adapter implementation discussion, not default Chat migration. |
+| W49 Default Chat Adapter Cutover Route Guard Scaffold | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/commands/agent_runtime.rs`, Rust tests, docs | Adds a shared default Chat adapter route resolver and fail-closed guard. The resolver reports `legacy_stream`, scaffold present, controlled adapter disabled, automatic migration disabled, and separate cutover implementation required. `get_default_chat_adapter_routing_status`, `send_message`, and `start_stream_message` now use that same source-of-truth; ordinary Chat entries call no W19-W48 gate/review/preview/evidence command. If a future route is misconfigured as enabled or non-legacy before a reviewed cutover exists, the default Chat entry blocks instead of silently switching. This is route guard scaffolding, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use cutover plan approval readiness only as implementation-discussion evidence; default Chat remains unchanged
+use cutover plan approval readiness and route guard scaffold only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -515,8 +525,9 @@ review evidence over that controlled preview, and W45 only checks read-only
 controlled preview approval readiness over W42/W44 evidence and the approved
 preview AgentRun's current safety state, W46 only drafts a metadata-safe
 human-review cutover implementation plan over W45 readiness, W47 only records
-metadata-safe human review evidence over that W46 draft, and W48 only checks
-current approval readiness without side effects. Default
+metadata-safe human review evidence over that W46 draft, W48 only checks
+current approval readiness without side effects, and W49 only adds a pure
+fail-closed route guard that keeps default Chat on `legacy_stream`. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.
