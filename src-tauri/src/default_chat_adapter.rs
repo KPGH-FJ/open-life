@@ -12,6 +12,35 @@ pub(crate) struct DefaultChatAdapterRoute {
     pub(crate) requires_separate_cutover_implementation: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DefaultChatAdapterCallsite {
+    SendMessage,
+    StartStreamMessage,
+}
+
+impl DefaultChatAdapterCallsite {
+    fn caller(self) -> &'static str {
+        match self {
+            Self::SendMessage => "send_message",
+            Self::StartStreamMessage => "start_stream_message",
+        }
+    }
+
+    fn contract_shape(self) -> &'static str {
+        match self {
+            Self::SendMessage => "send_message_compatible",
+            Self::StartStreamMessage => "stream_message_compatible",
+        }
+    }
+
+    fn route_path(self, route: &DefaultChatAdapterRoute) -> &str {
+        match self {
+            Self::SendMessage => &route.default_send_path,
+            Self::StartStreamMessage => &route.start_stream_path,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DefaultChatAdapterCutoverHarness {
     pub(crate) caller: String,
@@ -31,6 +60,20 @@ pub(crate) struct DefaultChatAdapterCutoverHarness {
     pub(crate) default_send_path: String,
     pub(crate) start_stream_path: String,
     pub(crate) requires_separate_cutover_implementation: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatAdapterCallsiteContract {
+    pub(crate) callsite: String,
+    pub(crate) contract_ready: bool,
+    pub(crate) boundary_ready: bool,
+    pub(crate) contract_shape: String,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) required_callsite_path: String,
+    pub(crate) actual_callsite_path: String,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) side_effect_free_before_legacy_entry: bool,
     pub(crate) blocking_reasons: Vec<String>,
 }
 
@@ -173,6 +216,64 @@ pub(crate) fn ensure_default_chat_cutover_harness(
         Err(format!(
             "{caller} blocked by default Chat adapter cutover harness: {}",
             harness.blocking_reasons.join(", ")
+        ))
+    }
+}
+
+pub(crate) fn evaluate_default_chat_adapter_callsite_contract(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+) -> DefaultChatAdapterCallsiteContract {
+    let boundary = evaluate_default_chat_adapter_invocation_boundary(callsite.caller(), route);
+    let boundary_guard_passed =
+        ensure_default_chat_adapter_invocation_boundary(callsite.caller(), route).is_ok();
+    debug_assert_eq!(boundary_guard_passed, boundary.boundary_ready);
+    let actual_callsite_path = callsite.route_path(route).to_string();
+    let mut blocking_reasons = boundary.blocking_reasons.clone();
+
+    if !boundary_guard_passed {
+        blocking_reasons.insert(0, "invocation_boundary_not_ready".into());
+    }
+    if actual_callsite_path != boundary.required_callsite_path {
+        blocking_reasons.push("callsite_path_not_legacy_stream".into());
+    }
+
+    let contract_ready = boundary_guard_passed
+        && blocking_reasons.is_empty()
+        && actual_callsite_path == LEGACY_STREAM_PATH;
+
+    DefaultChatAdapterCallsiteContract {
+        callsite: callsite.caller().into(),
+        contract_ready,
+        boundary_ready: boundary_guard_passed,
+        contract_shape: callsite.contract_shape().into(),
+        selected_adapter_path: if contract_ready {
+            LEGACY_STREAM_PATH
+        } else {
+            "blocked"
+        }
+        .into(),
+        required_callsite_path: boundary.required_callsite_path,
+        actual_callsite_path,
+        controlled_adapter_executor_attached: boundary.controlled_adapter_executor_attached,
+        side_effect_free_before_legacy_entry: boundary.side_effect_free_before_legacy_entry,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_default_chat_adapter_callsite_contract(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+) -> Result<DefaultChatAdapterCallsiteContract, String> {
+    let contract = evaluate_default_chat_adapter_callsite_contract(callsite, route);
+
+    if contract.contract_ready {
+        Ok(contract)
+    } else {
+        Err(format!(
+            "{} blocked by default Chat adapter callsite contract: {}",
+            contract.callsite,
+            contract.blocking_reasons.join(", ")
         ))
     }
 }

@@ -1060,8 +1060,8 @@ async fn send_message(
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    let _adapter_boundary = default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
-        "send_message",
+    let _adapter_contract = default_chat_adapter::ensure_default_chat_adapter_callsite_contract(
+        default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
         &adapter_route,
     )?;
 
@@ -2218,8 +2218,8 @@ async fn start_stream_message(
     };
 
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    let _adapter_boundary = default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
-        "start_stream_message",
+    let _adapter_contract = default_chat_adapter::ensure_default_chat_adapter_callsite_contract(
+        default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
         &adapter_route,
     )?;
 
@@ -3512,6 +3512,79 @@ mod hs_runtime_tests {
         assert!(error.contains("start_stream_message"));
         assert!(error.contains("invocation_plan_not_ready"));
         assert!(error.contains("start_stream_path_not_legacy_stream"));
+    }
+
+    #[test]
+    fn default_chat_adapter_callsite_contract_selects_typed_legacy_paths() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let send_contract =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_callsite_contract(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+            );
+        let stream_contract =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_callsite_contract(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+            );
+
+        assert!(send_contract.contract_ready);
+        assert!(send_contract.boundary_ready);
+        assert_eq!(send_contract.callsite, "send_message");
+        assert_eq!(send_contract.contract_shape, "send_message_compatible");
+        assert_eq!(send_contract.actual_callsite_path, "legacy_stream");
+        assert_eq!(send_contract.required_callsite_path, "legacy_stream");
+        assert_eq!(send_contract.selected_adapter_path, "legacy_stream");
+        assert!(!send_contract.controlled_adapter_executor_attached);
+        assert!(send_contract.side_effect_free_before_legacy_entry);
+        assert!(send_contract.blocking_reasons.is_empty());
+
+        assert!(stream_contract.contract_ready);
+        assert!(stream_contract.boundary_ready);
+        assert_eq!(stream_contract.callsite, "start_stream_message");
+        assert_eq!(stream_contract.contract_shape, "stream_message_compatible");
+        assert_eq!(stream_contract.actual_callsite_path, "legacy_stream");
+        assert_eq!(stream_contract.required_callsite_path, "legacy_stream");
+        assert_eq!(stream_contract.selected_adapter_path, "legacy_stream");
+        assert!(!stream_contract.controlled_adapter_executor_attached);
+        assert!(stream_contract.side_effect_free_before_legacy_entry);
+        assert!(stream_contract.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn default_chat_adapter_callsite_contract_blocks_when_callsite_route_drifts() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.default_send_path = "controlled_adapter".into();
+
+        let contract = crate::default_chat_adapter::evaluate_default_chat_adapter_callsite_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+        );
+
+        assert!(!contract.contract_ready);
+        assert!(!contract.boundary_ready);
+        assert_eq!(contract.callsite, "send_message");
+        assert_eq!(contract.actual_callsite_path, "controlled_adapter");
+        assert_eq!(contract.required_callsite_path, "legacy_stream");
+        assert_eq!(contract.selected_adapter_path, "blocked");
+        assert!(contract
+            .blocking_reasons
+            .contains(&"invocation_boundary_not_ready".to_string()));
+        assert!(contract
+            .blocking_reasons
+            .contains(&"callsite_path_not_legacy_stream".to_string()));
+        assert!(contract
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+
+        let error = crate::default_chat_adapter::ensure_default_chat_adapter_callsite_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+        )
+        .expect_err("route drift must block the typed default Chat adapter callsite");
+        assert!(error.contains("send_message"));
+        assert!(error.contains("callsite_path_not_legacy_stream"));
     }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
