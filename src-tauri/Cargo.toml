@@ -37,7 +37,7 @@ uuid = { version = "1.0", features = ["v4"] }
 sha2 = "0.10"
 # open: cross-platform URL/file opening (used for mailto: links)
 open = "5.3"
-axum = "0.7"
+axum = "0.8"
 log = "0.4"
 openlife-core = { path = "../openlife-core" }
 
