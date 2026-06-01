@@ -58,6 +58,30 @@ pub(crate) struct DefaultChatAdapterInvocationPlan {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatAdapterInvocationBoundary {
+    pub(crate) caller: String,
+    pub(crate) boundary_ready: bool,
+    pub(crate) plan_ready: bool,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) required_callsite_path: String,
+    pub(crate) fallback_adapter_path: String,
+    pub(crate) controlled_adapter_candidate_path: String,
+    pub(crate) legacy_adapter_invocation_required: bool,
+    pub(crate) controlled_adapter_invocation_allowed: bool,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) side_effect_free_before_legacy_entry: bool,
+    pub(crate) runtime_call_enabled: bool,
+    pub(crate) model_call_enabled: bool,
+    pub(crate) tool_call_enabled: bool,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) chat_message_saved: bool,
+    pub(crate) agent_run_recorded: bool,
+    pub(crate) evidence_recorded: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn resolve_default_chat_adapter_route() -> DefaultChatAdapterRoute {
     DefaultChatAdapterRoute {
         current_mode: LEGACY_STREAM_PATH.into(),
@@ -149,6 +173,87 @@ pub(crate) fn ensure_default_chat_cutover_harness(
         Err(format!(
             "{caller} blocked by default Chat adapter cutover harness: {}",
             harness.blocking_reasons.join(", ")
+        ))
+    }
+}
+
+pub(crate) fn evaluate_default_chat_adapter_invocation_boundary(
+    caller: &str,
+    route: &DefaultChatAdapterRoute,
+) -> DefaultChatAdapterInvocationBoundary {
+    let plan = plan_default_chat_adapter_invocation(caller, route);
+    let plan_guard_passed = ensure_default_chat_adapter_invocation_plan(caller, route).is_ok();
+    debug_assert_eq!(plan_guard_passed, plan.plan_ready);
+    let mut blocking_reasons = plan.blocking_reasons.clone();
+
+    if !plan_guard_passed {
+        blocking_reasons.insert(0, "invocation_plan_not_ready".into());
+    }
+    if plan_guard_passed && plan.selected_adapter_path != LEGACY_STREAM_PATH {
+        blocking_reasons.push("selected_adapter_path_not_legacy_stream".into());
+    }
+
+    let side_effect_free_before_legacy_entry = !plan.runtime_call_enabled
+        && !plan.model_call_enabled
+        && !plan.tool_call_enabled
+        && !plan.allow_writes
+        && plan.max_tool_calls == 0
+        && !plan.chat_message_saved
+        && !plan.agent_run_recorded
+        && !plan.evidence_recorded;
+
+    if plan_guard_passed && !side_effect_free_before_legacy_entry {
+        blocking_reasons.push("invocation_boundary_not_side_effect_free".into());
+    }
+
+    let boundary_ready = plan_guard_passed
+        && blocking_reasons.is_empty()
+        && plan.selected_adapter_path == LEGACY_STREAM_PATH
+        && !plan.controlled_adapter_invocation_allowed
+        && !plan.controlled_adapter_executor_attached
+        && side_effect_free_before_legacy_entry;
+
+    DefaultChatAdapterInvocationBoundary {
+        caller: caller.into(),
+        boundary_ready,
+        plan_ready: plan_guard_passed,
+        selected_adapter_path: if boundary_ready {
+            LEGACY_STREAM_PATH
+        } else {
+            "blocked"
+        }
+        .into(),
+        required_callsite_path: LEGACY_STREAM_PATH.into(),
+        fallback_adapter_path: plan.fallback_adapter_path,
+        controlled_adapter_candidate_path: plan.controlled_adapter_candidate_path,
+        legacy_adapter_invocation_required: boundary_ready,
+        controlled_adapter_invocation_allowed: plan.controlled_adapter_invocation_allowed,
+        controlled_adapter_executor_attached: plan.controlled_adapter_executor_attached,
+        side_effect_free_before_legacy_entry,
+        runtime_call_enabled: plan.runtime_call_enabled,
+        model_call_enabled: plan.model_call_enabled,
+        tool_call_enabled: plan.tool_call_enabled,
+        allow_writes: plan.allow_writes,
+        max_tool_calls: plan.max_tool_calls,
+        chat_message_saved: plan.chat_message_saved,
+        agent_run_recorded: plan.agent_run_recorded,
+        evidence_recorded: plan.evidence_recorded,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_default_chat_adapter_invocation_boundary(
+    caller: &str,
+    route: &DefaultChatAdapterRoute,
+) -> Result<DefaultChatAdapterInvocationBoundary, String> {
+    let boundary = evaluate_default_chat_adapter_invocation_boundary(caller, route);
+
+    if boundary.boundary_ready {
+        Ok(boundary)
+    } else {
+        Err(format!(
+            "{caller} blocked by default Chat adapter invocation boundary: {}",
+            boundary.blocking_reasons.join(", ")
         ))
     }
 }

@@ -1060,7 +1060,7 @@ async fn send_message(
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
+    let _adapter_boundary = default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
         "send_message",
         &adapter_route,
     )?;
@@ -2218,7 +2218,7 @@ async fn start_stream_message(
     };
 
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_adapter_invocation_plan(
+    let _adapter_boundary = default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
         "start_stream_message",
         &adapter_route,
     )?;
@@ -3437,6 +3437,81 @@ mod hs_runtime_tests {
         assert!(error.contains("send_message"));
         assert!(error.contains("cutover_harness_not_ready"));
         assert!(error.contains("controlled_adapter_enabled"));
+    }
+
+    #[test]
+    fn default_chat_adapter_invocation_boundary_requires_legacy_path_only() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let boundary =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_invocation_boundary(
+                "send_message",
+                &route,
+            );
+
+        assert!(boundary.boundary_ready);
+        assert!(boundary.plan_ready);
+        assert_eq!(boundary.selected_adapter_path, "legacy_stream");
+        assert_eq!(boundary.required_callsite_path, "legacy_stream");
+        assert_eq!(boundary.fallback_adapter_path, "legacy_stream");
+        assert_eq!(
+            boundary.controlled_adapter_candidate_path,
+            "controlled_adapter"
+        );
+        assert!(boundary.legacy_adapter_invocation_required);
+        assert!(!boundary.controlled_adapter_invocation_allowed);
+        assert!(!boundary.controlled_adapter_executor_attached);
+        assert!(boundary.side_effect_free_before_legacy_entry);
+        assert!(!boundary.runtime_call_enabled);
+        assert!(!boundary.model_call_enabled);
+        assert!(!boundary.tool_call_enabled);
+        assert!(!boundary.allow_writes);
+        assert_eq!(boundary.max_tool_calls, 0);
+        assert!(!boundary.chat_message_saved);
+        assert!(!boundary.agent_run_recorded);
+        assert!(!boundary.evidence_recorded);
+        assert!(boundary.blocking_reasons.is_empty());
+
+        let decision =
+            crate::default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
+                "send_message",
+                &route,
+            )
+            .expect("default invocation boundary must select the legacy adapter path");
+        assert_eq!(decision.selected_adapter_path, "legacy_stream");
+    }
+
+    #[test]
+    fn default_chat_adapter_invocation_boundary_blocks_when_plan_blocks() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.start_stream_path = "controlled_adapter".into();
+
+        let boundary =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_invocation_boundary(
+                "start_stream_message",
+                &route,
+            );
+
+        assert!(!boundary.boundary_ready);
+        assert!(!boundary.plan_ready);
+        assert_eq!(boundary.selected_adapter_path, "blocked");
+        assert_eq!(boundary.required_callsite_path, "legacy_stream");
+        assert!(!boundary.legacy_adapter_invocation_required);
+        assert!(boundary
+            .blocking_reasons
+            .contains(&"invocation_plan_not_ready".to_string()));
+        assert!(boundary
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+
+        let error = crate::default_chat_adapter::ensure_default_chat_adapter_invocation_boundary(
+            "start_stream_message",
+            &route,
+        )
+        .expect_err("blocked invocation plan must prevent default adapter boundary entry");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("invocation_plan_not_ready"));
+        assert!(error.contains("start_stream_path_not_legacy_stream"));
     }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
