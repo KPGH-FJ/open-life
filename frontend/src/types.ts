@@ -952,6 +952,58 @@ export interface DefaultChatAdapterCutoverImplementationPlanDraft {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export type DefaultChatAdapterCutoverPlanReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterCutoverPlanReviewDecisionInput {
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  cutoverPlanDigest?: string | null;
+  planSectionCount: number;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  cutoverPlanDigest?: string | null;
+  planSectionCount: number;
+  w45Ready: boolean;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterCutoverPlanReviewSummary {
+  latestDecision?: DefaultChatAdapterCutoverPlanReviewLatestDecision | null;
+  approvedCount: number;
+  rejectedCount: number;
+  requestReworkCount: number;
+  latestApprovedPlanDigest?: string | null;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

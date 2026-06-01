@@ -18,6 +18,8 @@ import {
   checkDefaultChatAdapterImplementationReadiness,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   draftDefaultChatAdapterCutoverImplementationPlan,
+  getDefaultChatAdapterCutoverPlanReviewSummary,
+  recordDefaultChatAdapterCutoverPlanReviewDecision,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
@@ -1440,5 +1442,79 @@ describe("tauri command argument aliases", () => {
     expect(result.draftReady).toBe(true);
     expect(result.stablePlanDigest).toBe("sha256:plan123");
     expect(result.planSections[0].sectionKey).toBe("implementationScope");
+  });
+
+  it("records and reads default chat adapter cutover plan review decisions", async () => {
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        recorded: true,
+        evidenceId: "ev_cutover_plan_review_1",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        draftReady: true,
+        cutoverPlanDigest: "sha256:plan123",
+        planSectionCount: 9,
+        createdAt: "2026-06-01T00:00:00Z",
+        blockingReasons: [],
+      })
+      .mockResolvedValueOnce({
+        latestDecision: {
+          evidenceId: "ev_cutover_plan_review_1",
+          decisionKind: "approve",
+          sourceSessionId: "session-1",
+          draftReady: true,
+          cutoverPlanDigest: "sha256:plan123",
+          planSectionCount: 9,
+          reviewerNoteChecksum: "sha256:note123",
+          reviewerNoteLength: 12,
+          reviewerNoteCategory: "brief",
+          createdAt: "2026-06-01T00:00:00Z",
+        },
+        approvedCount: 1,
+        rejectedCount: 0,
+        requestReworkCount: 0,
+        latestApprovedPlanDigest: "sha256:plan123",
+        latestTimestamp: "2026-06-01T00:00:00Z",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverPlanReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+        },
+      });
+
+    const result = await recordDefaultChatAdapterCutoverPlanReviewDecision({
+      decisionKind: "approve",
+      sourceSessionId: "session-1",
+      message: "cutover plan probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+      optionalReviewerNote: "review note",
+    });
+    const summary = await getDefaultChatAdapterCutoverPlanReviewSummary();
+
+    expect(invoke).toHaveBeenNthCalledWith(
+      1,
+      "record_default_chat_adapter_cutover_plan_review_decision",
+      {
+        input: {
+          decisionKind: "approve",
+          sourceSessionId: "session-1",
+          message: "cutover plan probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+          optionalReviewerNote: "review note",
+        },
+      }
+    );
+    expect(invoke).toHaveBeenNthCalledWith(
+      2,
+      "get_default_chat_adapter_cutover_plan_review_summary",
+      undefined
+    );
+    expect(result.recorded).toBe(true);
+    expect(result.cutoverPlanDigest).toBe("sha256:plan123");
+    expect(summary.latestApprovedPlanDigest).toBe("sha256:plan123");
   });
 });

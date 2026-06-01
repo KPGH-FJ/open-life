@@ -27,6 +27,7 @@ import {
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
   getDefaultChatAdapterControlledPreviewReviewSummary,
+  getDefaultChatAdapterCutoverPlanReviewSummary,
   getDefaultChatAdapterDryRunReviewSummary,
   getDefaultChatAdapterRoutingStatus,
   getControlledChatCutoverCandidateReviewSummary,
@@ -36,6 +37,7 @@ import {
   getDefaultChatRuntimeBoundaryStatus,
   recordDefaultChatAdapterActivationReviewDecision,
   recordDefaultChatAdapterControlledPreviewReviewDecision,
+  recordDefaultChatAdapterCutoverPlanReviewDecision,
   recordDefaultChatAdapterDryRunReviewDecision,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
@@ -58,6 +60,9 @@ import type {
   DefaultChatAdapterContractHarnessReport,
   DefaultChatAdapterControlledPreviewApprovalReadinessReport,
   DefaultChatAdapterCutoverImplementationPlanDraft,
+  DefaultChatAdapterCutoverPlanReviewDecisionKind,
+  DefaultChatAdapterCutoverPlanReviewDecisionResult,
+  DefaultChatAdapterCutoverPlanReviewSummary,
   DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterControlledPreviewReviewDecisionKind,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
@@ -102,6 +107,7 @@ const SAFE_SUMMARY_KEYS = [
   "controlledPreviewReview",
   "controlledPreviewApprovalReadiness",
   "cutoverImplementationPlan",
+  "cutoverPlanReview",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -180,6 +186,8 @@ const SAFE_SUMMARY_KEYS = [
   "implementationGateEligible",
   "activationPlanDigestMatched",
   "approvedCount",
+  "rejectedCount",
+  "requestReworkCount",
   "rejectOrReworkCount",
   "implementationEligible",
   "latestShadowReviewDecisionKind",
@@ -440,6 +448,20 @@ export default function MultiStrategyPreviewSection() {
   const [adapterCutoverPlanError, setAdapterCutoverPlanError] = useState<string | null>(null);
   const [adapterCutoverPlanDraft, setAdapterCutoverPlanDraft] =
     useState<DefaultChatAdapterCutoverImplementationPlanDraft | null>(null);
+  const [adapterCutoverPlanReviewNote, setAdapterCutoverPlanReviewNote] = useState("");
+  const [adapterCutoverPlanReviewRecording, setAdapterCutoverPlanReviewRecording] = useState(false);
+  const [adapterCutoverPlanReviewError, setAdapterCutoverPlanReviewError] = useState<string | null>(
+    null
+  );
+  const [adapterCutoverPlanReviewResult, setAdapterCutoverPlanReviewResult] =
+    useState<DefaultChatAdapterCutoverPlanReviewDecisionResult | null>(null);
+  const [adapterCutoverPlanReviewSummaryChecking, setAdapterCutoverPlanReviewSummaryChecking] =
+    useState(false);
+  const [adapterCutoverPlanReviewSummaryError, setAdapterCutoverPlanReviewSummaryError] = useState<
+    string | null
+  >(null);
+  const [adapterCutoverPlanReviewSummary, setAdapterCutoverPlanReviewSummary] =
+    useState<DefaultChatAdapterCutoverPlanReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1041,6 +1063,51 @@ export default function MultiStrategyPreviewSection() {
       setAdapterCutoverPlanError(`Adapter cutover implementation plan failed: ${readableError(e)}`);
     } finally {
       setAdapterCutoverPlanDrafting(false);
+    }
+  };
+
+  const handleAdapterCutoverPlanReviewSummary = async () => {
+    setAdapterCutoverPlanReviewSummaryChecking(true);
+    setAdapterCutoverPlanReviewSummaryError(null);
+    try {
+      const summary = await getDefaultChatAdapterCutoverPlanReviewSummary();
+      setAdapterCutoverPlanReviewSummary(summary);
+    } catch (e) {
+      setAdapterCutoverPlanReviewSummaryError(
+        `Adapter cutover plan review summary failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterCutoverPlanReviewSummaryChecking(false);
+    }
+  };
+
+  const handleAdapterCutoverPlanReviewDecision = async (
+    decisionKind: DefaultChatAdapterCutoverPlanReviewDecisionKind
+  ) => {
+    setAdapterCutoverPlanReviewRecording(true);
+    setAdapterCutoverPlanReviewError(null);
+    setAdapterCutoverPlanReviewResult(null);
+    try {
+      const trimmedNote = adapterCutoverPlanReviewNote.trim();
+      const result = await recordDefaultChatAdapterCutoverPlanReviewDecision({
+        decisionKind,
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setAdapterCutoverPlanReviewResult(result);
+      if (result.recorded) {
+        setAdapterCutoverPlanReviewNote("");
+        void handleAdapterCutoverPlanReviewSummary();
+      }
+    } catch (e) {
+      setAdapterCutoverPlanReviewError(
+        `Adapter cutover plan review recording failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterCutoverPlanReviewRecording(false);
     }
   };
 
@@ -5091,6 +5158,197 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No cutover implementation plan draft loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Cutover Plan Review
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              W47 records human review evidence over the W46 cutover implementation plan. It does
+              not implement, enable, or route default Chat through the adapter.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterCutoverPlanReviewSummary}
+            disabled={adapterCutoverPlanReviewSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterCutoverPlanReviewSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={adapterCutoverPlanReviewSummaryChecking ? "animate-spin" : undefined}
+            />
+            {adapterCutoverPlanReviewSummaryChecking
+              ? "Refreshing..."
+              : "Refresh Cutover Plan Review"}
+          </button>
+        </div>
+
+        <label className="mt-3 block text-xs font-medium text-stone-700">
+          Cutover plan reviewer note
+          <textarea
+            value={adapterCutoverPlanReviewNote}
+            onChange={event => setAdapterCutoverPlanReviewNote(event.target.value)}
+            rows={2}
+            className="mt-1 w-full rounded-md border border-stone-200 px-3 py-2 text-sm text-stone-800 focus:border-stone-400 focus:outline-none"
+            placeholder="Optional note stored only as length/checksum/category metadata."
+          />
+        </label>
+
+        <div className="mt-3 flex flex-wrap gap-2">
+          {[
+            ["approve", "Approve Cutover Plan"],
+            ["reject", "Reject Cutover Plan"],
+            ["request_rework", "Request Cutover Plan Rework"],
+          ].map(([decisionKind, label]) => (
+            <button
+              key={decisionKind}
+              type="button"
+              onClick={() =>
+                handleAdapterCutoverPlanReviewDecision(
+                  decisionKind as DefaultChatAdapterCutoverPlanReviewDecisionKind
+                )
+              }
+              disabled={adapterCutoverPlanReviewRecording}
+              className={classNames(
+                "rounded-md px-3 py-2 text-xs font-medium",
+                adapterCutoverPlanReviewRecording
+                  ? "bg-stone-100 text-stone-400"
+                  : decisionKind === "approve"
+                    ? "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                    : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          Approve is blocked unless the current W46 draft is ready. Reject and request rework can
+          record metadata-safe review evidence for a blocked draft.
+        </div>
+
+        {adapterCutoverPlanReviewError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterCutoverPlanReviewError}
+          </div>
+        )}
+
+        {adapterCutoverPlanReviewSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterCutoverPlanReviewSummaryError}
+          </div>
+        )}
+
+        {adapterCutoverPlanReviewResult && (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterCutoverPlanReviewResult.recorded
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterCutoverPlanReviewResult.recorded
+                ? "Cutover plan review recorded"
+                : "Cutover plan review blocked"}
+            </div>
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["recorded", String(adapterCutoverPlanReviewResult.recorded)],
+                ["decisionKind", adapterCutoverPlanReviewResult.decisionKind],
+                ["sourceSessionId", adapterCutoverPlanReviewResult.sourceSessionId],
+                ["draftReady", String(adapterCutoverPlanReviewResult.draftReady)],
+                ["cutoverPlanDigest", adapterCutoverPlanReviewResult.cutoverPlanDigest ?? "none"],
+                ["planSectionCount", String(adapterCutoverPlanReviewResult.planSectionCount)],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+            {adapterCutoverPlanReviewResult.blockingReasons.length > 0 && (
+              <div className="space-y-1">
+                {adapterCutoverPlanReviewResult.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {adapterCutoverPlanReviewSummary && (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["approvedCount", String(adapterCutoverPlanReviewSummary.approvedCount)],
+                ["rejectedCount", String(adapterCutoverPlanReviewSummary.rejectedCount)],
+                ["requestReworkCount", String(adapterCutoverPlanReviewSummary.requestReworkCount)],
+                [
+                  "latestApprovedPlanDigest",
+                  adapterCutoverPlanReviewSummary.latestApprovedPlanDigest ?? "none",
+                ],
+                [
+                  "latestDecisionKind",
+                  adapterCutoverPlanReviewSummary.latestDecision?.decisionKind ?? "none",
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(adapterCutoverPlanReviewSummary.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(adapterCutoverPlanReviewSummary.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            {adapterCutoverPlanReviewSummary.blockingReasons.length > 0 && (
+              <div className="space-y-1">
+                {adapterCutoverPlanReviewSummary.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>

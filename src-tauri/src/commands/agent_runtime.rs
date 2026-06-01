@@ -32,6 +32,8 @@ const DEFAULT_CHAT_ADAPTER_DRY_RUN_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.default_chat.adapter_dry_run_review_decision";
 const DEFAULT_CHAT_ADAPTER_CONTROLLED_PREVIEW_REVIEW_DECISION_EVIDENCE_PATH: &str =
     "runtime.default_chat.adapter_controlled_preview_review_decision";
+const DEFAULT_CHAT_ADAPTER_CUTOVER_PLAN_REVIEW_DECISION_EVIDENCE_PATH: &str =
+    "runtime.default_chat.adapter_cutover_plan_review_decision";
 const RECENT_PROMOTION_EVIDENCE_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -934,6 +936,72 @@ pub struct DefaultChatAdapterCutoverImplementationPlanDraft {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_plan_digest: Option<String>,
     pub plan_sections: Vec<DefaultChatAdapterCutoverImplementationPlanSection>,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanReviewDecisionInput {
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_previews: Option<usize>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+    #[serde(default)]
+    pub optional_reviewer_note: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanReviewDecisionResult {
+    pub recorded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_id: Option<String>,
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub draft_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutover_plan_digest: Option<String>,
+    pub plan_section_count: usize,
+    pub created_at: String,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanReviewLatestDecision {
+    pub evidence_id: String,
+    pub decision_kind: String,
+    pub source_session_id: String,
+    pub draft_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutover_plan_digest: Option<String>,
+    pub plan_section_count: usize,
+    pub w45_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reviewer_note_checksum: Option<String>,
+    pub reviewer_note_length: usize,
+    pub reviewer_note_category: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterCutoverPlanReviewSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterCutoverPlanReviewLatestDecision>,
+    pub approved_count: usize,
+    pub rejected_count: usize,
+    pub request_rework_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_approved_plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_timestamp: Option<String>,
     pub blocking_reasons: Vec<String>,
     pub metadata_safe_summary: Value,
 }
@@ -4685,6 +4753,217 @@ fn default_chat_adapter_cutover_implementation_plan_digest(
     }))
 }
 
+#[tauri::command]
+pub async fn record_default_chat_adapter_cutover_plan_review_decision(
+    input: DefaultChatAdapterCutoverPlanReviewDecisionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterCutoverPlanReviewDecisionResult, String> {
+    record_default_chat_adapter_cutover_plan_review_decision_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn record_default_chat_adapter_cutover_plan_review_decision_with_state(
+    input: DefaultChatAdapterCutoverPlanReviewDecisionInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterCutoverPlanReviewDecisionResult, String> {
+    let decision_kind = safe_enum_value(
+        &input.decision_kind,
+        "decisionKind",
+        &["approve", "reject", "request_rework"],
+    )?;
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let draft = draft_default_chat_adapter_cutover_implementation_plan_with_state(
+        DefaultChatAdapterCutoverImplementationPlanInput {
+            source_session_id: source_session_id.clone(),
+            message: input.message,
+            required_approved_previews: input.required_approved_previews,
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+        },
+        state,
+    )
+    .await?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    let mut blocking_reasons = draft.blocking_reasons.clone();
+
+    if decision_kind == "approve" && !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "cutover_implementation_plan_not_ready".into(),
+        );
+        return Ok(DefaultChatAdapterCutoverPlanReviewDecisionResult {
+            recorded: false,
+            evidence_id: None,
+            decision_kind,
+            source_session_id,
+            draft_ready: false,
+            cutover_plan_digest: draft.stable_plan_digest,
+            plan_section_count: draft.plan_sections.len(),
+            created_at,
+            blocking_reasons,
+        });
+    }
+
+    let reviewer_note_metadata =
+        metadata_safe_reviewer_note_fields(input.optional_reviewer_note.as_deref());
+    let mut evidence_draft = EvidenceDraft::new(
+        EvidenceType::RuntimeBehavior,
+        DEFAULT_CHAT_ADAPTER_CUTOVER_PLAN_REVIEW_DECISION_EVIDENCE_PATH,
+        1.0,
+        RiskLevel::Low,
+        EvidencePrivacyLevel::Internal,
+    );
+    evidence_draft.run_metadata = json!({
+        "evidenceKind": "default_chat_adapter_cutover_plan_review_decision",
+        "decisionKind": decision_kind.clone(),
+        "sourceSessionId": source_session_id.clone(),
+        "draftReady": draft.draft_ready,
+        "w45Ready": draft.controlled_preview_approval_readiness.ready,
+        "cutoverPlanDigest": draft.stable_plan_digest.clone(),
+        "planSectionCount": draft.plan_sections.len(),
+        "reviewerNoteChecksum": reviewer_note_metadata.checksum,
+        "reviewerNoteLength": reviewer_note_metadata.length,
+        "reviewerNoteCategory": reviewer_note_metadata.category,
+        "createdAt": created_at.clone(),
+    });
+
+    let record = {
+        let store = state.evidence_store.lock().await;
+        store.create_evidence(evidence_draft).map_err(|e| {
+            format!("failed to record default Chat adapter cutover plan review evidence: {e}")
+        })?
+    };
+
+    Ok(DefaultChatAdapterCutoverPlanReviewDecisionResult {
+        recorded: true,
+        evidence_id: Some(record.id),
+        decision_kind,
+        source_session_id,
+        draft_ready: draft.draft_ready,
+        cutover_plan_digest: draft.stable_plan_digest,
+        plan_section_count: draft.plan_sections.len(),
+        created_at,
+        blocking_reasons,
+    })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_cutover_plan_review_summary(
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterCutoverPlanReviewSummary, String> {
+    get_default_chat_adapter_cutover_plan_review_summary_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_default_chat_adapter_cutover_plan_review_summary_with_state(
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterCutoverPlanReviewSummary, String> {
+    let records = default_chat_adapter_cutover_plan_review_records(state).await?;
+    let approved_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_cutover_plan_review_decision_kind(record) == Some("approve")
+        })
+        .count();
+    let rejected_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_cutover_plan_review_decision_kind(record) == Some("reject")
+        })
+        .count();
+    let request_rework_count = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_cutover_plan_review_decision_kind(record) == Some("request_rework")
+        })
+        .count();
+    let latest_decision = records
+        .first()
+        .and_then(default_chat_adapter_cutover_plan_review_latest_decision);
+    let latest_approved_plan_digest = records
+        .iter()
+        .filter(|record| {
+            default_chat_adapter_cutover_plan_review_decision_kind(record) == Some("approve")
+        })
+        .find_map(|record| {
+            record
+                .run_metadata
+                .get("cutoverPlanDigest")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+    let latest_timestamp = latest_decision
+        .as_ref()
+        .map(|decision| decision.created_at.clone());
+    let latest_decision_present = latest_decision.is_some();
+    let blocking_reasons = if latest_decision_present {
+        Vec::new()
+    } else {
+        vec!["cutover_plan_review_decision_missing".into()]
+    };
+    let blocking_reason_count = blocking_reasons.len();
+
+    Ok(DefaultChatAdapterCutoverPlanReviewSummary {
+        latest_decision,
+        approved_count,
+        rejected_count,
+        request_rework_count,
+        latest_approved_plan_digest,
+        latest_timestamp,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "cutoverPlanReview": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "approvedCount": approved_count,
+            "rejectedCount": rejected_count,
+            "requestReworkCount": request_rework_count,
+            "latestDecisionPresent": latest_decision_present,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "reviewerNoteStorage": "length_checksum_category_only",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "agentRunStorage": "none",
+            "runtimeCallStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+            "notAutomaticMigration": true,
+        }),
+    })
+}
+
+async fn default_chat_adapter_cutover_plan_review_records(
+    state: &Arc<AppState>,
+) -> Result<Vec<openlife_core::agent::EvidenceRecord>, String> {
+    let records = {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_CUTOVER_PLAN_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .map_err(|e| {
+                format!("failed to read default Chat adapter cutover plan review evidence: {e}")
+            })?
+    };
+    Ok(records
+        .into_iter()
+        .filter(default_chat_adapter_cutover_plan_review_decision_evidence_is_metadata_safe)
+        .collect())
+}
+
 struct NormalizedPromotionEvidenceInput {
     pilot_run_id: String,
     source_session_id: String,
@@ -6530,6 +6809,144 @@ fn default_chat_adapter_controlled_preview_review_latest_decision(
             .get("previewSummaryDigest")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)?,
+        reviewer_note_checksum: record
+            .run_metadata
+            .get("reviewerNoteChecksum")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        reviewer_note_length: record
+            .run_metadata
+            .get("reviewerNoteLength")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        reviewer_note_category: record
+            .run_metadata
+            .get("reviewerNoteCategory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        created_at: record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| record.created_at.to_rfc3339()),
+    })
+}
+
+fn default_chat_adapter_cutover_plan_review_decision_evidence_is_metadata_safe(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> bool {
+    if record.affected_path != DEFAULT_CHAT_ADAPTER_CUTOVER_PLAN_REVIEW_DECISION_EVIDENCE_PATH
+        || record.evidence_type != EvidenceType::RuntimeBehavior
+        || record.summary.is_some()
+        || !record.source_refs.is_empty()
+        || !record.linked_agent_run_ids.is_empty()
+        || !record.linked_proposal_ids.is_empty()
+    {
+        return false;
+    }
+    let Some(metadata) = record.run_metadata.as_object() else {
+        return false;
+    };
+    let allowed = [
+        "evidenceKind",
+        "decisionKind",
+        "sourceSessionId",
+        "draftReady",
+        "w45Ready",
+        "cutoverPlanDigest",
+        "planSectionCount",
+        "reviewerNoteChecksum",
+        "reviewerNoteLength",
+        "reviewerNoteCategory",
+        "createdAt",
+    ];
+    if metadata.len() != allowed.len()
+        || !metadata.keys().all(|key| allowed.contains(&key.as_str()))
+    {
+        return false;
+    }
+
+    let digest_is_safe = match record.run_metadata.get("cutoverPlanDigest") {
+        Some(Value::Null) => true,
+        Some(Value::String(value)) => safe_checksum_field(value, "cutoverPlanDigest").is_ok(),
+        _ => false,
+    };
+
+    record
+        .run_metadata
+        .get("evidenceKind")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value == "default_chat_adapter_cutover_plan_review_decision")
+        && metadata_string_is_safe(&record.run_metadata, "decisionKind", |value, field| {
+            safe_enum_value(value, field, &["approve", "reject", "request_rework"])
+        })
+        && metadata_string_is_safe(&record.run_metadata, "sourceSessionId", safe_internal_id)
+        && record
+            .run_metadata
+            .get("draftReady")
+            .and_then(Value::as_bool)
+            .is_some()
+        && record
+            .run_metadata
+            .get("w45Ready")
+            .and_then(Value::as_bool)
+            .is_some()
+        && digest_is_safe
+        && record
+            .run_metadata
+            .get("planSectionCount")
+            .and_then(Value::as_u64)
+            .is_some()
+        && reviewer_note_flat_metadata_is_safe(&record.run_metadata)
+        && record
+            .run_metadata
+            .get("createdAt")
+            .and_then(Value::as_str)
+            .is_some_and(|value| chrono::DateTime::parse_from_rfc3339(value).is_ok())
+        && !contains_unsafe_promotion_metadata(&record.run_metadata)
+}
+
+fn default_chat_adapter_cutover_plan_review_decision_kind(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<&str> {
+    record
+        .run_metadata
+        .get("decisionKind")
+        .and_then(Value::as_str)
+}
+
+fn default_chat_adapter_cutover_plan_review_latest_decision(
+    record: &openlife_core::agent::EvidenceRecord,
+) -> Option<DefaultChatAdapterCutoverPlanReviewLatestDecision> {
+    Some(DefaultChatAdapterCutoverPlanReviewLatestDecision {
+        evidence_id: record.id.clone(),
+        decision_kind: default_chat_adapter_cutover_plan_review_decision_kind(record)?.to_string(),
+        source_session_id: record
+            .run_metadata
+            .get("sourceSessionId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)?,
+        draft_ready: record
+            .run_metadata
+            .get("draftReady")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cutover_plan_digest: record
+            .run_metadata
+            .get("cutoverPlanDigest")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        plan_section_count: record
+            .run_metadata
+            .get("planSectionCount")
+            .and_then(Value::as_u64)
+            .unwrap_or_default() as usize,
+        w45_ready: record
+            .run_metadata
+            .get("w45Ready")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         reviewer_note_checksum: record
             .run_metadata
             .get("reviewerNoteChecksum")
@@ -14443,6 +14860,301 @@ mod tests {
         assert!(!serialized.contains(message));
         assert!(!serialized.contains("This raw note must not be stored."));
         assert!(!serialized.contains("toolPayload"));
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    async fn seed_default_chat_adapter_cutover_plan_ready(
+        state: &Arc<crate::AppState>,
+        candidate_run_id: &str,
+        preview_run_id: &str,
+        session_id: &str,
+        message: &str,
+    ) {
+        seed_default_chat_adapter_implementation_ready(
+            state,
+            candidate_run_id,
+            session_id,
+            message,
+        )
+        .await;
+        let run = completed_default_chat_adapter_controlled_preview_review_run(preview_run_id);
+        insert_default_chat_adapter_controlled_preview_review_run(state, &run).await;
+        record_default_chat_adapter_controlled_preview_review_decision_with_state(
+            DefaultChatAdapterControlledPreviewReviewDecisionInput {
+                preview_run_id: preview_run_id.into(),
+                decision_kind: "approve".into(),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn default_chat_adapter_cutover_plan_review_evidence_records(
+        state: &Arc<crate::AppState>,
+    ) -> Vec<openlife_core::agent::EvidenceRecord> {
+        let store = state.evidence_store.lock().await;
+        store
+            .query(EvidenceQuery {
+                affected_path: Some(
+                    DEFAULT_CHAT_ADAPTER_CUTOVER_PLAN_REVIEW_DECISION_EVIDENCE_PATH.into(),
+                ),
+                evidence_type: Some(EvidenceType::RuntimeBehavior),
+                ..EvidenceQuery::default()
+            })
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_review_blocks_approve_when_draft_not_ready() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let result = record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-cutover-review-blocked".into(),
+                message: "Cutover plan approve should be blocked.".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some("Never store this raw reviewer note.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!result.recorded);
+        assert!(result.evidence_id.is_none());
+        assert_eq!(result.decision_kind, "approve");
+        assert!(!result.draft_ready);
+        assert!(result.cutover_plan_digest.is_none());
+        assert!(result
+            .blocking_reasons
+            .contains(&"cutover_implementation_plan_not_ready".to_string()));
+        assert!(
+            default_chat_adapter_cutover_plan_review_evidence_records(&state)
+                .await
+                .is_empty()
+        );
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_review_approve_records_metadata_safe_evidence() {
+        let state = preview_state().await;
+        let message = "Cutover plan review ready probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-cutover-review-approve",
+            "run-preview-cutover-review-approve",
+            "session-cutover-review",
+            message,
+        )
+        .await;
+        let before = side_effect_counts(&state).await;
+        let raw_note = "Approve cutover plan, but do not store reviewer-secret@example.com.";
+
+        let result = record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-cutover-review".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some(raw_note.into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(result.recorded);
+        assert!(result.evidence_id.is_some());
+        assert_eq!(result.decision_kind, "approve");
+        assert!(result.draft_ready);
+        assert_eq!(result.plan_section_count, 9);
+        assert!(result
+            .cutover_plan_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+        assert!(result.blocking_reasons.is_empty());
+
+        let records = default_chat_adapter_cutover_plan_review_evidence_records(&state).await;
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert!(record.summary.is_none());
+        assert!(record.source_refs.is_empty());
+        assert!(record.linked_agent_run_ids.is_empty());
+        assert!(record.linked_proposal_ids.is_empty());
+        let metadata = record.run_metadata.as_object().unwrap();
+        let mut keys = metadata.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "createdAt",
+                "cutoverPlanDigest",
+                "decisionKind",
+                "draftReady",
+                "evidenceKind",
+                "planSectionCount",
+                "reviewerNoteCategory",
+                "reviewerNoteChecksum",
+                "reviewerNoteLength",
+                "sourceSessionId",
+                "w45Ready"
+            ]
+        );
+        assert_eq!(
+            record.run_metadata["evidenceKind"],
+            "default_chat_adapter_cutover_plan_review_decision"
+        );
+        assert_eq!(record.run_metadata["decisionKind"], "approve");
+        assert_eq!(
+            record.run_metadata["sourceSessionId"],
+            "session-cutover-review"
+        );
+        assert_eq!(record.run_metadata["draftReady"], true);
+        assert_eq!(record.run_metadata["w45Ready"], true);
+        assert_eq!(record.run_metadata["planSectionCount"], 9);
+        assert!(record.run_metadata["cutoverPlanDigest"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(
+            record.run_metadata["reviewerNoteLength"],
+            raw_note.chars().count()
+        );
+        assert!(record.run_metadata["reviewerNoteChecksum"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:"));
+        assert_eq!(record.run_metadata["reviewerNoteCategory"], "brief");
+
+        let serialized = serde_json::to_string(record).unwrap();
+        assert!(!serialized.contains(raw_note));
+        assert!(!serialized.contains("reviewer-secret@example.com"));
+        assert!(!serialized.contains(message));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+
+        let summary = get_default_chat_adapter_cutover_plan_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 1);
+        assert_eq!(summary.rejected_count, 0);
+        assert_eq!(summary.request_rework_count, 0);
+        assert_eq!(
+            summary
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("approve")
+        );
+        assert!(summary
+            .latest_approved_plan_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count + 1, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_review_reject_and_rework_can_be_recorded_metadata_safe(
+    ) {
+        let state = preview_state().await;
+
+        for decision_kind in ["reject", "request_rework"] {
+            let result = record_default_chat_adapter_cutover_plan_review_decision_with_state(
+                DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    source_session_id: "session-cutover-review-blocked".into(),
+                    message: "Blocked cutover plan can be rejected or marked for rework.".into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    optional_reviewer_note: Some("Do not save private reviewer note.".into()),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+            assert!(result.recorded);
+            assert_eq!(result.decision_kind, decision_kind);
+            assert!(!result.draft_ready);
+            assert!(result.cutover_plan_digest.is_none());
+        }
+
+        let summary = get_default_chat_adapter_cutover_plan_review_summary_with_state(&state)
+            .await
+            .unwrap();
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.rejected_count, 1);
+        assert_eq!(summary.request_rework_count, 1);
+        assert!(summary.latest_approved_plan_digest.is_none());
+        assert_eq!(
+            summary.latest_decision.unwrap().decision_kind,
+            "request_rework"
+        );
+
+        let serialized = serde_json::to_string(
+            &default_chat_adapter_cutover_plan_review_evidence_records(&state).await,
+        )
+        .unwrap();
+        assert!(!serialized.contains("Do not save private reviewer note."));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("toolPayload"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_cutover_plan_review_summary_is_read_only() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let summary = get_default_chat_adapter_cutover_plan_review_summary_with_state(&state)
+            .await
+            .unwrap();
+
+        assert!(summary.latest_decision.is_none());
+        assert_eq!(summary.approved_count, 0);
+        assert_eq!(summary.rejected_count, 0);
+        assert_eq!(summary.request_rework_count, 0);
+        assert!(summary.latest_approved_plan_digest.is_none());
+        assert!(summary
+            .blocking_reasons
+            .contains(&"cutover_plan_review_decision_missing".to_string()));
+        assert_eq!(summary.metadata_safe_summary["readOnly"], true);
+        assert_eq!(
+            summary.metadata_safe_summary["reviewerNoteStorage"],
+            "length_checksum_category_only"
+        );
         let after = side_effect_counts(&state).await;
         assert_eq!(before.run_count, after.run_count);
         assert_eq!(before.pending_proposal_count, after.pending_proposal_count);

@@ -57,6 +57,9 @@ import type {
   DefaultChatAdapterControlledPreviewApprovalReadinessReport,
   DefaultChatAdapterCutoverImplementationPlanInput,
   DefaultChatAdapterCutoverImplementationPlanDraft,
+  DefaultChatAdapterCutoverPlanReviewDecisionInput,
+  DefaultChatAdapterCutoverPlanReviewDecisionResult,
+  DefaultChatAdapterCutoverPlanReviewSummary,
   DefaultChatAdapterControlledPreviewReviewDecisionInput,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
   DefaultChatAdapterControlledPreviewReviewSummary,
@@ -545,6 +548,21 @@ export async function draftDefaultChatAdapterCutoverImplementationPlan(
   return safeInvoke<DefaultChatAdapterCutoverImplementationPlanDraft>(
     "draft_default_chat_adapter_cutover_implementation_plan",
     { input }
+  );
+}
+
+export async function recordDefaultChatAdapterCutoverPlanReviewDecision(
+  input: DefaultChatAdapterCutoverPlanReviewDecisionInput
+): Promise<DefaultChatAdapterCutoverPlanReviewDecisionResult> {
+  return safeInvoke<DefaultChatAdapterCutoverPlanReviewDecisionResult>(
+    "record_default_chat_adapter_cutover_plan_review_decision",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterCutoverPlanReviewSummary(): Promise<DefaultChatAdapterCutoverPlanReviewSummary> {
+  return safeInvoke<DefaultChatAdapterCutoverPlanReviewSummary>(
+    "get_default_chat_adapter_cutover_plan_review_summary"
   );
 }
 

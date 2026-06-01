@@ -924,6 +924,46 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           notAutomaticMigration: true,
         },
       } as T);
+    case "record_default_chat_adapter_cutover_plan_review_decision":
+      return Promise.resolve({
+        recorded: true,
+        evidenceId: "ev_adapter_cutover_plan_review_1",
+        decisionKind: _args?.input?.decisionKind ?? "approve",
+        sourceSessionId: _args?.input?.sourceSessionId ?? "settings-dry-run",
+        draftReady: true,
+        cutoverPlanDigest: "sha256:adaptercutoverplanreview",
+        planSectionCount: 9,
+        createdAt: new Date().toISOString(),
+        blockingReasons: [],
+      } as T);
+    case "get_default_chat_adapter_cutover_plan_review_summary":
+      return Promise.resolve({
+        latestDecision: {
+          evidenceId: "ev_adapter_cutover_plan_review_1",
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          draftReady: true,
+          cutoverPlanDigest: "sha256:adaptercutoverplanreview",
+          planSectionCount: 9,
+          w45Ready: true,
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        approvedCount: 1,
+        rejectedCount: 0,
+        requestReworkCount: 0,
+        latestApprovedPlanDigest: "sha256:adaptercutoverplanreview",
+        latestTimestamp: new Date().toISOString(),
+        blockingReasons: [],
+        metadataSafeSummary: {
+          cutoverPlanReview: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          approvedCount: 1,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

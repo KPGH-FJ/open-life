@@ -3111,6 +3111,121 @@ describe("SettingsPage", () => {
     expect(screen.getAllByText("draftReady: false").length).toBeGreaterThan(0);
   });
 
+  it("renders default chat adapter cutover plan review summary and records approval", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "get_default_chat_adapter_cutover_plan_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "ev_cutover_plan_review_1",
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            draftReady: true,
+            cutoverPlanDigest: "sha256:cutover-plan-review-123",
+            planSectionCount: 9,
+            reviewerNoteChecksum: "sha256:note123",
+            reviewerNoteLength: 10,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-06-01T00:00:00Z",
+          },
+          approvedCount: 1,
+          rejectedCount: 0,
+          requestReworkCount: 0,
+          latestApprovedPlanDigest: "sha256:cutover-plan-review-123",
+          latestTimestamp: "2026-06-01T00:00:00Z",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            cutoverPlanReview: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        });
+      }
+      if (cmd === "record_default_chat_adapter_cutover_plan_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "ev_cutover_plan_review_2",
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          draftReady: true,
+          cutoverPlanDigest: "sha256:cutover-plan-review-456",
+          planSectionCount: 9,
+          createdAt: "2026-06-01T00:01:00Z",
+          blockingReasons: [],
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(await screen.findByText("Default Chat Adapter Cutover Plan Review")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Cutover Plan Review" }));
+    expect(
+      await screen.findByText("latestApprovedPlanDigest: sha256:cutover-plan-review-123")
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Cutover plan reviewer note"), {
+      target: { value: "Approve reviewed plan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve Cutover Plan" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_default_chat_adapter_cutover_plan_review_decision",
+        {
+          input: {
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+            optionalReviewerNote: "Approve reviewed plan",
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Cutover plan review recorded")).toBeInTheDocument();
+    expect(
+      screen.getByText("cutoverPlanDigest: sha256:cutover-plan-review-456")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders blocked default chat adapter cutover plan review approval without evidence", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (cmd === "record_default_chat_adapter_cutover_plan_review_decision") {
+        return Promise.resolve({
+          recorded: false,
+          evidenceId: null,
+          decisionKind: "approve",
+          sourceSessionId: "settings-dry-run",
+          draftReady: false,
+          cutoverPlanDigest: null,
+          planSectionCount: 0,
+          createdAt: "2026-06-01T00:01:00Z",
+          blockingReasons: ["cutover_implementation_plan_not_ready"],
+        });
+      }
+      return mockInvoke(cmd);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(await screen.findByRole("button", { name: "Approve Cutover Plan" }));
+
+    expect(await screen.findByText("Cutover plan review blocked")).toBeInTheDocument();
+    expect(screen.getByText("cutover_implementation_plan_not_ready")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {
