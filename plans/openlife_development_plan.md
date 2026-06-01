@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-05-30 W22 Post-Promotion Validation And Source Binding
-> Current direction: source-bound post-promotion validation complete; default Chat remains unchanged
+> Version: 2026-06-01 W54 Authority Roadmap Sync
+> Current direction: W1-W53 runtime/adapter guard ladder complete; authority docs synced; default Chat remains unchanged
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -12,14 +12,14 @@
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
 ReAct remains the current default Chat execution strategy and Beta execution
-kernel, but the long-term architecture is not "ReAct only." W1-W22 have already
+kernel, but the long-term architecture is not "ReAct only." W1-W54 have already
 implemented the thin runtime contract, LifeModel governance foundations,
 PlanExecute core/vertical slices, StrategySelector, MultiStrategy preview/audit,
-the lightweight RuntimeStrategy adapter foundation, the read-only Runtime
-Migration Gate with a visible Settings evidence surface, W19 sustained gate
-evidence / pilot eligibility, and W20 explicit single-turn Chat Controlled Pilot
-with fallback plus W21 reviewed pilot response promotion and W22 source-bound
-post-promotion validation.
+the lightweight RuntimeStrategy adapter foundation, read-only migration gates,
+visible Settings evidence surfaces, explicit controlled pilot/shadow/candidate
+paths, metadata-safe review evidence, a disabled default Chat adapter guard
+stack through typed callsite contracts, and an authority roadmap sync so later
+Agents no longer follow stale W22 route instructions.
 
 The important current boundary is that MultiStrategy Runtime is
 preview/audit-ready, not productized as the default Chat path. Future work must
@@ -39,7 +39,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-The realized W11-W22 sequence after W10 is:
+The realized W11-W54 sequence after W10 is:
 
 ```text
 docs/status sync
@@ -54,12 +54,17 @@ docs/status sync
 -> very small controlled Chat migration pilot with fallback
 -> reviewed pilot response promotion
 -> post-promotion validation and source binding
+-> promotion/readiness/review/shadow/cutover candidate evidence ladder
+-> default Chat boundary/activation/disabled adapter planning ladder
+-> dry-run/controlled preview/cutover plan review ladder
+-> route guard/invocation guard/typed callsite guard stack
+-> authority roadmap sync
 ```
 
-The next practical sequence after W22 is:
+The next practical sequence after W54 is:
 
 ```text
-further reviewed migration planning only after source-bound promotion validation
+keep authority docs synced -> only then consider narrower default Chat adapter preflight/side-effect lock work; default Chat remains unchanged
 ```
 
 `calendar.propose_event` and `email.propose_draft` are now P1 proposal-only
@@ -114,6 +119,9 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | Runtime Migration Gate evidence surface | Settings experimental panel can explicitly display `check_runtime_migration_gate` pass/block evidence and blocking reasons | Read-only diagnostic surface; not a Chat switch and not a preview runner |
 | Pilot eligibility | `check_controlled_chat_pilot_eligibility` and Settings Pilot eligibility check recent preview gate evidence for sustained clean runs | Read-only qualification only; not a Chat switch, not a migration trigger, and creates no AgentRun/Proposal/Action/Observation |
 | Controlled Chat Pilot / Promotion | Chat page exposes explicit `Run Controlled Pilot`; it checks eligibility first, blocks without preview when ineligible, runs one write-disabled preview when eligible, and renders “Pilot response” separately. Successful output with `userOutput` can be reviewed and explicitly promoted into one assistant chat message with `run_id` trace metadata when available | W22 promotion is user-confirmed and source-bound; source/target session mismatch blocks without writing, and default Chat is still not migrated |
+| Migration evidence ladder | W23-W33 promotion evidence, readiness, reviewed migration plan, review decision evidence, implementation gate, shadow run/review, cutover readiness, cutover candidate/review, and candidate promotion readiness are implemented | All steps are explicit, metadata-safe, and non-default; readiness or approval only means implementation discussion evidence |
+| Default Chat adapter guard ladder | W34-W53 default Chat boundary, activation planning/review/gate, disabled routing, contract harness, dry run/review, implementation readiness, controlled preview/review/readiness, cutover plan/review/readiness, route guard, invocation harness/plan/boundary, and typed callsite contract are implemented | Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter executor remains disabled and unattached |
+| Authority roadmap sync | W54 syncs high-priority route documents with W1-W53 code status | Documentation governance step; prevents stale W22 instructions from steering future Agents |
 | Diagnostics/Safe Mode | Recovery and readiness mechanisms exist | Good foundation for control plane |
 | Frontend | Workspace/Chat/Review/Runs/Settings surfaces exist; Settings and Chat expose non-default governed preview/debug paths; Settings also exposes read-only gate evidence, pilot eligibility, W20 controlled pilot, W21 reviewed promotion, and W22 source-bound promotion validation | Further migration planning must remain reviewed and evidence-backed; default Chat stays unchanged |
 
@@ -131,11 +139,11 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - ~~No Runtime Migration Gate.~~ ✅ 已完成（W17：read-only gate for preview audit, fallback, metadata-safe trace, external-write, and proposal-first boundaries）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **Current boundary: W22 source-bound promotion validation.** Do not treat W19 eligibility, W20 pilot success, W21 promotion, or W22 validation as permission to replace default Chat directly.
+- **Current boundary: W54 authority roadmap sync after W53 typed callsite contract.** Do not treat W19-W53 eligibility, preview, promotion, evidence, readiness, review, activation, dry-run, controlled preview, cutover plan, route guard, invocation guard, or typed callsite success as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
-- MultiStrategy preview is still not the default Chat path; the migration gate evidence surface, pilot eligibility check, W20 controlled pilot, W21 reviewed promotion, and W22 source-bound validation exist, but broader Chat migration still requires a separate reviewed migration phase.
+- MultiStrategy preview is still not the default Chat path; the migration gate evidence surface, pilot eligibility, controlled pilot/promotion, promotion evidence, migration review, shadow/cutover candidate, activation planning, dry-run/controlled preview, cutover plan approval, and default Chat adapter guard stack exist, but broader Chat migration still requires a separate reviewed implementation phase.
 - Users cannot yet use a productized LifeModel-governed weekly planning flow.
 - LifeModel maturation V1 exists as a service, but is not yet a visible end-to-end product loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
@@ -435,7 +443,7 @@ Every major development round should verify:
 - Do not hardcode test counts in planning docs; they drift quickly.
 - `make ci` is the release gate and includes format-check, Rust tests, frontend tests, and frontend build/typecheck.
 
-### W1-W22 LifeModel-Governed Runtime Progress (2026-05-30)
+### W1-W54 LifeModel-Governed Runtime Progress (2026-06-01)
 
 | Work Package | 状态 | 边界 |
 | --- | --- | --- |
@@ -452,23 +460,31 @@ Every major development round should verify:
 | W20 | ✅ Done | Very small Chat Controlled Pilot adds explicit single-turn `Run Controlled Pilot`: eligibility first, blocked means no preview, eligible means `allowWrites=false` preview, success renders “Pilot response”, normal Send unchanged. |
 | W21 | ✅ Done | Reviewed Pilot Response Promotion adds explicit review/confirmation for successful pilot `userOutput`, writes one assistant chat message with existing `run_id` metadata when available, prevents duplicate promotion, and keeps blocked/failed/canceled/no-output/default Send paths unchanged. |
 | W22 | ✅ Done | Post-Promotion Validation binds pilot results to source chat sessions, shows source/target session plus runId/strategy/governance in review, blocks source/target mismatch without `save_chat_message`, and prompts rerunning the pilot in the current session. |
+| W23-W29 | ✅ Done | Promotion evidence, readiness, reviewed migration draft, migration review decision, implementation gate, controlled shadow run, and shadow review evidence are metadata-safe and non-default. |
+| W30-W33 | ✅ Done | Cutover readiness, cutover candidate adapter, candidate review evidence, and candidate promotion readiness validate contract shape and evidence only; they do not migrate default Chat. |
+| W34-W37 | ✅ Done | Default Chat boundary status, activation plan draft, activation review evidence, and activation implementation gate expose reviewed activation planning without switching routing. |
+| W38-W42 | ✅ Done | Disabled routing scaffold, contract harness, dry-run boundary, dry-run review evidence, and implementation readiness keep adapter work observable and write-disabled. |
+| W43-W48 | ✅ Done | Controlled preview, controlled preview review, approval readiness, cutover implementation plan draft, cutover plan review, and cutover plan approval readiness are explicit non-default review steps. |
+| W49-W53 | ✅ Done | Route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, and typed callsite contract keep ordinary send/stream fail-closed on `legacy_stream`. |
+| W54 | ✅ Done | Authority roadmap sync updates high-priority planning docs from stale W22 status to W54/W1-W53 current state. |
 
 ## 8. Current Next Step
 
 The latest completed development tasks are:
 
 ```text
-W18: Runtime Migration Gate evidence surface
-W19: Sustained Gate Evidence / Pilot Eligibility
-W20: Very small controlled Chat migration pilot with fallback
-W21: Reviewed pilot response promotion
-W22: Post-promotion validation and source binding
+W49: Default Chat adapter route guard scaffold
+W50: Default Chat adapter cutover invocation harness
+W51: Default Chat adapter invocation plan
+W52: Default Chat adapter invocation boundary
+W53: Default Chat adapter typed callsite contract
+W54: Authority roadmap sync
 ```
 
-After W22, the next possible step is:
+After W54, the next possible step is:
 
 ```text
-further reviewed migration planning only after source-bound promotion validation
+only consider a narrower default Chat adapter ordinary-entry preflight or side-effect lock after authority docs remain synced; default Chat still must not migrate
 ```
 
 Guardrails:
@@ -500,6 +516,13 @@ Guardrails:
   review must show source/target session, runId, strategy, and governance
   summary; confirmation must block source/target mismatch without calling
   `save_chat_message` and must show rerun fallback guidance.
+- W23-W53 evidence, readiness, review, shadow, candidate, activation, dry-run,
+  controlled preview, cutover plan, route guard, invocation guard, and typed
+  callsite contract work are non-default guardrails only. They do not authorize
+  automatic Chat migration.
+- W54 Authority Roadmap Sync means high-priority documents must now be treated
+  as aligned with W1-W53 code status; if a future Agent finds a stale W22 route,
+  fixing the document is part of the task.
 - Default Chat must remain unchanged until a later reviewed migration stage.
 - `make ci` remains the publication gate.
 
