@@ -22,7 +22,7 @@ futures = "0.3"
 async-stream = "0.3"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 tract-onnx = "0.21"
-ndarray = "0.16"
+ndarray = "0.17"
 aes-gcm = "0.10"
 base64 = "0.22"
 ring = "0.17"
