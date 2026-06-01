@@ -1060,7 +1060,7 @@ async fn send_message(
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_legacy_route("send_message", &adapter_route)?;
+    default_chat_adapter::ensure_default_chat_cutover_harness("send_message", &adapter_route)?;
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -2215,7 +2215,10 @@ async fn start_stream_message(
     };
 
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    default_chat_adapter::ensure_default_chat_legacy_route("start_stream_message", &adapter_route)?;
+    default_chat_adapter::ensure_default_chat_cutover_harness(
+        "start_stream_message",
+        &adapter_route,
+    )?;
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -3259,7 +3262,7 @@ mod hs_runtime_tests {
         assert_eq!(route.default_send_path, "legacy_stream");
         assert_eq!(route.start_stream_path, "legacy_stream");
         assert!(route.requires_separate_cutover_implementation);
-        crate::default_chat_adapter::ensure_default_chat_legacy_route("send_message", &route)
+        crate::default_chat_adapter::ensure_default_chat_cutover_harness("send_message", &route)
             .expect("disabled scaffold must allow legacy send path");
     }
 
@@ -3269,13 +3272,97 @@ mod hs_runtime_tests {
         route.controlled_adapter_enabled = true;
         route.default_send_path = "controlled_adapter".into();
 
-        let error =
-            crate::default_chat_adapter::ensure_default_chat_legacy_route("send_message", &route)
-                .expect_err("enabled adapter route must fail closed until cutover is implemented");
+        let error = crate::default_chat_adapter::ensure_default_chat_cutover_harness(
+            "send_message",
+            &route,
+        )
+        .expect_err("enabled adapter route must fail closed until cutover is implemented");
 
         assert!(error.contains("send_message"));
         assert!(error.contains("controlled_adapter_enabled"));
         assert!(error.contains("default_send_path_not_legacy_stream"));
+    }
+
+    #[test]
+    fn default_chat_adapter_cutover_harness_is_legacy_guarded_and_side_effect_free() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let harness = crate::default_chat_adapter::evaluate_default_chat_adapter_cutover_harness(
+            "send_message",
+            &route,
+        );
+
+        assert!(harness.harness_ready);
+        assert!(harness.route_guard_passed);
+        assert_eq!(harness.invocation_mode, "legacy_guarded");
+        assert_eq!(harness.default_send_path, "legacy_stream");
+        assert_eq!(harness.start_stream_path, "legacy_stream");
+        assert!(!harness.controlled_adapter_invocation_allowed);
+        assert!(!harness.runtime_call_enabled);
+        assert!(!harness.model_call_enabled);
+        assert!(!harness.tool_call_enabled);
+        assert!(!harness.allow_writes);
+        assert_eq!(harness.max_tool_calls, 0);
+        assert!(!harness.chat_message_saved);
+        assert!(!harness.agent_run_recorded);
+        assert!(!harness.evidence_recorded);
+        assert!(harness.default_chat_path_unchanged);
+        assert!(harness.requires_separate_cutover_implementation);
+        assert!(harness.blocking_reasons.is_empty());
+        crate::default_chat_adapter::ensure_default_chat_cutover_harness("send_message", &route)
+            .expect("default route must satisfy the legacy guarded cutover harness");
+    }
+
+    #[test]
+    fn default_chat_adapter_cutover_harness_fails_closed_for_route_drift() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.current_mode = "controlled_adapter".into();
+        route.adapter_scaffold_present = false;
+        route.controlled_adapter_enabled = true;
+        route.automatic_migration_enabled = true;
+        route.default_send_path = "controlled_adapter".into();
+        route.start_stream_path = "controlled_adapter".into();
+        route.requires_separate_cutover_implementation = false;
+
+        let harness = crate::default_chat_adapter::evaluate_default_chat_adapter_cutover_harness(
+            "start_stream_message",
+            &route,
+        );
+
+        assert!(!harness.harness_ready);
+        assert!(!harness.route_guard_passed);
+        assert_eq!(harness.invocation_mode, "blocked");
+        assert!(!harness.default_chat_path_unchanged);
+        assert!(harness
+            .blocking_reasons
+            .contains(&"adapter_scaffold_missing".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"separate_cutover_implementation_not_required".to_string()));
+
+        let error = crate::default_chat_adapter::ensure_default_chat_cutover_harness(
+            "start_stream_message",
+            &route,
+        )
+        .expect_err("route drift must fail closed before default Chat can cut over");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("adapter_scaffold_missing"));
+        assert!(error.contains("separate_cutover_implementation_not_required"));
     }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
