@@ -1,6 +1,6 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-05-31
+> Last updated: 2026-06-01
 > Status: compact progress index, not a second roadmap
 
 This file summarizes implementation status for Agents entering the project. It
@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W44 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W45 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -89,6 +89,12 @@ send-message-compatible, write-disabled, zero-tool, metadata-safe,
 side-effect-free preview AgentRun. Evidence metadata is strictly whitelisted
 and stores no reviewer raw note, raw prompt/output, preview output, or tool
 payload. It is review evidence, not default Chat migration.
+W45 adds a read-only controlled preview approval readiness gate over W42
+implementation readiness, W44 latest review approval evidence, and the approved
+W43 preview AgentRun's current safety/digest state. It creates no records, runs
+no runtime/tool/model call, changes no routing, and only indicates readiness for
+later adapter cutover implementation discussion. It is not default Chat
+migration.
 
 The key boundary is unchanged:
 
@@ -459,11 +465,12 @@ The key boundary is unchanged:
 | W42 Default Chat Adapter Implementation Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_implementation_readiness`. It combines W37 activation implementation gate, W39 contract harness, W40 dry run, and W41 latest dry-run review evidence. Ready requires latest approve, dry-run digest match, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and both send paths on `legacy_stream`. It creates no records, runs no runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is implementation readiness, not default Chat migration. |
 | W43 Default Chat Adapter Controlled Preview | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit non-default `run_default_chat_adapter_controlled_preview`. It calls W42 readiness first, blocks without runtime/AgentRun when not ready, and when ready runs one `allowWrites=false`, `maxToolCalls=0` controlled preview returning SendMessageResult-compatible fields. It may create only metadata-safe adapter preview AgentRun audit, writes no Chat/Evidence/Proposal/Memory/LifeModel/MCP audit/external results, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is controlled preview, not default Chat migration. |
 | W44 Default Chat Adapter Controlled Preview Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_controlled_preview_review_decision` and read-only summary. Approve requires a completed, ready, send-message-compatible, write-disabled, zero-tool, metadata-safe, side-effect-free W43 preview AgentRun. Evidence stores only previewRunId, decisionKind, contractShape, previewSummaryDigest, reviewer-note checksum/length/category, and createdAt; it stores no reviewer raw text, preview output, raw prompt/output, or tool payload. Normal Send / `send_message` / `start_stream_message` do not call it. This is controlled preview review evidence, not default Chat migration. |
+| W45 Default Chat Adapter Controlled Preview Approval Readiness Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_controlled_preview_approval_readiness`. It combines current W42 implementation readiness, W44 latest metadata-safe review decision, required approved preview count, approved preview digest match, and approved W43 preview AgentRun current completed/send-message-compatible/previewReady/write-disabled/zero-tool/metadata-safe/side-effect-free state. It creates no AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no controlled preview/runtime/tool/model call, changes no routing or feature flag, and normal Send / `send_message` / `start_stream_message` do not call it. This is approval readiness for later adapter cutover implementation discussion, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-use controlled preview review evidence only as non-default implementation evidence; default Chat remains unchanged
+use controlled preview approval readiness only as non-default implementation evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -488,7 +495,9 @@ adapter dry-run contract boundary, W41 only records metadata-safe human review
 evidence over that dry run, and W42 only checks read-only implementation
 readiness over W37/W39/W40/W41 evidence, W43 only runs explicit non-default
 controlled preview after W42 readiness, and W44 only records metadata-safe human
-review evidence over that controlled preview. Default
+review evidence over that controlled preview, and W45 only checks read-only
+controlled preview approval readiness over W42/W44 evidence and the approved
+preview AgentRun's current safety state. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

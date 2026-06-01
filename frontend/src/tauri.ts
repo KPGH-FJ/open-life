@@ -53,6 +53,8 @@ import type {
   DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterControlledPreviewInput,
   DefaultChatAdapterControlledPreviewReport,
+  DefaultChatAdapterControlledPreviewApprovalReadinessInput,
+  DefaultChatAdapterControlledPreviewApprovalReadinessReport,
   DefaultChatAdapterControlledPreviewReviewDecisionInput,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
   DefaultChatAdapterControlledPreviewReviewSummary,
@@ -523,6 +525,15 @@ export async function recordDefaultChatAdapterControlledPreviewReviewDecision(
 export async function getDefaultChatAdapterControlledPreviewReviewSummary(): Promise<DefaultChatAdapterControlledPreviewReviewSummary> {
   return safeInvoke<DefaultChatAdapterControlledPreviewReviewSummary>(
     "get_default_chat_adapter_controlled_preview_review_summary"
+  );
+}
+
+export async function checkDefaultChatAdapterControlledPreviewApprovalReadiness(
+  input: DefaultChatAdapterControlledPreviewApprovalReadinessInput
+): Promise<DefaultChatAdapterControlledPreviewApprovalReadinessReport> {
+  return safeInvoke<DefaultChatAdapterControlledPreviewApprovalReadinessReport>(
+    "check_default_chat_adapter_controlled_preview_approval_readiness",
+    { input }
   );
 }
 

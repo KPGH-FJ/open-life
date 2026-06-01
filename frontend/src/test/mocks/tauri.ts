@@ -827,6 +827,40 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
           approvedCount: 1,
         },
       } as T);
+    case "check_default_chat_adapter_controlled_preview_approval_readiness":
+      return Promise.resolve({
+        ready: true,
+        requiredApprovedPreviews: _args?.input?.requiredApprovedPreviews ?? 1,
+        approvedPreviewCount: 1,
+        latestDecision: {
+          evidenceId: "ev_adapter_preview_review_1",
+          previewRunId: "run-adapter-preview-1",
+          decisionKind: "approve",
+          contractShape: "send_message_compatible",
+          previewSummaryDigest: "sha256:adapterpreviewreview",
+          reviewerNoteChecksum: null,
+          reviewerNoteLength: 0,
+          reviewerNoteCategory: "none",
+          createdAt: new Date().toISOString(),
+        },
+        verifiedPreviewRunIds: ["run-adapter-preview-1"],
+        implementationReadinessReady: true,
+        previewReviewApproved: true,
+        previewDigestMatched: true,
+        defaultChatUnchanged: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          controlledPreviewApprovalReadiness: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+          ready: true,
+          notAutomaticMigration: true,
+        },
+      } as T);
     case "check_controlled_chat_pilot_eligibility":
       return Promise.resolve({
         eligible: true,

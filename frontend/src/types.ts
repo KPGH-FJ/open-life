@@ -896,6 +896,32 @@ export interface DefaultChatAdapterControlledPreviewReviewSummary {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterControlledPreviewApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterControlledPreviewApprovalReadinessReport {
+  ready: boolean;
+  requiredApprovedPreviews: number;
+  approvedPreviewCount: number;
+  latestDecision?: DefaultChatAdapterControlledPreviewReviewLatestDecision | null;
+  verifiedPreviewRunIds: string[];
+  implementationReadinessReady: boolean;
+  previewReviewApproved: boolean;
+  previewDigestMatched: boolean;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

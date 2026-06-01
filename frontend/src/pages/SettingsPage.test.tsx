@@ -2807,6 +2807,144 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("renders default chat adapter controlled preview approval readiness", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_controlled_preview_approval_readiness") {
+        return Promise.resolve({
+          ready: true,
+          requiredApprovedPreviews: args?.input?.requiredApprovedPreviews ?? 1,
+          approvedPreviewCount: 1,
+          latestDecision: {
+            evidenceId: "ev_adapter_preview_review_1",
+            previewRunId: "run-adapter-preview-review-1",
+            decisionKind: "approve",
+            contractShape: "send_message_compatible",
+            previewSummaryDigest: "sha256:preview123",
+            reviewerNoteChecksum: "sha256:note123",
+            reviewerNoteLength: 11,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-05-31T00:00:00Z",
+          },
+          verifiedPreviewRunIds: ["run-adapter-preview-review-1"],
+          implementationReadinessReady: true,
+          previewReviewApproved: true,
+          previewDigestMatched: true,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            controlledPreviewApprovalReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Controlled Preview Approval Readiness")
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Check Controlled Preview Approval Readiness" })
+    );
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "check_default_chat_adapter_controlled_preview_approval_readiness",
+        {
+          input: {
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+          },
+        }
+      );
+    });
+    expect(
+      await screen.findByText("Controlled preview approval readiness ready")
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("ready: true").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("previewReviewApproved: true").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("previewDigestMatched: true").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("verifiedPreviewRunIds: run-adapter-preview-review-1")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("controlledPreviewApprovalReadiness: default_chat_adapter")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
+  it("renders default chat adapter controlled preview approval readiness blockers", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_controlled_preview_approval_readiness") {
+        return Promise.resolve({
+          ready: false,
+          requiredApprovedPreviews: args?.input?.requiredApprovedPreviews ?? 1,
+          approvedPreviewCount: 0,
+          latestDecision: null,
+          verifiedPreviewRunIds: [],
+          implementationReadinessReady: true,
+          previewReviewApproved: false,
+          previewDigestMatched: false,
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [
+            "controlled_preview_review_decision_missing",
+            "controlled_preview_review_approval_missing",
+          ],
+          metadataSafeSummary: {
+            controlledPreviewApprovalReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            ready: false,
+            blockingReasonCount: 2,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "Check Controlled Preview Approval Readiness",
+      })
+    );
+
+    expect(
+      await screen.findByText("Controlled preview approval readiness blocked")
+    ).toBeInTheDocument();
+    expect(screen.getByText("controlled_preview_review_decision_missing")).toBeInTheDocument();
+    expect(screen.getByText("controlled_preview_review_approval_missing")).toBeInTheDocument();
+    expect(screen.getAllByText("ready: false").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /save to chat/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("renders shadow run gate blockers without controlled runtime success", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "run_controlled_chat_migration_shadow_run") {

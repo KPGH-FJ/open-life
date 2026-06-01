@@ -674,6 +674,13 @@ describe("ChatPage", () => {
           ([cmd]) => cmd === "get_default_chat_adapter_controlled_preview_review_summary"
         )
     ).toBe(false);
+    expect(
+      vi
+        .mocked(invoke)
+        .mock.calls.some(
+          ([cmd]) => cmd === "check_default_chat_adapter_controlled_preview_approval_readiness"
+        )
+    ).toBe(false);
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {

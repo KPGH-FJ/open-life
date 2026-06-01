@@ -19,6 +19,7 @@ import {
   checkControlledPilotPromotionReadiness,
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
+  checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterImplementationReadiness,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterActivationPlan,
@@ -54,6 +55,7 @@ import type {
   DefaultChatAdapterActivationPlanDraft,
   DefaultChatAdapterActivationImplementationGateReport,
   DefaultChatAdapterContractHarnessReport,
+  DefaultChatAdapterControlledPreviewApprovalReadinessReport,
   DefaultChatAdapterControlledPreviewReport,
   DefaultChatAdapterControlledPreviewReviewDecisionKind,
   DefaultChatAdapterControlledPreviewReviewDecisionResult,
@@ -96,6 +98,7 @@ const SAFE_SUMMARY_KEYS = [
   "implementationReadiness",
   "adapterPreview",
   "controlledPreviewReview",
+  "controlledPreviewApprovalReadiness",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -146,6 +149,12 @@ const SAFE_SUMMARY_KEYS = [
   "candidatePromotionReadinessRequired",
   "automaticMigrationEnabled",
   "ready",
+  "requiredApprovedPreviews",
+  "approvedPreviewCount",
+  "verifiedPreviewRunCount",
+  "implementationReadinessReady",
+  "previewReviewApproved",
+  "previewDigestMatched",
   "cutoverReadinessEligible",
   "requiredApprovedCandidates",
   "approvedCandidateCount",
@@ -407,6 +416,18 @@ export default function MultiStrategyPreviewSection() {
   ] = useState<string | null>(null);
   const [adapterControlledPreviewReviewSummary, setAdapterControlledPreviewReviewSummary] =
     useState<DefaultChatAdapterControlledPreviewReviewSummary | null>(null);
+  const [
+    adapterControlledPreviewApprovalReadinessChecking,
+    setAdapterControlledPreviewApprovalReadinessChecking,
+  ] = useState(false);
+  const [
+    adapterControlledPreviewApprovalReadinessError,
+    setAdapterControlledPreviewApprovalReadinessError,
+  ] = useState<string | null>(null);
+  const [
+    adapterControlledPreviewApprovalReadinessReport,
+    setAdapterControlledPreviewApprovalReadinessReport,
+  ] = useState<DefaultChatAdapterControlledPreviewApprovalReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -968,6 +989,27 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setAdapterControlledPreviewReviewRecording(false);
+    }
+  };
+
+  const handleAdapterControlledPreviewApprovalReadinessCheck = async () => {
+    setAdapterControlledPreviewApprovalReadinessChecking(true);
+    setAdapterControlledPreviewApprovalReadinessError(null);
+    setAdapterControlledPreviewApprovalReadinessReport(null);
+    try {
+      const report = await checkDefaultChatAdapterControlledPreviewApprovalReadiness({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setAdapterControlledPreviewApprovalReadinessReport(report);
+    } catch (e) {
+      setAdapterControlledPreviewApprovalReadinessError(
+        `Adapter controlled preview approval readiness failed: ${readableError(e)}`
+      );
+    } finally {
+      setAdapterControlledPreviewApprovalReadinessChecking(false);
     }
   };
 
@@ -4682,6 +4724,197 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 text-xs text-stone-500">
             No default Chat adapter controlled preview report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Controlled Preview Approval Readiness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              W45 read-only gate over implementation readiness, human preview review approval, and
+              the approved controlled preview AgentRun safety state.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleAdapterControlledPreviewApprovalReadinessCheck}
+            disabled={adapterControlledPreviewApprovalReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              adapterControlledPreviewApprovalReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "border border-stone-200 bg-white text-stone-700 hover:bg-stone-50"
+            )}
+          >
+            <ShieldCheck size={13} />
+            {adapterControlledPreviewApprovalReadinessChecking
+              ? "Checking..."
+              : "Check Controlled Preview Approval Readiness"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This check does not run the controlled preview, save Chat messages, create review
+          evidence, enable the adapter, or migrate default Chat.
+        </div>
+
+        {adapterControlledPreviewApprovalReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {adapterControlledPreviewApprovalReadinessError}
+          </div>
+        )}
+
+        {adapterControlledPreviewApprovalReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                adapterControlledPreviewApprovalReadinessReport.ready
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {adapterControlledPreviewApprovalReadinessReport.ready
+                ? "Controlled preview approval readiness ready"
+                : "Controlled preview approval readiness blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["ready", String(adapterControlledPreviewApprovalReadinessReport.ready)],
+                [
+                  "requiredApprovedPreviews",
+                  String(adapterControlledPreviewApprovalReadinessReport.requiredApprovedPreviews),
+                ],
+                [
+                  "approvedPreviewCount",
+                  String(adapterControlledPreviewApprovalReadinessReport.approvedPreviewCount),
+                ],
+                [
+                  "implementationReadinessReady",
+                  String(
+                    adapterControlledPreviewApprovalReadinessReport.implementationReadinessReady
+                  ),
+                ],
+                [
+                  "previewReviewApproved",
+                  String(adapterControlledPreviewApprovalReadinessReport.previewReviewApproved),
+                ],
+                [
+                  "previewDigestMatched",
+                  String(adapterControlledPreviewApprovalReadinessReport.previewDigestMatched),
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(adapterControlledPreviewApprovalReadinessReport.defaultChatUnchanged),
+                ],
+                [
+                  "controlledAdapterEnabled",
+                  String(adapterControlledPreviewApprovalReadinessReport.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(adapterControlledPreviewApprovalReadinessReport.automaticMigrationEnabled),
+                ],
+                [
+                  "defaultSendPath",
+                  adapterControlledPreviewApprovalReadinessReport.defaultSendPath,
+                ],
+                [
+                  "startStreamPath",
+                  adapterControlledPreviewApprovalReadinessReport.startStreamPath,
+                ],
+                [
+                  "verifiedPreviewRunIds",
+                  adapterControlledPreviewApprovalReadinessReport.verifiedPreviewRunIds.length
+                    ? adapterControlledPreviewApprovalReadinessReport.verifiedPreviewRunIds.join(
+                        ", "
+                      )
+                    : "none",
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {adapterControlledPreviewApprovalReadinessReport.latestDecision && (
+              <div className="grid gap-2 md:grid-cols-3">
+                {[
+                  [
+                    "latestEvidenceId",
+                    adapterControlledPreviewApprovalReadinessReport.latestDecision.evidenceId,
+                  ],
+                  [
+                    "latestPreviewRunId",
+                    adapterControlledPreviewApprovalReadinessReport.latestDecision.previewRunId,
+                  ],
+                  [
+                    "latestDecisionKind",
+                    adapterControlledPreviewApprovalReadinessReport.latestDecision.decisionKind,
+                  ],
+                  [
+                    "latestContractShape",
+                    adapterControlledPreviewApprovalReadinessReport.latestDecision.contractShape,
+                  ],
+                ].map(([label, value]) => (
+                  <div
+                    key={label}
+                    className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                  >
+                    {label}: {value}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {safeSummaryEntries(adapterControlledPreviewApprovalReadinessReport.metadataSafeSummary)
+              .length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(
+                  adapterControlledPreviewApprovalReadinessReport.metadataSafeSummary
+                ).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {adapterControlledPreviewApprovalReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {adapterControlledPreviewApprovalReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No controlled preview approval readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No controlled preview approval readiness report loaded.
           </div>
         )}
       </section>

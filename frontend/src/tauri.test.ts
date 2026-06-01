@@ -16,6 +16,7 @@ import {
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterImplementationReadiness,
+  checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatRuntimeBoundaryStatus,
@@ -1316,5 +1317,61 @@ describe("tauri command argument aliases", () => {
     );
     expect(result.approvedCount).toBe(1);
     expect(result.latestDecision?.previewRunId).toBe("run-adapter-preview-1");
+  });
+
+  it("checks default chat adapter controlled preview approval readiness", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ready: true,
+      requiredApprovedPreviews: 1,
+      approvedPreviewCount: 1,
+      latestDecision: {
+        evidenceId: "ev_adapter_preview_review_1",
+        previewRunId: "run-adapter-preview-1",
+        decisionKind: "approve",
+        contractShape: "send_message_compatible",
+        previewSummaryDigest: "sha256:preview123",
+        reviewerNoteChecksum: "sha256:note123",
+        reviewerNoteLength: 11,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-05-31T00:00:00Z",
+      },
+      verifiedPreviewRunIds: ["run-adapter-preview-1"],
+      implementationReadinessReady: true,
+      previewReviewApproved: true,
+      previewDigestMatched: true,
+      defaultChatUnchanged: true,
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        controlledPreviewApprovalReadiness: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterControlledPreviewApprovalReadiness({
+      sourceSessionId: "session-1",
+      message: "approval readiness probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_default_chat_adapter_controlled_preview_approval_readiness",
+      {
+        input: {
+          sourceSessionId: "session-1",
+          message: "approval readiness probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+        },
+      }
+    );
+    expect(result.ready).toBe(true);
+    expect(result.previewReviewApproved).toBe(true);
+    expect(result.verifiedPreviewRunIds).toEqual(["run-adapter-preview-1"]);
   });
 });

@@ -1,6 +1,6 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-05-31
+> Last updated: 2026-06-01
 > Status: authoritative document index for Agents
 
 This file prevents old planning documents from accidentally steering new Agent
@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W44 completion/status index. This is not a second roadmap.
+   - Compact W1-W45 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W44 through sustained Runtime Migration
+Current implementation has completed W1-W45 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -62,11 +62,13 @@ default Chat adapter contract harness plus a write-disabled default Chat adapter
 dry-run invocation boundary plus metadata-safe default Chat adapter dry-run
 review evidence plus a read-only default Chat adapter implementation readiness
 gate plus an explicit non-default default Chat adapter controlled preview plus
-metadata-safe human review decision evidence over that controlled preview.
+metadata-safe human review decision evidence over that controlled preview plus
+a read-only controlled preview approval readiness gate over W42/W44 evidence
+and the approved W43 preview AgentRun current safety state.
 The next practical sequence is:
 
 ```text
-use controlled preview review evidence only as non-default implementation evidence; default Chat remains unchanged
+use controlled preview approval readiness only as non-default implementation evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -75,7 +77,7 @@ use controlled preview review evidence only as non-default implementation eviden
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W44 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W45 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -397,6 +399,20 @@ previewSummaryDigest, reviewer-note checksum/length/category, and createdAt;
 summary is read-only. Default Send, `send_message`, and
 `start_stream_message` must not call controlled preview review commands. W44 is
 review evidence, not default Chat migration.
+
+W45 adds only
+`check_default_chat_adapter_controlled_preview_approval_readiness` and the
+Settings Default Chat Adapter Controlled Preview Approval Readiness panel. It is
+a read-only gate over current W42 implementation readiness, W44 latest
+metadata-safe review approval, required approved preview count, digest match,
+and the approved W43 preview AgentRun's current completed/send-compatible/
+previewReady/write-disabled/zero-tool/metadata-safe/side-effect-free state. It
+must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
+audit rows, chat messages, controlled preview/runtime/tool/model calls,
+external writes, feature flags, or default Chat routing changes. Default Send,
+`send_message`, and `start_stream_message` must not call controlled preview
+approval readiness. W45 is approval readiness for later adapter cutover
+implementation discussion, not default Chat migration.
 
 ## 6. Agent Rules
 
