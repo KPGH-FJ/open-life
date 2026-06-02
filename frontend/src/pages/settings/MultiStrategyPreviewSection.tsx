@@ -23,6 +23,7 @@ import {
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   checkDefaultChatAdapterImplementationReadiness,
   checkDefaultChatAdapterNarrowImplementationDiscussionGate,
+  checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterCutoverImplementationPlan,
   draftDefaultChatAdapterNarrowImplementationPlan,
@@ -81,6 +82,7 @@ import type {
   DefaultChatAdapterImplementationReadinessReport,
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterNarrowImplementationPlanDraft,
+  DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport,
   DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind,
   DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult,
   DefaultChatAdapterNarrowImplementationPlanReviewSummary,
@@ -125,6 +127,7 @@ const SAFE_SUMMARY_KEYS = [
   "narrowImplementationDiscussionGate",
   "narrowImplementationPlan",
   "narrowImplementationPlanReview",
+  "narrowImplementationPlanApprovalReadiness",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -533,6 +536,18 @@ export default function MultiStrategyPreviewSection() {
   ] = useState<string | null>(null);
   const [narrowImplementationPlanReviewSummary, setNarrowImplementationPlanReviewSummary] =
     useState<DefaultChatAdapterNarrowImplementationPlanReviewSummary | null>(null);
+  const [
+    narrowImplementationPlanApprovalReadinessChecking,
+    setNarrowImplementationPlanApprovalReadinessChecking,
+  ] = useState(false);
+  const [
+    narrowImplementationPlanApprovalReadinessError,
+    setNarrowImplementationPlanApprovalReadinessError,
+  ] = useState<string | null>(null);
+  const [
+    narrowImplementationPlanApprovalReadinessReport,
+    setNarrowImplementationPlanApprovalReadinessReport,
+  ] = useState<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1301,6 +1316,27 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setNarrowImplementationPlanReviewRecording(false);
+    }
+  };
+
+  const handleNarrowImplementationPlanApprovalReadinessCheck = async () => {
+    setNarrowImplementationPlanApprovalReadinessChecking(true);
+    setNarrowImplementationPlanApprovalReadinessError(null);
+    setNarrowImplementationPlanApprovalReadinessReport(null);
+    try {
+      const report = await checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setNarrowImplementationPlanApprovalReadinessReport(report);
+    } catch (e) {
+      setNarrowImplementationPlanApprovalReadinessError(
+        `Narrow implementation plan approval readiness failed: ${readableError(e)}`
+      );
+    } finally {
+      setNarrowImplementationPlanApprovalReadinessChecking(false);
     }
   };
 
@@ -6374,6 +6410,167 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
             No narrow implementation plan review summary loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Narrow Implementation Plan Approval Readiness
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W60 gate over the current W58 narrow implementation plan draft and W59
+              review approval. A pass only supports separate narrow implementation discussion; it
+              does not route, activate, or migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleNarrowImplementationPlanApprovalReadinessCheck}
+            disabled={narrowImplementationPlanApprovalReadinessChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              narrowImplementationPlanApprovalReadinessChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={
+                narrowImplementationPlanApprovalReadinessChecking ? "animate-spin" : undefined
+              }
+            />
+            {narrowImplementationPlanApprovalReadinessChecking
+              ? "Checking..."
+              : "Check Narrow Plan Approval Readiness"}
+          </button>
+        </div>
+
+        {narrowImplementationPlanApprovalReadinessError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {narrowImplementationPlanApprovalReadinessError}
+          </div>
+        )}
+
+        {narrowImplementationPlanApprovalReadinessReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                narrowImplementationPlanApprovalReadinessReport.ready
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-amber-100 bg-amber-50 text-amber-800"
+              )}
+            >
+              {narrowImplementationPlanApprovalReadinessReport.ready
+                ? "Narrow plan approval readiness passed"
+                : "Narrow plan approval readiness blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["ready", String(narrowImplementationPlanApprovalReadinessReport.ready)],
+                ["draftReady", String(narrowImplementationPlanApprovalReadinessReport.draftReady)],
+                [
+                  "discussionGateEligible",
+                  String(narrowImplementationPlanApprovalReadinessReport.discussionGateEligible),
+                ],
+                [
+                  "narrowPlanReviewApproved",
+                  String(narrowImplementationPlanApprovalReadinessReport.narrowPlanReviewApproved),
+                ],
+                [
+                  "narrowPlanDigestMatched",
+                  String(narrowImplementationPlanApprovalReadinessReport.narrowPlanDigestMatched),
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(narrowImplementationPlanApprovalReadinessReport.defaultChatUnchanged),
+                ],
+                [
+                  "controlledAdapterEnabled",
+                  String(narrowImplementationPlanApprovalReadinessReport.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(narrowImplementationPlanApprovalReadinessReport.automaticMigrationEnabled),
+                ],
+                [
+                  "defaultSendPath",
+                  narrowImplementationPlanApprovalReadinessReport.defaultSendPath,
+                ],
+                [
+                  "startStreamPath",
+                  narrowImplementationPlanApprovalReadinessReport.startStreamPath,
+                ],
+                [
+                  "latestDecisionKind",
+                  narrowImplementationPlanApprovalReadinessReport.latestDecision?.decisionKind ??
+                    "none",
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            <div className="space-y-2">
+              <div className="break-all rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700">
+                currentPlanDigest:{" "}
+                {narrowImplementationPlanApprovalReadinessReport.currentPlanDigest ?? "none"}
+              </div>
+              <div className="break-all rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700">
+                latestApprovedPlanDigest:{" "}
+                {narrowImplementationPlanApprovalReadinessReport.latestApprovedPlanDigest ?? "none"}
+              </div>
+            </div>
+
+            {safeSummaryEntries(narrowImplementationPlanApprovalReadinessReport.metadataSafeSummary)
+              .length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(
+                  narrowImplementationPlanApprovalReadinessReport.metadataSafeSummary
+                ).map(([key, value]) => (
+                  <span
+                    key={key}
+                    className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                  >
+                    {key}: {value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {narrowImplementationPlanApprovalReadinessReport.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {narrowImplementationPlanApprovalReadinessReport.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No narrow implementation plan approval readiness blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+            No narrow implementation plan approval readiness report loaded.
           </div>
         )}
       </section>

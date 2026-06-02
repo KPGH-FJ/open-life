@@ -834,6 +834,42 @@ pub struct DefaultChatAdapterNarrowImplementationPlanReviewSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_previews: Option<usize>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport {
+    pub ready: bool,
+    pub draft_ready: bool,
+    pub discussion_gate_eligible: bool,
+    pub narrow_plan_review_approved: bool,
+    pub narrow_plan_digest_matched: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_approved_plan_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_decision: Option<DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision>,
+    pub default_chat_unchanged: bool,
+    pub controlled_adapter_enabled: bool,
+    pub automatic_migration_enabled: bool,
+    pub default_send_path: String,
+    pub start_stream_path: String,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DefaultChatAdapterDryRunInput {
     pub session_id: String,
     pub message: String,
@@ -4284,6 +4320,207 @@ pub(crate) async fn get_default_chat_adapter_narrow_implementation_plan_review_s
             "notAutomaticMigration": true,
         }),
     })
+}
+
+#[tauri::command]
+pub async fn check_default_chat_adapter_narrow_implementation_plan_approval_readiness(
+    input: DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport, String> {
+    check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+    input: DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport, String> {
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let draft = draft_default_chat_adapter_narrow_implementation_plan_with_state(
+        DefaultChatAdapterNarrowImplementationPlanInput {
+            source_session_id,
+            message: input.message,
+            required_approved_previews: input.required_approved_previews,
+            required_approved_candidates: input.required_approved_candidates,
+            required_promotions: input.required_promotions,
+        },
+        state,
+    )
+    .await?;
+    let review_summary =
+        get_default_chat_adapter_narrow_implementation_plan_review_summary_with_state(state)
+            .await?;
+    let latest_decision = review_summary.latest_decision.clone();
+    let current_plan_digest = draft.stable_plan_digest.clone();
+    let latest_approved_plan_digest = review_summary.latest_approved_plan_digest.clone();
+    let mut blocking_reasons = Vec::new();
+
+    for reason in &draft.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+    for reason in &review_summary.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+
+    let discussion_gate_eligible = draft.discussion_gate.eligible;
+    let default_chat_unchanged = draft.discussion_gate.default_chat_unchanged;
+    let controlled_adapter_enabled = draft.discussion_gate.controlled_adapter_enabled;
+    let automatic_migration_enabled = draft.discussion_gate.automatic_migration_enabled;
+    let default_send_path = draft.discussion_gate.default_send_path.clone();
+    let start_stream_path = draft.discussion_gate.start_stream_path.clone();
+
+    if !draft.draft_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "narrow_implementation_plan_not_ready".into(),
+        );
+    }
+    if !discussion_gate_eligible {
+        push_unique_string(
+            &mut blocking_reasons,
+            "narrow_implementation_discussion_gate_not_ready".into(),
+        );
+    }
+    if !default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_not_unchanged".into());
+    }
+    if controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+    if default_send_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "default_send_path_not_legacy_stream".into(),
+        );
+    }
+    if start_stream_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "start_stream_path_not_legacy_stream".into(),
+        );
+    }
+
+    let mut narrow_plan_review_approved = false;
+    let mut narrow_plan_digest_matched = false;
+    match latest_decision.as_ref() {
+        Some(decision) if decision.decision_kind == "approve" => {
+            narrow_plan_review_approved = true;
+            narrow_plan_digest_matched =
+                current_plan_digest.is_some() && decision.narrow_plan_digest == current_plan_digest;
+            if !decision.draft_ready {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_narrow_implementation_plan_draft_not_ready".into(),
+                );
+            }
+            if !decision.w57_eligible {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_narrow_implementation_plan_w57_not_eligible".into(),
+                );
+            }
+            if decision.plan_section_count == 0 {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "approved_narrow_implementation_plan_sections_missing".into(),
+                );
+            }
+            if !narrow_plan_digest_matched {
+                push_unique_string(
+                    &mut blocking_reasons,
+                    "narrow_implementation_plan_digest_mismatch".into(),
+                );
+            }
+        }
+        Some(_) => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "latest_narrow_implementation_plan_review_not_approved".into(),
+            );
+        }
+        None => {
+            push_unique_string(
+                &mut blocking_reasons,
+                "narrow_implementation_plan_review_approval_missing".into(),
+            );
+        }
+    }
+
+    let latest_decision_kind = latest_decision
+        .as_ref()
+        .map(|decision| decision.decision_kind.clone())
+        .unwrap_or_else(|| "none".into());
+    let blocking_reason_count = blocking_reasons.len();
+    let ready = draft.draft_ready
+        && discussion_gate_eligible
+        && narrow_plan_review_approved
+        && narrow_plan_digest_matched
+        && default_chat_unchanged
+        && !controlled_adapter_enabled
+        && !automatic_migration_enabled
+        && default_send_path == "legacy_stream"
+        && start_stream_path == "legacy_stream"
+        && blocking_reasons.is_empty();
+
+    Ok(
+        DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport {
+            ready,
+            draft_ready: draft.draft_ready,
+            discussion_gate_eligible,
+            narrow_plan_review_approved,
+            narrow_plan_digest_matched,
+            current_plan_digest: current_plan_digest.clone(),
+            latest_approved_plan_digest: latest_approved_plan_digest.clone(),
+            latest_decision,
+            default_chat_unchanged,
+            controlled_adapter_enabled,
+            automatic_migration_enabled,
+            default_send_path: default_send_path.clone(),
+            start_stream_path: start_stream_path.clone(),
+            blocking_reasons,
+            metadata_safe_summary: json!({
+                "narrowImplementationPlanApprovalReadiness": "default_chat_adapter",
+                "metadataSafe": true,
+                "readOnly": true,
+                "ready": ready,
+                "draftReady": draft.draft_ready,
+                "discussionGateEligible": discussion_gate_eligible,
+                "narrowPlanReviewApproved": narrow_plan_review_approved,
+                "narrowPlanDigestMatched": narrow_plan_digest_matched,
+                "currentPlanDigestPresent": current_plan_digest.is_some(),
+                "latestApprovedPlanDigestPresent": latest_approved_plan_digest.is_some(),
+                "latestDecisionKind": latest_decision_kind,
+                "defaultChatUnchanged": default_chat_unchanged,
+                "controlledAdapterEnabled": controlled_adapter_enabled,
+                "automaticMigrationEnabled": automatic_migration_enabled,
+                "defaultSendPath": default_send_path,
+                "startStreamPath": start_stream_path,
+                "blockingReasonCount": blocking_reason_count,
+                "contentStorage": "none",
+                "reviewerNoteStorage": "length_checksum_category_only",
+                "toolStorage": "none",
+                "chatHistoryStorage": "none",
+                "proposalStorage": "none",
+                "lifeModelPatchStorage": "none",
+                "memoryStorage": "none",
+                "evidenceStorage": "read_only",
+                "mcpAuditStorage": "none",
+                "agentRunStorage": "none",
+                "runtimeCallStorage": "none",
+                "modelCallStorage": "none",
+                "externalWriteStorage": "none",
+                "transcriptStorage": "none",
+                "notAutomaticMigration": true,
+                "requiresSeparateImplementation": true,
+            }),
+        },
+    )
 }
 
 #[tauri::command]
@@ -17595,6 +17832,348 @@ mod tests {
         assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
         assert_eq!(before.model_version, after.model_version);
         assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    async fn seed_default_chat_adapter_narrow_plan_review_approval(
+        state: &Arc<crate::AppState>,
+        candidate_run_id: &str,
+        preview_run_id: &str,
+        session_id: &str,
+        message: &str,
+    ) {
+        seed_default_chat_adapter_cutover_plan_ready(
+            state,
+            candidate_run_id,
+            preview_run_id,
+            session_id,
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: session_id.into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+        record_default_chat_adapter_narrow_implementation_plan_review_decision_with_state(
+            DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: session_id.into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            state,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_blocks_without_review_approval(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation plan approval readiness missing review.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-narrow-plan-approval-missing",
+            "run-preview-narrow-plan-approval-missing",
+            "session-narrow-plan-approval-missing",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-narrow-plan-approval-missing".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-approval-missing".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        assert!(!report.ready);
+        assert!(report.draft_ready);
+        assert!(report.discussion_gate_eligible);
+        assert!(!report.narrow_plan_review_approved);
+        assert!(report.current_plan_digest.is_some());
+        assert!(report.latest_approved_plan_digest.is_none());
+        assert!(report.latest_decision.is_none());
+        assert!(report
+            .blocking_reasons
+            .contains(&"narrow_implementation_plan_review_approval_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_blocks_latest_reject_or_rework(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation plan approval readiness latest reject.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-narrow-plan-latest-reject",
+            "run-preview-narrow-plan-latest-reject",
+            "session-narrow-plan-latest-reject",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-narrow-plan-latest-reject".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        for decision_kind in ["reject", "request_rework"] {
+            record_default_chat_adapter_narrow_implementation_plan_review_decision_with_state(
+                DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput {
+                    decision_kind: decision_kind.into(),
+                    source_session_id: "session-narrow-plan-latest-reject".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                    optional_reviewer_note: None,
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+        }
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-latest-reject".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        assert!(!report.ready);
+        assert!(report.draft_ready);
+        assert_eq!(
+            report
+                .latest_decision
+                .as_ref()
+                .map(|decision| decision.decision_kind.as_str()),
+            Some("request_rework")
+        );
+        assert!(!report.narrow_plan_review_approved);
+        assert!(report
+            .blocking_reasons
+            .contains(&"latest_narrow_implementation_plan_review_not_approved".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_blocks_digest_mismatch(
+    ) {
+        let state = preview_state().await;
+        let approved_message = "Approved narrow implementation plan readiness message.";
+        seed_default_chat_adapter_narrow_plan_review_approval(
+            &state,
+            "run-candidate-narrow-plan-digest-mismatch",
+            "run-preview-narrow-plan-digest-mismatch",
+            "session-narrow-plan-digest-mismatch",
+            approved_message,
+        )
+        .await;
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-digest-mismatch".into(),
+                    message: "Current narrow implementation plan readiness message changed.".into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        assert!(!report.ready);
+        assert!(report.narrow_plan_review_approved);
+        assert!(!report.narrow_plan_digest_matched);
+        assert_ne!(
+            report.current_plan_digest,
+            report.latest_approved_plan_digest
+        );
+        assert!(report
+            .blocking_reasons
+            .contains(&"narrow_implementation_plan_digest_mismatch".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_ready_with_current_approved_plan(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation plan approval readiness clean.";
+        seed_default_chat_adapter_narrow_plan_review_approval(
+            &state,
+            "run-candidate-narrow-plan-ready",
+            "run-preview-narrow-plan-ready",
+            "session-narrow-plan-ready",
+            message,
+        )
+        .await;
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-ready".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        assert!(report.ready);
+        assert!(report.draft_ready);
+        assert!(report.discussion_gate_eligible);
+        assert!(report.narrow_plan_review_approved);
+        assert!(report.narrow_plan_digest_matched);
+        assert_eq!(
+            report.current_plan_digest,
+            report.latest_approved_plan_digest
+        );
+        assert!(report.default_chat_unchanged);
+        assert!(!report.controlled_adapter_enabled);
+        assert!(!report.automatic_migration_enabled);
+        assert_eq!(report.default_send_path, "legacy_stream");
+        assert_eq!(report.start_stream_path, "legacy_stream");
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report.metadata_safe_summary["narrowImplementationPlanApprovalReadiness"],
+            "default_chat_adapter"
+        );
+        assert_eq!(report.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+        assert_eq!(report.metadata_safe_summary["notAutomaticMigration"], true);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_is_read_only_by_side_effect_counts(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation plan approval readiness side effects.";
+        seed_default_chat_adapter_narrow_plan_review_approval(
+            &state,
+            "run-candidate-narrow-plan-read-only",
+            "run-preview-narrow-plan-read-only",
+            "session-narrow-plan-read-only",
+            message,
+        )
+        .await;
+        let before = side_effect_counts(&state).await;
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-read-only".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        assert!(report.ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_approval_readiness_serialized_output_is_metadata_safe(
+    ) {
+        let state = preview_state().await;
+        let message =
+            "Narrow approval readiness should not serialize this raw private prompt content.";
+        seed_default_chat_adapter_narrow_plan_review_approval(
+            &state,
+            "run-candidate-narrow-plan-serialized",
+            "run-preview-narrow-plan-serialized",
+            "session-narrow-plan-serialized",
+            message,
+        )
+        .await;
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_plan_approval_readiness_with_state(
+                DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+                    source_session_id: "session-narrow-plan-serialized".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+            )
+            .await
+            .unwrap();
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains(message));
+        assert!(!serialized.contains("raw private prompt content"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
     }
 
     #[tokio::test]

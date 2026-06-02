@@ -870,6 +870,32 @@ export interface DefaultChatAdapterNarrowImplementationPlanReviewSummary {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport {
+  ready: boolean;
+  draftReady: boolean;
+  discussionGateEligible: boolean;
+  narrowPlanReviewApproved: boolean;
+  narrowPlanDigestMatched: boolean;
+  currentPlanDigest?: string | null;
+  latestApprovedPlanDigest?: string | null;
+  latestDecision?: DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision | null;
+  defaultChatUnchanged: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface DefaultChatAdapterDryRunInput {
   sessionId: string;
   message: string;

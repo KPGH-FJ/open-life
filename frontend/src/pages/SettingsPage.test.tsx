@@ -2387,6 +2387,85 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("checks default chat adapter narrow implementation plan approval readiness without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_narrow_implementation_plan_approval_readiness") {
+        return Promise.resolve({
+          ready: true,
+          draftReady: true,
+          discussionGateEligible: true,
+          narrowPlanReviewApproved: true,
+          narrowPlanDigestMatched: true,
+          currentPlanDigest: "sha256:narrow-plan-approval-current",
+          latestApprovedPlanDigest: "sha256:narrow-plan-approval-current",
+          latestDecision: {
+            evidenceId: "evidence-narrow-plan-review",
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            draftReady: true,
+            narrowPlanDigest: "sha256:narrow-plan-approval-current",
+            planSectionCount: 8,
+            w57Eligible: true,
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 19,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-06-02T00:00:00Z",
+          },
+          defaultChatUnchanged: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            narrowImplementationPlanApprovalReadiness: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Narrow Implementation Plan Approval Readiness")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Narrow Plan Approval Readiness" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
+        {
+          input: {
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+          },
+        }
+      );
+    });
+    expect(await screen.findByText("Narrow plan approval readiness passed")).toBeInTheDocument();
+    expect(screen.getByText("ready: true")).toBeInTheDocument();
+    expect(screen.getByText("narrowPlanDigestMatched: true")).toBeInTheDocument();
+    expect(
+      screen.getByText("currentPlanDigest: sha256:narrow-plan-approval-current")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("narrowImplementationPlanApprovalReadiness: default_chat_adapter")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("checks default chat adapter contract harness without routing controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_default_chat_adapter_contract_harness") {

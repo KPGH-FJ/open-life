@@ -51,6 +51,8 @@ import type {
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterNarrowImplementationPlanInput,
   DefaultChatAdapterNarrowImplementationPlanDraft,
+  DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput,
+  DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport,
   DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput,
   DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult,
   DefaultChatAdapterNarrowImplementationPlanReviewSummary,
@@ -523,6 +525,15 @@ export async function recordDefaultChatAdapterNarrowImplementationPlanReviewDeci
 export async function getDefaultChatAdapterNarrowImplementationPlanReviewSummary(): Promise<DefaultChatAdapterNarrowImplementationPlanReviewSummary> {
   return safeInvoke<DefaultChatAdapterNarrowImplementationPlanReviewSummary>(
     "get_default_chat_adapter_narrow_implementation_plan_review_summary"
+  );
+}
+
+export async function checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness(
+  input: DefaultChatAdapterNarrowImplementationPlanApprovalReadinessInput
+): Promise<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport> {
+  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanApprovalReadinessReport>(
+    "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
+    { input }
   );
 }
 

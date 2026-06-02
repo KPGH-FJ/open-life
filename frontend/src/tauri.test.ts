@@ -17,6 +17,7 @@ import {
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterImplementationReadiness,
   checkDefaultChatAdapterNarrowImplementationDiscussionGate,
+  checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   draftDefaultChatAdapterNarrowImplementationPlan,
@@ -1255,6 +1256,67 @@ describe("tauri command argument aliases", () => {
     );
     expect(result.approvedCount).toBe(1);
     expect(result.latestDecision?.decisionKind).toBe("approve");
+  });
+
+  it("checks default chat adapter narrow implementation plan approval readiness", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      ready: true,
+      draftReady: true,
+      discussionGateEligible: true,
+      narrowPlanReviewApproved: true,
+      narrowPlanDigestMatched: true,
+      currentPlanDigest: "sha256:narrow-plan123",
+      latestApprovedPlanDigest: "sha256:narrow-plan123",
+      latestDecision: {
+        evidenceId: "evidence-narrow-plan-review",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        draftReady: true,
+        narrowPlanDigest: "sha256:narrow-plan123",
+        planSectionCount: 8,
+        w57Eligible: true,
+        reviewerNoteChecksum: "sha256:note",
+        reviewerNoteLength: 21,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-06-02T00:00:00Z",
+      },
+      defaultChatUnchanged: true,
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        narrowImplementationPlanApprovalReadiness: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+        notAutomaticMigration: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterNarrowImplementationPlanApprovalReadiness({
+      sourceSessionId: "session-1",
+      message: "narrow plan approval readiness probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+      requiredPromotions: 3,
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
+      {
+        input: {
+          sourceSessionId: "session-1",
+          message: "narrow plan approval readiness probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+          requiredPromotions: 3,
+        },
+      }
+    );
+    expect(result.ready).toBe(true);
+    expect(result.narrowPlanDigestMatched).toBe(true);
+    expect(result.metadataSafeSummary.notAutomaticMigration).toBe(true);
   });
 
   it("invokes default chat adapter contract harness as read-only", async () => {
