@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W54 completion/status index. This is not a second roadmap.
+   - Compact W1-W55 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W54 through sustained Runtime Migration
+Current implementation has completed W1-W55 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -79,11 +79,14 @@ send/stream callsites to enter `legacy_stream` after a side-effect-free guard
 plus a typed default Chat adapter callsite contract that binds send and stream
 callsites to their legacy route path and contract shape plus an authority
 roadmap sync that realigns high-priority route documents with W1-W53 code
-status.
+status plus a pure ordinary-entry preflight / side-effect lock that keeps
+ordinary `send_message` and `start_stream_message` on `legacy_stream` with
+typed contract ready, controlled executor unattached, migration disabled, and
+zero runtime/model/tool/write pre-entry budget.
 The next practical sequence is:
 
 ```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, and typed callsite contract only as implementation-discussion evidence; default Chat remains unchanged
+keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, and ordinary-entry preflight only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -92,7 +95,7 @@ keep authority docs synced, then use cutover plan approval readiness, route guar
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W54 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W55 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -525,6 +528,16 @@ W54 is an authority roadmap sync. It updates this document,
 `README.md`, and `AGENTS.md` so high-priority route files no longer describe
 W22 as the current boundary. W54 does not change runtime code and is not default
 Chat migration.
+
+W55 adds a pure default Chat adapter ordinary-entry preflight in
+`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
+`start_stream_message` entries now call
+`ensure_default_chat_adapter_ordinary_entry_preflight`, which reuses W53 typed
+contracts and W52 side-effect information to require legacy entry, controlled
+executor unattached, migration disabled, and zero runtime/model/tool/write
+pre-entry budget. It does not call W19-W54 readiness, review, preview,
+evidence, runtime, model, or tool commands, and it is not default Chat
+migration.
 
 ## 6. Agent Rules
 

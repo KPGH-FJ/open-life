@@ -1060,10 +1060,11 @@ async fn send_message(
     app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    let _adapter_contract = default_chat_adapter::ensure_default_chat_adapter_callsite_contract(
-        default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
-        &adapter_route,
-    )?;
+    let _adapter_preflight =
+        default_chat_adapter::ensure_default_chat_adapter_ordinary_entry_preflight(
+            default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &adapter_route,
+        )?;
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -2218,10 +2219,11 @@ async fn start_stream_message(
     };
 
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
-    let _adapter_contract = default_chat_adapter::ensure_default_chat_adapter_callsite_contract(
-        default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
-        &adapter_route,
-    )?;
+    let _adapter_preflight =
+        default_chat_adapter::ensure_default_chat_adapter_ordinary_entry_preflight(
+            default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+            &adapter_route,
+        )?;
 
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -3585,6 +3587,100 @@ mod hs_runtime_tests {
         .expect_err("route drift must block the typed default Chat adapter callsite");
         assert!(error.contains("send_message"));
         assert!(error.contains("callsite_path_not_legacy_stream"));
+    }
+
+    #[test]
+    fn default_chat_adapter_ordinary_entry_preflight_locks_zero_side_effect_budget() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let send_preflight =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_ordinary_entry_preflight(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+            );
+        let stream_preflight =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_ordinary_entry_preflight(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+            );
+
+        assert!(send_preflight.preflight_ready);
+        assert!(send_preflight.contract_ready);
+        assert!(send_preflight.legacy_entry_allowed);
+        assert_eq!(send_preflight.callsite, "send_message");
+        assert_eq!(send_preflight.contract_shape, "send_message_compatible");
+        assert_eq!(send_preflight.ordinary_entry_path, "legacy_stream");
+        assert_eq!(send_preflight.required_entry_path, "legacy_stream");
+        assert!(send_preflight.side_effect_lock_engaged);
+        assert!(!send_preflight.default_chat_migration_allowed);
+        assert!(!send_preflight.controlled_adapter_executor_attached);
+        assert!(!send_preflight.runtime_call_enabled);
+        assert!(!send_preflight.model_call_enabled);
+        assert!(!send_preflight.tool_call_enabled);
+        assert!(!send_preflight.allow_writes);
+        assert_eq!(send_preflight.max_tool_calls, 0);
+        assert!(!send_preflight.chat_message_saved);
+        assert!(!send_preflight.agent_run_recorded);
+        assert!(!send_preflight.evidence_recorded);
+        assert!(send_preflight.blocking_reasons.is_empty());
+
+        assert!(stream_preflight.preflight_ready);
+        assert!(stream_preflight.contract_ready);
+        assert!(stream_preflight.legacy_entry_allowed);
+        assert_eq!(stream_preflight.callsite, "start_stream_message");
+        assert_eq!(stream_preflight.contract_shape, "stream_message_compatible");
+        assert_eq!(stream_preflight.ordinary_entry_path, "legacy_stream");
+        assert_eq!(stream_preflight.required_entry_path, "legacy_stream");
+        assert!(stream_preflight.side_effect_lock_engaged);
+        assert!(!stream_preflight.default_chat_migration_allowed);
+        assert!(!stream_preflight.controlled_adapter_executor_attached);
+        assert!(!stream_preflight.runtime_call_enabled);
+        assert!(!stream_preflight.model_call_enabled);
+        assert!(!stream_preflight.tool_call_enabled);
+        assert!(!stream_preflight.allow_writes);
+        assert_eq!(stream_preflight.max_tool_calls, 0);
+        assert!(!stream_preflight.chat_message_saved);
+        assert!(!stream_preflight.agent_run_recorded);
+        assert!(!stream_preflight.evidence_recorded);
+        assert!(stream_preflight.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn default_chat_adapter_ordinary_entry_preflight_blocks_route_drift() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.start_stream_path = "controlled_adapter".into();
+
+        let preflight =
+            crate::default_chat_adapter::evaluate_default_chat_adapter_ordinary_entry_preflight(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+            );
+
+        assert!(!preflight.preflight_ready);
+        assert!(!preflight.contract_ready);
+        assert!(!preflight.legacy_entry_allowed);
+        assert_eq!(preflight.callsite, "start_stream_message");
+        assert_eq!(preflight.ordinary_entry_path, "blocked");
+        assert_eq!(preflight.required_entry_path, "legacy_stream");
+        assert!(preflight.side_effect_lock_engaged);
+        assert!(preflight
+            .blocking_reasons
+            .contains(&"callsite_contract_not_ready".to_string()));
+        assert!(preflight
+            .blocking_reasons
+            .contains(&"callsite_path_not_legacy_stream".to_string()));
+        assert!(preflight
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_adapter_ordinary_entry_preflight(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+            )
+            .expect_err("route drift must block the ordinary default Chat adapter entry preflight");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("callsite_contract_not_ready"));
     }
 
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {

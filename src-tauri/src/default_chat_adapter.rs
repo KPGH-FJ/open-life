@@ -78,6 +78,29 @@ pub(crate) struct DefaultChatAdapterCallsiteContract {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatAdapterOrdinaryEntryPreflight {
+    pub(crate) callsite: String,
+    pub(crate) preflight_ready: bool,
+    pub(crate) contract_ready: bool,
+    pub(crate) legacy_entry_allowed: bool,
+    pub(crate) ordinary_entry_path: String,
+    pub(crate) required_entry_path: String,
+    pub(crate) contract_shape: String,
+    pub(crate) side_effect_lock_engaged: bool,
+    pub(crate) default_chat_migration_allowed: bool,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) runtime_call_enabled: bool,
+    pub(crate) model_call_enabled: bool,
+    pub(crate) tool_call_enabled: bool,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) chat_message_saved: bool,
+    pub(crate) agent_run_recorded: bool,
+    pub(crate) evidence_recorded: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DefaultChatAdapterInvocationPlan {
     pub(crate) caller: String,
     pub(crate) plan_ready: bool,
@@ -274,6 +297,89 @@ pub(crate) fn ensure_default_chat_adapter_callsite_contract(
             "{} blocked by default Chat adapter callsite contract: {}",
             contract.callsite,
             contract.blocking_reasons.join(", ")
+        ))
+    }
+}
+
+pub(crate) fn evaluate_default_chat_adapter_ordinary_entry_preflight(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+) -> DefaultChatAdapterOrdinaryEntryPreflight {
+    let contract = evaluate_default_chat_adapter_callsite_contract(callsite, route);
+    let contract_guard_passed =
+        ensure_default_chat_adapter_callsite_contract(callsite, route).is_ok();
+    debug_assert_eq!(contract_guard_passed, contract.contract_ready);
+    let boundary = evaluate_default_chat_adapter_invocation_boundary(callsite.caller(), route);
+    let mut blocking_reasons = contract.blocking_reasons.clone();
+
+    if !contract_guard_passed {
+        blocking_reasons.insert(0, "callsite_contract_not_ready".into());
+    }
+
+    let side_effect_lock_engaged = !boundary.runtime_call_enabled
+        && !boundary.model_call_enabled
+        && !boundary.tool_call_enabled
+        && !boundary.allow_writes
+        && boundary.max_tool_calls == 0
+        && !boundary.chat_message_saved
+        && !boundary.agent_run_recorded
+        && !boundary.evidence_recorded;
+
+    if contract_guard_passed && !side_effect_lock_engaged {
+        blocking_reasons.push("ordinary_entry_side_effect_lock_not_engaged".into());
+    }
+
+    let legacy_entry_allowed = contract_guard_passed
+        && contract.contract_ready
+        && contract.selected_adapter_path == LEGACY_STREAM_PATH
+        && contract.actual_callsite_path == LEGACY_STREAM_PATH
+        && !contract.controlled_adapter_executor_attached
+        && side_effect_lock_engaged;
+    let default_chat_migration_allowed = false;
+    let preflight_ready =
+        legacy_entry_allowed && !default_chat_migration_allowed && blocking_reasons.is_empty();
+
+    DefaultChatAdapterOrdinaryEntryPreflight {
+        callsite: contract.callsite,
+        preflight_ready,
+        contract_ready: contract_guard_passed && contract.contract_ready,
+        legacy_entry_allowed,
+        ordinary_entry_path: if preflight_ready {
+            LEGACY_STREAM_PATH
+        } else {
+            "blocked"
+        }
+        .into(),
+        required_entry_path: contract.required_callsite_path,
+        contract_shape: contract.contract_shape,
+        side_effect_lock_engaged,
+        default_chat_migration_allowed,
+        controlled_adapter_executor_attached: contract.controlled_adapter_executor_attached,
+        runtime_call_enabled: boundary.runtime_call_enabled,
+        model_call_enabled: boundary.model_call_enabled,
+        tool_call_enabled: boundary.tool_call_enabled,
+        allow_writes: boundary.allow_writes,
+        max_tool_calls: boundary.max_tool_calls,
+        chat_message_saved: boundary.chat_message_saved,
+        agent_run_recorded: boundary.agent_run_recorded,
+        evidence_recorded: boundary.evidence_recorded,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_default_chat_adapter_ordinary_entry_preflight(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+) -> Result<DefaultChatAdapterOrdinaryEntryPreflight, String> {
+    let preflight = evaluate_default_chat_adapter_ordinary_entry_preflight(callsite, route);
+
+    if preflight.preflight_ready {
+        Ok(preflight)
+    } else {
+        Err(format!(
+            "{} blocked by default Chat adapter ordinary entry preflight: {}",
+            preflight.callsite,
+            preflight.blocking_reasons.join(", ")
         ))
     }
 }
