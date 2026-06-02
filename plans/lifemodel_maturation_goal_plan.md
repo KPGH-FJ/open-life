@@ -1,7 +1,7 @@
 # LifeModel Maturation Loop End-to-End Goal Plan
 
 > Last updated: 2026-06-02
-> Status: W75 proposal outcome evidence link complete; W76 low-energy collaboration rule candidate next
+> Status: W76 low-energy collaboration rule candidate complete; W77 accepted rule to RuntimeHSPacket selection proof next
 
 This document is the entry point for the next Goal-mode development block after
 W72. It does not authorize default Chat route migration, controlled adapter
@@ -45,7 +45,7 @@ Current completed default Chat adapter state:
 - Default Chat remains `legacy_stream`.
 - Ordinary `send_message` / `start_stream_message` may only use the W49-W55
   pure ordinary-entry guard/preflight and must not call W67-W72 proof/skeleton
-  code or W73-W75 LifeModel maturation helper code.
+  code or W73-W76 LifeModel maturation helper code.
 
 Current LifeModel maturation baseline:
 
@@ -67,6 +67,14 @@ Current LifeModel maturation baseline:
   - `evaluate_maturation_proposal_outcome_evidence` is pure/report-only.
   - `record_maturation_proposal_outcome_evidence` writes metadata-safe
     `ProposalOutcome` evidence only for maturation lineage proposals.
+- `openlife-core/src/agent/maturation.rs`
+  - `LowEnergyCollaborationRuleCandidateInput` and
+    `LowEnergyCollaborationRuleCandidateReport` model W76 rule candidate
+    aggregation.
+  - `evaluate_low_energy_collaboration_rule_candidate` is pure/report-only.
+  - `propose_low_energy_collaboration_rule_candidate` writes only a pending
+    ProposalStore candidate proposal when evidence is sufficient and not
+    blocked by opposing outcome evidence.
 - `src-tauri/src/commands/proposal.rs`
   - `accept_proposal_with_state`, `reject_proposal_with_state`, and
     `edit_proposal_with_state` call the W75 helper after successful proposal
@@ -196,6 +204,8 @@ Acceptance:
 
 ### W76: Low-Energy Collaboration Rule Candidate
 
+Status: Done.
+
 Goal:
 
 Aggregate repeated low-energy / low-pressure planning signals into a
@@ -203,10 +213,22 @@ reviewable collaboration rule proposal.
 
 Acceptance:
 
-- Requires repeated evidence or a clear threshold.
-- Produces a proposal for a trial collaboration rule, not an active rule.
-- The rule is narrow, reversible, and metadata-safe.
-- Rejection weakens or blocks repeated similar rule suggestions.
+- Implemented as pure core evaluator/report plus optional ProposalStore
+  proposer in `openlife-core/src/agent/maturation.rs`.
+- Aggregates metadata-safe accepted/edited/rejected W75 ProposalOutcome
+  evidence in the low-energy / low-pressure planning collaboration scope.
+- Preserves accepted/rejected/edited outcome evidence ids, source evidence ids,
+  linked proposal ids, and linked AgentRun ids.
+- Produces only a pending reviewable candidate proposal; it does not activate a
+  Heuristic and does not write an active rule.
+- Rejected/negative/opposing outcome evidence blocks or weakens repeated
+  similar rule suggestions.
+- Edited outcome evidence participates only through metadata-safe ids/digests
+  and does not leak raw edited payload.
+- Non-low-energy domains and outcome evidence outside the collaboration scope
+  fail closed.
+- No Tauri command, frontend surface, runtime/model/tool call, ordinary Chat
+  integration, or direct LifeModel/Memory/Heuristic write was added.
 
 ### W77: Accepted Rule To RuntimeHSPacket Selection Proof
 
@@ -238,36 +260,33 @@ Acceptance:
 ## 6. Next Agent Development Prompt
 
 ```text
-你现在开发 W76: Low-Energy Collaboration Rule Candidate。
+W76 Low-Energy Collaboration Rule Candidate is complete. The next slice is W77:
+Accepted Rule To RuntimeHSPacket Selection Proof.
 
 当前基线：
 - W73 LifeModel maturation readiness report 已完成。
 - W74 non-default maturation invocation 已完成。
 - W75 proposal outcome evidence link 已完成：maturation proposal accept/reject/edit 会写 metadata-safe ProposalOutcome evidence。
+- W76 low-energy collaboration rule candidate 已完成：accepted/edited/rejected outcome evidence 可聚合为 pending reviewable candidate proposal，但不激活 Heuristic、不写 active rule。
 - default Chat 仍是 legacy_stream。
-- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W73-W75 maturation helper。
-- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore、proposal outcome evidence helper。
+- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W73-W76 maturation helper。
+- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore、proposal outcome evidence helper 和 W76 candidate evaluator/proposer。
 
-开发目标：
-- 聚合已接受/拒绝/编辑的 low-energy / low-pressure planning maturation proposal outcome evidence。
-- 生成一个 reviewable collaboration rule candidate proposal，而不是直接激活规则。
-- 只允许 metadata-safe report/evidence/proposal metadata；不包含 raw prompt/output/memory/tool payload/secrets。
-- Rejection/outcome negative evidence 必须弱化或阻止重复相似规则建议。
-- 不新增 default Chat route，不接普通 Chat，不运行 runtime/model/tool，不直接写 LifeModel/Memory/Heuristic active truth。
+W77 开发目标：
+- 在用户接受候选规则之后，证明低能量规划协作规则可以以 metadata-safe 方式进入 future RuntimeHSPacket selection。
+- 只证明 selection packet/audit shape，不迁移 default Chat、不运行 runtime/model/tool。
+- 只影响 low-energy / low-pressure planning domain。
+- 必须保留 W76 candidate proposal / outcome evidence / source evidence / agent run lineage。
 
 测试要求：
 - 新增 focused core tests。
-- 覆盖 accepted outcome evidence 可推动 rule candidate。
-- 覆盖 rejected/negative/opposing outcome evidence 会阻止或弱化重复 rule candidate。
-- 覆盖 edited outcome evidence 只使用 metadata-safe digest/id，不泄露 raw edited payload。
-- 覆盖 evidence/proposal/source run lineage。
-- 覆盖 non-low-energy domain fail closed。
-- 覆盖不直接写 LifeModel/Memory/Heuristic，不调用 runtime/model/tool。
-- 覆盖 ordinary send_message / start_stream_message 不调用 W76 helper。
+- 覆盖 accepted W76 candidate proposal outcome 可推动 selection proof。
+- 覆盖 rejected/negative/opposing candidate outcome 会阻止 selection proof。
+- 覆盖 selection proof 不写 LifeModel/Memory/Heuristic，不调用 runtime/model/tool。
+- 覆盖 ordinary send_message / start_stream_message 不调用 W77 helper。
 
 至少运行：
-- cargo test -p openlife-core proposal_outcome -- --nocapture
-- cargo test -p openlife-core maturation_loop -- --nocapture
+- cargo test -p openlife-core low_energy_collaboration -- --nocapture
 - cargo test -p openlife-tauri default_chat_entrypoints_do_not_call_w19_w60_command_surfaces -- --nocapture
 - git diff --check
 

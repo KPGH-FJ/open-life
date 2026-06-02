@@ -58,12 +58,15 @@ pub use hs_selector::{
 };
 pub use maturation::{
     ensure_lifemodel_maturation_non_default_invocation, ensure_lifemodel_maturation_readiness,
-    evaluate_lifemodel_maturation_readiness, run_lifemodel_maturation_non_default_invocation,
-    LifeModelMaturationNonDefaultInvocationInput, LifeModelMaturationNonDefaultInvocationReport,
-    LifeModelMaturationReadinessInput, LifeModelMaturationReadinessReport,
-    LifeModelMaturationReadinessSideEffectBudget, LifeModelMaturationService, MaturationDropReason,
-    MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
-    MaturationProposalCandidate, MaturationReport, MaturationService,
+    evaluate_lifemodel_maturation_readiness, evaluate_low_energy_collaboration_rule_candidate,
+    propose_low_energy_collaboration_rule_candidate,
+    run_lifemodel_maturation_non_default_invocation, LifeModelMaturationNonDefaultInvocationInput,
+    LifeModelMaturationNonDefaultInvocationReport, LifeModelMaturationReadinessInput,
+    LifeModelMaturationReadinessReport, LifeModelMaturationReadinessSideEffectBudget,
+    LifeModelMaturationService, LowEnergyCollaborationRuleCandidateInput,
+    LowEnergyCollaborationRuleCandidateReport, MaturationDropReason, MaturationGovernanceAudit,
+    MaturationGovernanceSummary, MaturationInput, MaturationOutput, MaturationProposalCandidate,
+    MaturationReport, MaturationService,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};

@@ -5965,6 +5965,10 @@ mod hs_runtime_tests {
             "evaluate_maturation_proposal_outcome_evidence",
             "MaturationProposalOutcome",
             "MaturationProposalOutcomeEvidenceReport",
+            "LowEnergyCollaborationRuleCandidateInput",
+            "LowEnergyCollaborationRuleCandidateReport",
+            "evaluate_low_energy_collaboration_rule_candidate",
+            "propose_low_energy_collaboration_rule_candidate",
         ];
 
         for forbidden in forbidden_command_surfaces {
