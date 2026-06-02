@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-06-02 W60 Default Chat Adapter Narrow Implementation Plan Approval Readiness Gate
-> Current direction: W1-W60 runtime/adapter guard ladder complete; default Chat remains unchanged
+> Version: 2026-06-02 W65 Default Chat Adapter Backend-Only Descriptor Skeleton
+> Current direction: W1-W60 runtime/adapter guard ladder plus W65 descriptor skeleton complete; default Chat remains unchanged
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -25,7 +25,11 @@ ordinary-entry preflight status surface for Settings review, a read-only
 narrow implementation discussion gate over W48/W56 evidence, a read-only
 narrow implementation plan draft over W57, metadata-safe human review evidence
 over that W58 draft, and a read-only narrow implementation plan approval
-readiness gate over the current draft/review digest.
+readiness gate over the current draft/review digest. The W65 descriptor
+slice adds only a pure backend mapper for a future controlled adapter candidate
+contract; it stores input length/hash and route/executor metadata, keeps the
+controlled executor disabled/unattached, writes nothing, runs nothing, and does
+not route default Chat.
 
 The important current boundary is that MultiStrategy Runtime is
 preview/audit-ready, not productized as the default Chat path. Future work must
@@ -133,6 +137,7 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | Controlled Chat Pilot / Promotion | Chat page exposes explicit `Run Controlled Pilot`; it checks eligibility first, blocks without preview when ineligible, runs one write-disabled preview when eligible, and renders “Pilot response” separately. Successful output with `userOutput` can be reviewed and explicitly promoted into one assistant chat message with `run_id` trace metadata when available | W22 promotion is user-confirmed and source-bound; source/target session mismatch blocks without writing, and default Chat is still not migrated |
 | Migration evidence ladder | W23-W33 promotion evidence, readiness, reviewed migration plan, review decision evidence, implementation gate, shadow run/review, cutover readiness, cutover candidate/review, and candidate promotion readiness are implemented | All steps are explicit, metadata-safe, and non-default; readiness or approval only means implementation discussion evidence |
 | Default Chat adapter guard ladder | W34-W60 default Chat boundary, activation planning/review/gate, disabled routing, contract harness, dry run/review, implementation readiness, controlled preview/review/readiness, cutover plan/review/readiness, route guard, invocation harness/plan/boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, narrow implementation plan draft, narrow implementation plan review evidence, and narrow implementation plan approval readiness are implemented | Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter executor remains disabled and unattached |
+| Backend-only descriptor skeleton | W65 pure `default_chat_adapter.rs` descriptor/mapper describes a future controlled adapter candidate with callsite kind, contract shape, route metadata, input length/hash, disabled/unattached executor state, `allowWrites=false`, `maxToolCalls=0`, and zero side-effect budget | Not a command, not a Settings/Chat surface, not a preview/draft/readiness permission, and not default Chat migration |
 | Authority roadmap sync | W54 syncs high-priority route documents with W1-W53 code status | Documentation governance step; prevents stale W22 instructions from steering future Agents |
 | Ordinary-entry preflight | W55 adds a pure default Chat adapter preflight / side-effect lock before ordinary send/stream legacy entry | Requires typed contract readiness, legacy entry, controlled executor unattached, migration disabled, and zero pre-entry runtime/model/tool/write budget |
 | Ordinary-entry preflight status | W56 adds a read-only status command and Settings surface over W55 send/stream preflight | Reports metadata-safe readiness/blockers only; no runtime/model/tool call, no business writes, no migration |
@@ -157,7 +162,7 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - ~~No Runtime Migration Gate.~~ ✅ 已完成（W17：read-only gate for preview audit, fallback, metadata-safe trace, external-write, and proposal-first boundaries）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **Current boundary: W60 narrow implementation plan approval readiness after W59 review evidence.** Do not treat W19-W60 eligibility, preview, promotion, evidence, readiness, review, activation, dry-run, controlled preview, cutover plan, route guard, invocation guard, typed callsite, preflight, preflight status, narrow implementation discussion, narrow implementation draft, narrow implementation plan review approval, or narrow implementation plan approval readiness as permission to replace default Chat directly.
+- **Current boundary: W65 backend-only descriptor skeleton after W64 authority compression validation.** Do not treat W19-W60 eligibility, preview, promotion, evidence, readiness, review, activation, dry-run, controlled preview, cutover plan, route guard, invocation guard, typed callsite, preflight, preflight status, narrow implementation discussion, narrow implementation draft, narrow implementation plan review approval, narrow implementation plan approval readiness, or W65 descriptor readiness as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
@@ -491,6 +496,7 @@ Every major development round should verify:
 | W58 | ✅ Done | Narrow implementation plan draft calls W57 first; blocked gates return no sections or digest, eligible gates return metadata-safe human-review sections plus stable digest, and it runs no runtime/model/tool/preview call, writes no records, changes no routing, and is not migration. |
 | W59 | ✅ Done | Narrow implementation plan review evidence calls W58 first; blocked draft approve writes no evidence, ready draft approve/reject/request_rework writes metadata-safe Evidence only, reviewer notes are stored as checksum/length/category, and it runs no runtime/model/tool/preview call, changes no routing, and is not migration. |
 | W60 | ✅ Done | Narrow implementation plan approval readiness calls current W58 draft and W59 review summary; ready requires latest approve, digest match, W57 eligible, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and legacy send/stream paths. It writes no records, runs no runtime/model/tool/preview call, changes no routing, and is not migration. |
+| W65 | ✅ Done | Backend-only descriptor skeleton adds a pure metadata-safe mapper for future controlled adapter candidate contract prep. It contains no raw transcript/prompt/tool/LifeModel/Memory content, attaches no executor, writes no records, calls no runtime/model/tool/preview path, and keeps default Chat on `legacy_stream`. |
 
 ## 8. Current Next Step
 
@@ -509,12 +515,13 @@ W57: Default Chat adapter narrow implementation discussion gate
 W58: Default Chat adapter narrow implementation plan draft
 W59: Default Chat adapter narrow implementation plan review evidence
 W60: Default Chat adapter narrow implementation plan approval readiness
+W65: Default Chat adapter backend-only descriptor skeleton
 ```
 
-After W60, the next possible step is:
+After W65, the next possible step is:
 
 ```text
-only consider a separately reviewed narrow adapter implementation slice after W60 remains clean; default Chat still must not migrate
+only consider separately reviewed controlled adapter contract work after the descriptor skeleton remains clean; default Chat still must not migrate
 ```
 
 Guardrails:

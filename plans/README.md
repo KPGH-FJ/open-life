@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents, W63 complete
+> Status: authoritative document index for Agents, W65 backend-only descriptor skeleton complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W63 completion/status index. This is not a second roadmap.
+   - Compact W1-W65 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -33,14 +33,15 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W63 complete**. W61-W63 are docs/index整理 stages that
-compress W1-W60 route status into a bounded entry for the next narrow adapter
-implementation slice. They add no Rust/TypeScript code, no commands, no
-settings surface, no runtime/model/tool call, and no routing change.
+Current latest status is **W65 backend-only descriptor skeleton complete**.
+W64 validated the compressed W1-W63 authority/index entry. W65 adds only a pure
+Rust mapper in `src-tauri/src/default_chat_adapter.rs` for a future controlled
+adapter candidate contract; it adds no command, no frontend change, no Settings
+surface, no runtime/model/tool call, no store write, and no routing change.
 
-The next state is: narrow adapter implementation 前的索引整理完成态. If the next
-implementation slice is labeled W64, W64 is still future work and must be
-separately implemented, reviewed, and verified. W63 does not authorize W64.
+The next state remains controlled adapter contract work only if a separate task
+explicitly asks for it and preserves default Chat `legacy_stream` until a
+reviewed route change is implemented and verified.
 
 Hard current constraints:
 
@@ -52,6 +53,8 @@ Hard current constraints:
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
+- W65 backend-only descriptor skeleton is metadata only and is not migration
+  permission.
 
 ## 3. W1-W63 Compression Map
 
@@ -71,7 +74,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W43-W48 | Controlled preview/review/readiness and cutover implementation plan/review/readiness | Non-default preview and planning only |
 | W49-W55 | Route guard, invocation harness/plan/boundary, typed callsite contract, ordinary-entry preflight | Pure fail-closed guard only; route stays `legacy_stream` |
 | W56-W60 | Ordinary-entry status, narrow discussion gate, narrow plan draft/review/approval readiness | Settings/status/planning only; ordinary entries must not call commands |
-| W61-W63 | Docs/index整理 and W1-W63 compression freeze | Docs only; no default Chat effect |
+| W61-W64 | Docs/index整理, W1-W63 compression freeze, and authority validation | Docs only; no default Chat effect |
+| W65 | Backend-only controlled adapter descriptor skeleton | Internal metadata-safe mapper only; no default Chat effect |
 
 ## 4. Current Authoritative Entry Points
 
@@ -149,10 +153,10 @@ and fail-closed.
 ## 8. Next Recommended Sequence
 
 ```text
-W63 complete -> use plans/lifemodel_governed_runtime_progress.md as the compact
-W1-W63 index -> prepare a separate W64 narrow adapter implementation slice only
-if the task explicitly asks for implementation and preserves default Chat
-legacy_stream until separately reviewed.
+W63 complete -> W64 authority compression validated -> W65 backend-only
+descriptor skeleton complete -> prepare any future controlled adapter contract
+work only if the task explicitly asks for implementation and preserves default
+Chat legacy_stream until separately reviewed.
 ```
 
 For docs-only index整理, `git diff --check` plus targeted `rg` validation is

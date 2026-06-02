@@ -10,9 +10,9 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：W63 Narrow Adapter Implementation Entry Index Freeze 已完成。W61-W63 是 docs/index整理阶段，用于把 W1-W60 的长路线状态压缩成结构化索引，给后续 narrow adapter implementation slice 准备入口；它们不新增 Rust/TypeScript 代码、不新增 command/surface、不运行 runtime/model/tool、不写记录、不切换 routing，不是 default Chat migration。若后续实现 slice 标为 W64，W64 仍需单独任务、实现、评审和验证，W63 不授权 W64。
+- **当前阶段**：W65 Default Chat Adapter Backend-Only Descriptor Skeleton 已完成。W64 已完成 W1-W63 文档权威压缩验收；W65 只新增纯后端 metadata-safe descriptor / mapper，用于描述未来 controlled adapter candidate contract。W65 不新增 Tauri command、不新增前端或 Settings surface、不运行 runtime/model/tool、不写 Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write、不切换 routing，不是 default Chat migration。
 - **Default Chat 硬约束**：default Chat 仍是 `legacy_stream`。普通 `Send` / `send_message` / `start_stream_message` 只能进入 legacy path；允许调用的 adapter 相关代码仅限 W49-W55 共享 pure ordinary-entry guard/preflight，并且只能 fail closed，不能切换路由。普通入口不得调用 W19-W60 command surfaces；W19-W60 readiness/review/preview/gate/draft/evidence/status 结果都不是 migration permission。
-- **文档入口**：`plans/README.md` 是文档权威地图，`plans/lifemodel_governed_runtime_progress.md` 是 W1-W63 结构化状态索引。若旧长段仍写 W60 latest、ready/approve 可迁移、或 W61-W63 会影响 default Chat，以本 W63 入口、`plans/README.md` 和 progress index 为准。
+- **文档入口**：`plans/README.md` 是文档权威地图，`plans/lifemodel_governed_runtime_progress.md` 是 W1-W65 结构化状态索引。若旧长段仍写 W60 latest、ready/approve 可迁移、或 W61-W65 会影响 default Chat，以本 W65 入口、`plans/README.md` 和 progress index 为准。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -21,7 +21,7 @@
 
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
-3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W63 结构化状态索引，按 stage id / 名称 / 状态 / command-surface 类型 / read-only-write-disabled-metadata-safe / default Chat 影响 / 下一步依赖整理；不是第二套路线图。
+3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W65 结构化状态索引，按 stage id / 名称 / 状态 / command-surface 类型 / read-only-write-disabled-metadata-safe / default Chat 影响 / 下一步依赖整理；不是第二套路线图。
 4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
 5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
 6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
@@ -38,13 +38,14 @@
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
 - ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
-- 当前分支已完成 W1-W63；W61-W63 只是 docs/index整理，用来压缩 W1-W60 长路线文本并准备 narrow adapter implementation slice 的文档入口。W64 若出现，仍是未来单独实现任务，不由 W63 授权。
+- 当前分支已完成 W1-W65；W61-W64 是 docs/index整理和权威入口压缩验收，W65 是 backend-only descriptor skeleton。W65 只描述 future controlled adapter candidate contract，不接入 ordinary Chat callsite，不授权迁移。
 - W9-W18 只建立 non-default preview、preview audit 和 read-only migration gate/evidence surface；它们不替换 default Chat。
 - W19-W23 只提供 controlled pilot eligibility、显式 pilot、reviewed promotion、source binding 和 metadata-safe promotion evidence；普通 Send 仍不调用 eligibility/gate/preview。
 - W24-W48 的 readiness/review/preview/gate/draft/evidence 只允许人工审阅、对比、planning 或 implementation discussion；ready/approve/draftReady/previewReady 都不是 migration permission。
 - W49-W55 是 pure ordinary-entry guard/preflight：默认 `send_message` / `start_stream_message` 只能在 typed contract ready、controlled executor unattached、migration disabled、zero runtime/model/tool/write budget 下进入 `legacy_stream`，并只能 fail closed。
 - W56-W60 是 read-only/status/planning/review/readiness surfaces；普通 `Send` / `send_message` / `start_stream_message` 不得调用这些 command。
 - W61-W63 是 docs/index整理阶段，不运行 runtime/model/tool、不写记录、不切换 routing，不是 default Chat migration。
+- W64 是 W1-W63 文档权威压缩验收；W65 是纯后端 descriptor / mapper 骨架，metadata-safe、executor disabled/unattached、zero side-effect budget，不是 command/surface，不是 default Chat migration。
 - W10 的 preview AgentRun audit 是 metadata-safe 外层 run。ReAct payload 里的 inner run id 只能作为 child metadata 存在，不是 Runs 查询和产品 trace 的主 id。
 - 后续 Agent 不得默认替换 `send_message`、`start_stream_message` 或 Chat 主流程；任何迁移必须先从非默认 preview/debug 入口或受控子路径开始，并保留稳定 fallback。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。

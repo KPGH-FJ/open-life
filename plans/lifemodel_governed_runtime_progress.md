@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-02
-> Status: W63 complete docs-only compression index, not a second roadmap
+> Status: W65 backend-only default Chat adapter descriptor skeleton complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,12 +11,12 @@ route text.
 
 ## Current Position
 
-Current latest status is **W63 complete**. W61-W63 are documentation/index
-整理 stages only; they do not add Rust/TypeScript code, do not add commands, do
-not change routing, and are not default Chat migration. The next state is the
-index整理完成态 immediately before a future narrow adapter implementation slice.
-If that future work is labeled W64, W64 still needs a separate reviewed
-implementation task and separate verification.
+Current latest status is **W65 backend-only descriptor skeleton complete**.
+W61-W64 were documentation/index整理 and authority compression stages only. W65
+adds only a pure Rust mapper in `src-tauri/src/default_chat_adapter.rs` for a
+future controlled adapter candidate contract. It adds no command, no frontend
+surface, no Settings surface, no runtime/model/tool call, no store write, and no
+default Chat routing change.
 
 Hard boundaries:
 
@@ -25,6 +25,8 @@ Hard boundaries:
   `start_stream_message` may enter only the legacy route, with the W49-W55 pure
   guards/preflight allowed to fail closed.
 - W19-W60 readiness/review/preview/gate results are not migration permission.
+- W65 backend-only descriptor is not migration permission and must keep the
+  controlled adapter executor disabled/unattached.
 - Ordinary `send_message` / `start_stream_message` must not call any W19-W60
   command surface.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
@@ -121,7 +123,9 @@ permission.
 | W60 | Default Chat Adapter Narrow Implementation Plan Approval Readiness Gate | Done | `check_default_chat_adapter_narrow_implementation_plan_approval_readiness` | RO / MS gate | No; ready is not migration permission | W61 |
 | W61 | Progress Index Compression Prep | Done | Docs/index surface | Docs only | No | W62 |
 | W62 | Plans README Authority Compression | Done | Docs/index surface | Docs only | No | W63 |
-| W63 | Narrow Adapter Implementation Entry Index Freeze | Done | Docs/index surface | Docs only | No; prepares W64 only as future separate implementation | W64 future narrow adapter implementation slice |
+| W63 | Narrow Adapter Implementation Entry Index Freeze | Done | Docs/index surface | Docs only | No; prepares future implementation only | W64 |
+| W64 | W1-W63 Authority Compression Validation | Done | Docs/index surface | Docs only | No | W65 |
+| W65 | Default Chat Adapter Backend-Only Descriptor Skeleton | Done | Pure internal mapper in `default_chat_adapter.rs` | MS descriptor only; input length/hash, route metadata, disabled/unattached executor, zero side-effect budget | No; ordinary send/stream stay `legacy_stream` | Future controlled adapter contract work |
 
 ## Folded Boundary Summary
 
@@ -140,13 +144,17 @@ above. The boundary meaning is preserved:
   `send_message` / `start_stream_message` must not call them.
 - W61-W63 are documentation/index整理, not migration permission, not code work,
   and not default Chat migration.
+- W65 descriptor skeleton is internal backend code only. It may
+  describe a future controlled adapter candidate with metadata-safe fields, but
+  it must not execute or attach that adapter.
 
 ## Next Recommended Sequence
 
 ```text
-W63 complete -> use this compact W1-W63 index as the narrow adapter
-implementation entry context -> if a W64 narrow adapter implementation slice is
-started, keep default Chat on legacy_stream unless that separate task explicitly
+W63 complete -> W64 authority compression validated -> W65 backend-only
+descriptor skeleton complete -> future controlled adapter contract work may
+build on the descriptor only through a separately reviewed implementation task;
+keep default Chat on legacy_stream unless that separate task explicitly
 implements, reviews, verifies, and authorizes a route change.
 ```
 

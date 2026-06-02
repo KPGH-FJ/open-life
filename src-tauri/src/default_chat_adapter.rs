@@ -1,5 +1,9 @@
+use sha2::{Digest, Sha256};
+
 pub(crate) const LEGACY_STREAM_PATH: &str = "legacy_stream";
 pub(crate) const CONTROLLED_ADAPTER_PATH: &str = "controlled_adapter";
+#[allow(dead_code)]
+pub(crate) const CONTROLLED_ADAPTER_EXECUTOR_DISABLED_STATE: &str = "disabled_unattached";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DefaultChatAdapterRoute {
@@ -148,6 +152,80 @@ pub(crate) struct DefaultChatAdapterInvocationBoundary {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DefaultChatAdapterDescriptorSideEffectBudget {
+    pub(crate) runtime_calls: u32,
+    pub(crate) model_calls: u32,
+    pub(crate) tool_calls: u32,
+    pub(crate) store_writes: u32,
+    pub(crate) chat_message_writes: u32,
+    pub(crate) agent_run_writes: u32,
+    pub(crate) evidence_writes: u32,
+    pub(crate) proposal_writes: u32,
+    pub(crate) memory_writes: u32,
+    pub(crate) life_model_writes: u32,
+    pub(crate) mcp_audit_writes: u32,
+    pub(crate) external_writes: u32,
+}
+
+#[allow(dead_code)]
+impl DefaultChatAdapterDescriptorSideEffectBudget {
+    pub(crate) fn zero() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn is_zero(&self) -> bool {
+        self.runtime_calls == 0
+            && self.model_calls == 0
+            && self.tool_calls == 0
+            && self.store_writes == 0
+            && self.chat_message_writes == 0
+            && self.agent_run_writes == 0
+            && self.evidence_writes == 0
+            && self.proposal_writes == 0
+            && self.memory_writes == 0
+            && self.life_model_writes == 0
+            && self.mcp_audit_writes == 0
+            && self.external_writes == 0
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatControlledAdapterDescriptor {
+    pub(crate) descriptor_kind: String,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_content: bool,
+    pub(crate) mapper_side_effect_free: bool,
+    pub(crate) callsite_kind: String,
+    pub(crate) contract_shape: String,
+    pub(crate) route_mode: String,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) required_callsite_path: String,
+    pub(crate) actual_callsite_path: String,
+    pub(crate) default_send_path: String,
+    pub(crate) start_stream_path: String,
+    pub(crate) controlled_adapter_candidate_path: String,
+    pub(crate) controlled_adapter_enabled: bool,
+    pub(crate) automatic_migration_enabled: bool,
+    pub(crate) controlled_adapter_invocation_allowed: bool,
+    pub(crate) controlled_adapter_executor_enabled: bool,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) controlled_adapter_executor_state: String,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) side_effect_budget: DefaultChatAdapterDescriptorSideEffectBudget,
+    pub(crate) input_length_bytes: usize,
+    pub(crate) input_length_chars: usize,
+    pub(crate) input_sha256: String,
+    pub(crate) route_guard_passed: bool,
+    pub(crate) descriptor_ready: bool,
+    pub(crate) fail_closed: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn resolve_default_chat_adapter_route() -> DefaultChatAdapterRoute {
     DefaultChatAdapterRoute {
         current_mode: LEGACY_STREAM_PATH.into(),
@@ -186,6 +264,72 @@ fn default_chat_legacy_route_blockers(route: &DefaultChatAdapterRoute) -> Vec<St
     }
 
     blockers
+}
+
+#[allow(dead_code)]
+pub(crate) fn describe_default_chat_controlled_adapter_candidate(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+    input: &str,
+) -> DefaultChatControlledAdapterDescriptor {
+    let mut blocking_reasons = default_chat_legacy_route_blockers(route);
+    let actual_callsite_path = callsite.route_path(route).to_string();
+
+    if actual_callsite_path != LEGACY_STREAM_PATH {
+        blocking_reasons.push("callsite_path_not_legacy_stream".into());
+    }
+
+    let route_guard_passed = blocking_reasons.is_empty();
+    let descriptor_ready = route_guard_passed
+        && route.current_mode == LEGACY_STREAM_PATH
+        && actual_callsite_path == LEGACY_STREAM_PATH
+        && !route.controlled_adapter_enabled
+        && !route.automatic_migration_enabled;
+
+    DefaultChatControlledAdapterDescriptor {
+        descriptor_kind: "default_chat_controlled_adapter_candidate".into(),
+        metadata_safe: true,
+        contains_raw_content: false,
+        mapper_side_effect_free: true,
+        callsite_kind: callsite.caller().into(),
+        contract_shape: callsite.contract_shape().into(),
+        route_mode: route.current_mode.clone(),
+        selected_adapter_path: if descriptor_ready {
+            LEGACY_STREAM_PATH
+        } else {
+            "blocked"
+        }
+        .into(),
+        required_callsite_path: LEGACY_STREAM_PATH.into(),
+        actual_callsite_path,
+        default_send_path: route.default_send_path.clone(),
+        start_stream_path: route.start_stream_path.clone(),
+        controlled_adapter_candidate_path: CONTROLLED_ADAPTER_PATH.into(),
+        controlled_adapter_enabled: route.controlled_adapter_enabled,
+        automatic_migration_enabled: route.automatic_migration_enabled,
+        controlled_adapter_invocation_allowed: false,
+        controlled_adapter_executor_enabled: false,
+        controlled_adapter_executor_attached: false,
+        controlled_adapter_executor_state: CONTROLLED_ADAPTER_EXECUTOR_DISABLED_STATE.into(),
+        allow_writes: false,
+        max_tool_calls: 0,
+        side_effect_budget: DefaultChatAdapterDescriptorSideEffectBudget::zero(),
+        input_length_bytes: input.len(),
+        input_length_chars: input.chars().count(),
+        input_sha256: default_chat_adapter_metadata_sha256(input),
+        route_guard_passed,
+        descriptor_ready,
+        fail_closed: !descriptor_ready,
+        migration_permission: false,
+        blocking_reasons,
+    }
+}
+
+#[allow(dead_code)]
+fn default_chat_adapter_metadata_sha256(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
 }
 
 pub(crate) fn evaluate_default_chat_adapter_cutover_harness(

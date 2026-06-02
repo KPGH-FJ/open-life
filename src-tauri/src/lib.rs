@@ -3697,6 +3697,310 @@ mod hs_runtime_tests {
         assert!(error.contains("callsite_contract_not_ready"));
     }
 
+    #[test]
+    fn default_chat_adapter_descriptor_is_metadata_safe_and_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input =
+            "raw-user-secret prompt-token assistant-output tool-payload lifemodel-memory";
+
+        let descriptor =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        assert!(descriptor.metadata_safe);
+        assert!(!descriptor.contains_raw_content);
+        assert_eq!(descriptor.callsite_kind, "send_message");
+        assert_eq!(descriptor.contract_shape, "send_message_compatible");
+        assert_eq!(descriptor.input_length_bytes, raw_input.len());
+        assert_eq!(descriptor.input_length_chars, raw_input.chars().count());
+        assert!(descriptor.input_sha256.starts_with("sha256:"));
+        assert!(!descriptor.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{descriptor:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "lifemodel-memory",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "descriptor leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_descriptor_keeps_controlled_executor_disabled_unattached() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let descriptor =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "metadata only input",
+            );
+
+        assert!(descriptor.descriptor_ready);
+        assert!(!descriptor.fail_closed);
+        assert_eq!(descriptor.route_mode, "legacy_stream");
+        assert_eq!(
+            descriptor.controlled_adapter_candidate_path,
+            "controlled_adapter"
+        );
+        assert!(!descriptor.controlled_adapter_enabled);
+        assert!(!descriptor.controlled_adapter_invocation_allowed);
+        assert!(!descriptor.controlled_adapter_executor_enabled);
+        assert!(!descriptor.controlled_adapter_executor_attached);
+        assert_eq!(
+            descriptor.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!descriptor.allow_writes);
+        assert_eq!(descriptor.max_tool_calls, 0);
+        assert_eq!(descriptor.side_effect_budget.runtime_calls, 0);
+        assert_eq!(descriptor.side_effect_budget.model_calls, 0);
+        assert_eq!(descriptor.side_effect_budget.tool_calls, 0);
+        assert_eq!(descriptor.side_effect_budget.store_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.chat_message_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.agent_run_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.evidence_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.proposal_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.memory_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.life_model_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.mcp_audit_writes, 0);
+        assert_eq!(descriptor.side_effect_budget.external_writes, 0);
+    }
+
+    #[test]
+    fn default_chat_adapter_descriptor_default_send_stream_routes_remain_legacy_stream() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let send_descriptor =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "send input",
+            );
+        let stream_descriptor =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "stream input",
+            );
+
+        assert!(send_descriptor.descriptor_ready);
+        assert!(stream_descriptor.descriptor_ready);
+        assert_eq!(send_descriptor.selected_adapter_path, "legacy_stream");
+        assert_eq!(stream_descriptor.selected_adapter_path, "legacy_stream");
+        assert_eq!(send_descriptor.default_send_path, "legacy_stream");
+        assert_eq!(send_descriptor.start_stream_path, "legacy_stream");
+        assert_eq!(stream_descriptor.default_send_path, "legacy_stream");
+        assert_eq!(stream_descriptor.start_stream_path, "legacy_stream");
+        assert!(!send_descriptor.migration_permission);
+        assert!(!stream_descriptor.migration_permission);
+        assert!(send_descriptor.blocking_reasons.is_empty());
+        assert!(stream_descriptor.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn default_chat_adapter_descriptor_fails_closed_for_route_drift_enabled_and_auto_migration() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.current_mode = "controlled_adapter".into();
+        route.controlled_adapter_enabled = true;
+        route.automatic_migration_enabled = true;
+        route.default_send_path = "controlled_adapter".into();
+        route.requires_separate_cutover_implementation = false;
+
+        let descriptor =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "blocked input",
+            );
+
+        assert!(!descriptor.descriptor_ready);
+        assert!(descriptor.fail_closed);
+        assert!(!descriptor.route_guard_passed);
+        assert_eq!(descriptor.selected_adapter_path, "blocked");
+        assert!(!descriptor.migration_permission);
+        assert!(!descriptor.controlled_adapter_invocation_allowed);
+        assert!(!descriptor.controlled_adapter_executor_enabled);
+        assert!(!descriptor.controlled_adapter_executor_attached);
+        assert!(descriptor
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(descriptor
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+        assert!(descriptor
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+        assert!(descriptor
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+        assert!(descriptor
+            .blocking_reasons
+            .contains(&"separate_cutover_implementation_not_required".to_string()));
+    }
+
+    #[test]
+    fn default_chat_adapter_descriptor_mapper_is_side_effect_free_and_stable() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let first = crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            "stable side-effect-free input",
+        );
+        let second =
+            crate::default_chat_adapter::describe_default_chat_controlled_adapter_candidate(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "stable side-effect-free input",
+            );
+
+        assert_eq!(first, second);
+        assert!(first.mapper_side_effect_free);
+        assert!(first.side_effect_budget.is_zero());
+        assert!(!first.allow_writes);
+        assert_eq!(first.max_tool_calls, 0);
+        assert!(!first.migration_permission);
+    }
+
+    #[test]
+    fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_command_surfaces = [
+            "run_multi_strategy_agent_preview",
+            "check_runtime_migration_gate",
+            "check_controlled_chat_pilot_eligibility",
+            "draft_controlled_chat_migration_plan",
+            "record_controlled_chat_migration_review_decision",
+            "get_controlled_chat_migration_review_decision_summary",
+            "check_controlled_chat_migration_implementation_gate",
+            "run_controlled_chat_migration_shadow_run",
+            "record_controlled_chat_migration_shadow_review_decision",
+            "get_controlled_chat_migration_shadow_review_summary",
+            "check_controlled_chat_cutover_readiness",
+            "run_controlled_chat_cutover_candidate",
+            "record_controlled_chat_cutover_candidate_review_decision",
+            "get_controlled_chat_cutover_candidate_review_summary",
+            "check_controlled_chat_cutover_candidate_promotion_readiness",
+            "draft_default_chat_adapter_activation_plan",
+            "record_default_chat_adapter_activation_review_decision",
+            "get_default_chat_adapter_activation_review_summary",
+            "check_default_chat_adapter_activation_implementation_gate",
+            "get_default_chat_adapter_routing_status",
+            "check_default_chat_adapter_contract_harness",
+            "get_default_chat_adapter_ordinary_entry_preflight_status",
+            "check_default_chat_adapter_narrow_implementation_discussion_gate",
+            "draft_default_chat_adapter_narrow_implementation_plan",
+            "record_default_chat_adapter_narrow_implementation_plan_review_decision",
+            "get_default_chat_adapter_narrow_implementation_plan_review_summary",
+            "check_default_chat_adapter_narrow_implementation_plan_approval_readiness",
+            "run_default_chat_adapter_dry_run",
+            "record_default_chat_adapter_dry_run_review_decision",
+            "get_default_chat_adapter_dry_run_review_summary",
+            "check_default_chat_adapter_implementation_readiness",
+            "run_default_chat_adapter_controlled_preview",
+            "record_default_chat_adapter_controlled_preview_review_decision",
+            "get_default_chat_adapter_controlled_preview_review_summary",
+            "check_default_chat_adapter_controlled_preview_approval_readiness",
+            "draft_default_chat_adapter_cutover_implementation_plan",
+            "record_default_chat_adapter_cutover_plan_review_decision",
+            "get_default_chat_adapter_cutover_plan_review_summary",
+            "check_default_chat_adapter_cutover_plan_approval_readiness",
+            "get_default_chat_runtime_boundary_status",
+        ];
+
+        for forbidden in forbidden_command_surfaces {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_page_does_not_call_default_adapter_migration_preview_or_review_commands() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("repo root");
+        let chat_paths = [
+            repo_root.join("frontend/src/pages/ChatPage.tsx"),
+            repo_root.join("frontend/src/pages/chat/ChatInputArea.tsx"),
+            repo_root.join("frontend/src/pages/chat/useChatStreaming.ts"),
+            repo_root.join("frontend/src/pages/chat/useChatContext.ts"),
+            repo_root.join("frontend/src/pages/chat/useChatSessions.ts"),
+        ];
+        let forbidden = [
+            "default_chat_adapter",
+            "DefaultChatAdapter",
+            "checkRuntimeMigrationGate",
+            "draftControlledChatMigrationPlan",
+            "recordControlledChatMigrationReviewDecision",
+            "checkControlledChatMigrationImplementationGate",
+            "runControlledChatMigrationShadowRun",
+            "runDefaultChatAdapterControlledPreview",
+            "draftDefaultChatAdapterActivationPlan",
+            "draftDefaultChatAdapterCutoverImplementationPlan",
+            "draftDefaultChatAdapterNarrowImplementationPlan",
+            "recordDefaultChatAdapter",
+            "checkDefaultChatAdapter",
+            "getDefaultChatAdapter",
+        ];
+
+        for path in chat_paths {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            for forbidden in forbidden {
+                assert!(
+                    !source.contains(forbidden),
+                    "{} must not call {}",
+                    path.display(),
+                    forbidden
+                );
+            }
+        }
+    }
+
+    fn extract_rust_function_body(source: &str, signature: &str) -> String {
+        let signature_start = source.find(signature).expect("function signature exists");
+        let brace_start = source[signature_start..]
+            .find('{')
+            .map(|index| signature_start + index)
+            .expect("function body starts");
+        let mut depth = 0usize;
+
+        for (offset, ch) in source[brace_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = brace_start + offset + ch.len_utf8();
+                        return source[brace_start..end].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        panic!("function body closes");
+    }
+
     fn local_only_test_packet() -> openlife_core::agent::RuntimeHSPacket {
         openlife_core::agent::RuntimeHSPacket {
             selected_policies: vec![openlife_core::agent::SelectedPolicyRef {
