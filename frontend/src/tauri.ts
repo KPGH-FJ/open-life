@@ -51,6 +51,9 @@ import type {
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterNarrowImplementationPlanInput,
   DefaultChatAdapterNarrowImplementationPlanDraft,
+  DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput,
+  DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult,
+  DefaultChatAdapterNarrowImplementationPlanReviewSummary,
   DefaultChatAdapterDryRunInput,
   DefaultChatAdapterDryRunReport,
   DefaultChatAdapterDryRunReviewDecisionInput,
@@ -505,6 +508,21 @@ export async function draftDefaultChatAdapterNarrowImplementationPlan(
   return safeInvoke<DefaultChatAdapterNarrowImplementationPlanDraft>(
     "draft_default_chat_adapter_narrow_implementation_plan",
     { input }
+  );
+}
+
+export async function recordDefaultChatAdapterNarrowImplementationPlanReviewDecision(
+  input: DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput
+): Promise<DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult> {
+  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult>(
+    "record_default_chat_adapter_narrow_implementation_plan_review_decision",
+    { input }
+  );
+}
+
+export async function getDefaultChatAdapterNarrowImplementationPlanReviewSummary(): Promise<DefaultChatAdapterNarrowImplementationPlanReviewSummary> {
+  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanReviewSummary>(
+    "get_default_chat_adapter_narrow_implementation_plan_review_summary"
   );
 }
 

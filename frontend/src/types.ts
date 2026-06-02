@@ -818,6 +818,58 @@ export interface DefaultChatAdapterNarrowImplementationPlanDraft {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export type DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind =
+  | "approve"
+  | "reject"
+  | "request_rework";
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewDecisionInput {
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+  optionalReviewerNote?: string;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult {
+  recorded: boolean;
+  evidenceId?: string | null;
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  narrowPlanDigest?: string | null;
+  planSectionCount: number;
+  createdAt: string;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision {
+  evidenceId: string;
+  decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind;
+  sourceSessionId: string;
+  draftReady: boolean;
+  narrowPlanDigest?: string | null;
+  planSectionCount: number;
+  w57Eligible: boolean;
+  reviewerNoteChecksum?: string | null;
+  reviewerNoteLength: number;
+  reviewerNoteCategory: string;
+  createdAt: string;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanReviewSummary {
+  latestDecision?: DefaultChatAdapterNarrowImplementationPlanReviewLatestDecision | null;
+  approvedCount: number;
+  rejectedCount: number;
+  requestReworkCount: number;
+  latestApprovedPlanDigest?: string | null;
+  latestTimestamp?: string | null;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface DefaultChatAdapterDryRunInput {
   sessionId: string;
   message: string;

@@ -21,7 +21,9 @@ import {
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   draftDefaultChatAdapterNarrowImplementationPlan,
   draftDefaultChatAdapterCutoverImplementationPlan,
+  getDefaultChatAdapterNarrowImplementationPlanReviewSummary,
   getDefaultChatAdapterCutoverPlanReviewSummary,
+  recordDefaultChatAdapterNarrowImplementationPlanReviewDecision,
   recordDefaultChatAdapterCutoverPlanReviewDecision,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
@@ -1174,6 +1176,85 @@ describe("tauri command argument aliases", () => {
     expect(result.draftReady).toBe(true);
     expect(result.discussionGate.eligible).toBe(true);
     expect(result.planSections[0]?.sectionKey).toBe("implementationScope");
+  });
+
+  it("records default chat adapter narrow implementation plan review decisions", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      recorded: true,
+      evidenceId: "evidence-narrow-plan-review",
+      decisionKind: "approve",
+      sourceSessionId: "session-1",
+      draftReady: true,
+      narrowPlanDigest: "sha256:narrow-plan123",
+      planSectionCount: 8,
+      createdAt: "2026-06-02T00:00:00Z",
+      blockingReasons: [],
+    });
+
+    const result = await recordDefaultChatAdapterNarrowImplementationPlanReviewDecision({
+      decisionKind: "approve",
+      sourceSessionId: "session-1",
+      message: "narrow plan review probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+      requiredPromotions: 3,
+      optionalReviewerNote: "approved after review",
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "record_default_chat_adapter_narrow_implementation_plan_review_decision",
+      {
+        input: {
+          decisionKind: "approve",
+          sourceSessionId: "session-1",
+          message: "narrow plan review probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+          requiredPromotions: 3,
+          optionalReviewerNote: "approved after review",
+        },
+      }
+    );
+    expect(result.recorded).toBe(true);
+    expect(result.narrowPlanDigest).toBe("sha256:narrow-plan123");
+  });
+
+  it("loads default chat adapter narrow implementation plan review summary", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      latestDecision: {
+        evidenceId: "evidence-narrow-plan-review",
+        decisionKind: "approve",
+        sourceSessionId: "session-1",
+        draftReady: true,
+        narrowPlanDigest: "sha256:narrow-plan123",
+        planSectionCount: 8,
+        w57Eligible: true,
+        reviewerNoteChecksum: "sha256:note",
+        reviewerNoteLength: 21,
+        reviewerNoteCategory: "brief",
+        createdAt: "2026-06-02T00:00:00Z",
+      },
+      approvedCount: 1,
+      rejectedCount: 0,
+      requestReworkCount: 0,
+      latestApprovedPlanDigest: "sha256:narrow-plan123",
+      latestTimestamp: "2026-06-02T00:00:00Z",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        narrowImplementationPlanReview: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+      },
+    });
+
+    const result = await getDefaultChatAdapterNarrowImplementationPlanReviewSummary();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_default_chat_adapter_narrow_implementation_plan_review_summary",
+      undefined
+    );
+    expect(result.approvedCount).toBe(1);
+    expect(result.latestDecision?.decisionKind).toBe("approve");
   });
 
   it("invokes default chat adapter contract harness as read-only", async () => {

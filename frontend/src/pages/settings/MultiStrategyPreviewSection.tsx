@@ -28,6 +28,7 @@ import {
   draftDefaultChatAdapterNarrowImplementationPlan,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
+  getDefaultChatAdapterNarrowImplementationPlanReviewSummary,
   getDefaultChatAdapterActivationReviewSummary,
   getDefaultChatAdapterControlledPreviewReviewSummary,
   getDefaultChatAdapterCutoverPlanReviewSummary,
@@ -43,6 +44,7 @@ import {
   recordDefaultChatAdapterControlledPreviewReviewDecision,
   recordDefaultChatAdapterCutoverPlanReviewDecision,
   recordDefaultChatAdapterDryRunReviewDecision,
+  recordDefaultChatAdapterNarrowImplementationPlanReviewDecision,
   recordControlledChatCutoverCandidateReviewDecision,
   recordControlledChatMigrationReviewDecision,
   recordControlledChatMigrationShadowReviewDecision,
@@ -79,6 +81,9 @@ import type {
   DefaultChatAdapterImplementationReadinessReport,
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterNarrowImplementationPlanDraft,
+  DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind,
+  DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult,
+  DefaultChatAdapterNarrowImplementationPlanReviewSummary,
   DefaultChatAdapterOrdinaryEntryPreflightStatus,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
@@ -119,6 +124,7 @@ const SAFE_SUMMARY_KEYS = [
   "cutoverPlanApprovalReadiness",
   "narrowImplementationDiscussionGate",
   "narrowImplementationPlan",
+  "narrowImplementationPlanReview",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -509,6 +515,24 @@ export default function MultiStrategyPreviewSection() {
   );
   const [narrowImplementationPlanDraft, setNarrowImplementationPlanDraft] =
     useState<DefaultChatAdapterNarrowImplementationPlanDraft | null>(null);
+  const [narrowImplementationPlanReviewNote, setNarrowImplementationPlanReviewNote] = useState("");
+  const [narrowImplementationPlanReviewRecording, setNarrowImplementationPlanReviewRecording] =
+    useState(false);
+  const [narrowImplementationPlanReviewError, setNarrowImplementationPlanReviewError] = useState<
+    string | null
+  >(null);
+  const [narrowImplementationPlanReviewResult, setNarrowImplementationPlanReviewResult] =
+    useState<DefaultChatAdapterNarrowImplementationPlanReviewDecisionResult | null>(null);
+  const [
+    narrowImplementationPlanReviewSummaryChecking,
+    setNarrowImplementationPlanReviewSummaryChecking,
+  ] = useState(false);
+  const [
+    narrowImplementationPlanReviewSummaryError,
+    setNarrowImplementationPlanReviewSummaryError,
+  ] = useState<string | null>(null);
+  const [narrowImplementationPlanReviewSummary, setNarrowImplementationPlanReviewSummary] =
+    useState<DefaultChatAdapterNarrowImplementationPlanReviewSummary | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1216,6 +1240,8 @@ export default function MultiStrategyPreviewSection() {
     setNarrowImplementationPlanDrafting(true);
     setNarrowImplementationPlanError(null);
     setNarrowImplementationPlanDraft(null);
+    setNarrowImplementationPlanReviewError(null);
+    setNarrowImplementationPlanReviewResult(null);
     try {
       const draft = await draftDefaultChatAdapterNarrowImplementationPlan({
         sourceSessionId: "settings-dry-run",
@@ -1230,6 +1256,51 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setNarrowImplementationPlanDrafting(false);
+    }
+  };
+
+  const handleNarrowImplementationPlanReviewSummaryRefresh = async () => {
+    setNarrowImplementationPlanReviewSummaryChecking(true);
+    setNarrowImplementationPlanReviewSummaryError(null);
+    try {
+      const summary = await getDefaultChatAdapterNarrowImplementationPlanReviewSummary();
+      setNarrowImplementationPlanReviewSummary(summary);
+    } catch (e) {
+      setNarrowImplementationPlanReviewSummaryError(
+        `Narrow implementation plan review summary failed: ${readableError(e)}`
+      );
+    } finally {
+      setNarrowImplementationPlanReviewSummaryChecking(false);
+    }
+  };
+
+  const handleRecordNarrowImplementationPlanReviewDecision = async (
+    decisionKind: DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind
+  ) => {
+    setNarrowImplementationPlanReviewRecording(true);
+    setNarrowImplementationPlanReviewError(null);
+    setNarrowImplementationPlanReviewResult(null);
+    try {
+      const trimmedNote = narrowImplementationPlanReviewNote.trim();
+      const result = await recordDefaultChatAdapterNarrowImplementationPlanReviewDecision({
+        decisionKind,
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+        ...(trimmedNote ? { optionalReviewerNote: trimmedNote } : {}),
+      });
+      setNarrowImplementationPlanReviewResult(result);
+      if (result.recorded) {
+        setNarrowImplementationPlanReviewNote("");
+        await handleNarrowImplementationPlanReviewSummaryRefresh();
+      }
+    } catch (e) {
+      setNarrowImplementationPlanReviewError(
+        `Narrow implementation plan review recording failed: ${readableError(e)}`
+      );
+    } finally {
+      setNarrowImplementationPlanReviewRecording(false);
     }
   };
 
@@ -6074,6 +6145,235 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
             No narrow implementation plan draft loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Narrow Implementation Plan Review
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Explicit W59 human review evidence for the W58 narrow implementation plan draft. It
+              records approve, reject, or request rework metadata only; it does not implement,
+              route, activate, or migrate default Chat.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleNarrowImplementationPlanReviewSummaryRefresh}
+            disabled={narrowImplementationPlanReviewSummaryChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              narrowImplementationPlanReviewSummaryChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={narrowImplementationPlanReviewSummaryChecking ? "animate-spin" : undefined}
+            />
+            {narrowImplementationPlanReviewSummaryChecking
+              ? "Refreshing..."
+              : "Refresh Narrow Plan Review"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          Reviewer notes are never stored as raw text. Only checksum, length, and bounded category
+          metadata are persisted when a decision is recorded.
+        </div>
+
+        <div className="mt-4 space-y-3">
+          <label className="block">
+            <span className="text-xs font-medium text-stone-700">
+              Narrow implementation reviewer note
+            </span>
+            <textarea
+              value={narrowImplementationPlanReviewNote}
+              onChange={event => setNarrowImplementationPlanReviewNote(event.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-sm text-stone-800 outline-none focus:border-stone-500"
+              placeholder="Optional narrow plan reviewer note; only metadata is stored."
+            />
+          </label>
+
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["approve", "Approve Narrow Plan"],
+              ["reject", "Reject Narrow Plan"],
+              ["request_rework", "Request Narrow Plan Rework"],
+            ].map(([decisionKind, label]) => (
+              <button
+                key={decisionKind}
+                type="button"
+                onClick={() =>
+                  handleRecordNarrowImplementationPlanReviewDecision(
+                    decisionKind as DefaultChatAdapterNarrowImplementationPlanReviewDecisionKind
+                  )
+                }
+                disabled={narrowImplementationPlanReviewRecording}
+                className={classNames(
+                  "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+                  narrowImplementationPlanReviewRecording
+                    ? "bg-stone-100 text-stone-400"
+                    : decisionKind === "approve"
+                      ? "bg-emerald-700 text-white hover:bg-emerald-800"
+                      : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+                )}
+              >
+                {decisionKind === "approve" ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {narrowImplementationPlanReviewError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {narrowImplementationPlanReviewError}
+          </div>
+        )}
+
+        {narrowImplementationPlanReviewSummaryError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {narrowImplementationPlanReviewSummaryError}
+          </div>
+        )}
+
+        {narrowImplementationPlanReviewResult && (
+          <div className="mt-4 space-y-2 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+            <div className="font-medium text-stone-900">
+              {narrowImplementationPlanReviewResult.recorded
+                ? "Narrow implementation plan review recorded"
+                : "Narrow implementation plan review blocked"}
+            </div>
+            <div>recorded: {String(narrowImplementationPlanReviewResult.recorded)}</div>
+            <div>decisionKind: {narrowImplementationPlanReviewResult.decisionKind}</div>
+            <div>sourceSessionId: {narrowImplementationPlanReviewResult.sourceSessionId}</div>
+            <div>draftReady: {String(narrowImplementationPlanReviewResult.draftReady)}</div>
+            <div>planSectionCount: {narrowImplementationPlanReviewResult.planSectionCount}</div>
+            <div className="break-all">
+              narrowPlanDigest: {narrowImplementationPlanReviewResult.narrowPlanDigest ?? "none"}
+            </div>
+            {narrowImplementationPlanReviewResult.evidenceId && (
+              <div>evidenceId: {narrowImplementationPlanReviewResult.evidenceId}</div>
+            )}
+            {narrowImplementationPlanReviewResult.blockingReasons.length > 0 && (
+              <div className="space-y-1">
+                {narrowImplementationPlanReviewResult.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {narrowImplementationPlanReviewSummary ? (
+          <div className="mt-4 space-y-3">
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["approvedCount", String(narrowImplementationPlanReviewSummary.approvedCount)],
+                ["rejectedCount", String(narrowImplementationPlanReviewSummary.rejectedCount)],
+                [
+                  "requestReworkCount",
+                  String(narrowImplementationPlanReviewSummary.requestReworkCount),
+                ],
+                [
+                  "latestApprovedPlanDigest",
+                  narrowImplementationPlanReviewSummary.latestApprovedPlanDigest ?? "none",
+                ],
+                [
+                  "latestTimestamp",
+                  narrowImplementationPlanReviewSummary.latestTimestamp ?? "none",
+                ],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {narrowImplementationPlanReviewSummary.latestDecision && (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700">
+                <div className="font-medium text-stone-900">Latest decision</div>
+                <div className="mt-1">
+                  latestDecisionKind:{" "}
+                  {narrowImplementationPlanReviewSummary.latestDecision.decisionKind}
+                </div>
+                <div>
+                  draftReady:{" "}
+                  {String(narrowImplementationPlanReviewSummary.latestDecision.draftReady)}
+                </div>
+                <div>
+                  w57Eligible:{" "}
+                  {String(narrowImplementationPlanReviewSummary.latestDecision.w57Eligible)}
+                </div>
+                <div className="break-all">
+                  latestNarrowPlanDigest:{" "}
+                  {narrowImplementationPlanReviewSummary.latestDecision.narrowPlanDigest ?? "none"}
+                </div>
+                <div>
+                  reviewerNoteCategory:{" "}
+                  {narrowImplementationPlanReviewSummary.latestDecision.reviewerNoteCategory}
+                </div>
+                <div>
+                  reviewerNoteLength:{" "}
+                  {narrowImplementationPlanReviewSummary.latestDecision.reviewerNoteLength}
+                </div>
+              </div>
+            )}
+
+            {safeSummaryEntries(narrowImplementationPlanReviewSummary.metadataSafeSummary).length >
+              0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(narrowImplementationPlanReviewSummary.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {narrowImplementationPlanReviewSummary.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {narrowImplementationPlanReviewSummary.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No narrow implementation plan review blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+            No narrow implementation plan review summary loaded.
           </div>
         )}
       </section>

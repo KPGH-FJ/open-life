@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W58 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W59 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -182,6 +182,13 @@ stable digest, while eligible gate output returns metadata-safe human-review
 plan sections and a stable digest. It creates no records, runs no
 runtime/model/tool/preview call, changes no routing, and is not default Chat
 migration.
+W59 adds explicit default Chat adapter narrow implementation plan review
+evidence. `record_default_chat_adapter_narrow_implementation_plan_review_decision`
+calls W58 first; blocked draft approve writes no evidence, while ready draft
+approve/reject/request_rework writes metadata-safe Evidence. The summary command
+is read-only. Reviewer notes are reduced to checksum/length/category only, raw
+note/prompt/output/tool payload/plan content are not stored, routing is
+unchanged, and W59 is not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -566,11 +573,12 @@ The key boundary is unchanged:
 | W56 Default Chat Adapter Ordinary Entry Preflight Status | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/types.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `get_default_chat_adapter_ordinary_entry_preflight_status`, frontend wrapper, and Settings status surface. It reports send/stream ordinary-entry preflight readiness, legacy entry, side-effect lock, route status, blockers, and metadata-safe summary. It does not run runtime/model/tool calls, does not write Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write records, and is not default Chat migration. |
 | W57 Default Chat Adapter Narrow Implementation Discussion Gate | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/types.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `check_default_chat_adapter_narrow_implementation_discussion_gate`, frontend wrapper, and Settings panel. It combines W48 cutover plan approval readiness with W56 ordinary-entry preflight status, requiring both ordinary preflights ready, default Chat unchanged, controlled adapter disabled, automatic migration disabled, and send/stream paths still `legacy_stream`. It creates no records, runs no runtime/model/tool call, changes no routing, and is only discussion readiness for a narrow adapter implementation slice, not default Chat migration. |
 | W58 Default Chat Adapter Narrow Implementation Plan Draft | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/types.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `draft_default_chat_adapter_narrow_implementation_plan`, frontend wrapper, and Settings panel. It calls W57 first; blocked discussion gate returns `draftReady=false`, blockers, no plan sections, and no stable digest, while eligible discussion gate returns metadata-safe human-review plan sections plus a stable digest. It creates no Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write records, runs no runtime/model/tool/preview call, changes no routing, and is only a plan draft for a narrow adapter implementation slice, not default Chat migration. |
+| W59 Default Chat Adapter Narrow Implementation Plan Review Evidence | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/types.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds explicit `record_default_chat_adapter_narrow_implementation_plan_review_decision` and read-only `get_default_chat_adapter_narrow_implementation_plan_review_summary`. The record command calls W58 first; blocked draft approve writes no evidence, while ready draft approve/reject/request_rework writes metadata-safe Evidence. Evidence stores only decision/source session/draftReady/W57 eligibility/narrow plan digest/plan section count/reviewer-note checksum-length-category/timestamp metadata. It creates no AgentRun/Proposal/Memory/LifeModel/MCP audit/chat/external write records, runs no runtime/model/tool/preview call, changes no routing, and normal Send / `send_message` / `start_stream_message` do not call it. This is plan review evidence, not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, and narrow implementation plan draft only as implementation-discussion evidence; default Chat remains unchanged
+keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, narrow implementation plan draft, and narrow implementation plan review evidence only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -613,8 +621,9 @@ W54 only syncs authority documents so Agents do not follow stale W22 guidance,
 W55 only adds an ordinary-entry preflight / side-effect lock before legacy
 entry, W56 only adds a read-only ordinary-entry preflight status surface, and
 W57 only adds a read-only narrow implementation discussion gate over W48/W56
-evidence, and W58 only adds a read-only narrow implementation plan draft over
-W57. Default `Send`, `send_message`, and `start_stream_message` remain
+evidence, W58 only adds a read-only narrow implementation plan draft over W57,
+and W59 only records metadata-safe human review evidence over that W58 draft.
+Default `Send`, `send_message`, and `start_stream_message` remain
 unchanged until a later reviewed migration stage with separate implementation
 work and explicit human approval.
 

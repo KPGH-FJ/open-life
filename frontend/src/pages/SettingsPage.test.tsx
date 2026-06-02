@@ -2299,6 +2299,94 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("records default chat adapter narrow implementation plan review without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "record_default_chat_adapter_narrow_implementation_plan_review_decision") {
+        return Promise.resolve({
+          recorded: true,
+          evidenceId: "evidence-narrow-plan-review",
+          decisionKind: args?.input?.decisionKind ?? "approve",
+          sourceSessionId: "settings-dry-run",
+          draftReady: true,
+          narrowPlanDigest: "sha256:narrow-plan-review-123",
+          planSectionCount: 8,
+          createdAt: "2026-06-02T00:00:00Z",
+          blockingReasons: [],
+        });
+      }
+      if (cmd === "get_default_chat_adapter_narrow_implementation_plan_review_summary") {
+        return Promise.resolve({
+          latestDecision: {
+            evidenceId: "evidence-narrow-plan-review",
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            draftReady: true,
+            narrowPlanDigest: "sha256:narrow-plan-review-123",
+            planSectionCount: 8,
+            w57Eligible: true,
+            reviewerNoteChecksum: "sha256:reviewer-note",
+            reviewerNoteLength: 19,
+            reviewerNoteCategory: "brief",
+            createdAt: "2026-06-02T00:00:00Z",
+          },
+          approvedCount: 1,
+          rejectedCount: 0,
+          requestReworkCount: 0,
+          latestApprovedPlanDigest: "sha256:narrow-plan-review-123",
+          latestTimestamp: "2026-06-02T00:00:00Z",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            narrowImplementationPlanReview: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Narrow Implementation Plan Review")
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Narrow implementation reviewer note"), {
+      target: { value: "Looks safe to review" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve Narrow Plan" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "record_default_chat_adapter_narrow_implementation_plan_review_decision",
+        {
+          input: {
+            decisionKind: "approve",
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+            optionalReviewerNote: "Looks safe to review",
+          },
+        }
+      );
+    });
+    expect(
+      await screen.findByText("Narrow implementation plan review recorded")
+    ).toBeInTheDocument();
+    expect(screen.getByText("narrowPlanDigest: sha256:narrow-plan-review-123")).toBeInTheDocument();
+    expect(
+      screen.getByText("narrowImplementationPlanReview: default_chat_adapter")
+    ).toBeInTheDocument();
+    expect(screen.getByText("approvedCount: 1")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("checks default chat adapter contract harness without routing controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_default_chat_adapter_contract_harness") {

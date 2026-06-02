@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W58 completion/status index. This is not a second roadmap.
+   - Compact W1-W59 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W58 through sustained Runtime Migration
+Current implementation has completed W1-W59 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -87,11 +87,12 @@ preflight status surface for Settings review plus a read-only narrow
 implementation discussion gate over current W48 cutover plan approval readiness
 and W56 ordinary-entry preflight status plus a read-only narrow implementation
 plan draft over W57 that returns metadata-safe human-review plan sections and a
-stable digest only when the W57 gate remains eligible.
+stable digest only when the W57 gate remains eligible plus explicit metadata-safe
+human review evidence over the current W58 narrow implementation plan draft.
 The next practical sequence is:
 
 ```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, and narrow implementation plan draft only as implementation-discussion evidence; default Chat remains unchanged
+keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, narrow implementation plan draft, and narrow implementation plan review evidence only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -100,7 +101,7 @@ keep authority docs synced, then use cutover plan approval readiness, route guar
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W58 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight/ordinary-entry preflight status/narrow implementation discussion gate/narrow implementation plan draft. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W59 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight/ordinary-entry preflight status/narrow implementation discussion gate/narrow implementation plan draft/narrow implementation plan review evidence. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -569,6 +570,15 @@ returns `draftReady=false`, blocking reasons, no plan sections, and no digest,
 while eligible W57 output returns only metadata-safe human-review plan sections
 and a stable digest. It creates no records, runs no runtime/model/tool/preview
 call, changes no routing, and is not default Chat migration.
+
+W59 adds explicit narrow implementation plan review evidence through
+`record_default_chat_adapter_narrow_implementation_plan_review_decision`, the
+read-only `get_default_chat_adapter_narrow_implementation_plan_review_summary`,
+the frontend wrappers, and the Settings experimental panel. The record command
+calls W58 first; blocked draft approve writes no evidence, while ready draft
+approve/reject/request_rework writes metadata-safe Evidence with reviewer note
+checksum/length/category only. It stores no raw note, prompt/output, tool
+payload, or plan content, changes no routing, and is not default Chat migration.
 
 ## 6. Agent Rules
 
