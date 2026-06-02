@@ -1,21 +1,22 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents
+> Status: authoritative document index for Agents, W63 complete
 
-This file prevents old planning documents from accidentally steering new Agent
-work. If two documents disagree, use the precedence below.
+This file prevents old planning documents from steering new Agent work. If two
+documents disagree, use the precedence below and treat lower-priority stale text
+as reference only.
 
 ## 1. Precedence
 
 1. `AGENTS.md`
-   - Project-wide Agent instructions and current Tool Taxonomy.
+   - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
-   - This document authority map.
+   - This authority map and current entry point.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W60 completion/status index. This is not a second roadmap.
+   - Compact W1-W63 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -28,81 +29,57 @@ work. If two documents disagree, use the precedence below.
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
 8. Historical/reference documents.
-   - These can explain why earlier decisions were made, but cannot override
-     the current program.
+   - Useful for context, but never authoritative for current task order.
 
-## 2. Current Development Order
+## 2. Current Position
 
-```text
-tool/proposal hygiene
--> thin runtime spine
--> ReAct convergence
--> maturation loop
--> governor
--> Plan-Execute
--> strategy abstraction
-```
+Current latest status is **W63 complete**. W61-W63 are docs/index整理 stages that
+compress W1-W60 route status into a bounded entry for the next narrow adapter
+implementation slice. They add no Rust/TypeScript code, no commands, no
+settings surface, no runtime/model/tool call, and no routing change.
 
-Current implementation has completed W1-W60 through sustained Runtime Migration
-Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
-Controlled Pilot with fallback, reviewed pilot response promotion,
-source-bound post-promotion validation, metadata-safe promotion evidence, a
-read-only promotion readiness gate, and a reviewed migration plan draft
-generator plus metadata-safe manual migration review decision evidence and a
-read-only implementation gate plus a non-default controlled migration shadow
-run plus metadata-safe manual shadow review evidence and a read-only cutover
-planning readiness gate plus a non-default cutover candidate adapter for Chat
-contract-shape validation plus metadata-safe cutover candidate review evidence
-plus a read-only cutover candidate promotion readiness gate plus a read-only
-default Chat runtime boundary status plus a human-review-only default Chat
-adapter activation plan draft plus metadata-safe activation review decision
-evidence plus a read-only default Chat adapter activation implementation gate
-plus a read-only default Chat adapter disabled routing scaffold plus a read-only
-default Chat adapter contract harness plus a write-disabled default Chat adapter
-dry-run invocation boundary plus metadata-safe default Chat adapter dry-run
-review evidence plus a read-only default Chat adapter implementation readiness
-gate plus an explicit non-default default Chat adapter controlled preview plus
-metadata-safe human review decision evidence over that controlled preview plus
-a read-only controlled preview approval readiness gate over W42/W44 evidence
-and the approved W43 preview AgentRun current safety state plus a read-only
-default Chat adapter cutover implementation plan draft over W45 readiness plus
-metadata-safe cutover plan review decision evidence over the current W46 draft
-plus a read-only cutover plan approval readiness gate over W46/W47 evidence
-plus a shared default Chat adapter route guard scaffold that keeps ordinary
-send/stream fail-closed on `legacy_stream` plus a pure default Chat adapter
-cutover invocation harness that keeps ordinary send/stream in `legacy_guarded`,
-write-disabled, zero-tool, no-runtime/no-model/no-tool/no-business-write mode
-plus a pure default Chat adapter invocation plan that explicitly selects
-`legacy_stream` and keeps `controlled_adapter` as a disabled candidate plus a
-pure default Chat adapter invocation boundary that only permits the ordinary
-send/stream callsites to enter `legacy_stream` after a side-effect-free guard
-plus a typed default Chat adapter callsite contract that binds send and stream
-callsites to their legacy route path and contract shape plus an authority
-roadmap sync that realigns high-priority route documents with W1-W53 code
-status plus a pure ordinary-entry preflight / side-effect lock that keeps
-ordinary `send_message` and `start_stream_message` on `legacy_stream` with
-typed contract ready, controlled executor unattached, migration disabled, and
-zero runtime/model/tool/write pre-entry budget plus a read-only ordinary-entry
-preflight status surface for Settings review plus a read-only narrow
-implementation discussion gate over current W48 cutover plan approval readiness
-and W56 ordinary-entry preflight status plus a read-only narrow implementation
-plan draft over W57 that returns metadata-safe human-review plan sections and a
-stable digest only when the W57 gate remains eligible, explicit metadata-safe
-human review evidence over the current W58 narrow implementation plan draft,
-and a read-only W60 approval readiness gate over the current W58/W59 digest.
-The next practical sequence is:
+The next state is: narrow adapter implementation 前的索引整理完成态. If the next
+implementation slice is labeled W64, W64 is still future work and must be
+separately implemented, reviewed, and verified. W63 does not authorize W64.
 
-```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, narrow implementation discussion gate, narrow implementation plan draft, narrow implementation plan review evidence, and narrow implementation plan approval readiness only as implementation-discussion evidence; default Chat remains unchanged
-```
+Hard current constraints:
 
-## 3. Current Authoritative Entry Points
+- default Chat remains `legacy_stream`.
+- W19-W60 readiness/review/preview/gate outputs are not migration permission.
+- W61-W63 are整理阶段, not default Chat migration.
+- Ordinary `send_message` / `start_stream_message` must not call W19-W60
+  command surfaces.
+- Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
+  preflight, and those guards may only fail closed while preserving
+  `legacy_stream`.
+
+## 3. W1-W63 Compression Map
+
+For the row-level structured index, use
+`plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
+stage id, name, status, command/surface type, read-only/write-disabled/
+metadata-safe safety, default Chat impact, and next dependency.
+
+| Range | Compressed meaning | Default Chat authority |
+| --- | --- | --- |
+| W1-W8 | Runtime, LifeModel, Strategy, and MultiStrategy foundations | No migration authority |
+| W9-W18 | Non-default preview, preview audit, and migration gate evidence surfaces | No migration authority |
+| W19-W23 | Controlled pilot eligibility, explicit pilot, reviewed promotion, source binding, promotion evidence | Explicit pilot/promotion only; ordinary Send unchanged |
+| W24-W27 | Promotion readiness, migration plan draft, review evidence, implementation gate | Readiness/approval is discussion only, not migration permission |
+| W28-W33 | Shadow run/review, cutover readiness, candidate adapter/review, candidate promotion readiness | Non-default write-disabled validation only |
+| W34-W42 | Default Chat boundary, activation plan/review/gate, disabled routing, contract harness, dry run/review, implementation readiness | Read-only or non-default evidence only |
+| W43-W48 | Controlled preview/review/readiness and cutover implementation plan/review/readiness | Non-default preview and planning only |
+| W49-W55 | Route guard, invocation harness/plan/boundary, typed callsite contract, ordinary-entry preflight | Pure fail-closed guard only; route stays `legacy_stream` |
+| W56-W60 | Ordinary-entry status, narrow discussion gate, narrow plan draft/review/approval readiness | Settings/status/planning only; ordinary entries must not call commands |
+| W61-W63 | Docs/index整理 and W1-W63 compression freeze | Docs only; no default Chat effect |
+
+## 4. Current Authoritative Entry Points
 
 | Document | Use for |
 | --- | --- |
-| `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
+| `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W60 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight/ordinary-entry preflight status/narrow implementation discussion gate/narrow implementation plan draft/narrow implementation plan review evidence/narrow implementation plan approval readiness. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W63 structured status index and compressed guardrail map. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -110,7 +87,7 @@ keep authority docs synced, then use cutover plan approval readiness, route guar
 | `plans/openlife_development_plan.md` | Current execution route, already aligned to the LifeModel-Governed program. |
 | `plans/openlife_codex_execution_playbook.md` | How to slice and verify individual Codex tasks. |
 
-## 4. Historical Or Scoped Reference Documents
+## 5. Historical Or Scoped Reference Documents
 
 These files are useful context, but they are not current execution authority:
 
@@ -128,7 +105,7 @@ These files are useful context, but they are not current execution authority:
 | `docs/ARCHITECTURE.md` | Quick architecture explainer; defer to current program for implementation order. |
 | `docs/DEV_HANDOVER.md` | General handover; defer to this index and AGENTS for current Agent work. |
 
-## 5. Tool Status Guardrail
+## 6. Tool Status Guardrail
 
 `calendar.propose_event` and `email.propose_draft` are P1 proposal-only
 governed executors. They create `ScheduledTask` / `DataExport` proposals and
@@ -143,462 +120,41 @@ audit is a metadata-safe outer run; any ReAct inner run id is child metadata and
 must not become the product trace's primary query id. Do not replace
 `send_message` or the default Chat path just because the preview path works.
 
-`check_runtime_migration_gate` and the Settings Runtime Migration Gate panel are
-read-only evidence surfaces over existing preview audit state. They must not run
-preview, ReAct, PlanExecute, tools, proposal apply, external writes, or
-LifeModel/Memory writes, and they are not Chat migration switches. Controlled
-Chat migration may only proceed as a smaller pilot after gate evidence stays
-clean across runs.
+`check_runtime_migration_gate`, W19 pilot eligibility, W24/W27/W30/W33/W37/
+W42/W45/W48/W57/W60 readiness gates, W25/W35/W46/W58 plan drafts, W26/W29/W32/
+W36/W41/W44/W47/W59 review evidence, W28/W31/W40/W43 non-default run/preview
+commands, and W56 status commands are not migration permission. They are
+readiness, review, preview, draft, evidence, or status surfaces only.
 
-`check_controlled_chat_pilot_eligibility` and the Settings Pilot eligibility
-panel are also read-only. They default to the latest 3 MultiStrategy preview
-AgentRuns, recompute gate reports, and expose `eligible`, clean run count,
-checked run ids, blocking reasons, and the latest gate report. They must not
-create AgentRuns, Proposals, Actions, Observations, audit rows, LifeModel/Memory
-writes, or run any runtime/tool/proposal-apply path.
+Default `Send`, ordinary `send_message`, and ordinary `start_stream_message`
+must remain on `legacy_stream`. They must not call W19-W60 command surfaces.
+The only allowed ordinary-entry adapter code is W49-W55 pure guard/preflight
+logic, which is read-only/pure, write-disabled, metadata-safe, side-effect-free,
+and fail-closed.
 
-W20 adds only a very small Chat-page Controlled Pilot. It is explicit, single
-turn, and fallback-preserving: normal Send does not call eligibility/gate/preview;
-the pilot calls eligibility first, does not call preview when blocked, runs
-`run_multi_strategy_agent_preview` only after eligibility passes, forces
-`allowWrites=false`, and displays success as “Pilot response” outside normal
-assistant history. Default Chat is still not migrated. Reviewed pilot response
-promotion is a later phase, not part of W20.
-
-W24 adds only `check_controlled_pilot_promotion_readiness` and its Settings
-panel. The gate reads existing W23 promotion evidence, defaults to 3 required
-metadata-safe promotions, accepts `sessionId` for a future filtered store path
-but currently reports a global EvidenceStore summary, and must not create
-AgentRuns, Proposals, Actions, Observations, LifeModel/Memory writes, external
-tool writes, or new evidence. A ready result means discussion eligibility only;
-it is not permission to migrate default Chat.
-
-W25 adds only `draft_controlled_chat_migration_plan` and its Settings Draft
-Migration Plan panel. The command reuses W24 readiness output. When readiness is
-blocked it returns `draftReady=false` plus blockers and does not generate plan
-sections. When readiness passes it returns a human-review-only scope,
-preconditions, rollback plan, fallback plan, and test plan with
-`manualReviewRequired=true` and `notAutomaticMigration=true`. It must not
-replace default Chat, modify default runtime feature flags, create AgentRuns,
-Proposals, Memory writes, LifeModel patches, promotion evidence, or output raw
-user content, raw assistant output, or tool payloads.
-
-W26 adds only `record_controlled_chat_migration_review_decision`,
-`get_controlled_chat_migration_review_decision_summary`, and the Settings
-Migration Review Decision panel. The record command first calls W25 draft,
-rejects blocked-draft `approve` without writing evidence, and records ready
-draft `approve` / `reject` / `request_rework` as metadata-safe EvidenceStore
-decision evidence only. Evidence metadata must include
-`evidenceKind=migration_review_decision`, `metadataSafe=true`, `draftReady`,
-`decisionKind`, readiness counts, draft hash, and `createdAt`; reviewer notes
-are stored only as length, checksum, and bounded category. The summary command
-is read-only and must not read raw transcript or create AgentRuns, Proposals,
-Memory writes, LifeModel patches, or external tool results. Approval only allows
-next-stage implementation discussion; it is not Chat migration permission.
-
-W27 adds only `check_controlled_chat_migration_implementation_gate` and the
-Settings Implementation Gate panel. The command reads current W24 readiness,
-the current W25 draft hash, and existing W26 metadata-safe review decision
-evidence. It returns implementation eligibility, latest decision, readiness
-report, draft hash match, approved-after-latest-draft status, and blockers. The
-latest metadata-safe decision must be `approve`; latest `reject` or
-`request_rework`, approved draft hash mismatch, or current readiness failure
-must block. It must not replace default Chat, modify feature flags, create new
-review evidence, create AgentRuns, Proposals, Memory writes, LifeModel patches,
-or invoke external tools. Eligible means controlled migration implementation
-discussion only; it is not permission to switch default Chat.
-
-W28 adds only `run_controlled_chat_migration_shadow_run` and the Settings
-Shadow Run panel. The command first calls the W27 implementation gate. If the
-gate is blocked, it returns blockers and does not execute runtime. If eligible,
-it runs a bounded non-default controlled runtime preview with `allowWrites=false`
-and returns only `shadowRunReady`, the implementation gate report,
-strategy/payload kind, metadata-safe summary, warnings, and blockers. It may
-create a metadata-safe `controlled_migration_shadow_run` AgentRun audit, but it
-must not create Proposal, Memory, LifeModel patch, Evidence, chat message, or
-external tool result records. It must not expose raw user prompt, raw assistant
-output, or full tool payload. Default Send, `send_message`, and
-`start_stream_message` must not call the shadow run command.
-
-W29 adds only `record_controlled_chat_migration_shadow_review_decision`,
-`get_controlled_chat_migration_shadow_review_summary`, and the Settings Shadow
-Review panel. The record command reads an existing shadow AgentRun and records
-human `approve` / `reject` / `request_rework` decisions as metadata-safe
-EvidenceStore evidence only. Every decision is allowed only when the AgentRun exists,
-has `reasoning_strategy=controlled_migration_shadow_run`, is completed,
-`allowWrites=false`, `metadataSafe=true`, and has no Chat message, Proposal,
-Memory, LifeModel patch, or external-write side effects. Evidence metadata is
-strictly limited to `shadowRunId`, `decisionKind`, `reviewerNoteChecksum`,
-`reviewerNoteLength`, `reviewerNoteCategory`, `readinessSummaryDigest`, and
-`createdAt`; it must not store reviewer raw text, shadow prompt, shadow output,
-or tool payload. The summary command is read-only. Default Send,
-`send_message`, and `start_stream_message` must not call shadow review commands.
-W29 is review evidence, not Chat migration.
-
-W30 adds only `check_controlled_chat_cutover_readiness` and the Settings
-Cutover Readiness panel. The command is read-only and requires the current W27
-implementation gate to be eligible, the latest W29 shadow review decision to be
-`approve`, and the approved `shadowRunId` AgentRun to still exist as a
-completed `controlled_migration_shadow_run` with `allowWrites=false`,
-`metadataSafe=true`, and no Chat/Proposal/Memory/LifeModel patch or external
-write side effects. It returns only metadata-safe readiness summary fields and
-blockers. It must not create AgentRuns, Evidence, Proposals, Memory writes,
-LifeModel patches, MCP audit rows, or chat messages; it must not run ReAct,
-PlanExecute, preview, or shadow run. W30 is cutover planning readiness for
-implementation discussion, not default Chat migration.
-
-W31 adds only `run_controlled_chat_cutover_candidate` and the Settings Cutover
-Candidate panel. The command first calls W30 cutover readiness; if it is not
-eligible, W31 returns blocked output and must not execute runtime. Only after
-W30 is eligible may it run one non-default controlled runtime candidate with
-`allowWrites=false`, `maxToolCalls=0`, no proposal apply, no Memory write, no
-LifeModel patch, and no external write. The result is for Chat contract-shape
-validation only: `candidateReady`, `candidateRunId`, `outputPreview` or
-`userOutput`, `contractShape`, metadata-safe summary, warnings, and blockers.
-It may create a metadata-safe `controlled_chat_cutover_candidate` AgentRun
-audit, but must not save raw user prompt, raw assistant output, tool payload,
-Chat message, Proposal, Memory, LifeModel patch, Evidence, MCP audit, or
-external tool result. Default Send, `send_message`, and
-`start_stream_message` must not call this command. W31 is a non-default
-candidate adapter, not default Chat migration.
-
-W32 adds only `record_controlled_chat_cutover_candidate_review_decision`,
-`get_controlled_chat_cutover_candidate_review_summary`, and the Settings
-Cutover Candidate Review panel. The record command reads an existing W31
-candidate AgentRun and records human `approve` / `reject` / `request_rework`
-decisions as metadata-safe EvidenceStore evidence only. Approve requires the
-AgentRun to exist, be completed, have
-`reasoning_strategy=controlled_chat_cutover_candidate`,
-`contractShape=send_message_compatible`, `candidateReady=true`,
-`allowWrites=false`, `maxToolCalls=0`, `metadataSafe=true`, and no
-Chat/Proposal/Memory/LifeModel/Evidence/MCP audit/external write side effects.
-Evidence metadata is strictly limited to `candidateRunId`, `decisionKind`,
-`contractShape`, `candidateSummaryDigest`, `reviewerNoteChecksum`,
-`reviewerNoteLength`, `reviewerNoteCategory`, and `createdAt`; it must not
-store reviewer raw text, candidate userOutput, raw prompt, raw assistant output,
-tool payload, or candidate output. The summary command is read-only. Default
-Send, `send_message`, and `start_stream_message` must not call candidate review
-commands. W32 is candidate review evidence, not default Chat migration.
-
-W33 adds only `check_controlled_chat_cutover_candidate_promotion_readiness`
-and the Settings Candidate Promotion Readiness panel. The command is read-only:
-it reuses W30 cutover readiness, reads W32 metadata-safe review evidence, checks
-that the latest candidate review decision is `approve`, verifies each approved
-candidate AgentRun still exists and is completed, send-message-compatible,
-write-disabled, zero-tool, metadata-safe, and side-effect-free, and confirms
-default Chat is unchanged. It must not create AgentRuns, Evidence, Proposals,
-Memory, LifeModel patches, MCP audit rows, chat messages, or runtime/tool/model
-calls. Default Send, `send_message`, and `start_stream_message` must not call
-candidate promotion readiness. W33 is implementation-planning readiness, not
-default Chat migration.
-
-W34 adds only `get_default_chat_runtime_boundary_status` and the Settings
-Default Chat Runtime Boundary panel. The command is read-only and reports that
-the current default Chat runtime remains `legacy_stream`, that automatic
-migration is disabled, that no controlled candidate is available on the default
-path, and that candidate promotion readiness remains required before any future
-activation planning. It must not call W19-W33 gates, run runtime/tool/model
-paths, or create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
-audit rows, or chat messages. Default Send, `send_message`, and
-`start_stream_message` must not call default Chat boundary status. W34 is
-boundary observability, not default Chat migration.
-
-W35 adds only `draft_default_chat_adapter_activation_plan` and the Settings
-Default Chat Adapter Activation Plan panel. The command is read-only and
-combines W33 candidate promotion readiness with W34 default Chat runtime
-boundary status. When blocked, it returns blockers and no plan sections. When
-ready, it returns only a human-review activation scope, required preconditions,
-adapter contract checks, fallback, rollback, observability, and test plan, with
-`manualReviewRequired=true`, `notAutomaticMigration=true`, and
-`requiresSeparateImplementation=true`. It must not switch default Chat, modify
-feature flags, run runtime/tool/model paths, or create AgentRuns, Evidence,
-Proposals, Memory, LifeModel patches, MCP audit rows, or chat messages. Default
-Send, `send_message`, and `start_stream_message` must not call the activation
-plan draft. W35 is activation planning, not default Chat migration.
-
-W36 adds only `record_default_chat_adapter_activation_review_decision`,
-`get_default_chat_adapter_activation_review_summary`, and the Settings Default
-Chat Adapter Activation Review Decision panel. The record command first calls
-the W35 activation plan draft. `approve` is rejected without evidence when the
-draft is blocked; ready drafts may record approve/reject/request_rework as
-metadata-safe EvidenceStore records. Evidence metadata stores only decision
-kind, draftReady, activationPlanDigest, candidatePromotionReady, currentMode,
-automaticMigrationEnabled, reviewerNote checksum/length/category, and createdAt.
-The summary command is read-only. Default Send, `send_message`, and
-`start_stream_message` must not call activation review commands. W36 is review
-evidence for implementation gate discussion, not default Chat migration.
-
-W37 adds only `check_default_chat_adapter_activation_implementation_gate` and
-the Settings Default Chat Adapter Activation Implementation Gate panel. The
-command is read-only and combines the current W35 stable activation plan digest
-with W36 metadata-safe latest activation review decision evidence. It requires
-current draft ready, latest approve, digest match, candidate promotion ready,
-default Chat unchanged, `currentMode=legacy_stream`, and automatic migration
-disabled. It must not create AgentRuns, Evidence, Proposals, Memory, LifeModel
-patches, MCP audit rows, chat messages, runtime/tool/model calls, feature flags,
-or default Chat routing changes. Default Send, `send_message`, and
-`start_stream_message` must not call the activation implementation gate. W37 is
-implementation gate readiness for separate implementation discussion, not
-default Chat migration.
-
-W38 adds only `get_default_chat_adapter_routing_status` and the Settings Default
-Chat Adapter Routing Status panel. The command is read-only: it calls the W37
-activation implementation gate, reports `currentMode=legacy_stream`,
-`adapterScaffoldPresent=true`, `controlledAdapterEnabled=false`,
-`defaultSendPath=legacy_stream`, `startStreamPath=legacy_stream`,
-`activationImplementationGateEligible`, blockers, and a metadata-safe summary.
-It must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches,
-MCP audit rows, chat messages, runtime/tool/model calls, feature flags, or
-default Chat routing changes. Default Send, `send_message`, and
-`start_stream_message` must not call adapter routing status. W38 is disabled
-routing scaffold observability, not default Chat migration.
-
-W39 adds only `check_default_chat_adapter_contract_harness` and the Settings
-Default Chat Adapter Contract Harness panel. The command is read-only: it calls
-W38 routing status and validates the disabled adapter contract, including
-`send_message` and `start_stream_message` remaining on `legacy_stream`,
-controlled adapter disabled, and activation implementation gate eligibility. It
-must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
-audit rows, chat messages, runtime/tool/model calls, feature flags, or default
-Chat routing changes. Default Send, `send_message`, and `start_stream_message`
-must not call contract harness. W39 is contract observability, not default Chat
-migration.
-
-W40 adds only `run_default_chat_adapter_dry_run` and the Settings Default Chat
-Adapter Dry Run panel. The command is explicit and non-default: it calls the W39
-contract harness first, blocks without dry-run output when the harness is not
-ready, and when ready returns only a metadata-safe invocation contract result
-with `allowWrites=false`, `maxToolCalls=0`, and
-`defaultChatPathUnchanged=true`. It must not create AgentRuns, Evidence,
-Proposals, Memory, LifeModel patches, MCP audit rows, chat messages,
-runtime/tool/model calls, external writes, feature flags, or default Chat
-routing changes. Default Send, `send_message`, and `start_stream_message` must
-not call adapter dry run. W40 is write-disabled invocation contract
-observability, not default Chat migration.
-
-W41 adds only `record_default_chat_adapter_dry_run_review_decision`,
-`get_default_chat_adapter_dry_run_review_summary`, and the Settings Default Chat
-Adapter Dry Run Review panel. The record command re-runs W40 dry run before
-recording evidence. `approve` records only when dry run is ready; blocked dry-run
-approval writes no evidence. `reject` and `request_rework` record only
-metadata-safe evidence. Reviewer notes are reduced to checksum, length, and
-bounded category. It must not create AgentRuns, Proposals, Memory, LifeModel
-patches, MCP audit rows, chat messages, runtime/tool/model calls, external
-writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call dry-run review commands.
-W41 is dry-run review evidence, not default Chat migration.
-
-W42 adds only `check_default_chat_adapter_implementation_readiness` and the
-Settings Default Chat Adapter Implementation Readiness panel. The command is
-read-only: it combines W37 activation implementation gate, W39 contract harness,
-W40 dry run, and W41 latest dry-run review evidence; ready requires latest
-approve, current dry-run digest match, default Chat unchanged, controlled
-adapter disabled, automatic migration disabled, and send/stream paths still on
-`legacy_stream`. It must not create AgentRuns, Evidence, Proposals, Memory,
-LifeModel patches, MCP audit rows, chat messages, runtime/tool/model calls,
-external writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call implementation
-readiness. W42 is implementation readiness, not default Chat migration.
-
-W43 adds only `run_default_chat_adapter_controlled_preview` and the Settings
-Default Chat Adapter Controlled Preview panel. The command is explicit and
-non-default: it calls W42 implementation readiness first, blocks without runtime
-or AgentRun when readiness is not ready, and when ready runs one controlled
-preview with `allowWrites=false` and `maxToolCalls=0`. Ready output returns a
-SendMessageResult-compatible shape for inspection and may create only a
-metadata-safe adapter preview AgentRun audit. It must not create Evidence,
-Proposals, Memory, LifeModel patches, MCP audit rows, chat messages, external
-writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call controlled preview.
-W43 is controlled implementation preview, not default Chat migration.
-
-W44 adds only `record_default_chat_adapter_controlled_preview_review_decision`,
-`get_default_chat_adapter_controlled_preview_review_summary`, and the Settings
-Default Chat Adapter Controlled Preview Review panel. Approve requires a
-completed W43 preview AgentRun with
-`reasoning_strategy=default_chat_adapter_controlled_preview`,
-`contractShape=send_message_compatible`, `previewReady=true`,
-`allowWrites=false`, `maxToolCalls=0`, `metadataSafe=true`, and no side effects.
-Evidence metadata is limited to previewRunId, decisionKind, contractShape,
-previewSummaryDigest, reviewer-note checksum/length/category, and createdAt;
-summary is read-only. Default Send, `send_message`, and
-`start_stream_message` must not call controlled preview review commands. W44 is
-review evidence, not default Chat migration.
-
-W45 adds only
-`check_default_chat_adapter_controlled_preview_approval_readiness` and the
-Settings Default Chat Adapter Controlled Preview Approval Readiness panel. It is
-a read-only gate over current W42 implementation readiness, W44 latest
-metadata-safe review approval, required approved preview count, digest match,
-and the approved W43 preview AgentRun's current completed/send-compatible/
-previewReady/write-disabled/zero-tool/metadata-safe/side-effect-free state. It
-must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
-audit rows, chat messages, controlled preview/runtime/tool/model calls,
-external writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call controlled preview
-approval readiness. W45 is approval readiness for later adapter cutover
-implementation discussion, not default Chat migration.
-
-W46 adds only `draft_default_chat_adapter_cutover_implementation_plan` and the
-Settings Default Chat Adapter Cutover Implementation Plan panel. It is a
-read-only draft over current W45 approval readiness. Blocked readiness must
-return `draftReady=false`, propagated blockers, and no plan sections; ready
-output may return only metadata-safe human-review implementation scope, adapter
-contract requirements, routing boundary, safety preconditions, fallback,
-rollback, observability, test plan, explicit non-goals, and a stable plan digest.
-It must not create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP
-audit rows, chat messages, controlled preview/runtime/tool/model calls, external
-writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call cutover implementation
-plan draft. W46 is cutover implementation planning, not default Chat migration.
-
-W47 adds only `record_default_chat_adapter_cutover_plan_review_decision`,
-`get_default_chat_adapter_cutover_plan_review_summary`, and the Settings Default
-Chat Adapter Cutover Plan Review panel. The record command must call W46 first;
-blocked draft approve must not write evidence, while reject/request_rework may
-write metadata-safe review evidence. Evidence stores only decision kind, source
-session id, draftReady, W45 readiness flag, cutover plan digest when present,
-plan section count, reviewer-note checksum/length/category, and createdAt. It
-must not create AgentRuns, Proposals, Memory, LifeModel patches, MCP audit rows,
-chat messages, controlled preview/runtime/tool/model calls, external writes,
-feature flags, or default Chat routing changes. Default Send, `send_message`,
-and `start_stream_message` must not call cutover plan review commands. W47 is
-cutover plan review evidence, not default Chat migration.
-
-W48 adds only `check_default_chat_adapter_cutover_plan_approval_readiness` and
-the Settings Default Chat Adapter Cutover Plan Approval Readiness panel. The
-command is read-only over the current W46 draft, W47 latest review decision
-evidence, plan digest match, W45 readiness, and default Chat isolation. Ready
-requires latest decision `approve`, current plan digest matching the approved
-evidence, W45 still ready, default Send and stream paths still `legacy_stream`,
-controlled adapter disabled, and automatic migration disabled. It must not
-create AgentRuns, Evidence, Proposals, Memory, LifeModel patches, MCP audit
-rows, chat messages, controlled preview/runtime/tool/model calls, external
-writes, feature flags, or default Chat routing changes. Default Send,
-`send_message`, and `start_stream_message` must not call the cutover plan
-approval readiness command. W48 is implementation-discussion readiness, not
-default Chat migration.
-
-W49 adds `src-tauri/src/default_chat_adapter.rs` as a shared default Chat
-adapter route source-of-truth plus a fail-closed legacy route guard. The
-ordinary `send_message` and `start_stream_message` entries may call this pure
-guard to verify that default Chat still resolves to `legacy_stream`; they must
-not call W19-W48 readiness, review, preview, or evidence commands. The Settings
-routing status also reads the same route resolver so observability and the
-default Chat boundary cannot drift silently. W49 does not enable a controlled
-adapter, automatic migration, model/runtime/tool calls, or any business writes.
-
-W50 upgrades the default Chat entry boundary to a pure cutover invocation
-harness in `src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message`
-and `start_stream_message` entries now call `ensure_default_chat_cutover_harness`
-instead of a narrower route-only guard. The harness reports only
-`legacy_guarded` invocation mode, `allowWrites=false`, `maxToolCalls=0`,
-controlled adapter invocation disabled, runtime/model/tool calls disabled, and
-no Chat/AgentRun/Evidence/business writes. It fails closed when the route drifts,
-the adapter scaffold disappears, controlled adapter or automatic migration is
-enabled, or the separate cutover implementation requirement is removed. W50
-does not call W19-W49 readiness, review, preview, evidence, runtime, model, or
-tool commands, and it is not default Chat migration.
-
-W51 adds a pure default Chat adapter invocation plan in
-`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
-`start_stream_message` entries now call
-`ensure_default_chat_adapter_invocation_plan`, which reuses W50 and explicitly
-selects `legacy_stream`, keeps `controlled_adapter` as a disabled candidate,
-marks the controlled executor unattached, preserves send/stream-compatible
-contract shape labels, and keeps writes/tool/runtime/model calls disabled. W51
-does not call W19-W50 readiness, review, preview, evidence, runtime, model, or
-tool commands, and it is not default Chat migration.
-
-W52 adds a pure default Chat adapter invocation boundary in
-`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
-`start_stream_message` entries now call
-`ensure_default_chat_adapter_invocation_boundary`, which reuses W51 and only
-permits a `legacy_stream` callsite when the boundary is side-effect-free before
-legacy entry, with controlled adapter invocation disabled and the controlled
-executor unattached. W52 does not call W19-W51 readiness, review, preview,
-evidence, runtime, model, or tool commands, and it is not default Chat
-migration.
-
-W53 adds a pure typed default Chat adapter callsite contract in
-`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
-`start_stream_message` entries now call
-`ensure_default_chat_adapter_callsite_contract` with typed callsites, binding
-each entry to its own contract shape and actual legacy route path. W53 blocks
-when W52 blocks or when a callsite route drifts away from `legacy_stream`; it
-does not call W19-W52 readiness, review, preview, evidence, runtime, model, or
-tool commands, and it is not default Chat migration.
-
-W54 is an authority roadmap sync. It updates this document,
-`plans/openlife_lifemodel_governed_agent_runtime.md`,
-`plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md`,
-`README.md`, and `AGENTS.md` so high-priority route files no longer describe
-W22 as the current boundary. W54 does not change runtime code and is not default
-Chat migration.
-
-W55 adds a pure default Chat adapter ordinary-entry preflight in
-`src-tauri/src/default_chat_adapter.rs`. The ordinary `send_message` and
-`start_stream_message` entries now call
-`ensure_default_chat_adapter_ordinary_entry_preflight`, which reuses W53 typed
-contracts and W52 side-effect information to require legacy entry, controlled
-executor unattached, migration disabled, and zero runtime/model/tool/write
-pre-entry budget. It does not call W19-W54 readiness, review, preview,
-evidence, runtime, model, or tool commands, and it is not default Chat
-migration.
-
-W56 adds a read-only ordinary-entry preflight status surface through
-`get_default_chat_adapter_ordinary_entry_preflight_status`, the frontend wrapper,
-and the Settings experimental panel. It only reads the current route and W55
-send/stream preflight checks, exposes metadata-safe status summaries, and
-creates no AgentRun, Evidence, Proposal, Memory, LifeModel patch, MCP audit,
-chat message, external write, runtime call, model call, or tool call. It is a
-status surface for implementation discussion, not default Chat migration.
-
-W57 adds a read-only narrow implementation discussion gate through
-`check_default_chat_adapter_narrow_implementation_discussion_gate`, the frontend
-wrapper, and the Settings experimental panel. It combines current W48 cutover
-plan approval readiness with W56 ordinary-entry preflight status, requires
-default Chat to remain unchanged on `legacy_stream`, and requires controlled
-adapter execution plus automatic migration to remain disabled. It creates no
-records, runs no runtime/model/tool call, changes no routing, and only indicates
-whether a narrow adapter implementation slice may be discussed. It is not
-default Chat migration.
-
-W58 adds a read-only narrow implementation plan draft through
-`draft_default_chat_adapter_narrow_implementation_plan`, the frontend wrapper,
-and the Settings experimental panel. It calls W57 first; blocked W57 output
-returns `draftReady=false`, blocking reasons, no plan sections, and no digest,
-while eligible W57 output returns only metadata-safe human-review plan sections
-and a stable digest. It creates no records, runs no runtime/model/tool/preview
-call, changes no routing, and is not default Chat migration.
-
-W59 adds explicit narrow implementation plan review evidence through
-`record_default_chat_adapter_narrow_implementation_plan_review_decision`, the
-read-only `get_default_chat_adapter_narrow_implementation_plan_review_summary`,
-the frontend wrappers, and the Settings experimental panel. The record command
-calls W58 first; blocked draft approve writes no evidence, while ready draft
-approve/reject/request_rework writes metadata-safe Evidence with reviewer note
-checksum/length/category only. It stores no raw note, prompt/output, tool
-payload, or plan content, changes no routing, and is not default Chat migration.
-
-W60 adds read-only narrow implementation plan approval readiness through
-`check_default_chat_adapter_narrow_implementation_plan_approval_readiness`, the
-frontend wrapper, and the Settings experimental panel. It calls the current W58
-draft and W59 review summary; ready requires latest approve, digest match, W57
-eligible, default Chat unchanged, controlled adapter disabled, automatic
-migration disabled, and legacy send/stream paths. It writes no records, runs no
-runtime/model/tool/preview call, changes no routing, and is not default Chat
-migration.
-
-## 6. Agent Rules
+## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Do not use historical plans to override current ordering or current Tool
-  Taxonomy.
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W63 status, not as
+  an implementation roadmap.
+- Do not use historical plans to override current ordering, current Tool
+  Taxonomy, or the default Chat `legacy_stream` boundary.
 - If implementation changes tool status, proposal semantics, runtime authority,
-  model routing, LifeModel source-of-truth, or privacy boundaries, update the
-  relevant docs in the same task.
-- If an old document conflicts with the current program, treat the old document
-  as historical unless the user explicitly asks to revive or rewrite it.
+  model routing, LifeModel source-of-truth, privacy boundaries, or default Chat
+  routing, update the relevant docs in the same task and run the implementation
+  verification gate.
+
+## 8. Next Recommended Sequence
+
+```text
+W63 complete -> use plans/lifemodel_governed_runtime_progress.md as the compact
+W1-W63 index -> prepare a separate W64 narrow adapter implementation slice only
+if the task explicitly asks for implementation and preserves default Chat
+legacy_stream until separately reviewed.
+```
+
+For docs-only index整理, `git diff --check` plus targeted `rg` validation is
+enough. Run `make ci` when code, tests, package configuration, or runtime
+behavior changes.
