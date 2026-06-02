@@ -4739,6 +4739,261 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_adapter_executor_attachment_gate_report_generates_under_clean_legacy_route_without_permissions(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "raw prompt should remain metadata only",
+            );
+
+        assert_eq!(
+            report.report_kind,
+            "default_chat_controlled_adapter_executor_attachment_gate_report"
+        );
+        assert!(report.gate_report_metadata_ready);
+        assert!(report.executor_skeleton_discussion_ready);
+        assert!(!report.executor_attachment_allowed);
+        assert!(!report.executor_attached);
+        assert!(!report.executor_enabled);
+        assert!(!report.route_cutover_permission);
+        assert!(!report.migration_permission);
+        assert!(report.ordinary_default_chat_unchanged);
+        assert_eq!(report.selected_adapter_path, "legacy_stream");
+        assert!(!report.controlled_adapter_invocation_allowed);
+        assert!(report.send_proof_ready);
+        assert!(report.stream_boundary_proof_ready);
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_content);
+        assert!(!report.runtime_call_enabled);
+        assert!(!report.model_call_enabled);
+        assert!(!report.tool_call_enabled);
+        assert!(!report.stream_started);
+        assert!(!report.event_channel_opened);
+        assert!(!report.stream_events_emitted);
+        assert!(report.side_effect_budget_zero);
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_reuses_send_stream_and_metadata_safe_layers() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "metadata only",
+            );
+
+        assert!(report.send_proof_ready);
+        assert!(report.send_message_result_compatible);
+        assert!(report.stream_boundary_proof_ready);
+        assert!(report.stream_message_compatible);
+        assert!(report.send_descriptor_ready);
+        assert!(report.send_contract_ready);
+        assert!(report.send_harness_ready);
+        assert!(report.stream_descriptor_ready);
+        assert!(report.stream_contract_ready);
+        assert!(report.stream_harness_ready);
+        assert!(report.w65_w67_metadata_safe);
+        assert!(report.w68_send_compatible_proof_ready);
+        assert!(report.w69_stream_boundary_proof_ready);
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_fails_closed_for_route_drift_controlled_adapter_and_auto_migration(
+    ) {
+        let mut drift_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        drift_route.current_mode = "controlled_adapter".into();
+        drift_route.default_send_path = "controlled_adapter".into();
+        drift_route.start_stream_path = "controlled_adapter".into();
+        let drift_report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &drift_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!drift_report.gate_report_metadata_ready);
+        assert!(!drift_report.executor_skeleton_discussion_ready);
+        assert!(!drift_report.executor_attachment_allowed);
+        assert!(!drift_report.migration_permission);
+        assert!(!drift_report.ordinary_default_chat_unchanged);
+        assert!(drift_report
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(drift_report
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+        assert!(drift_report
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+        assert!(drift_report
+            .blocking_reasons
+            .contains(&"send_proof_not_ready".to_string()));
+        assert!(drift_report
+            .blocking_reasons
+            .contains(&"stream_boundary_proof_not_ready".to_string()));
+
+        let mut enabled_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        enabled_route.controlled_adapter_enabled = true;
+        let enabled_report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &enabled_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!enabled_report.gate_report_metadata_ready);
+        assert!(!enabled_report.executor_attachment_allowed);
+        assert!(!enabled_report.controlled_adapter_invocation_allowed);
+        assert!(enabled_report
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+
+        let mut auto_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        auto_route.automatic_migration_enabled = true;
+        let auto_report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &auto_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!auto_report.gate_report_metadata_ready);
+        assert!(!auto_report.executor_attachment_allowed);
+        assert!(!auto_report.migration_permission);
+        assert!(auto_report
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_blocks_missing_executor_review_and_cutover_authorization(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "metadata only",
+            );
+
+        for blocker in [
+            "executor_implementation_missing",
+            "human_review_missing",
+            "route_cutover_not_authorized",
+        ] {
+            assert!(
+                report.blocking_reasons.contains(&blocker.to_string()),
+                "expected W70 attachment blocker: {blocker}"
+            );
+        }
+        assert!(!report.executor_attachment_allowed);
+        assert!(!report.route_cutover_permission);
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "metadata only",
+            )
+            .expect_err("W70 must fail closed because it is not executor attachment");
+        assert!(error.contains("executor_attachment_gate_not_ready"));
+        assert!(error.contains("executor_implementation_missing"));
+        assert!(error.contains("human_review_missing"));
+        assert!(error.contains("route_cutover_not_authorized"));
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_debug_dump_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "raw-user-secret prompt-token assistant-output tool-payload LifeModel-memory memory-raw-content";
+
+        let report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_content);
+        assert!(report.input_sha256.starts_with("sha256:"));
+        assert!(!report.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{report:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "LifeModel-memory",
+            "memory-raw-content",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "executor attachment gate report leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_side_effect_budget_is_all_zero() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "metadata only",
+            );
+
+        assert!(report.side_effect_budget_zero);
+        assert_eq!(report.side_effect_budget.runtime_calls, 0);
+        assert_eq!(report.side_effect_budget.model_calls, 0);
+        assert_eq!(report.side_effect_budget.tool_calls, 0);
+        assert_eq!(report.side_effect_budget.store_writes, 0);
+        assert_eq!(report.side_effect_budget.chat_message_writes, 0);
+        assert_eq!(report.side_effect_budget.agent_run_writes, 0);
+        assert_eq!(report.side_effect_budget.evidence_writes, 0);
+        assert_eq!(report.side_effect_budget.proposal_writes, 0);
+        assert_eq!(report.side_effect_budget.memory_writes, 0);
+        assert_eq!(report.side_effect_budget.life_model_writes, 0);
+        assert_eq!(report.side_effect_budget.mcp_audit_writes, 0);
+        assert_eq!(report.side_effect_budget.external_writes, 0);
+        assert!(!report.runtime_call_enabled);
+        assert!(!report.model_call_enabled);
+        assert!(!report.tool_call_enabled);
+        assert!(!report.chat_message_saved);
+        assert!(!report.agent_run_recorded);
+        assert!(!report.evidence_recorded);
+        assert!(!report.proposal_created);
+        assert!(!report.memory_written);
+        assert!(!report.life_model_written);
+        assert!(!report.mcp_audit_written);
+        assert!(!report.external_write_recorded);
+    }
+
+    #[test]
+    fn default_chat_adapter_executor_attachment_gate_is_not_called_by_ordinary_entrypoints() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_gate_calls = [
+            "evaluate_default_chat_controlled_adapter_executor_attachment_gate",
+            "ensure_default_chat_controlled_adapter_executor_attachment_gate",
+        ];
+
+        for forbidden in forbidden_gate_calls {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn default_chat_adapter_stream_boundary_proof_is_not_called_by_ordinary_entrypoints() {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");

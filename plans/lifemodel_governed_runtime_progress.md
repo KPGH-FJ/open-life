@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-02
-> Status: W69 backend-only default Chat adapter stream-compatible boundary proof complete
+> Status: W70 backend-only default Chat adapter executor attachment gate report complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W69 backend-only stream-compatible boundary proof complete**.
+Current latest status is **W70 backend-only executor attachment gate report complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -31,9 +31,18 @@ boundary for `start_stream_message`. It allows only the StartStreamMessage calls
 become proof ready; SendMessage fails closed with
 `callsite_not_start_stream_message`. W69 does not emit a real stream, open an
 event channel, attach an executor, run runtime/model/tool, write business
-records, or authorize a default Chat route cutover. W65-W69 add no command, no
-frontend surface, no Settings surface, no runtime/model/tool call, no store
-write, no executor attachment, and no default Chat routing change.
+records, or authorize a default Chat route cutover. W70 adds a pure Rust
+backend-only executor attachment gate report/evaluator/ensure that simultaneously
+reuses W65-W67 metadata-safe descriptor/contract/harness results, the W68
+send-compatible proof, and the W69 stream-compatible boundary proof. It can
+report attachment gate metadata readiness for the next executor skeleton
+discussion, but executor_attachment_allowed=false, executor_attached=false,
+executor_enabled=false, route_cutover_permission=false, and
+migrationPermission=false remain fixed. Executor implementation missing, human
+review missing, and route cutover not authorized are explicit blockers. W65-W70
+add no command, no frontend surface, no Settings surface, no runtime/model/tool
+call, no store write, no executor attachment, and no default Chat routing
+change.
 
 Hard boundaries:
 
@@ -42,12 +51,15 @@ Hard boundaries:
   `start_stream_message` may enter only the legacy route, with the W49-W55 pure
   guards/preflight allowed to fail closed.
 - W19-W60 readiness/review/preview/gate results are not migration permission.
-- W65-W69 backend-only descriptor/contract/harness/proof work is not migration
-  permission and must keep the controlled adapter executor disabled/unattached.
+- W65-W70 backend-only descriptor/contract/harness/proof/gate work is not
+  migration permission and must keep the controlled adapter executor
+  disabled/unattached.
   W67 `harness_ready` only means the non-default invocation shape proof is
   safe; W68 `proof_ready` only means the SendMessageResult-compatible metadata
   shape proof is safe; W69 `proof_ready` only means the stream-compatible
-  metadata boundary proof is safe, not that default Chat may migrate.
+  metadata boundary proof is safe; W70 `gate_report_metadata_ready` only means
+  the executor attachment gate report is metadata-ready for skeleton
+  discussion, not that default Chat may migrate.
 - Ordinary `send_message` / `start_stream_message` must not call any W19-W60
   command surface.
 - Ordinary `send_message` / `start_stream_message` must not call the W67
@@ -56,6 +68,8 @@ Hard boundaries:
   send-compatible proof.
 - Ordinary `send_message` / `start_stream_message` must not call the W69
   stream-compatible boundary proof.
+- Ordinary `send_message` / `start_stream_message` must not call the W70
+  executor attachment gate.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -65,7 +79,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W69 progress index
+4. This W1-W70 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -84,7 +98,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W69 Structured Index
+## W1-W70 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -156,7 +170,8 @@ permission.
 | W66 | Default Chat Adapter Controlled Contract Report | Done | Pure internal contract evaluator in `default_chat_adapter.rs` | MS report only; descriptor readiness, send/stream contract shape, disabled/unattached executor, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` | W67 |
 | W67 | Default Chat Adapter Non-Default Controlled Invocation Harness | Done | Pure internal harness in `default_chat_adapter.rs` | MS harness only; reads W66 report, input length/hash only, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | W68 |
 | W68 | Default Chat Adapter Send-Compatible Contract Proof | Done | Pure internal proof/evaluator in `default_chat_adapter.rs` | MS send-compatible proof only; reads W65/W66/W67 metadata, SendMessage only ready, stream fail-closed, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | W69 |
-| W69 | Default Chat Adapter Stream-Compatible Boundary Proof | Done | Pure internal proof/evaluator in `default_chat_adapter.rs` | MS stream boundary proof only; reads W65/W66/W67 metadata, StartStreamMessage only ready, SendMessage fail-closed, no real stream/event channel, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | Future controlled adapter implementation discussion only |
+| W69 | Default Chat Adapter Stream-Compatible Boundary Proof | Done | Pure internal proof/evaluator in `default_chat_adapter.rs` | MS stream boundary proof only; reads W65/W66/W67 metadata, StartStreamMessage only ready, SendMessage fail-closed, no real stream/event channel, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | W70 |
+| W70 | Default Chat Adapter Controlled Executor Attachment Gate Report | Done | Pure internal gate report/evaluator in `default_chat_adapter.rs` | MS executor attachment gate report only; reads W65-W67 metadata-safe layers plus W68/W69 proofs, executor attachment/cutover/migration permission all false, explicit executor implementation/human review/cutover blockers, zero side-effect budget | No; ordinary send/stream stay `legacy_stream` and do not call it | Future executor skeleton discussion only |
 
 ## Folded Boundary Summary
 
@@ -175,13 +190,15 @@ above. The boundary meaning is preserved:
   `send_message` / `start_stream_message` must not call them.
 - W61-W63 are documentation/index整理, not migration permission, not code work,
   and not default Chat migration.
-- W65-W69 descriptor/contract/harness/proof work is internal backend code only.
+- W65-W70 descriptor/contract/harness/proof/gate work is internal backend code only.
   It may describe and validate a future controlled adapter candidate with
   metadata-safe fields, a non-default invocation shape proof, and a
   SendMessageResult-compatible metadata shape proof, plus a
-  `start_stream_message`-compatible metadata boundary proof, but it must not
-  execute or attach that adapter, emit a real stream, open an event channel, run
-  runtime/model/tool, write business records, or change default Chat routing.
+  `start_stream_message`-compatible metadata boundary proof, and W70 may report
+  the attachment gate metadata-ready for executor skeleton discussion, but it
+  must not execute or attach that adapter, emit a real stream, open an event
+  channel, run runtime/model/tool, write business records, grant route cutover,
+  grant migration permission, or change default Chat routing.
 
 ## Next Recommended Sequence
 
@@ -189,11 +206,11 @@ above. The boundary meaning is preserved:
 W63 complete -> W64 authority compression validated -> W65 backend-only
 descriptor skeleton complete -> W66 controlled adapter contract report complete
 -> W67 non-default invocation harness complete -> W68 send-compatible proof
-complete -> W69 stream-compatible boundary proof complete -> future controlled
-adapter implementation discussion may build on the proofs only through a
-separately reviewed task; keep default Chat on legacy_stream unless that
-separate task explicitly implements, reviews, verifies, and authorizes a route
-change.
+complete -> W69 stream-compatible boundary proof complete -> W70 executor
+attachment gate report complete -> future executor skeleton discussion may build
+on the proofs only through a separately reviewed task; keep default Chat on
+legacy_stream unless that separate task explicitly implements, reviews,
+verifies, and authorizes a route change.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

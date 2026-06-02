@@ -392,6 +392,67 @@ pub(crate) struct DefaultChatControlledAdapterStreamBoundaryProof {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatControlledAdapterExecutorAttachmentGateReport {
+    pub(crate) report_kind: String,
+    pub(crate) gate_report_metadata_ready: bool,
+    pub(crate) executor_skeleton_discussion_ready: bool,
+    pub(crate) executor_attachment_allowed: bool,
+    pub(crate) executor_enabled: bool,
+    pub(crate) executor_attached: bool,
+    pub(crate) executor_implementation_present: bool,
+    pub(crate) human_review_present: bool,
+    pub(crate) route_cutover_permission: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) ordinary_default_chat_unchanged: bool,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) candidate_adapter_path: String,
+    pub(crate) default_send_path: String,
+    pub(crate) start_stream_path: String,
+    pub(crate) controlled_adapter_enabled: bool,
+    pub(crate) automatic_migration_enabled: bool,
+    pub(crate) controlled_adapter_invocation_allowed: bool,
+    pub(crate) send_message_result_compatible: bool,
+    pub(crate) stream_message_compatible: bool,
+    pub(crate) send_proof_ready: bool,
+    pub(crate) stream_boundary_proof_ready: bool,
+    pub(crate) w68_send_compatible_proof_ready: bool,
+    pub(crate) w69_stream_boundary_proof_ready: bool,
+    pub(crate) send_descriptor_ready: bool,
+    pub(crate) send_contract_ready: bool,
+    pub(crate) send_harness_ready: bool,
+    pub(crate) stream_descriptor_ready: bool,
+    pub(crate) stream_contract_ready: bool,
+    pub(crate) stream_harness_ready: bool,
+    pub(crate) w65_w67_metadata_safe: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_content: bool,
+    pub(crate) stream_started: bool,
+    pub(crate) stream_events_emitted: bool,
+    pub(crate) event_channel_opened: bool,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) side_effect_budget: DefaultChatAdapterDescriptorSideEffectBudget,
+    pub(crate) side_effect_budget_zero: bool,
+    pub(crate) runtime_call_enabled: bool,
+    pub(crate) model_call_enabled: bool,
+    pub(crate) tool_call_enabled: bool,
+    pub(crate) business_write_disabled: bool,
+    pub(crate) chat_message_saved: bool,
+    pub(crate) agent_run_recorded: bool,
+    pub(crate) evidence_recorded: bool,
+    pub(crate) proposal_created: bool,
+    pub(crate) memory_written: bool,
+    pub(crate) life_model_written: bool,
+    pub(crate) mcp_audit_written: bool,
+    pub(crate) external_write_recorded: bool,
+    pub(crate) input_length_bytes: usize,
+    pub(crate) input_length_chars: usize,
+    pub(crate) input_sha256: String,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn resolve_default_chat_adapter_route() -> DefaultChatAdapterRoute {
     DefaultChatAdapterRoute {
         current_mode: LEGACY_STREAM_PATH.into(),
@@ -1339,6 +1400,461 @@ pub(crate) fn ensure_default_chat_controlled_adapter_stream_boundary_proof(
             proof.blocking_reasons.join(",")
         ))
     }
+}
+
+#[allow(dead_code)]
+pub(crate) fn evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+    route: &DefaultChatAdapterRoute,
+    input: &str,
+) -> DefaultChatControlledAdapterExecutorAttachmentGateReport {
+    let send_descriptor = describe_default_chat_controlled_adapter_candidate(
+        DefaultChatAdapterCallsite::SendMessage,
+        route,
+        input,
+    );
+    let send_contract = evaluate_default_chat_controlled_adapter_contract(
+        DefaultChatAdapterCallsite::SendMessage,
+        route,
+        input,
+    );
+    let send_harness = evaluate_default_chat_controlled_adapter_invocation_harness(
+        DefaultChatAdapterCallsite::SendMessage,
+        route,
+        input,
+    );
+    let send_proof = evaluate_default_chat_controlled_adapter_send_compatible_proof(
+        DefaultChatAdapterCallsite::SendMessage,
+        route,
+        input,
+    );
+    let stream_descriptor = describe_default_chat_controlled_adapter_candidate(
+        DefaultChatAdapterCallsite::StartStreamMessage,
+        route,
+        input,
+    );
+    let stream_contract = evaluate_default_chat_controlled_adapter_contract(
+        DefaultChatAdapterCallsite::StartStreamMessage,
+        route,
+        input,
+    );
+    let stream_harness = evaluate_default_chat_controlled_adapter_invocation_harness(
+        DefaultChatAdapterCallsite::StartStreamMessage,
+        route,
+        input,
+    );
+    let stream_proof = evaluate_default_chat_controlled_adapter_stream_boundary_proof(
+        DefaultChatAdapterCallsite::StartStreamMessage,
+        route,
+        input,
+    );
+    let side_effect_budget = default_chat_adapter_sum_side_effect_budgets(&[
+        &send_descriptor.side_effect_budget,
+        &send_contract.side_effect_budget,
+        &send_harness.side_effect_budget,
+        &send_proof.side_effect_budget,
+        &stream_descriptor.side_effect_budget,
+        &stream_contract.side_effect_budget,
+        &stream_harness.side_effect_budget,
+        &stream_proof.side_effect_budget,
+    ]);
+    let side_effect_budget_zero = side_effect_budget.is_zero();
+    let send_descriptor_ready = send_descriptor.descriptor_ready;
+    let send_contract_ready = send_contract.contract_ready;
+    let send_harness_ready = send_harness.harness_ready;
+    let stream_descriptor_ready = stream_descriptor.descriptor_ready;
+    let stream_contract_ready = stream_contract.contract_ready;
+    let stream_harness_ready = stream_harness.harness_ready;
+    let w65_w67_metadata_safe = send_descriptor.metadata_safe
+        && send_contract.metadata_safe
+        && send_harness.metadata_safe
+        && stream_descriptor.metadata_safe
+        && stream_contract.metadata_safe
+        && stream_harness.metadata_safe;
+    let metadata_safe =
+        w65_w67_metadata_safe && send_proof.metadata_safe && stream_proof.metadata_safe;
+    let contains_raw_content = send_descriptor.contains_raw_content
+        || send_contract.contains_raw_content
+        || send_harness.contains_raw_content
+        || send_proof.contains_raw_content
+        || stream_descriptor.contains_raw_content
+        || stream_contract.contains_raw_content
+        || stream_harness.contains_raw_content
+        || stream_proof.contains_raw_content;
+    let send_proof_ready = send_proof.proof_ready;
+    let stream_boundary_proof_ready = stream_proof.proof_ready;
+    let selected_adapter_path = if send_proof.selected_adapter_path == LEGACY_STREAM_PATH
+        && stream_proof.selected_adapter_path == LEGACY_STREAM_PATH
+    {
+        LEGACY_STREAM_PATH
+    } else {
+        "blocked"
+    }
+    .into();
+    let candidate_adapter_path = if send_proof.candidate_adapter_path == CONTROLLED_ADAPTER_PATH
+        && stream_proof.candidate_adapter_path == CONTROLLED_ADAPTER_PATH
+    {
+        CONTROLLED_ADAPTER_PATH
+    } else {
+        "blocked"
+    }
+    .into();
+    let controlled_adapter_enabled = route.controlled_adapter_enabled
+        || send_proof.controlled_adapter_enabled
+        || stream_proof.controlled_adapter_enabled;
+    let automatic_migration_enabled = route.automatic_migration_enabled
+        || send_proof.automatic_migration_enabled
+        || stream_proof.automatic_migration_enabled;
+    let controlled_adapter_invocation_allowed = send_proof.controlled_adapter_invocation_allowed
+        || stream_proof.controlled_adapter_invocation_allowed
+        || send_harness.controlled_adapter_invocation_allowed
+        || stream_harness.controlled_adapter_invocation_allowed;
+    let executor_enabled =
+        send_proof.controlled_adapter_executor_enabled || stream_proof.executor_enabled;
+    let executor_attached =
+        send_proof.controlled_adapter_executor_attached || stream_proof.executor_attached;
+    let executor_implementation_present = false;
+    let human_review_present = false;
+    let route_cutover_permission = false;
+    let migration_permission = false;
+    let ordinary_default_chat_unchanged =
+        send_proof.default_chat_unchanged && stream_proof.default_chat_unchanged;
+    let stream_started = stream_proof.stream_started;
+    let stream_events_emitted = stream_proof.stream_events_emitted;
+    let event_channel_opened = stream_proof.event_channel_opened;
+    let allow_writes = send_proof.allow_writes
+        || stream_proof.allow_writes
+        || send_harness.allow_writes
+        || stream_harness.allow_writes;
+    let max_tool_calls = send_proof
+        .max_tool_calls
+        .max(stream_proof.max_tool_calls)
+        .max(send_harness.max_tool_calls)
+        .max(stream_harness.max_tool_calls);
+    let runtime_call_enabled = side_effect_budget.runtime_calls != 0
+        || send_proof.runtime_call_enabled
+        || stream_proof.runtime_call_enabled
+        || send_harness.runtime_call_enabled
+        || stream_harness.runtime_call_enabled;
+    let model_call_enabled = side_effect_budget.model_calls != 0
+        || send_proof.model_call_enabled
+        || stream_proof.model_call_enabled
+        || send_harness.model_call_enabled
+        || stream_harness.model_call_enabled;
+    let tool_call_enabled = side_effect_budget.tool_calls != 0
+        || send_proof.tool_call_enabled
+        || stream_proof.tool_call_enabled
+        || send_harness.tool_call_enabled
+        || stream_harness.tool_call_enabled;
+    let business_write_disabled = !allow_writes
+        && side_effect_budget.store_writes == 0
+        && side_effect_budget.chat_message_writes == 0
+        && side_effect_budget.agent_run_writes == 0
+        && side_effect_budget.evidence_writes == 0
+        && side_effect_budget.proposal_writes == 0
+        && side_effect_budget.memory_writes == 0
+        && side_effect_budget.life_model_writes == 0
+        && side_effect_budget.mcp_audit_writes == 0
+        && side_effect_budget.external_writes == 0
+        && send_proof.business_write_disabled
+        && stream_proof.business_write_disabled
+        && send_harness.business_write_disabled
+        && stream_harness.business_write_disabled;
+    let chat_message_saved = side_effect_budget.chat_message_writes != 0
+        || send_proof.chat_message_saved
+        || stream_proof.chat_message_saved;
+    let agent_run_recorded = side_effect_budget.agent_run_writes != 0
+        || send_proof.agent_run_recorded
+        || stream_proof.agent_run_recorded;
+    let evidence_recorded = side_effect_budget.evidence_writes != 0
+        || send_proof.evidence_recorded
+        || stream_proof.evidence_recorded;
+    let proposal_created = side_effect_budget.proposal_writes != 0
+        || send_proof.proposal_created
+        || stream_proof.proposal_created;
+    let memory_written = side_effect_budget.memory_writes != 0
+        || send_proof.memory_written
+        || stream_proof.memory_written;
+    let life_model_written = side_effect_budget.life_model_writes != 0
+        || send_proof.life_model_written
+        || stream_proof.life_model_written;
+    let mcp_audit_written =
+        side_effect_budget.mcp_audit_writes != 0 || stream_proof.mcp_audit_written;
+    let external_write_recorded = side_effect_budget.external_writes != 0
+        || send_proof.external_write_recorded
+        || stream_proof.external_write_recorded;
+    let mut blocking_reasons = Vec::new();
+
+    for reason in send_descriptor
+        .blocking_reasons
+        .iter()
+        .chain(send_contract.blocking_reasons.iter())
+        .chain(send_harness.blocking_reasons.iter())
+        .chain(send_proof.blocking_reasons.iter())
+        .chain(stream_descriptor.blocking_reasons.iter())
+        .chain(stream_contract.blocking_reasons.iter())
+        .chain(stream_harness.blocking_reasons.iter())
+        .chain(stream_proof.blocking_reasons.iter())
+    {
+        push_unique_blocker(&mut blocking_reasons, reason);
+    }
+    if !send_proof_ready {
+        push_unique_blocker(&mut blocking_reasons, "send_proof_not_ready");
+    }
+    if !stream_boundary_proof_ready {
+        push_unique_blocker(&mut blocking_reasons, "stream_boundary_proof_not_ready");
+    }
+    if !(send_descriptor_ready
+        && send_contract_ready
+        && send_harness_ready
+        && stream_descriptor_ready
+        && stream_contract_ready
+        && stream_harness_ready)
+    {
+        push_unique_blocker(&mut blocking_reasons, "metadata_safe_layers_not_ready");
+    }
+    if !metadata_safe {
+        push_unique_blocker(&mut blocking_reasons, "metadata_not_safe");
+    }
+    if contains_raw_content {
+        push_unique_blocker(&mut blocking_reasons, "raw_content_present");
+    }
+    if route.current_mode != LEGACY_STREAM_PATH
+        || route.default_send_path != LEGACY_STREAM_PATH
+        || route.start_stream_path != LEGACY_STREAM_PATH
+    {
+        push_unique_blocker(&mut blocking_reasons, "route_drift_from_legacy_stream");
+    }
+    if selected_adapter_path != LEGACY_STREAM_PATH {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "selected_adapter_path_not_legacy_stream",
+        );
+    }
+    if controlled_adapter_enabled {
+        push_unique_blocker(&mut blocking_reasons, "controlled_adapter_enabled");
+    }
+    if automatic_migration_enabled {
+        push_unique_blocker(&mut blocking_reasons, "automatic_migration_enabled");
+    }
+    if controlled_adapter_invocation_allowed {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "controlled_adapter_invocation_allowed",
+        );
+    }
+    if executor_enabled {
+        push_unique_blocker(&mut blocking_reasons, "executor_enabled");
+    }
+    if executor_attached {
+        push_unique_blocker(&mut blocking_reasons, "executor_attached");
+    }
+    if !executor_implementation_present {
+        push_unique_blocker(&mut blocking_reasons, "executor_implementation_missing");
+    }
+    if !human_review_present {
+        push_unique_blocker(&mut blocking_reasons, "human_review_missing");
+    }
+    if !route_cutover_permission {
+        push_unique_blocker(&mut blocking_reasons, "route_cutover_not_authorized");
+    }
+    if migration_permission || send_proof.migration_permission || stream_proof.migration_permission
+    {
+        push_unique_blocker(&mut blocking_reasons, "migration_permission_enabled");
+    }
+    if stream_started {
+        push_unique_blocker(&mut blocking_reasons, "stream_started");
+    }
+    if event_channel_opened {
+        push_unique_blocker(&mut blocking_reasons, "event_channel_opened");
+    }
+    if stream_events_emitted {
+        push_unique_blocker(&mut blocking_reasons, "stream_events_emitted");
+    }
+    if allow_writes {
+        push_unique_blocker(&mut blocking_reasons, "allow_writes_enabled");
+    }
+    if max_tool_calls != 0 {
+        push_unique_blocker(&mut blocking_reasons, "max_tool_calls_not_zero");
+    }
+    if !side_effect_budget_zero {
+        push_unique_blocker(&mut blocking_reasons, "side_effect_budget_not_zero");
+    }
+    if runtime_call_enabled {
+        push_unique_blocker(&mut blocking_reasons, "runtime_call_enabled");
+    }
+    if model_call_enabled {
+        push_unique_blocker(&mut blocking_reasons, "model_call_enabled");
+    }
+    if tool_call_enabled {
+        push_unique_blocker(&mut blocking_reasons, "tool_call_enabled");
+    }
+    if !business_write_disabled {
+        push_unique_blocker(&mut blocking_reasons, "business_write_enabled");
+    }
+    if chat_message_saved {
+        push_unique_blocker(&mut blocking_reasons, "chat_message_saved");
+    }
+    if agent_run_recorded {
+        push_unique_blocker(&mut blocking_reasons, "agent_run_recorded");
+    }
+    if evidence_recorded {
+        push_unique_blocker(&mut blocking_reasons, "evidence_recorded");
+    }
+    if proposal_created {
+        push_unique_blocker(&mut blocking_reasons, "proposal_created");
+    }
+    if memory_written {
+        push_unique_blocker(&mut blocking_reasons, "memory_written");
+    }
+    if life_model_written {
+        push_unique_blocker(&mut blocking_reasons, "life_model_written");
+    }
+    if mcp_audit_written {
+        push_unique_blocker(&mut blocking_reasons, "mcp_audit_written");
+    }
+    if external_write_recorded {
+        push_unique_blocker(&mut blocking_reasons, "external_write_recorded");
+    }
+    if !ordinary_default_chat_unchanged {
+        push_unique_blocker(&mut blocking_reasons, "default_chat_not_legacy_stream");
+    }
+
+    let gate_report_metadata_ready = send_proof_ready
+        && stream_boundary_proof_ready
+        && send_descriptor_ready
+        && send_contract_ready
+        && send_harness_ready
+        && stream_descriptor_ready
+        && stream_contract_ready
+        && stream_harness_ready
+        && w65_w67_metadata_safe
+        && metadata_safe
+        && !contains_raw_content
+        && selected_adapter_path == LEGACY_STREAM_PATH
+        && !controlled_adapter_enabled
+        && !automatic_migration_enabled
+        && !controlled_adapter_invocation_allowed
+        && !executor_enabled
+        && !executor_attached
+        && !migration_permission
+        && !stream_started
+        && !event_channel_opened
+        && !stream_events_emitted
+        && !allow_writes
+        && max_tool_calls == 0
+        && side_effect_budget_zero
+        && !runtime_call_enabled
+        && !model_call_enabled
+        && !tool_call_enabled
+        && business_write_disabled
+        && !chat_message_saved
+        && !agent_run_recorded
+        && !evidence_recorded
+        && !proposal_created
+        && !memory_written
+        && !life_model_written
+        && !mcp_audit_written
+        && !external_write_recorded
+        && ordinary_default_chat_unchanged;
+    let executor_skeleton_discussion_ready = gate_report_metadata_ready;
+
+    DefaultChatControlledAdapterExecutorAttachmentGateReport {
+        report_kind: "default_chat_controlled_adapter_executor_attachment_gate_report".into(),
+        gate_report_metadata_ready,
+        executor_skeleton_discussion_ready,
+        executor_attachment_allowed: false,
+        executor_enabled,
+        executor_attached,
+        executor_implementation_present,
+        human_review_present,
+        route_cutover_permission,
+        migration_permission,
+        ordinary_default_chat_unchanged,
+        selected_adapter_path,
+        candidate_adapter_path,
+        default_send_path: route.default_send_path.clone(),
+        start_stream_path: route.start_stream_path.clone(),
+        controlled_adapter_enabled,
+        automatic_migration_enabled,
+        controlled_adapter_invocation_allowed,
+        send_message_result_compatible: send_proof.send_message_result_compatible,
+        stream_message_compatible: stream_proof.stream_message_compatible,
+        send_proof_ready,
+        stream_boundary_proof_ready,
+        w68_send_compatible_proof_ready: send_proof_ready,
+        w69_stream_boundary_proof_ready: stream_boundary_proof_ready,
+        send_descriptor_ready,
+        send_contract_ready,
+        send_harness_ready,
+        stream_descriptor_ready,
+        stream_contract_ready,
+        stream_harness_ready,
+        w65_w67_metadata_safe,
+        metadata_safe,
+        contains_raw_content,
+        stream_started,
+        stream_events_emitted,
+        event_channel_opened,
+        allow_writes,
+        max_tool_calls,
+        side_effect_budget,
+        side_effect_budget_zero,
+        runtime_call_enabled,
+        model_call_enabled,
+        tool_call_enabled,
+        business_write_disabled,
+        chat_message_saved,
+        agent_run_recorded,
+        evidence_recorded,
+        proposal_created,
+        memory_written,
+        life_model_written,
+        mcp_audit_written,
+        external_write_recorded,
+        input_length_bytes: send_proof.input_length_bytes,
+        input_length_chars: send_proof.input_length_chars,
+        input_sha256: send_proof.input_sha256,
+        blocking_reasons,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn ensure_default_chat_controlled_adapter_executor_attachment_gate(
+    route: &DefaultChatAdapterRoute,
+    input: &str,
+) -> Result<DefaultChatControlledAdapterExecutorAttachmentGateReport, String> {
+    let report = evaluate_default_chat_controlled_adapter_executor_attachment_gate(route, input);
+    if report.executor_attachment_allowed && report.blocking_reasons.is_empty() {
+        Ok(report)
+    } else {
+        Err(format!(
+            "default_chat_controlled_adapter_executor_attachment_gate_not_ready: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
+fn default_chat_adapter_sum_side_effect_budgets(
+    budgets: &[&DefaultChatAdapterDescriptorSideEffectBudget],
+) -> DefaultChatAdapterDescriptorSideEffectBudget {
+    let mut total = DefaultChatAdapterDescriptorSideEffectBudget::zero();
+
+    for budget in budgets {
+        total.runtime_calls += budget.runtime_calls;
+        total.model_calls += budget.model_calls;
+        total.tool_calls += budget.tool_calls;
+        total.store_writes += budget.store_writes;
+        total.chat_message_writes += budget.chat_message_writes;
+        total.agent_run_writes += budget.agent_run_writes;
+        total.evidence_writes += budget.evidence_writes;
+        total.proposal_writes += budget.proposal_writes;
+        total.memory_writes += budget.memory_writes;
+        total.life_model_writes += budget.life_model_writes;
+        total.mcp_audit_writes += budget.mcp_audit_writes;
+        total.external_writes += budget.external_writes;
+    }
+
+    total
 }
 
 fn push_unique_blocker(blocking_reasons: &mut Vec<String>, reason: &str) {
