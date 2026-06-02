@@ -654,6 +654,46 @@ pub struct DefaultChatAdapterContractHarnessReport {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterOrdinaryEntryPreflightCheck {
+    pub callsite: String,
+    pub preflight_ready: bool,
+    pub contract_ready: bool,
+    pub legacy_entry_allowed: bool,
+    pub ordinary_entry_path: String,
+    pub required_entry_path: String,
+    pub contract_shape: String,
+    pub side_effect_lock_engaged: bool,
+    pub default_chat_migration_allowed: bool,
+    pub controlled_adapter_executor_attached: bool,
+    pub runtime_call_enabled: bool,
+    pub model_call_enabled: bool,
+    pub tool_call_enabled: bool,
+    pub allow_writes: bool,
+    pub max_tool_calls: u32,
+    pub chat_message_saved: bool,
+    pub agent_run_recorded: bool,
+    pub evidence_recorded: bool,
+    pub blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterOrdinaryEntryPreflightStatus {
+    pub status_ready: bool,
+    pub default_chat_unchanged: bool,
+    pub current_mode: String,
+    pub controlled_adapter_enabled: bool,
+    pub automatic_migration_enabled: bool,
+    pub default_send_path: String,
+    pub start_stream_path: String,
+    pub send_message_preflight: DefaultChatAdapterOrdinaryEntryPreflightCheck,
+    pub stream_message_preflight: DefaultChatAdapterOrdinaryEntryPreflightCheck,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DefaultChatAdapterDryRunInput {
@@ -3332,6 +3372,147 @@ pub(crate) async fn check_default_chat_adapter_contract_harness_with_state(
             "modelCallStorage": "none",
         }),
     })
+}
+
+#[tauri::command]
+pub async fn get_default_chat_adapter_ordinary_entry_preflight_status(
+) -> Result<DefaultChatAdapterOrdinaryEntryPreflightStatus, String> {
+    get_default_chat_adapter_ordinary_entry_preflight_status_with_route(
+        crate::default_chat_adapter::resolve_default_chat_adapter_route(),
+    )
+    .await
+}
+
+pub(crate) async fn get_default_chat_adapter_ordinary_entry_preflight_status_with_route(
+    route: crate::default_chat_adapter::DefaultChatAdapterRoute,
+) -> Result<DefaultChatAdapterOrdinaryEntryPreflightStatus, String> {
+    let send_message_preflight =
+        crate::default_chat_adapter::evaluate_default_chat_adapter_ordinary_entry_preflight(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+        );
+    let stream_message_preflight =
+        crate::default_chat_adapter::evaluate_default_chat_adapter_ordinary_entry_preflight(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+            &route,
+        );
+    let default_chat_unchanged = route.current_mode == "legacy_stream"
+        && route.default_send_path == "legacy_stream"
+        && route.start_stream_path == "legacy_stream"
+        && !route.controlled_adapter_enabled
+        && !route.automatic_migration_enabled;
+
+    let send_message_preflight =
+        default_chat_adapter_ordinary_entry_preflight_check(send_message_preflight);
+    let stream_message_preflight =
+        default_chat_adapter_ordinary_entry_preflight_check(stream_message_preflight);
+    let mut blocking_reasons = Vec::new();
+
+    if !send_message_preflight.preflight_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "send_message_preflight_not_ready".into(),
+        );
+        for reason in &send_message_preflight.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+    if !stream_message_preflight.preflight_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "start_stream_message_preflight_not_ready".into(),
+        );
+        for reason in &stream_message_preflight.blocking_reasons {
+            push_unique_string(&mut blocking_reasons, reason.clone());
+        }
+    }
+    if !default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_route_drifted".into());
+    }
+    if route.controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if route.automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+
+    let status_ready = default_chat_unchanged
+        && send_message_preflight.preflight_ready
+        && stream_message_preflight.preflight_ready
+        && blocking_reasons.is_empty();
+    let blocking_reason_count = blocking_reasons.len();
+    let send_preflight_ready = send_message_preflight.preflight_ready;
+    let stream_preflight_ready = stream_message_preflight.preflight_ready;
+    let send_side_effect_lock_engaged = send_message_preflight.side_effect_lock_engaged;
+    let stream_side_effect_lock_engaged = stream_message_preflight.side_effect_lock_engaged;
+
+    Ok(DefaultChatAdapterOrdinaryEntryPreflightStatus {
+        status_ready,
+        default_chat_unchanged,
+        current_mode: route.current_mode.clone(),
+        controlled_adapter_enabled: route.controlled_adapter_enabled,
+        automatic_migration_enabled: route.automatic_migration_enabled,
+        default_send_path: route.default_send_path.clone(),
+        start_stream_path: route.start_stream_path.clone(),
+        send_message_preflight,
+        stream_message_preflight,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "ordinaryEntryPreflight": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "statusReady": status_ready,
+            "defaultChatUnchanged": default_chat_unchanged,
+            "currentMode": route.current_mode,
+            "controlledAdapterEnabled": route.controlled_adapter_enabled,
+            "automaticMigrationEnabled": route.automatic_migration_enabled,
+            "defaultSendPath": route.default_send_path,
+            "startStreamPath": route.start_stream_path,
+            "sendPreflightReady": send_preflight_ready,
+            "streamPreflightReady": stream_preflight_ready,
+            "sendSideEffectLockEngaged": send_side_effect_lock_engaged,
+            "streamSideEffectLockEngaged": stream_side_effect_lock_engaged,
+            "notAutomaticMigration": true,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "none",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+            "agentRunStorage": "none",
+            "modelCallStorage": "none",
+        }),
+    })
+}
+
+fn default_chat_adapter_ordinary_entry_preflight_check(
+    preflight: crate::default_chat_adapter::DefaultChatAdapterOrdinaryEntryPreflight,
+) -> DefaultChatAdapterOrdinaryEntryPreflightCheck {
+    DefaultChatAdapterOrdinaryEntryPreflightCheck {
+        callsite: preflight.callsite,
+        preflight_ready: preflight.preflight_ready,
+        contract_ready: preflight.contract_ready,
+        legacy_entry_allowed: preflight.legacy_entry_allowed,
+        ordinary_entry_path: preflight.ordinary_entry_path,
+        required_entry_path: preflight.required_entry_path,
+        contract_shape: preflight.contract_shape,
+        side_effect_lock_engaged: preflight.side_effect_lock_engaged,
+        default_chat_migration_allowed: preflight.default_chat_migration_allowed,
+        controlled_adapter_executor_attached: preflight.controlled_adapter_executor_attached,
+        runtime_call_enabled: preflight.runtime_call_enabled,
+        model_call_enabled: preflight.model_call_enabled,
+        tool_call_enabled: preflight.tool_call_enabled,
+        allow_writes: preflight.allow_writes,
+        max_tool_calls: preflight.max_tool_calls,
+        chat_message_saved: preflight.chat_message_saved,
+        agent_run_recorded: preflight.agent_run_recorded,
+        evidence_recorded: preflight.evidence_recorded,
+        blocking_reasons: preflight.blocking_reasons,
+    }
 }
 
 #[tauri::command]
@@ -13206,6 +13387,135 @@ mod tests {
         let serialized = serde_json::to_string(&status).unwrap();
         assert!(!serialized.contains("secret@example.com"));
         assert!(!serialized.contains("Routing status note"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_ordinary_entry_preflight_status_reports_clean_legacy_entries() {
+        let status = get_default_chat_adapter_ordinary_entry_preflight_status_with_route(
+            crate::default_chat_adapter::resolve_default_chat_adapter_route(),
+        )
+        .await
+        .unwrap();
+
+        assert!(status.status_ready);
+        assert_eq!(status.current_mode, "legacy_stream");
+        assert_eq!(status.default_send_path, "legacy_stream");
+        assert_eq!(status.start_stream_path, "legacy_stream");
+        assert!(!status.controlled_adapter_enabled);
+        assert!(!status.automatic_migration_enabled);
+        assert!(status.default_chat_unchanged);
+        assert!(status.blocking_reasons.is_empty());
+
+        assert_eq!(status.send_message_preflight.callsite, "send_message");
+        assert!(status.send_message_preflight.preflight_ready);
+        assert!(status.send_message_preflight.legacy_entry_allowed);
+        assert_eq!(
+            status.send_message_preflight.contract_shape,
+            "send_message_compatible"
+        );
+        assert_eq!(
+            status.send_message_preflight.ordinary_entry_path,
+            "legacy_stream"
+        );
+        assert!(status.send_message_preflight.side_effect_lock_engaged);
+        assert!(!status.send_message_preflight.default_chat_migration_allowed);
+
+        assert_eq!(
+            status.stream_message_preflight.callsite,
+            "start_stream_message"
+        );
+        assert!(status.stream_message_preflight.preflight_ready);
+        assert!(status.stream_message_preflight.legacy_entry_allowed);
+        assert_eq!(
+            status.stream_message_preflight.contract_shape,
+            "stream_message_compatible"
+        );
+        assert_eq!(
+            status.stream_message_preflight.ordinary_entry_path,
+            "legacy_stream"
+        );
+        assert!(status.stream_message_preflight.side_effect_lock_engaged);
+        assert!(
+            !status
+                .stream_message_preflight
+                .default_chat_migration_allowed
+        );
+
+        assert_eq!(
+            status.metadata_safe_summary["ordinaryEntryPreflight"],
+            "default_chat_adapter"
+        );
+        assert_eq!(status.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(status.metadata_safe_summary["readOnly"], true);
+        assert_eq!(status.metadata_safe_summary["notAutomaticMigration"], true);
+        assert_eq!(status.metadata_safe_summary["sendPreflightReady"], true);
+        assert_eq!(status.metadata_safe_summary["streamPreflightReady"], true);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_ordinary_entry_preflight_status_blocks_route_drift() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.default_send_path = "controlled_adapter".into();
+
+        let status = get_default_chat_adapter_ordinary_entry_preflight_status_with_route(route)
+            .await
+            .unwrap();
+
+        assert!(!status.status_ready);
+        assert!(!status.default_chat_unchanged);
+        assert_eq!(status.send_message_preflight.ordinary_entry_path, "blocked");
+        assert!(!status.send_message_preflight.preflight_ready);
+        assert!(status
+            .blocking_reasons
+            .contains(&"send_message_preflight_not_ready".to_string()));
+        assert!(status
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+        assert!(status
+            .send_message_preflight
+            .blocking_reasons
+            .contains(&"callsite_contract_not_ready".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_ordinary_entry_preflight_status_is_read_only_by_side_effect_counts(
+    ) {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let status = get_default_chat_adapter_ordinary_entry_preflight_status_with_route(
+            crate::default_chat_adapter::resolve_default_chat_adapter_route(),
+        )
+        .await
+        .unwrap();
+
+        assert!(status.status_ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_ordinary_entry_preflight_status_serialized_output_is_metadata_safe(
+    ) {
+        let status = get_default_chat_adapter_ordinary_entry_preflight_status_with_route(
+            crate::default_chat_adapter::resolve_default_chat_adapter_route(),
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&status).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
         assert!(!serialized.contains("raw output"));
         assert!(!serialized.contains("rawPrompt"));
         assert!(!serialized.contains("rawAssistantOutput"));

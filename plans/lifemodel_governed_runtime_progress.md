@@ -10,7 +10,7 @@ completion/status index.
 
 ## Current Position
 
-W1-W55 are complete. The project now has a governed PlanExecute V1 vertical
+W1-W56 are complete. The project now has a governed PlanExecute V1 vertical
 slice, a lightweight fixed `RuntimeStrategy` trait foundation for ReAct and
 PlanExecute adapters, a read-only Runtime Migration Gate for Chat migration
 diagnostics, a Settings evidence surface that makes the gate result visible
@@ -158,6 +158,13 @@ callsite contracts and invocation boundary state to require legacy entry,
 controlled executor unattached, default Chat migration disabled, and zero
 runtime/model/tool/write pre-entry budget. It is ordinary entry preflight, not
 default Chat migration.
+W56 adds a read-only default Chat adapter ordinary-entry preflight status
+surface. `get_default_chat_adapter_ordinary_entry_preflight_status` and the
+Settings panel only read the current adapter route plus W55 send/stream
+preflight checks, then return metadata-safe status fields and summaries. It
+creates no AgentRun, Evidence, Proposal, Memory, LifeModel patch, MCP audit,
+chat message, external write, model call, runtime call, or tool call, and it is
+not default Chat migration.
 
 The key boundary is unchanged:
 
@@ -539,11 +546,12 @@ The key boundary is unchanged:
 | W53 Default Chat Adapter Typed Callsite Contract | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Rust tests, docs | Adds pure `DefaultChatAdapterCallsite`, `DefaultChatAdapterCallsiteContract`, `evaluate_default_chat_adapter_callsite_contract`, and `ensure_default_chat_adapter_callsite_contract`. Default `send_message` and `start_stream_message` now call the typed callsite contract guard with `SendMessage` and `StartStreamMessage` variants, binding each entry to `send_message_compatible` or `stream_message_compatible` and verifying its actual route path is still `legacy_stream`. W52 boundary blocking or callsite route drift makes W53 contract blocking. It calls no W19-W52 readiness/review/preview/evidence/runtime/model/tool command and is not default Chat migration. |
 | W54 Authority Roadmap Sync | Done | `AGENTS.md`, `README.md`, `plans/README.md`, `plans/openlife_lifemodel_governed_agent_runtime.md`, `plans/openlife_development_plan.md`, this file | Aligns high-priority roadmap and execution documents with W1-W53 code status so future Agents do not follow stale W22 instructions. It changes no runtime code, calls no commands, creates no records, and is not default Chat migration. |
 | W55 Default Chat Adapter Ordinary Entry Preflight | Done | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Rust tests, docs | Adds pure `DefaultChatAdapterOrdinaryEntryPreflight`, `evaluate_default_chat_adapter_ordinary_entry_preflight`, and `ensure_default_chat_adapter_ordinary_entry_preflight`. Default `send_message` and `start_stream_message` now call the preflight guard, which requires typed contract readiness, legacy entry allowed, controlled executor unattached, default Chat migration disabled, and zero pre-entry runtime/model/tool/write budget. Route drift or contract blocking fails closed. It calls no W19-W54 readiness/review/preview/evidence/runtime/model/tool command and is not default Chat migration. |
+| W56 Default Chat Adapter Ordinary Entry Preflight Status | Done | `src-tauri/src/commands/agent_runtime.rs`, `src-tauri/src/lib.rs`, `frontend/src/tauri.ts`, `frontend/src/types.ts`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx`, frontend tests, Rust tests, docs | Adds read-only `get_default_chat_adapter_ordinary_entry_preflight_status`, frontend wrapper, and Settings status surface. It reports send/stream ordinary-entry preflight readiness, legacy entry, side-effect lock, route status, blockers, and metadata-safe summary. It does not run runtime/model/tool calls, does not write Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write records, and is not default Chat migration. |
 
 ## Next Recommended Sequence
 
 ```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, and ordinary-entry preflight only as implementation-discussion evidence; default Chat remains unchanged
+keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, and ordinary-entry preflight status only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 The next phase still must not directly replace the default Chat path. W21 only
@@ -583,8 +591,8 @@ invocation boundary that permits default callsites to enter `legacy_stream`
 after a side-effect-free guard, and W53 only adds a typed callsite contract that
 binds send/stream entries to their legacy route path and contract shape, and
 W54 only syncs authority documents so Agents do not follow stale W22 guidance,
-and W55 only adds an ordinary-entry preflight / side-effect lock before legacy
-entry. Default
+W55 only adds an ordinary-entry preflight / side-effect lock before legacy
+entry, and W56 only adds a read-only ordinary-entry preflight status surface. Default
 `Send`, `send_message`, and `start_stream_message` remain unchanged until a
 later reviewed migration stage with separate implementation work and explicit
 human approval.

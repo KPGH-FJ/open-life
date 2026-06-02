@@ -2035,6 +2035,107 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("refreshes default chat adapter ordinary entry preflight status without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_default_chat_adapter_ordinary_entry_preflight_status") {
+        return Promise.resolve({
+          statusReady: true,
+          defaultChatUnchanged: true,
+          currentMode: "legacy_stream",
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          sendMessagePreflight: {
+            callsite: "send_message",
+            preflightReady: true,
+            contractReady: true,
+            legacyEntryAllowed: true,
+            ordinaryEntryPath: "legacy_stream",
+            requiredEntryPath: "legacy_stream",
+            contractShape: "send_message_compatible",
+            sideEffectLockEngaged: true,
+            defaultChatMigrationAllowed: false,
+            controlledAdapterExecutorAttached: false,
+            runtimeCallEnabled: false,
+            modelCallEnabled: false,
+            toolCallEnabled: false,
+            allowWrites: false,
+            maxToolCalls: 0,
+            chatMessageSaved: false,
+            agentRunRecorded: false,
+            evidenceRecorded: false,
+            blockingReasons: [],
+          },
+          streamMessagePreflight: {
+            callsite: "start_stream_message",
+            preflightReady: true,
+            contractReady: true,
+            legacyEntryAllowed: true,
+            ordinaryEntryPath: "legacy_stream",
+            requiredEntryPath: "legacy_stream",
+            contractShape: "stream_message_compatible",
+            sideEffectLockEngaged: true,
+            defaultChatMigrationAllowed: false,
+            controlledAdapterExecutorAttached: false,
+            runtimeCallEnabled: false,
+            modelCallEnabled: false,
+            toolCallEnabled: false,
+            allowWrites: false,
+            maxToolCalls: 0,
+            chatMessageSaved: false,
+            agentRunRecorded: false,
+            evidenceRecorded: false,
+            blockingReasons: [],
+          },
+          blockingReasons: [],
+          metadataSafeSummary: {
+            ordinaryEntryPreflight: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            statusReady: true,
+            sendPreflightReady: true,
+            streamPreflightReady: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Ordinary Entry Preflight")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Ordinary Entry Preflight" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "get_default_chat_adapter_ordinary_entry_preflight_status",
+        undefined
+      );
+    });
+    expect(await screen.findByText("Ordinary entry preflight ready")).toBeInTheDocument();
+    expect(screen.getAllByText("statusReady: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("defaultChatUnchanged: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("controlledAdapterEnabled: false").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("automaticMigrationEnabled: false").length).toBeGreaterThanOrEqual(
+      1
+    );
+    expect(screen.getAllByText("send_message").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("start_stream_message").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("ordinaryEntryPath: legacy_stream").length).toBeGreaterThanOrEqual(
+      2
+    );
+    expect(screen.getAllByText("sideEffectLockEngaged: true").length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText("ordinaryEntryPreflight: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("checks default chat adapter contract harness without routing controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_default_chat_adapter_contract_harness") {

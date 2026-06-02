@@ -729,6 +729,42 @@ export interface DefaultChatAdapterContractHarnessReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterOrdinaryEntryPreflightCheck {
+  callsite: string;
+  preflightReady: boolean;
+  contractReady: boolean;
+  legacyEntryAllowed: boolean;
+  ordinaryEntryPath: string;
+  requiredEntryPath: string;
+  contractShape: string;
+  sideEffectLockEngaged: boolean;
+  defaultChatMigrationAllowed: boolean;
+  controlledAdapterExecutorAttached: boolean;
+  runtimeCallEnabled: boolean;
+  modelCallEnabled: boolean;
+  toolCallEnabled: boolean;
+  allowWrites: boolean;
+  maxToolCalls: number;
+  chatMessageSaved: boolean;
+  agentRunRecorded: boolean;
+  evidenceRecorded: boolean;
+  blockingReasons: string[];
+}
+
+export interface DefaultChatAdapterOrdinaryEntryPreflightStatus {
+  statusReady: boolean;
+  defaultChatUnchanged: boolean;
+  currentMode: string;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  sendMessagePreflight: DefaultChatAdapterOrdinaryEntryPreflightCheck;
+  streamMessagePreflight: DefaultChatAdapterOrdinaryEntryPreflightCheck;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface DefaultChatAdapterDryRunInput {
   sessionId: string;
   message: string;

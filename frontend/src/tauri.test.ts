@@ -23,6 +23,7 @@ import {
   recordDefaultChatAdapterCutoverPlanReviewDecision,
   checkRuntimeMigrationGate,
   getDefaultChatAdapterRoutingStatus,
+  getDefaultChatAdapterOrdinaryEntryPreflightStatus,
   getDefaultChatRuntimeBoundaryStatus,
   runDefaultChatAdapterControlledPreview,
   getDefaultChatAdapterControlledPreviewReviewSummary,
@@ -984,6 +985,78 @@ describe("tauri command argument aliases", () => {
     expect(result.controlledAdapterEnabled).toBe(false);
     expect(result.defaultSendPath).toBe("legacy_stream");
     expect(result.startStreamPath).toBe("legacy_stream");
+  });
+
+  it("invokes default chat adapter ordinary entry preflight status as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      statusReady: true,
+      defaultChatUnchanged: true,
+      currentMode: "legacy_stream",
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      sendMessagePreflight: {
+        callsite: "send_message",
+        preflightReady: true,
+        contractReady: true,
+        legacyEntryAllowed: true,
+        ordinaryEntryPath: "legacy_stream",
+        requiredEntryPath: "legacy_stream",
+        contractShape: "send_message_compatible",
+        sideEffectLockEngaged: true,
+        defaultChatMigrationAllowed: false,
+        controlledAdapterExecutorAttached: false,
+        runtimeCallEnabled: false,
+        modelCallEnabled: false,
+        toolCallEnabled: false,
+        allowWrites: false,
+        maxToolCalls: 0,
+        chatMessageSaved: false,
+        agentRunRecorded: false,
+        evidenceRecorded: false,
+        blockingReasons: [],
+      },
+      streamMessagePreflight: {
+        callsite: "start_stream_message",
+        preflightReady: true,
+        contractReady: true,
+        legacyEntryAllowed: true,
+        ordinaryEntryPath: "legacy_stream",
+        requiredEntryPath: "legacy_stream",
+        contractShape: "stream_message_compatible",
+        sideEffectLockEngaged: true,
+        defaultChatMigrationAllowed: false,
+        controlledAdapterExecutorAttached: false,
+        runtimeCallEnabled: false,
+        modelCallEnabled: false,
+        toolCallEnabled: false,
+        allowWrites: false,
+        maxToolCalls: 0,
+        chatMessageSaved: false,
+        agentRunRecorded: false,
+        evidenceRecorded: false,
+        blockingReasons: [],
+      },
+      blockingReasons: [],
+      metadataSafeSummary: {
+        ordinaryEntryPreflight: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+        statusReady: true,
+      },
+    });
+
+    const result = await getDefaultChatAdapterOrdinaryEntryPreflightStatus();
+
+    expect(invoke).toHaveBeenCalledWith(
+      "get_default_chat_adapter_ordinary_entry_preflight_status",
+      undefined
+    );
+    expect(result.statusReady).toBe(true);
+    expect(result.sendMessagePreflight.callsite).toBe("send_message");
+    expect(result.streamMessagePreflight.callsite).toBe("start_stream_message");
+    expect(result.metadataSafeSummary.readOnly).toBe(true);
   });
 
   it("invokes default chat adapter contract harness as read-only", async () => {

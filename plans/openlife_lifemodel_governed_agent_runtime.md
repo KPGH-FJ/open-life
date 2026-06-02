@@ -1,18 +1,19 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-06-01
-> Status: W55 Default Chat Adapter Ordinary Entry Preflight complete; default Chat remains unchanged
+> Status: W56 Default Chat Adapter Ordinary Entry Preflight Status complete; default Chat remains unchanged
 > Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W55, it records that MultiStrategy work is preview/audit-ready with a
+As of W56, it records that MultiStrategy work is preview/audit-ready with a
 lightweight fixed RuntimeStrategy adapter boundary, read-only migration gates,
 Settings evidence surfaces, explicit controlled pilot/shadow/candidate paths,
 metadata-safe review evidence, and a disabled default Chat adapter guard stack
-through typed callsite contracts plus an ordinary-entry preflight / side-effect
-lock. MultiStrategy is still not the default Chat runtime.
+through typed callsite contracts, an ordinary-entry preflight / side-effect
+lock, and a read-only ordinary-entry preflight status surface. MultiStrategy is
+still not the default Chat runtime.
 
 It updates the project framing from:
 
@@ -109,7 +110,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W55 status table and preview/not-default/gate evidence/pilot eligibility/controlled pilot/promotion-validation/evidence/readiness/planning/review/shadow/cutover/default-adapter guard boundary.
+   - Compact W1-W56 status table and preview/not-default/gate evidence/pilot eligibility/controlled pilot/promotion-validation/evidence/readiness/planning/review/shadow/cutover/default-adapter guard boundary/status.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -134,7 +135,7 @@ As of this preparation document, the project already has meaningful primitives:
 | Pilot Eligibility | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_controlled_chat_pilot_eligibility`, Settings Pilot eligibility panel | W19 read-only sustained evidence check over the latest 3 preview gate reports. It returns eligibility, clean count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation and is not a Chat switch. |
 | Controlled Chat Pilot / Promotion | `frontend/src/pages/ChatPage.tsx` | W20 explicit single-turn pilot plus W21 reviewed promotion and W22 source-bound validation. The pilot calls eligibility before preview, blocks without preview when ineligible, runs `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, displays “Pilot response” separately, and keeps normal Send unchanged. Promotion can write one ordinary assistant chat message with existing `run_id` metadata only after explicit review/confirmation and only when the current target session matches the pilot source session. |
 | Promotion / migration evidence ladder | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | W23-W33 add metadata-safe promotion evidence, readiness, reviewed migration plan, review decision evidence, implementation gate, shadow run/review, cutover readiness, candidate adapter/review, and candidate promotion readiness. These are explicit, evidence-backed, and non-default; readiness means implementation discussion, not migration permission. |
-| Default Chat adapter guard ladder | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Settings panels | W34-W55 make the default Chat boundary observable, activation-planned, reviewable, implementation-gated, disabled-routed, contract-checked, dry-run-reviewed, implementation-readiness-checked, controlled-preview-reviewed, cutover-plan-reviewed, route-guarded, invocation-guarded, typed-callsite-guarded, and ordinary-entry-preflighted. Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter execution remains disabled and unattached. |
+| Default Chat adapter guard ladder | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Settings panels | W34-W56 make the default Chat boundary observable, activation-planned, reviewable, implementation-gated, disabled-routed, contract-checked, dry-run-reviewed, implementation-readiness-checked, controlled-preview-reviewed, cutover-plan-reviewed, route-guarded, invocation-guarded, typed-callsite-guarded, ordinary-entry-preflighted, and preflight-status-visible. Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter execution remains disabled and unattached. |
 | Authority roadmap sync | `AGENTS.md`, `README.md`, `plans/README.md`, this document, `plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md` | W54 realigns high-priority route documents with W1-W53 code status so future Agents do not follow stale W22 instructions. This is documentation governance, not runtime migration. |
 | Preview trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, payload, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
@@ -162,12 +163,13 @@ tool/proposal hygiene
 The implementation has moved ahead of the original work-package text in a few
 places:
 
-- W1-W55 are complete through Runtime Migration Gate evidence surface, Pilot
+- W1-W56 are complete through Runtime Migration Gate evidence surface, Pilot
   Eligibility, the very small controlled Chat pilot with fallback, reviewed
   pilot response promotion with source-bound validation, promotion and cutover
   evidence ladders, disabled default Chat adapter planning/review/readiness,
-  route/invocation/typed-callsite guards, authority roadmap sync, and
-  ordinary-entry preflight / side-effect lock.
+  route/invocation/typed-callsite guards, authority roadmap sync,
+  ordinary-entry preflight / side-effect lock, and ordinary-entry preflight
+  status surface.
 - StrategySelector, MultiStrategyRuntime orchestrator, and
   `run_multi_strategy_agent_preview` exist earlier than the original plan
   expected.
@@ -198,18 +200,23 @@ places:
   selected strategy, and governance summary. Confirmation blocks if the user has
   switched to a different target session, writes nothing, and tells the user to
   rerun Controlled Pilot in the current session or switch back.
-- W23-W55 then add metadata-safe promotion evidence, migration planning/review,
+- W23-W56 then add metadata-safe promotion evidence, migration planning/review,
   implementation and shadow gates, cutover candidate review, default Chat
   boundary and activation planning, disabled adapter routing, dry-run and
   controlled-preview review, cutover plan approval readiness, a pure
-  route/invocation/typed-callsite guard stack, and ordinary-entry preflight. All
-  are non-default evidence or guardrails; none replace default Chat.
+  route/invocation/typed-callsite guard stack, ordinary-entry preflight, and
+  ordinary-entry preflight status. All are non-default evidence, status surfaces,
+  or guardrails; none replace default Chat.
 - W54 syncs this high-priority roadmap with the progress index and current
   entry docs so future Agents do not follow stale W22 instructions.
 - W55 adds a pure ordinary-entry preflight / side-effect lock before the legacy
   Chat entry, requiring typed contract readiness, legacy entry, controlled
   executor unattached, migration disabled, and zero runtime/model/tool/write
   pre-entry budget.
+- W56 adds a read-only Settings-visible status surface over W55 send/stream
+  preflight, reporting readiness, blockers, side-effect lock state, and
+  metadata-safe summary without running runtime/model/tool paths or writing
+  records.
 
 These early pieces do not change the boundary:
 
@@ -220,10 +227,10 @@ These early pieces do not change the boundary:
 - PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
 - `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
   boundary; it remains fixed to those adapters and is not plugin loading.
-- The next step is still not direct default Chat replacement. W20-W55 evidence,
+- The next step is still not direct default Chat replacement. W20-W56 evidence,
   review, readiness, activation, dry-run, controlled preview, cutover plan, and
-  adapter guard success are implementation-discussion artifacts, not migration
-  permission.
+  adapter guard/status success are implementation-discussion artifacts, not
+  migration permission.
 
 ## 5. Target Spine
 
@@ -666,7 +673,7 @@ Run:
 make ci
 ```
 
-### Completed W1-W55
+### Completed W1-W56
 
 | Work Package | Status | Completion boundary |
 | --- | --- | --- |
@@ -697,18 +704,20 @@ make ci
 | W34-W37 Default Chat Activation Boundary | Done | Default Chat runtime boundary status, activation plan draft, activation review evidence, and activation implementation gate exist, all read-only/reviewed and not default Chat migration. |
 | W38-W42 Disabled Adapter Readiness Ladder | Done | Disabled routing scaffold, contract harness, dry-run boundary, dry-run review evidence, and implementation readiness gate exist while default Chat remains `legacy_stream`. |
 | W43-W48 Controlled Preview To Cutover Plan Approval | Done | Explicit non-default adapter controlled preview, controlled preview review evidence, approval readiness, cutover implementation plan draft, cutover plan review evidence, and cutover plan approval readiness exist without changing default Chat. |
-| W49-W55 Default Chat Adapter Guard Stack | Done | Route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, and ordinary-entry preflight keep ordinary send/stream fail-closed on `legacy_stream` with controlled executor disabled and unattached. |
+| W49-W56 Default Chat Adapter Guard Stack | Done | Route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, and ordinary-entry preflight status keep ordinary send/stream fail-closed and observable on `legacy_stream` with controlled executor disabled and unattached. |
 | W54 Authority Roadmap Sync | Done | High-priority roadmap and execution documents are synced with W1-W53 code status so future Agents do not follow stale W22 instructions. This is documentation governance, not runtime migration. |
 | W55 Default Chat Adapter Ordinary Entry Preflight | Done | Ordinary `send_message` / `start_stream_message` entries now call a pure preflight guard that requires typed contract readiness, legacy entry allowed, controlled executor unattached, migration disabled, and zero pre-entry side-effect budget. |
+| W56 Default Chat Adapter Ordinary Entry Preflight Status | Done | Settings can explicitly refresh a read-only status over W55 send/stream preflight readiness, route state, blockers, side-effect lock, and metadata-safe summary. It does not run runtime/model/tool paths, write records, change routing, or migrate default Chat. |
 
-### W23-W55: Status Bridge
+### W23-W56: Status Bridge
 
-W23-W55 extend the W20-W22 controlled pilot ladder into a long, reviewed
+W23-W56 extend the W20-W22 controlled pilot ladder into a long, reviewed
 evidence and adapter-guard chain. The important invariant is unchanged:
 successful preview, promotion, readiness, approval, dry-run, controlled preview,
 cutover plan approval, route guard, invocation guard, and typed callsite
-contract, and ordinary-entry preflight are all evidence or guardrails. They do
-not authorize automatic migration. Default `Send`, `send_message`, and
+contract, ordinary-entry preflight, and ordinary-entry preflight status are all
+evidence, status surfaces, or guardrails. They do not authorize automatic
+migration. Default `Send`, `send_message`, and
 `start_stream_message` remain on the legacy stream path until a later separate
 implementation is explicitly reviewed and accepted.
 
@@ -882,10 +891,10 @@ Do not:
 - Treat the Runtime Migration Gate panel as a Chat switching control.
 - Treat Pilot eligibility as a Chat switching control or automatic migration
   trigger.
-- Treat W20-W55 controlled pilot, promotion, readiness, shadow, candidate,
+- Treat W20-W56 controlled pilot, promotion, readiness, shadow, candidate,
   activation, dry-run, controlled preview, cutover plan, route guard,
-  invocation guard, typed callsite contract, or ordinary-entry preflight success as default Chat
-  migration.
+  invocation guard, typed callsite contract, ordinary-entry preflight, or
+  ordinary-entry preflight status success as default Chat migration.
 - Treat pilot success as automatic permission to write the pilot answer into
   ordinary assistant history; W21 promotion requires explicit review and
   confirmation.

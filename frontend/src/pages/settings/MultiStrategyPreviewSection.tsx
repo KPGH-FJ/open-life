@@ -30,6 +30,7 @@ import {
   getDefaultChatAdapterControlledPreviewReviewSummary,
   getDefaultChatAdapterCutoverPlanReviewSummary,
   getDefaultChatAdapterDryRunReviewSummary,
+  getDefaultChatAdapterOrdinaryEntryPreflightStatus,
   getDefaultChatAdapterRoutingStatus,
   getControlledChatCutoverCandidateReviewSummary,
   getControlledChatMigrationReviewDecisionSummary,
@@ -74,6 +75,7 @@ import type {
   DefaultChatAdapterDryRunReviewDecisionResult,
   DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterImplementationReadinessReport,
+  DefaultChatAdapterOrdinaryEntryPreflightStatus,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
   DefaultChatAdapterActivationReviewDecisionResult,
@@ -135,6 +137,12 @@ const SAFE_SUMMARY_KEYS = [
   "defaultChatUnchanged",
   "defaultChatPathUnchanged",
   "readOnly",
+  "ordinaryEntryPreflight",
+  "statusReady",
+  "sendPreflightReady",
+  "streamPreflightReady",
+  "sendSideEffectLockEngaged",
+  "streamSideEffectLockEngaged",
   "contractHarnessReady",
   "dryRunReady",
   "blocked",
@@ -384,6 +392,12 @@ export default function MultiStrategyPreviewSection() {
   const [adapterRoutingError, setAdapterRoutingError] = useState<string | null>(null);
   const [adapterRoutingStatus, setAdapterRoutingStatus] =
     useState<DefaultChatAdapterRoutingStatus | null>(null);
+  const [ordinaryEntryPreflightChecking, setOrdinaryEntryPreflightChecking] = useState(false);
+  const [ordinaryEntryPreflightError, setOrdinaryEntryPreflightError] = useState<string | null>(
+    null
+  );
+  const [ordinaryEntryPreflightStatus, setOrdinaryEntryPreflightStatus] =
+    useState<DefaultChatAdapterOrdinaryEntryPreflightStatus | null>(null);
   const [contractHarnessChecking, setContractHarnessChecking] = useState(false);
   const [contractHarnessError, setContractHarnessError] = useState<string | null>(null);
   const [contractHarnessReport, setContractHarnessReport] =
@@ -869,6 +883,20 @@ export default function MultiStrategyPreviewSection() {
     }
   };
 
+  const handleOrdinaryEntryPreflightRefresh = async () => {
+    setOrdinaryEntryPreflightChecking(true);
+    setOrdinaryEntryPreflightError(null);
+    setOrdinaryEntryPreflightStatus(null);
+    try {
+      const status = await getDefaultChatAdapterOrdinaryEntryPreflightStatus();
+      setOrdinaryEntryPreflightStatus(status);
+    } catch (e) {
+      setOrdinaryEntryPreflightError(`Ordinary entry preflight status failed: ${readableError(e)}`);
+    } finally {
+      setOrdinaryEntryPreflightChecking(false);
+    }
+  };
+
   const handleContractHarnessCheck = async () => {
     setContractHarnessChecking(true);
     setContractHarnessError(null);
@@ -1281,6 +1309,172 @@ export default function MultiStrategyPreviewSection() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Ordinary Entry Preflight
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W56 status over the W55 ordinary-entry preflight. It checks that ordinary
+              send and stream entries remain legacy-only, side-effect locked, and non-migrating.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleOrdinaryEntryPreflightRefresh}
+            disabled={ordinaryEntryPreflightChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              ordinaryEntryPreflightChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={ordinaryEntryPreflightChecking ? "animate-spin" : undefined}
+            />
+            {ordinaryEntryPreflightChecking ? "Checking..." : "Refresh Ordinary Entry Preflight"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This status command does not call runtime, tools, models, migration gates, preview
+          commands, or evidence recorders. It only reads the current default Chat adapter route and
+          W55 preflight guard.
+        </div>
+
+        {ordinaryEntryPreflightError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {ordinaryEntryPreflightError}
+          </div>
+        )}
+
+        {ordinaryEntryPreflightStatus ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                ordinaryEntryPreflightStatus.statusReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {ordinaryEntryPreflightStatus.statusReady
+                ? "Ordinary entry preflight ready"
+                : "Ordinary entry preflight blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["statusReady", String(ordinaryEntryPreflightStatus.statusReady)],
+                ["defaultChatUnchanged", String(ordinaryEntryPreflightStatus.defaultChatUnchanged)],
+                ["currentMode", ordinaryEntryPreflightStatus.currentMode],
+                [
+                  "controlledAdapterEnabled",
+                  String(ordinaryEntryPreflightStatus.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(ordinaryEntryPreflightStatus.automaticMigrationEnabled),
+                ],
+                ["defaultSendPath", ordinaryEntryPreflightStatus.defaultSendPath],
+                ["startStreamPath", ordinaryEntryPreflightStatus.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-2">
+              {[
+                ordinaryEntryPreflightStatus.sendMessagePreflight,
+                ordinaryEntryPreflightStatus.streamMessagePreflight,
+              ].map(preflight => (
+                <div
+                  key={preflight.callsite}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-700"
+                >
+                  <div className="font-medium text-stone-900">{preflight.callsite}</div>
+                  <div className="mt-1 font-mono">
+                    preflightReady: {String(preflight.preflightReady)}
+                  </div>
+                  <div className="font-mono">
+                    legacyEntryAllowed: {String(preflight.legacyEntryAllowed)}
+                  </div>
+                  <div className="font-mono">contractShape: {preflight.contractShape}</div>
+                  <div className="font-mono">ordinaryEntryPath: {preflight.ordinaryEntryPath}</div>
+                  <div className="font-mono">
+                    sideEffectLockEngaged: {String(preflight.sideEffectLockEngaged)}
+                  </div>
+                  <div className="font-mono">allowWrites: {String(preflight.allowWrites)}</div>
+                  <div className="font-mono">maxToolCalls: {preflight.maxToolCalls}</div>
+                  <div className="font-mono">
+                    defaultChatMigrationAllowed: {String(preflight.defaultChatMigrationAllowed)}
+                  </div>
+                  {preflight.blockingReasons.length > 0 && (
+                    <div className="mt-1 space-y-1">
+                      {preflight.blockingReasons.map(reason => (
+                        <div
+                          key={reason}
+                          className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-red-700"
+                        >
+                          {reason}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(ordinaryEntryPreflightStatus.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(ordinaryEntryPreflightStatus.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            <div>
+              <div className="text-xs font-medium text-stone-700">Blocking reasons</div>
+              {ordinaryEntryPreflightStatus.blockingReasons.length > 0 ? (
+                <div className="mt-1 space-y-1">
+                  {ordinaryEntryPreflightStatus.blockingReasons.map(reason => (
+                    <div
+                      key={reason}
+                      className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                    >
+                      {reason}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="mt-1 text-xs text-stone-500">
+                  No ordinary-entry preflight blockers returned.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 text-xs text-stone-500">
+            No ordinary-entry preflight status loaded.
           </div>
         )}
       </section>
