@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-02
-> Status: W67 backend-only default Chat adapter non-default invocation harness complete
+> Status: W68 backend-only default Chat adapter send-compatible proof complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W67 backend-only non-default invocation harness complete**.
+Current latest status is **W68 backend-only send-compatible proof complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -19,9 +19,13 @@ controlled adapter contract report/evaluator/ensure over that descriptor. W67
 adds a pure Rust backend-only non-default invocation harness that reads/reuses
 only the W66 contract report and proves the future controlled adapter candidate
 invocation shape is metadata-safe, zero-side-effect, and executor
-disabled/unattached. W65-W67 add no command, no frontend surface, no Settings
-surface, no runtime/model/tool call, no store write, no executor attachment,
-and no default Chat routing change.
+disabled/unattached. W68 adds a pure Rust backend-only send-compatible
+proof/evaluator/ensure that reads/reuses only W65 descriptor, W66 contract, and
+W67 harness metadata to prove the controlled adapter candidate can map to a
+SendMessageResult-compatible metadata-safe shape. It allows only the SendMessage
+callsite to become proof ready; stream callsites fail closed. W65-W68 add no
+command, no frontend surface, no Settings surface, no runtime/model/tool call,
+no store write, no executor attachment, and no default Chat routing change.
 
 Hard boundaries:
 
@@ -30,14 +34,17 @@ Hard boundaries:
   `start_stream_message` may enter only the legacy route, with the W49-W55 pure
   guards/preflight allowed to fail closed.
 - W19-W60 readiness/review/preview/gate results are not migration permission.
-- W65-W67 backend-only descriptor/contract/harness work is not migration
+- W65-W68 backend-only descriptor/contract/harness/proof work is not migration
   permission and must keep the controlled adapter executor disabled/unattached.
   W67 `harness_ready` only means the non-default invocation shape proof is
-  safe, not that default Chat may migrate.
+  safe; W68 `proof_ready` only means the SendMessageResult-compatible metadata
+  shape proof is safe, not that default Chat may migrate.
 - Ordinary `send_message` / `start_stream_message` must not call any W19-W60
   command surface.
 - Ordinary `send_message` / `start_stream_message` must not call the W67
   non-default invocation harness.
+- Ordinary `send_message` / `start_stream_message` must not call the W68
+  send-compatible proof.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -47,7 +54,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W67 progress index
+4. This W1-W68 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -66,7 +73,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W67 Structured Index
+## W1-W68 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -136,7 +143,8 @@ permission.
 | W64 | W1-W63 Authority Compression Validation | Done | Docs/index surface | Docs only | No | W65 |
 | W65 | Default Chat Adapter Backend-Only Descriptor Skeleton | Done | Pure internal mapper in `default_chat_adapter.rs` | MS descriptor only; input length/hash, route metadata, disabled/unattached executor, zero side-effect budget | No; ordinary send/stream stay `legacy_stream` | W66 |
 | W66 | Default Chat Adapter Controlled Contract Report | Done | Pure internal contract evaluator in `default_chat_adapter.rs` | MS report only; descriptor readiness, send/stream contract shape, disabled/unattached executor, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` | W67 |
-| W67 | Default Chat Adapter Non-Default Controlled Invocation Harness | Done | Pure internal harness in `default_chat_adapter.rs` | MS harness only; reads W66 report, input length/hash only, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | Future controlled adapter implementation discussion only |
+| W67 | Default Chat Adapter Non-Default Controlled Invocation Harness | Done | Pure internal harness in `default_chat_adapter.rs` | MS harness only; reads W66 report, input length/hash only, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | W68 |
+| W68 | Default Chat Adapter Send-Compatible Contract Proof | Done | Pure internal proof/evaluator in `default_chat_adapter.rs` | MS send-compatible proof only; reads W65/W66/W67 metadata, SendMessage only ready, stream fail-closed, executor disabled/unattached, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | Future controlled adapter implementation discussion only |
 
 ## Folded Boundary Summary
 
@@ -155,21 +163,23 @@ above. The boundary meaning is preserved:
   `send_message` / `start_stream_message` must not call them.
 - W61-W63 are documentation/index整理, not migration permission, not code work,
   and not default Chat migration.
-- W65-W67 descriptor/contract/harness work is internal backend code only. It
-  may describe and validate a future controlled adapter candidate with
-  metadata-safe fields and a non-default invocation shape proof, but it must not
-  execute or attach that adapter, run runtime/model/tool, write business
-  records, or change default Chat routing.
+- W65-W68 descriptor/contract/harness/proof work is internal backend code only.
+  It may describe and validate a future controlled adapter candidate with
+  metadata-safe fields, a non-default invocation shape proof, and a
+  SendMessageResult-compatible metadata shape proof, but it must not execute or
+  attach that adapter, run runtime/model/tool, write business records, or change
+  default Chat routing.
 
 ## Next Recommended Sequence
 
 ```text
 W63 complete -> W64 authority compression validated -> W65 backend-only
 descriptor skeleton complete -> W66 controlled adapter contract report complete
--> W67 non-default invocation harness complete -> future controlled adapter
-implementation discussion may build on the harness only through a separately
-reviewed task; keep default Chat on legacy_stream unless that separate task
-explicitly implements, reviews, verifies, and authorizes a route change.
+-> W67 non-default invocation harness complete -> W68 send-compatible proof
+complete -> future controlled adapter implementation discussion may build on
+the proof only through a separately reviewed task; keep default Chat on
+legacy_stream unless that separate task explicitly implements, reviews,
+verifies, and authorizes a route change.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

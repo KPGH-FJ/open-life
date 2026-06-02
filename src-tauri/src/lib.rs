@@ -4260,6 +4260,241 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_adapter_send_compatible_proof_send_ready_keeps_selected_legacy_and_no_writes() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "send raw prompt should be metadata only";
+
+        let proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        assert!(proof.proof_ready);
+        assert!(proof.send_message_result_compatible);
+        assert!(proof.descriptor_ready);
+        assert!(proof.contract_ready);
+        assert!(proof.harness_ready);
+        assert!(proof.metadata_safe);
+        assert!(!proof.contains_raw_content);
+        assert_eq!(
+            proof.proof_kind,
+            "default_chat_controlled_adapter_send_compatible_proof"
+        );
+        assert_eq!(proof.callsite_kind, "send_message");
+        assert_eq!(proof.contract_shape, "send_message_compatible");
+        assert_eq!(proof.selected_adapter_path, "legacy_stream");
+        assert_eq!(proof.candidate_adapter_path, "controlled_adapter");
+        assert_eq!(proof.required_callsite_path, "legacy_stream");
+        assert_eq!(proof.actual_callsite_path, "legacy_stream");
+        assert_eq!(proof.default_send_path, "legacy_stream");
+        assert_eq!(proof.start_stream_path, "legacy_stream");
+        assert!(!proof.controlled_adapter_enabled);
+        assert!(!proof.automatic_migration_enabled);
+        assert!(!proof.controlled_adapter_invocation_allowed);
+        assert!(!proof.controlled_adapter_executor_enabled);
+        assert!(!proof.controlled_adapter_executor_attached);
+        assert_eq!(
+            proof.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!proof.allow_writes);
+        assert_eq!(proof.max_tool_calls, 0);
+        assert!(proof.side_effect_budget_zero);
+        assert!(!proof.runtime_call_enabled);
+        assert!(!proof.model_call_enabled);
+        assert!(!proof.tool_call_enabled);
+        assert!(proof.business_write_disabled);
+        assert!(!proof.migration_permission);
+        assert!(!proof.chat_message_saved);
+        assert!(!proof.agent_run_recorded);
+        assert!(!proof.evidence_recorded);
+        assert!(!proof.proposal_created);
+        assert!(!proof.memory_written);
+        assert!(!proof.life_model_written);
+        assert!(!proof.external_write_recorded);
+        assert!(proof.default_chat_unchanged);
+        assert!(proof.blocking_reasons.is_empty());
+
+        crate::default_chat_adapter::ensure_default_chat_controlled_adapter_send_compatible_proof(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            raw_input,
+        )
+        .expect("clean send route should produce only a send-compatible proof");
+    }
+
+    #[test]
+    fn default_chat_adapter_send_compatible_proof_stream_callsite_fails_closed() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "stream raw prompt should be metadata only",
+            );
+
+        assert!(!proof.proof_ready);
+        assert!(!proof.send_message_result_compatible);
+        assert!(proof.harness_ready);
+        assert_eq!(proof.callsite_kind, "start_stream_message");
+        assert_eq!(proof.contract_shape, "stream_message_compatible");
+        assert_eq!(proof.selected_adapter_path, "legacy_stream");
+        assert_eq!(proof.candidate_adapter_path, "controlled_adapter");
+        assert!(!proof.controlled_adapter_invocation_allowed);
+        assert!(!proof.controlled_adapter_executor_enabled);
+        assert!(!proof.migration_permission);
+        assert!(proof.default_chat_unchanged);
+        assert!(proof
+            .blocking_reasons
+            .contains(&"callsite_not_send_message".to_string()));
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "stream raw prompt should be metadata only",
+            )
+            .expect_err("stream callsite must fail closed for send-compatible proof");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("send_compatible_proof_not_ready"));
+        assert!(error.contains("callsite_not_send_message"));
+    }
+
+    #[test]
+    fn default_chat_adapter_send_compatible_proof_fails_closed_for_route_drift_controlled_adapter_and_auto_migration(
+    ) {
+        let mut drift_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        drift_route.current_mode = "controlled_adapter".into();
+        drift_route.default_send_path = "controlled_adapter".into();
+        let drift_proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &drift_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!drift_proof.proof_ready);
+        assert!(!drift_proof.send_message_result_compatible);
+        assert!(!drift_proof.default_chat_unchanged);
+        assert_eq!(drift_proof.selected_adapter_path, "blocked");
+        assert!(!drift_proof.migration_permission);
+        assert!(drift_proof
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(drift_proof
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+
+        let mut enabled_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        enabled_route.controlled_adapter_enabled = true;
+        let enabled_proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &enabled_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!enabled_proof.proof_ready);
+        assert!(!enabled_proof.send_message_result_compatible);
+        assert!(!enabled_proof.default_chat_unchanged);
+        assert!(!enabled_proof.controlled_adapter_invocation_allowed);
+        assert!(enabled_proof
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+
+        let mut auto_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        auto_route.automatic_migration_enabled = true;
+        let auto_proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &auto_route,
+                "blocked raw prompt",
+            );
+
+        assert!(!auto_proof.proof_ready);
+        assert!(!auto_proof.send_message_result_compatible);
+        assert!(!auto_proof.default_chat_unchanged);
+        assert!(!auto_proof.migration_permission);
+        assert!(auto_proof
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+    }
+
+    #[test]
+    fn default_chat_adapter_send_compatible_proof_debug_dump_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "raw-user-secret prompt-token assistant-output tool-payload LifeModel-memory memory-raw-content";
+
+        let proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        assert!(proof.metadata_safe);
+        assert!(!proof.contains_raw_content);
+        assert!(proof.input_sha256.starts_with("sha256:"));
+        assert!(!proof.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{proof:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "LifeModel-memory",
+            "memory-raw-content",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "send-compatible proof leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_send_compatible_proof_side_effect_budget_is_all_zero() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let proof =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_send_compatible_proof(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "metadata only",
+            );
+
+        assert!(proof.proof_ready);
+        assert!(proof.side_effect_budget_zero);
+        assert_eq!(proof.side_effect_budget.runtime_calls, 0);
+        assert_eq!(proof.side_effect_budget.model_calls, 0);
+        assert_eq!(proof.side_effect_budget.tool_calls, 0);
+        assert_eq!(proof.side_effect_budget.store_writes, 0);
+        assert_eq!(proof.side_effect_budget.chat_message_writes, 0);
+        assert_eq!(proof.side_effect_budget.agent_run_writes, 0);
+        assert_eq!(proof.side_effect_budget.evidence_writes, 0);
+        assert_eq!(proof.side_effect_budget.proposal_writes, 0);
+        assert_eq!(proof.side_effect_budget.memory_writes, 0);
+        assert_eq!(proof.side_effect_budget.life_model_writes, 0);
+        assert_eq!(proof.side_effect_budget.mcp_audit_writes, 0);
+        assert_eq!(proof.side_effect_budget.external_writes, 0);
+        assert!(!proof.runtime_call_enabled);
+        assert!(!proof.model_call_enabled);
+        assert!(!proof.tool_call_enabled);
+        assert!(proof.business_write_disabled);
+        assert!(!proof.chat_message_saved);
+        assert!(!proof.agent_run_recorded);
+        assert!(!proof.evidence_recorded);
+        assert!(!proof.proposal_created);
+        assert!(!proof.memory_written);
+        assert!(!proof.life_model_written);
+        assert!(!proof.external_write_recorded);
+    }
+
+    #[test]
     fn default_chat_adapter_controlled_adapter_invocation_harness_is_not_called_by_ordinary_entrypoints(
     ) {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
@@ -4272,6 +4507,29 @@ mod hs_runtime_tests {
         ];
 
         for forbidden in forbidden_harness_calls {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_send_compatible_proof_is_not_called_by_ordinary_entrypoints() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_proof_calls = [
+            "evaluate_default_chat_controlled_adapter_send_compatible_proof",
+            "ensure_default_chat_controlled_adapter_send_compatible_proof",
+        ];
+
+        for forbidden in forbidden_proof_calls {
             assert!(
                 !send_body.contains(forbidden),
                 "send_message must not call {forbidden}"
