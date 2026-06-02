@@ -25,6 +25,7 @@ import {
   checkDefaultChatAdapterNarrowImplementationDiscussionGate,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterCutoverImplementationPlan,
+  draftDefaultChatAdapterNarrowImplementationPlan,
   draftDefaultChatAdapterActivationPlan,
   draftControlledChatMigrationPlan,
   getDefaultChatAdapterActivationReviewSummary,
@@ -77,6 +78,7 @@ import type {
   DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterImplementationReadinessReport,
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
+  DefaultChatAdapterNarrowImplementationPlanDraft,
   DefaultChatAdapterOrdinaryEntryPreflightStatus,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
@@ -116,6 +118,7 @@ const SAFE_SUMMARY_KEYS = [
   "cutoverPlanReview",
   "cutoverPlanApprovalReadiness",
   "narrowImplementationDiscussionGate",
+  "narrowImplementationPlan",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -143,6 +146,7 @@ const SAFE_SUMMARY_KEYS = [
   "eligible",
   "cutoverPlanApprovalReady",
   "ordinaryEntryPreflightStatusReady",
+  "discussionGateEligible",
   "ordinaryEntryPreflight",
   "statusReady",
   "sendPreflightReady",
@@ -499,6 +503,12 @@ export default function MultiStrategyPreviewSection() {
   );
   const [narrowImplementationGateReport, setNarrowImplementationGateReport] =
     useState<DefaultChatAdapterNarrowImplementationDiscussionGateReport | null>(null);
+  const [narrowImplementationPlanDrafting, setNarrowImplementationPlanDrafting] = useState(false);
+  const [narrowImplementationPlanError, setNarrowImplementationPlanError] = useState<string | null>(
+    null
+  );
+  const [narrowImplementationPlanDraft, setNarrowImplementationPlanDraft] =
+    useState<DefaultChatAdapterNarrowImplementationPlanDraft | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1199,6 +1209,27 @@ export default function MultiStrategyPreviewSection() {
       setNarrowImplementationGateError(`Narrow implementation gate failed: ${readableError(e)}`);
     } finally {
       setNarrowImplementationGateChecking(false);
+    }
+  };
+
+  const handleNarrowImplementationPlanDraft = async () => {
+    setNarrowImplementationPlanDrafting(true);
+    setNarrowImplementationPlanError(null);
+    setNarrowImplementationPlanDraft(null);
+    try {
+      const draft = await draftDefaultChatAdapterNarrowImplementationPlan({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setNarrowImplementationPlanDraft(draft);
+    } catch (e) {
+      setNarrowImplementationPlanError(
+        `Narrow implementation plan draft failed: ${readableError(e)}`
+      );
+    } finally {
+      setNarrowImplementationPlanDrafting(false);
     }
   };
 
@@ -5883,6 +5914,166 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
             No narrow implementation gate report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Narrow Implementation Plan
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W58 draft over the W57 discussion gate. Ready means human-review planning
+              material only; default Chat remains on legacy_stream.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleNarrowImplementationPlanDraft}
+            disabled={narrowImplementationPlanDrafting}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              narrowImplementationPlanDrafting
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={narrowImplementationPlanDrafting ? "animate-spin" : undefined}
+            />
+            {narrowImplementationPlanDrafting ? "Drafting..." : "Draft Narrow Implementation Plan"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This draft creates no records, calls no runtime, tools, models, previews, evidence
+          recorders, or routing toggles. Blocked drafts return no plan sections.
+        </div>
+
+        {narrowImplementationPlanError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {narrowImplementationPlanError}
+          </div>
+        )}
+
+        {narrowImplementationPlanDraft ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                narrowImplementationPlanDraft.draftReady
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {narrowImplementationPlanDraft.draftReady
+                ? "Narrow implementation plan ready for human review"
+                : "Narrow implementation plan blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["draftReady", String(narrowImplementationPlanDraft.draftReady)],
+                [
+                  "discussionGateEligible",
+                  String(narrowImplementationPlanDraft.discussionGate.eligible),
+                ],
+                ["sourceSessionId", narrowImplementationPlanDraft.sourceSessionId],
+                ["inputMessageLength", String(narrowImplementationPlanDraft.inputMessageLength)],
+                ["inputMessageHash", narrowImplementationPlanDraft.inputMessageHash],
+                ["stablePlanDigest", narrowImplementationPlanDraft.stablePlanDigest ?? "none"],
+                [
+                  "manualReviewRequired",
+                  String(narrowImplementationPlanDraft.manualReviewRequired),
+                ],
+                [
+                  "notAutomaticMigration",
+                  String(narrowImplementationPlanDraft.notAutomaticMigration),
+                ],
+                [
+                  "requiresSeparateImplementation",
+                  String(narrowImplementationPlanDraft.requiresSeparateImplementation),
+                ],
+                [
+                  "requiresSeparateCutoverReview",
+                  String(narrowImplementationPlanDraft.requiresSeparateCutoverReview),
+                ],
+                [
+                  "defaultChatUnchanged",
+                  String(narrowImplementationPlanDraft.discussionGate.defaultChatUnchanged),
+                ],
+                ["defaultSendPath", narrowImplementationPlanDraft.discussionGate.defaultSendPath],
+                ["startStreamPath", narrowImplementationPlanDraft.discussionGate.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(narrowImplementationPlanDraft.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(narrowImplementationPlanDraft.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            {narrowImplementationPlanDraft.planSections.length > 0 ? (
+              <div className="grid gap-3 md:grid-cols-2">
+                {narrowImplementationPlanDraft.planSections.map(section => (
+                  <div
+                    key={section.sectionKey}
+                    className="rounded-md border border-stone-100 bg-stone-50 p-3"
+                  >
+                    <div className="text-xs font-semibold text-stone-900">{section.title}</div>
+                    <ul className="mt-2 space-y-1 text-xs leading-5 text-stone-600">
+                      {section.items.map(item => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                No narrow implementation plan sections returned.
+              </div>
+            )}
+
+            {narrowImplementationPlanDraft.blockingReasons.length > 0 ? (
+              <div className="space-y-1">
+                {narrowImplementationPlanDraft.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                No narrow implementation plan blockers returned.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+            No narrow implementation plan draft loaded.
           </div>
         )}
       </section>

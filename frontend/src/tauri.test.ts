@@ -19,6 +19,7 @@ import {
   checkDefaultChatAdapterNarrowImplementationDiscussionGate,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
+  draftDefaultChatAdapterNarrowImplementationPlan,
   draftDefaultChatAdapterCutoverImplementationPlan,
   getDefaultChatAdapterCutoverPlanReviewSummary,
   recordDefaultChatAdapterCutoverPlanReviewDecision,
@@ -1106,6 +1107,73 @@ describe("tauri command argument aliases", () => {
     expect(result.cutoverPlanApprovalReady).toBe(true);
     expect(result.ordinaryEntryPreflightStatusReady).toBe(true);
     expect(result.metadataSafeSummary.notAutomaticMigration).toBe(true);
+  });
+
+  it("drafts default chat adapter narrow implementation plan", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      draftReady: true,
+      discussionGate: {
+        eligible: true,
+        defaultChatUnchanged: true,
+        cutoverPlanApprovalReady: true,
+        ordinaryEntryPreflightStatusReady: true,
+        sendPreflightReady: true,
+        streamPreflightReady: true,
+        controlledAdapterEnabled: false,
+        automaticMigrationEnabled: false,
+        defaultSendPath: "legacy_stream",
+        startStreamPath: "legacy_stream",
+        blockingReasons: [],
+        metadataSafeSummary: {
+          narrowImplementationDiscussionGate: "default_chat_adapter",
+          metadataSafe: true,
+          readOnly: true,
+        },
+      },
+      manualReviewRequired: true,
+      notAutomaticMigration: true,
+      requiresSeparateImplementation: true,
+      requiresSeparateCutoverReview: true,
+      sourceSessionId: "session-1",
+      inputMessageLength: 22,
+      inputMessageHash: "sha256:message123",
+      stablePlanDigest: "sha256:narrow-plan123",
+      planSections: [
+        {
+          sectionKey: "implementationScope",
+          title: "Implementation Scope",
+          items: ["Keep default Chat unchanged."],
+        },
+      ],
+      blockingReasons: [],
+      metadataSafeSummary: {
+        narrowImplementationPlan: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+        notAutomaticMigration: true,
+      },
+    });
+
+    const result = await draftDefaultChatAdapterNarrowImplementationPlan({
+      sourceSessionId: "session-1",
+      message: "narrow plan probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+      requiredPromotions: 3,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_narrow_implementation_plan", {
+      input: {
+        sourceSessionId: "session-1",
+        message: "narrow plan probe",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+        requiredPromotions: 3,
+      },
+    });
+    expect(result.draftReady).toBe(true);
+    expect(result.discussionGate.eligible).toBe(true);
+    expect(result.planSections[0]?.sectionKey).toBe("implementationScope");
   });
 
   it("invokes default chat adapter contract harness as read-only", async () => {

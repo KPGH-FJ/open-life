@@ -726,6 +726,46 @@ pub struct DefaultChatAdapterNarrowImplementationDiscussionGateReport {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationPlanInput {
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_previews: Option<usize>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationPlanSection {
+    pub section_key: String,
+    pub title: String,
+    pub items: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationPlanDraft {
+    pub draft_ready: bool,
+    pub discussion_gate: DefaultChatAdapterNarrowImplementationDiscussionGateReport,
+    pub manual_review_required: bool,
+    pub not_automatic_migration: bool,
+    pub requires_separate_implementation: bool,
+    pub requires_separate_cutover_review: bool,
+    pub source_session_id: String,
+    pub input_message_length: usize,
+    pub input_message_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_plan_digest: Option<String>,
+    pub plan_sections: Vec<DefaultChatAdapterNarrowImplementationPlanSection>,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DefaultChatAdapterDryRunInput {
     pub session_id: String,
     pub message: String,
@@ -3709,6 +3749,272 @@ pub(crate) async fn check_default_chat_adapter_narrow_implementation_discussion_
             "externalWriteStorage": "none",
         }),
     })
+}
+
+#[tauri::command]
+pub async fn draft_default_chat_adapter_narrow_implementation_plan(
+    input: DefaultChatAdapterNarrowImplementationPlanInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterNarrowImplementationPlanDraft, String> {
+    draft_default_chat_adapter_narrow_implementation_plan_with_state(input, &state.inner().clone())
+        .await
+}
+
+pub(crate) async fn draft_default_chat_adapter_narrow_implementation_plan_with_state(
+    input: DefaultChatAdapterNarrowImplementationPlanInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterNarrowImplementationPlanDraft, String> {
+    let source_session_id = safe_internal_id(&input.source_session_id, "sourceSessionId")?;
+    let input_message_length = input.message.chars().count();
+    let input_message_hash = sha256_metadata_checksum(&input.message);
+    let discussion_gate =
+        check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+            DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                source_session_id: source_session_id.clone(),
+                message: input.message,
+                required_approved_previews: input.required_approved_previews,
+                required_approved_candidates: input.required_approved_candidates,
+                required_promotions: input.required_promotions,
+            },
+            state,
+        )
+        .await?;
+
+    default_chat_adapter_narrow_implementation_plan_from_gate(
+        source_session_id,
+        input_message_length,
+        input_message_hash,
+        discussion_gate,
+    )
+}
+
+fn default_chat_adapter_narrow_implementation_plan_from_gate(
+    source_session_id: String,
+    input_message_length: usize,
+    input_message_hash: String,
+    discussion_gate: DefaultChatAdapterNarrowImplementationDiscussionGateReport,
+) -> Result<DefaultChatAdapterNarrowImplementationPlanDraft, String> {
+    let mut blocking_reasons = Vec::new();
+    if !discussion_gate.eligible {
+        push_unique_string(
+            &mut blocking_reasons,
+            "narrow_implementation_discussion_gate_not_ready".into(),
+        );
+    }
+    for reason in &discussion_gate.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+    if !discussion_gate.default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_changed".into());
+    }
+    if discussion_gate.controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if discussion_gate.automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+    if discussion_gate.default_send_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "default_send_path_not_legacy_stream".into(),
+        );
+    }
+    if discussion_gate.start_stream_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "start_stream_path_not_legacy_stream".into(),
+        );
+    }
+
+    let draft_ready = discussion_gate.eligible
+        && discussion_gate.default_chat_unchanged
+        && !discussion_gate.controlled_adapter_enabled
+        && !discussion_gate.automatic_migration_enabled
+        && discussion_gate.default_send_path == "legacy_stream"
+        && discussion_gate.start_stream_path == "legacy_stream"
+        && blocking_reasons.is_empty();
+    let plan_sections = if draft_ready {
+        default_chat_adapter_narrow_implementation_plan_sections()
+    } else {
+        Vec::new()
+    };
+    let stable_plan_digest = if draft_ready {
+        Some(default_chat_adapter_narrow_implementation_plan_digest(
+            &source_session_id,
+            input_message_length,
+            &input_message_hash,
+            &discussion_gate,
+            &plan_sections,
+        )?)
+    } else {
+        None
+    };
+    let plan_section_count = plan_sections.len();
+    let blocking_reason_count = blocking_reasons.len();
+    let summary_discussion_gate_eligible = discussion_gate.eligible;
+    let summary_default_chat_unchanged = discussion_gate.default_chat_unchanged;
+    let summary_controlled_adapter_enabled = discussion_gate.controlled_adapter_enabled;
+    let summary_automatic_migration_enabled = discussion_gate.automatic_migration_enabled;
+    let summary_default_send_path = discussion_gate.default_send_path.clone();
+    let summary_start_stream_path = discussion_gate.start_stream_path.clone();
+
+    Ok(DefaultChatAdapterNarrowImplementationPlanDraft {
+        draft_ready,
+        discussion_gate,
+        manual_review_required: true,
+        not_automatic_migration: true,
+        requires_separate_implementation: true,
+        requires_separate_cutover_review: true,
+        source_session_id,
+        input_message_length,
+        input_message_hash: input_message_hash.clone(),
+        stable_plan_digest,
+        plan_sections,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "narrowImplementationPlan": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "humanReviewOnly": true,
+            "draftReady": draft_ready,
+            "manualReviewRequired": true,
+            "notAutomaticMigration": true,
+            "requiresSeparateImplementation": true,
+            "requiresSeparateCutoverReview": true,
+            "discussionGateEligible": summary_discussion_gate_eligible,
+            "defaultChatUnchanged": summary_default_chat_unchanged,
+            "controlledAdapterEnabled": summary_controlled_adapter_enabled,
+            "automaticMigrationEnabled": summary_automatic_migration_enabled,
+            "defaultSendPath": summary_default_send_path,
+            "startStreamPath": summary_start_stream_path,
+            "inputMessageLength": input_message_length,
+            "inputMessageHash": input_message_hash,
+            "planSectionCount": plan_section_count,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "agentRunStorage": "read_only",
+            "runtimeCallStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+            "transcriptStorage": "none",
+        }),
+    })
+}
+
+fn default_chat_adapter_narrow_implementation_plan_sections(
+) -> Vec<DefaultChatAdapterNarrowImplementationPlanSection> {
+    vec![
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "implementationScope".into(),
+            title: "Implementation Scope".into(),
+            items: vec![
+                "Draft only the narrow adapter implementation slice that can be reviewed after W57 eligibility remains valid.".into(),
+                "Keep default Chat on legacy_stream while this plan is drafted.".into(),
+                "Treat this command as planning material only; it does not attach an executor or switch routing.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "adapterCallsiteBoundary".into(),
+            title: "Adapter Callsite Boundary".into(),
+            items: vec![
+                "Preserve send_message and start_stream_message contract shapes and current legacy route paths.".into(),
+                "Require ordinary entries to keep using W55 ordinary-entry preflight before legacy entry.".into(),
+                "Do not call W57 or W58 from ordinary Chat send or streaming paths.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "controlledExecutorBoundary".into(),
+            title: "Controlled Executor Boundary".into(),
+            items: vec![
+                "Keep controlled adapter execution disabled and unattached during this planning stage.".into(),
+                "Do not run controlled preview, MultiStrategy runtime, model calls, tool calls, proposal apply, or external writes.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "fallbackPlan".into(),
+            title: "Fallback Plan".into(),
+            items: vec![
+                "Keep legacy_stream as the stable fallback for blocked gate checks, route drift, missing review evidence, or future adapter errors.".into(),
+                "Surface metadata-safe blockers in Settings without changing Chat history.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "rollbackPlan".into(),
+            title: "Rollback Plan".into(),
+            items: vec![
+                "A later implementation must be reversible to legacy_stream without rewriting Chat history or evidence.".into(),
+                "Rollback must not patch LifeModel, Memory, Proposal, Evidence, MCP audit, or external tools.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "observabilityPlan".into(),
+            title: "Observability Plan".into(),
+            items: vec![
+                "Track only metadata-safe readiness, route, blocker, fallback, and contract counters.".into(),
+                "Expose stable plan digest and W57 gate status without transcript content.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "testPlan".into(),
+            title: "Test Plan".into(),
+            items: vec![
+                "Verify W57 blocked returns draftReady=false, no plan sections, and propagated blockers.".into(),
+                "Verify W57 eligible returns all plan sections, stable digest, and fixed human-review-only flags.".into(),
+                "Verify side-effect counts remain unchanged for AgentRun, Evidence, Proposal, Memory, LifeModel patch, MCP audit, and Chat messages.".into(),
+                "Verify serialized output contains no raw prompt, assistant output, tool payload, reviewer note, preview content, or private transcript.".into(),
+                "Verify default Send, send_message, and start_stream_message do not call the W58 command.".into(),
+            ],
+        },
+        DefaultChatAdapterNarrowImplementationPlanSection {
+            section_key: "explicitNonGoals".into(),
+            title: "Explicit Non Goals".into(),
+            items: vec![
+                "Do not migrate default Chat.".into(),
+                "Do not enable controlled adapter or automatic migration.".into(),
+                "Do not create Chat, AgentRun, Evidence, Proposal, Memory, LifeModel, MCP audit, or external write records.".into(),
+                "Do not run controlled preview, runtime, tools, model calls, proposal apply, or external writes.".into(),
+            ],
+        },
+    ]
+}
+
+fn default_chat_adapter_narrow_implementation_plan_digest(
+    source_session_id: &str,
+    input_message_length: usize,
+    input_message_hash: &str,
+    discussion_gate: &DefaultChatAdapterNarrowImplementationDiscussionGateReport,
+    plan_sections: &[DefaultChatAdapterNarrowImplementationPlanSection],
+) -> Result<String, String> {
+    metadata_hash_for_serializable(&json!({
+        "sourceSessionId": source_session_id,
+        "inputMessageLength": input_message_length,
+        "inputMessageHash": input_message_hash,
+        "manualReviewRequired": true,
+        "notAutomaticMigration": true,
+        "requiresSeparateImplementation": true,
+        "requiresSeparateCutoverReview": true,
+        "discussionGate": {
+            "eligible": discussion_gate.eligible,
+            "defaultChatUnchanged": discussion_gate.default_chat_unchanged,
+            "cutoverPlanApprovalReady": discussion_gate.cutover_plan_approval_ready,
+            "ordinaryEntryPreflightStatusReady": discussion_gate
+                .ordinary_entry_preflight_status_ready,
+            "sendPreflightReady": discussion_gate.send_preflight_ready,
+            "streamPreflightReady": discussion_gate.stream_preflight_ready,
+            "controlledAdapterEnabled": discussion_gate.controlled_adapter_enabled,
+            "automaticMigrationEnabled": discussion_gate.automatic_migration_enabled,
+            "defaultSendPath": discussion_gate.default_send_path,
+            "startStreamPath": discussion_gate.start_stream_path,
+        },
+        "planSections": plan_sections,
+    }))
 }
 
 #[tauri::command]
@@ -16368,6 +16674,182 @@ mod tests {
         .unwrap();
 
         let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_blocks_when_discussion_gate_not_ready()
+    {
+        let state = preview_state().await;
+        let draft = draft_default_chat_adapter_narrow_implementation_plan_with_state(
+            DefaultChatAdapterNarrowImplementationPlanInput {
+                source_session_id: "session-narrow-plan-blocked".into(),
+                message: "Narrow implementation plan blocked probe.".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!draft.draft_ready);
+        assert!(!draft.discussion_gate.eligible);
+        assert!(draft.plan_sections.is_empty());
+        assert!(draft.stable_plan_digest.is_none());
+        assert_eq!(draft.manual_review_required, true);
+        assert_eq!(draft.not_automatic_migration, true);
+        assert_eq!(draft.requires_separate_implementation, true);
+        assert!(draft
+            .blocking_reasons
+            .contains(&"narrow_implementation_discussion_gate_not_ready".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_ready_with_metadata_safe_sections() {
+        let state = preview_state().await;
+        let message = "Narrow implementation plan ready probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-narrow-plan-ready",
+            "run-preview-narrow-plan-ready",
+            "session-narrow-plan-ready",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-narrow-plan-ready".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some("Raw reviewer note must not leak.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let draft = draft_default_chat_adapter_narrow_implementation_plan_with_state(
+            DefaultChatAdapterNarrowImplementationPlanInput {
+                source_session_id: "session-narrow-plan-ready".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(draft.draft_ready);
+        assert!(draft.discussion_gate.eligible);
+        assert_eq!(draft.manual_review_required, true);
+        assert_eq!(draft.not_automatic_migration, true);
+        assert_eq!(draft.requires_separate_implementation, true);
+        assert_eq!(draft.requires_separate_cutover_review, true);
+        assert_eq!(draft.source_session_id, "session-narrow-plan-ready");
+        assert_eq!(draft.input_message_length, message.chars().count());
+        assert!(draft.input_message_hash.starts_with("sha256:"));
+        assert!(draft
+            .stable_plan_digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with("sha256:")));
+        let section_keys = draft
+            .plan_sections
+            .iter()
+            .map(|section| section.section_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            section_keys,
+            vec![
+                "implementationScope",
+                "adapterCallsiteBoundary",
+                "controlledExecutorBoundary",
+                "fallbackPlan",
+                "rollbackPlan",
+                "observabilityPlan",
+                "testPlan",
+                "explicitNonGoals",
+            ]
+        );
+        assert!(draft
+            .plan_sections
+            .iter()
+            .all(|section| !section.items.is_empty()));
+        assert!(draft.blocking_reasons.is_empty());
+        assert_eq!(
+            draft.metadata_safe_summary["narrowImplementationPlan"],
+            "default_chat_adapter"
+        );
+        assert_eq!(draft.metadata_safe_summary["metadataSafe"], true);
+        assert_eq!(draft.metadata_safe_summary["readOnly"], true);
+        assert_eq!(draft.metadata_safe_summary["notAutomaticMigration"], true);
+
+        let serialized = serde_json::to_string(&draft).unwrap();
+        assert!(!serialized.contains(message));
+        assert!(!serialized.contains("Raw reviewer note must not leak."));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_is_read_only_by_side_effect_counts() {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let draft = draft_default_chat_adapter_narrow_implementation_plan_with_state(
+            DefaultChatAdapterNarrowImplementationPlanInput {
+                source_session_id: "session-narrow-plan-read-only".into(),
+                message: "Narrow implementation plan read-only probe.".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!draft.draft_ready);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_plan_serialized_output_is_metadata_safe() {
+        let state = preview_state().await;
+        let draft = draft_default_chat_adapter_narrow_implementation_plan_with_state(
+            DefaultChatAdapterNarrowImplementationPlanInput {
+                source_session_id: "session-narrow-plan-metadata".into(),
+                message: "secret@example.com raw output tool payload userOutput".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&draft).unwrap();
         assert!(!serialized.contains("secret@example.com"));
         assert!(!serialized.contains("raw output"));
         assert!(!serialized.contains("rawPrompt"));

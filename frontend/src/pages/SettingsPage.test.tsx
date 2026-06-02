@@ -2211,6 +2211,94 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("drafts default chat adapter narrow implementation plan without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "draft_default_chat_adapter_narrow_implementation_plan") {
+        return Promise.resolve({
+          draftReady: true,
+          discussionGate: {
+            eligible: true,
+            defaultChatUnchanged: true,
+            cutoverPlanApprovalReady: true,
+            ordinaryEntryPreflightStatusReady: true,
+            sendPreflightReady: true,
+            streamPreflightReady: true,
+            controlledAdapterEnabled: false,
+            automaticMigrationEnabled: false,
+            defaultSendPath: "legacy_stream",
+            startStreamPath: "legacy_stream",
+            blockingReasons: [],
+            metadataSafeSummary: {
+              narrowImplementationDiscussionGate: "default_chat_adapter",
+              metadataSafe: true,
+              readOnly: true,
+            },
+          },
+          manualReviewRequired: true,
+          notAutomaticMigration: true,
+          requiresSeparateImplementation: true,
+          requiresSeparateCutoverReview: true,
+          sourceSessionId: "settings-dry-run",
+          inputMessageLength: 31,
+          inputMessageHash: "sha256:message123",
+          stablePlanDigest: "sha256:narrow-plan-123",
+          planSections: [
+            {
+              sectionKey: "implementationScope",
+              title: "Implementation Scope",
+              items: ["Keep default Chat unchanged."],
+            },
+            {
+              sectionKey: "explicitNonGoals",
+              title: "Explicit Non Goals",
+              items: ["Do not migrate default Chat."],
+            },
+          ],
+          blockingReasons: [],
+          metadataSafeSummary: {
+            narrowImplementationPlan: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            notAutomaticMigration: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Narrow Implementation Plan")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Draft Narrow Implementation Plan" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("draft_default_chat_adapter_narrow_implementation_plan", {
+        input: {
+          sourceSessionId: "settings-dry-run",
+          message: "Settings adapter dry-run probe.",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+        },
+      });
+    });
+    expect(
+      await screen.findByText("Narrow implementation plan ready for human review")
+    ).toBeInTheDocument();
+    expect(screen.getByText("stablePlanDigest: sha256:narrow-plan-123")).toBeInTheDocument();
+    expect(screen.getByText("narrowImplementationPlan: default_chat_adapter")).toBeInTheDocument();
+    expect(screen.getByText("Implementation Scope")).toBeInTheDocument();
+    expect(screen.getByText("Keep default Chat unchanged.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("checks default chat adapter contract harness without routing controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_default_chat_adapter_contract_harness") {

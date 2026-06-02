@@ -788,6 +788,36 @@ export interface DefaultChatAdapterNarrowImplementationDiscussionGateReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterNarrowImplementationPlanInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanSection {
+  sectionKey: string;
+  title: string;
+  items: string[];
+}
+
+export interface DefaultChatAdapterNarrowImplementationPlanDraft {
+  draftReady: boolean;
+  discussionGate: DefaultChatAdapterNarrowImplementationDiscussionGateReport;
+  manualReviewRequired: boolean;
+  notAutomaticMigration: boolean;
+  requiresSeparateImplementation: boolean;
+  requiresSeparateCutoverReview: boolean;
+  sourceSessionId: string;
+  inputMessageLength: number;
+  inputMessageHash: string;
+  stablePlanDigest?: string | null;
+  planSections: DefaultChatAdapterNarrowImplementationPlanSection[];
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface DefaultChatAdapterDryRunInput {
   sessionId: string;
   message: string;

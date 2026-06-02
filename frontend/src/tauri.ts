@@ -49,6 +49,8 @@ import type {
   DefaultChatAdapterOrdinaryEntryPreflightStatus,
   DefaultChatAdapterNarrowImplementationDiscussionGateInput,
   DefaultChatAdapterNarrowImplementationDiscussionGateReport,
+  DefaultChatAdapterNarrowImplementationPlanInput,
+  DefaultChatAdapterNarrowImplementationPlanDraft,
   DefaultChatAdapterDryRunInput,
   DefaultChatAdapterDryRunReport,
   DefaultChatAdapterDryRunReviewDecisionInput,
@@ -493,6 +495,15 @@ export async function checkDefaultChatAdapterNarrowImplementationDiscussionGate(
 ): Promise<DefaultChatAdapterNarrowImplementationDiscussionGateReport> {
   return safeInvoke<DefaultChatAdapterNarrowImplementationDiscussionGateReport>(
     "check_default_chat_adapter_narrow_implementation_discussion_gate",
+    { input }
+  );
+}
+
+export async function draftDefaultChatAdapterNarrowImplementationPlan(
+  input: DefaultChatAdapterNarrowImplementationPlanInput
+): Promise<DefaultChatAdapterNarrowImplementationPlanDraft> {
+  return safeInvoke<DefaultChatAdapterNarrowImplementationPlanDraft>(
+    "draft_default_chat_adapter_narrow_implementation_plan",
     { input }
   );
 }
