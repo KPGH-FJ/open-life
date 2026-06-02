@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-02
-> Status: W72 backend-only default Chat adapter disabled skeleton binding integrity report complete
+> Status: W73 LifeModel maturation readiness report complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W72 backend-only disabled skeleton binding integrity report complete**.
+Current latest status is **W73 LifeModel maturation readiness report complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -66,6 +66,15 @@ selected_adapter_path=legacy_stream. W72 adds no command, no frontend surface,
 no Settings surface, no runtime/model/tool call, no stream emission, no event
 channel, no business write, no executor implementation, no executor attachment,
 no route cutover, no migration permission, and no default Chat routing change.
+W73 adds a pure core LifeModel maturation readiness report/evaluator/ensure in
+`openlife-core/src/agent/maturation.rs`. It validates only a narrow low-energy
+/ low-pressure planning preference LifeEventDraft, requires metadata safety,
+proposal-first semantics, source lineage, default Chat unchanged, ordinary Chat
+unchanged, no direct LifeModel/Memory/Heuristic writes, and a zero side-effect
+budget. W73 returns `nextAllowedStep=non_default_maturation_invocation` only
+when clean. It adds no Tauri command, no frontend surface, no runtime/model/tool
+call, no Evidence/Proposal/LifeModel/Memory/Heuristic/Chat/MCP audit/external
+write, no ordinary Chat auto-maturation, and no default Chat route change.
 
 Hard boundaries:
 
@@ -100,6 +109,8 @@ Hard boundaries:
   disabled executor skeleton.
 - Ordinary `send_message` / `start_stream_message` must not call the W72
   skeleton binding integrity report.
+- Ordinary `send_message` / `start_stream_message` must not call the W73
+  LifeModel maturation readiness report.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -109,7 +120,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W72 progress index
+4. This W1-W73 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -128,7 +139,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W72 Structured Index
+## W1-W73 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -204,6 +215,7 @@ permission.
 | W70 | Default Chat Adapter Controlled Executor Attachment Gate Report | Done | Pure internal gate report/evaluator in `default_chat_adapter.rs` | MS executor attachment gate report only; reads W65-W67 metadata-safe layers plus W68/W69 proofs, executor attachment/cutover/migration permission all false, explicit executor implementation/human review/cutover blockers, zero side-effect budget | No; ordinary send/stream stay `legacy_stream` and do not call it | Future executor skeleton discussion only |
 | W71 | Default Chat Adapter Disabled Controlled Executor Skeleton Contract | Done | Pure internal skeleton contract/evaluator in `default_chat_adapter.rs` | MS disabled skeleton only; reads W70 gate report, input length/hash and route metadata only, send/stream metadata-only placeholders, executor disabled/unattached/not runnable, invocation disallowed, zero side-effect budget, migration permission false | No; ordinary send/stream stay `legacy_stream` and do not call it | Future executor implementation discussion only |
 | W72 | Default Chat Adapter Disabled Executor Skeleton Binding Integrity Report | Done | Pure internal binding integrity evaluator in `default_chat_adapter.rs` | MS binding report only; reads W71 skeleton/input and W70 gate report, verifies input hash/length, route metadata, requested shape/callsite, skeleton output shape, legacy route, disabled/no-run/no-write/no-stream constraints | No; ordinary send/stream stay `legacy_stream` and do not call it | Future executor implementation discussion only |
+| W73 | LifeModel Maturation End-to-End Readiness Report | Done | Pure core evaluator in `maturation.rs` | RO / MS readiness report only; low-energy planning candidate, proposal-first, source-lineage-required, no direct LifeModel/Memory/Heuristic writes, zero side-effect budget | No; ordinary send/stream stay `legacy_stream` and do not call it | W74 non-default maturation invocation |
 
 ## Folded Boundary Summary
 
@@ -244,9 +256,10 @@ complete -> W69 stream-compatible boundary proof complete -> W70 executor
 attachment gate report complete -> W71 disabled executor skeleton contract
 complete -> W72 disabled skeleton binding integrity report complete -> enter
 LifeModel Maturation Loop End-to-End Goal preparation through
-plans/lifemodel_maturation_goal_plan.md. Future default Chat executor
-implementation discussion may build on the W65-W72 proofs only through a
-separately reviewed task; keep default Chat on legacy_stream unless that
+plans/lifemodel_maturation_goal_plan.md -> W73 LifeModel maturation readiness
+report complete -> W74 non-default maturation invocation. Future default Chat
+executor implementation discussion may build on the W65-W72 proofs only through
+a separately reviewed task; keep default Chat on legacy_stream unless that
 separate task explicitly implements, reviews, verifies, and authorizes a route
 change.
 ```

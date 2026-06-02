@@ -1,7 +1,7 @@
 # LifeModel Maturation Loop End-to-End Goal Plan
 
 > Last updated: 2026-06-02
-> Status: Goal-mode preparation for LifeModel Maturation Loop End-to-End
+> Status: W73 readiness report complete; W74 non-default maturation invocation next
 
 This document is the entry point for the next Goal-mode development block after
 W72. It does not authorize default Chat route migration, controlled adapter
@@ -111,9 +111,11 @@ Every slice in this Goal block must preserve:
 
 ### W73: Maturation End-to-End Readiness Report
 
+Status: Done.
+
 Goal:
 
-Add a pure/read-only backend report that evaluates whether the current
+Added a pure/read-only backend report that evaluates whether the current
 MaturationService, EvidenceStore, ProposalStore, Governor, RuntimeOutput
 candidate shape, and default Chat isolation are ready for a non-default
 end-to-end maturation invocation.
@@ -137,6 +139,8 @@ Acceptance:
   / planning domain.
 
 ### W74: Non-Default Maturation Invocation Command
+
+Status: Next.
 
 Goal:
 

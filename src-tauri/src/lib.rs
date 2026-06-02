@@ -5768,6 +5768,31 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces_or_w73_readiness_report() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_readiness_calls = [
+            "LifeModelMaturationReadinessInput",
+            "LifeModelMaturationReadinessReport",
+            "evaluate_lifemodel_maturation_readiness",
+            "ensure_lifemodel_maturation_readiness",
+        ];
+
+        for forbidden in forbidden_readiness_calls {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call W73 readiness API {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call W73 readiness API {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn default_chat_adapter_disabled_executor_skeleton_is_not_called_by_ordinary_entrypoints() {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");

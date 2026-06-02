@@ -56,9 +56,11 @@ pub use hs_selector::{
     RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use maturation::{
-    LifeModelMaturationService, MaturationDropReason, MaturationGovernanceAudit,
-    MaturationGovernanceSummary, MaturationInput, MaturationOutput, MaturationProposalCandidate,
-    MaturationReport, MaturationService,
+    ensure_lifemodel_maturation_readiness, evaluate_lifemodel_maturation_readiness,
+    LifeModelMaturationReadinessInput, LifeModelMaturationReadinessReport,
+    LifeModelMaturationReadinessSideEffectBudget, LifeModelMaturationService, MaturationDropReason,
+    MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
+    MaturationProposalCandidate, MaturationReport, MaturationService,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};

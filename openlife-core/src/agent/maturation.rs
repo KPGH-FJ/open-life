@@ -6,7 +6,7 @@ use crate::agent::governor::{GovernanceDecision, GovernanceDecisionKind, LifeMod
 use crate::agent::proposal_store::ProposalStore;
 use crate::agent::runtime_contract::{LifeEventDraft, RuntimeOutput};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +15,245 @@ use std::collections::HashSet;
 const DEFAULT_CONFIDENCE: f32 = 0.7;
 const MIN_CONFIDENCE: f32 = 0.55;
 const MIN_SUMMARY_CHARS: usize = 4;
+const DEFAULT_CHAT_LEGACY_PATH: &str = "legacy_stream";
+const MATURATION_NEXT_ALLOWED_STEP: &str = "non_default_maturation_invocation";
+
+#[derive(Clone, PartialEq)]
+pub struct LifeModelMaturationReadinessInput {
+    pub candidate: Option<LifeEventDraft>,
+    pub default_chat_selected_adapter_path: String,
+    pub ordinary_chat_auto_maturation_enabled: bool,
+    pub require_direct_life_model_write: bool,
+    pub require_direct_memory_write: bool,
+    pub require_heuristic_activation: bool,
+}
+
+impl Default for LifeModelMaturationReadinessInput {
+    fn default() -> Self {
+        Self {
+            candidate: None,
+            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            ordinary_chat_auto_maturation_enabled: false,
+            require_direct_life_model_write: false,
+            require_direct_memory_write: false,
+            require_heuristic_activation: false,
+        }
+    }
+}
+
+impl LifeModelMaturationReadinessInput {
+    pub fn for_candidate(candidate: LifeEventDraft) -> Self {
+        Self {
+            candidate: Some(candidate),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeModelMaturationReadinessSideEffectBudget {
+    pub runtime_calls: u32,
+    pub model_calls: u32,
+    pub tool_calls: u32,
+    pub store_writes: u32,
+    pub chat_message_writes: u32,
+    pub agent_run_writes: u32,
+    pub evidence_writes: u32,
+    pub proposal_writes: u32,
+    pub life_model_writes: u32,
+    pub memory_writes: u32,
+    pub heuristic_writes: u32,
+    pub mcp_audit_writes: u32,
+    pub external_writes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeModelMaturationReadinessReport {
+    pub readiness_ready: bool,
+    pub ready: bool,
+    pub default_chat_unchanged: bool,
+    pub ordinary_chat_entrypoint_unchanged: bool,
+    pub runtime_output_candidate_shape_present: bool,
+    pub maturation_service_present: bool,
+    pub evidence_store_present: bool,
+    pub proposal_store_present: bool,
+    pub governor_present: bool,
+    pub proposal_first_required: bool,
+    pub direct_life_model_write_allowed: bool,
+    pub direct_memory_write_allowed: bool,
+    pub direct_heuristic_write_allowed: bool,
+    pub heuristic_activation_allowed: bool,
+    pub low_energy_planning_domain_only: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub source_lineage_required: bool,
+    pub source_lineage_present: bool,
+    pub negative_evidence_required_for_rejection: bool,
+    pub accepted_rule_runtime_packet_future_only: bool,
+    pub business_write_disabled: bool,
+    pub side_effect_budget_zero: bool,
+    pub side_effect_budget: LifeModelMaturationReadinessSideEffectBudget,
+    pub candidate_digest: Option<String>,
+    pub candidate_confidence: Option<f32>,
+    pub blocking_reasons: Vec<String>,
+    pub next_allowed_step: String,
+}
+
+pub fn evaluate_lifemodel_maturation_readiness(
+    input: LifeModelMaturationReadinessInput,
+) -> LifeModelMaturationReadinessReport {
+    let runtime_output_candidate_shape_present =
+        type_available::<RuntimeOutput>() && type_available::<LifeEventDraft>();
+    let maturation_service_present =
+        type_available::<MaturationService>() && type_available::<LifeModelMaturationService>();
+    let evidence_store_present = type_available::<EvidenceStore>();
+    let proposal_store_present = type_available::<ProposalStore>();
+    let governor_present = type_available::<LifeModelGovernor>();
+
+    let default_chat_unchanged =
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+    let ordinary_chat_entrypoint_unchanged = !input.ordinary_chat_auto_maturation_enabled;
+    let mut blocking_reasons = Vec::new();
+
+    if !runtime_output_candidate_shape_present {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "runtime_output_candidate_shape_missing",
+        );
+    }
+    if !maturation_service_present {
+        push_unique_reason(&mut blocking_reasons, "maturation_service_missing");
+    }
+    if !evidence_store_present {
+        push_unique_reason(&mut blocking_reasons, "evidence_store_missing");
+    }
+    if !proposal_store_present {
+        push_unique_reason(&mut blocking_reasons, "proposal_store_missing");
+    }
+    if !governor_present {
+        push_unique_reason(&mut blocking_reasons, "governor_missing");
+    }
+    if !default_chat_unchanged {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "default_chat_route_migration_assumed",
+        );
+    }
+    if !ordinary_chat_entrypoint_unchanged {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "ordinary_chat_auto_maturation_assumed",
+        );
+    }
+    if input.require_direct_life_model_write {
+        push_unique_reason(&mut blocking_reasons, "direct_lifemodel_write_required");
+    }
+    if input.require_direct_memory_write {
+        push_unique_reason(&mut blocking_reasons, "direct_memory_write_required");
+    }
+    if input.require_heuristic_activation {
+        push_unique_reason(&mut blocking_reasons, "heuristic_activation_required");
+    }
+
+    let candidate_digest = input
+        .candidate
+        .as_ref()
+        .map(|draft| draft_digest(draft, draft.source_run_id.as_deref()));
+    let candidate_confidence = input
+        .candidate
+        .as_ref()
+        .map(|draft| confidence_from_metadata(&draft.metadata).unwrap_or(DEFAULT_CONFIDENCE));
+    let source_lineage_present = input
+        .candidate
+        .as_ref()
+        .and_then(|draft| draft.source_run_id.as_deref())
+        .map(|source| !source.trim().is_empty())
+        .unwrap_or(false);
+    let contains_raw_content = input
+        .candidate
+        .as_ref()
+        .map(candidate_contains_raw_content)
+        .unwrap_or(false);
+
+    match input.candidate.as_ref() {
+        Some(candidate) => {
+            if !is_low_energy_planning_candidate(candidate) {
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_type_outside_low_energy_planning_domain",
+                );
+            }
+            if candidate_confidence.unwrap_or(DEFAULT_CONFIDENCE) < MIN_CONFIDENCE {
+                push_unique_reason(&mut blocking_reasons, "candidate_confidence_too_low");
+            }
+            if proposal_only_from_metadata(&candidate.metadata) == Some(false) {
+                push_unique_reason(&mut blocking_reasons, "proposal_only_false");
+            }
+            if contains_raw_content {
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_metadata_contains_raw_content",
+                );
+            }
+            if !source_lineage_present {
+                push_unique_reason(&mut blocking_reasons, "source_lineage_missing");
+            }
+        }
+        None => push_unique_reason(&mut blocking_reasons, "candidate_missing"),
+    }
+
+    let ready = blocking_reasons.is_empty();
+    LifeModelMaturationReadinessReport {
+        readiness_ready: ready,
+        ready,
+        default_chat_unchanged,
+        ordinary_chat_entrypoint_unchanged,
+        runtime_output_candidate_shape_present,
+        maturation_service_present,
+        evidence_store_present,
+        proposal_store_present,
+        governor_present,
+        proposal_first_required: true,
+        direct_life_model_write_allowed: false,
+        direct_memory_write_allowed: false,
+        direct_heuristic_write_allowed: false,
+        heuristic_activation_allowed: false,
+        low_energy_planning_domain_only: true,
+        metadata_safe: true,
+        contains_raw_content,
+        source_lineage_required: true,
+        source_lineage_present,
+        negative_evidence_required_for_rejection: true,
+        accepted_rule_runtime_packet_future_only: true,
+        business_write_disabled: true,
+        side_effect_budget_zero: true,
+        side_effect_budget: LifeModelMaturationReadinessSideEffectBudget::default(),
+        candidate_digest,
+        candidate_confidence,
+        blocking_reasons,
+        next_allowed_step: if ready {
+            MATURATION_NEXT_ALLOWED_STEP.into()
+        } else {
+            "blocked".into()
+        },
+    }
+}
+
+pub fn ensure_lifemodel_maturation_readiness(
+    input: LifeModelMaturationReadinessInput,
+) -> Result<LifeModelMaturationReadinessReport> {
+    let report = evaluate_lifemodel_maturation_readiness(input);
+    if report.ready {
+        Ok(report)
+    } else {
+        Err(anyhow!(
+            "lifemodel maturation readiness blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -726,6 +965,127 @@ fn searchable(event_type: &str, summary: &str) -> String {
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
+}
+
+fn type_available<T>() -> bool {
+    !std::any::type_name::<T>().is_empty()
+}
+
+fn push_unique_reason(reasons: &mut Vec<String>, reason: &str) {
+    if !reasons.iter().any(|existing| existing == reason) {
+        reasons.push(reason.to_string());
+    }
+}
+
+fn candidate_contains_raw_content(candidate: &LifeEventDraft) -> bool {
+    string_looks_secret_like(&candidate.summary) || value_contains_raw_content(&candidate.metadata)
+}
+
+fn value_contains_raw_content(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map
+            .iter()
+            .any(|(key, value)| raw_content_metadata_key(key) || value_contains_raw_content(value)),
+        Value::Array(values) => values.iter().any(value_contains_raw_content),
+        Value::String(value) => string_looks_secret_like(value),
+        _ => false,
+    }
+}
+
+fn raw_content_metadata_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    contains_any(
+        &normalized,
+        &[
+            "rawprompt",
+            "prompt",
+            "rawassistantoutput",
+            "assistantoutput",
+            "rawmemorycontext",
+            "memorycontext",
+            "toolpayload",
+            "secret",
+            "apikey",
+            "token",
+            "password",
+        ],
+    )
+}
+
+fn string_looks_secret_like(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "raw prompt",
+            "assistant output",
+            "memory context",
+            "tool payload",
+            "private key",
+            "secret",
+            "password",
+            "api key",
+            "sk-",
+        ],
+    ) || looks_like_email(value)
+}
+
+fn looks_like_email(value: &str) -> bool {
+    value.split_whitespace().any(|part| {
+        let trimmed = part.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | ':' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']'
+            )
+        });
+        let Some((local, domain)) = trimmed.split_once('@') else {
+            return false;
+        };
+        !local.is_empty() && domain.contains('.') && !domain.ends_with('.')
+    })
+}
+
+fn is_low_energy_planning_candidate(candidate: &LifeEventDraft) -> bool {
+    let metadata_domain = candidate
+        .metadata
+        .get("domain")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let combined = searchable(
+        &format!("{} {}", candidate.event_type, metadata_domain),
+        &candidate.summary,
+    );
+    let planning = contains_any(&combined, &["planning", "plan", "计划", "规划"]);
+    let low_pressure = contains_any(
+        &combined,
+        &[
+            "low_energy",
+            "low-energy",
+            "low energy",
+            "low_pressure",
+            "low-pressure",
+            "low pressure",
+            "低能量",
+            "低压力",
+        ],
+    );
+    let supported_surface = contains_any(
+        &combined,
+        &[
+            "preference",
+            "preferences",
+            "collaboration",
+            "planning",
+            "偏好",
+            "协作",
+            "规划",
+        ],
+    );
+    planning && low_pressure && supported_surface
 }
 
 fn risk_for_memory(text: &str) -> RiskLevel {

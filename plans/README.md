@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents, W72 complete; LifeModel Maturation Goal preparation active
+> Status: authoritative document index for Agents, W73 LifeModel maturation readiness complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W72 completion/status index. This is not a second roadmap.
+   - Compact W1-W73 completion/status index. This is not a second roadmap.
 5. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
@@ -36,7 +36,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W72 disabled skeleton binding integrity report complete**.
+Current latest status is **W73 LifeModel maturation readiness report complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -87,6 +87,15 @@ executor_attached=false, executor_runnable=false, invocation_allowed=false,
 route_cutover_permission=false, migrationPermission=false, and
 selected_adapter_path=legacy_stream. W72 is not executor implementation, not
 executor attachment, not route cutover, and not migration permission.
+W73 adds a pure core LifeModel maturation readiness report/evaluator/ensure in
+`openlife-core/src/agent/maturation.rs`. It validates only the narrow
+low-energy / low-pressure planning preference domain, checks that candidate
+metadata is safe, proposal-first, source-lineage-ready, and does not require
+direct LifeModel/Memory/Heuristic writes, keeps a zero side-effect budget, and
+returns `nextAllowedStep=non_default_maturation_invocation` only when clean.
+W73 adds no command, no frontend surface, no runtime/model/tool call, no
+Evidence/Proposal/LifeModel/Memory/Heuristic/Chat/MCP audit/external write, no
+ordinary Chat auto-maturation, and no default Chat route change.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -97,6 +106,7 @@ The next active Goal-mode preparation entry is
 End-to-End with a narrow low-energy / low-pressure planning domain. That Goal
 must not migrate default Chat, attach the controlled adapter executor, directly
 write LifeModel/Memory/Heuristic truth, or bypass proposal-first governance.
+After W73, the next allowed slice is W74 non-default maturation invocation.
 
 Hard current constraints:
 
@@ -131,7 +141,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W72 Compression Map
+## 3. W1-W73 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -158,6 +168,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W70 | Backend-only executor attachment gate report | Internal metadata-ready gate report only; executor attachment/cutover/migration permission all false; no command, executor, runtime, write, routing, or default Chat effect |
 | W71 | Backend-only disabled executor skeleton contract | Internal metadata-only placeholder contract only; executor disabled/unattached/not runnable, invocation disallowed, no stream/event channel, no command, runtime, write, routing, or default Chat effect |
 | W72 | Backend-only disabled skeleton binding integrity report | Internal metadata binding report only; verifies W71 input/skeleton and W70 gate consistency, no executor implementation/attachment/cutover/migration permission, no command, runtime, write, routing, or default Chat effect |
+| W73 | LifeModel maturation readiness report | Pure core metadata-safe readiness report only; low-energy planning domain, proposal-first, no writes, no command, no ordinary Chat effect |
 
 ## 4. Current Authoritative Entry Points
 
@@ -165,7 +176,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W72 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W73 structured status index and compressed guardrail map. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -245,7 +256,7 @@ remains `legacy_stream`.
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W72 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W73 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -263,11 +274,11 @@ descriptor skeleton complete -> W66 controlled adapter contract report complete
 complete -> W69 stream-compatible boundary proof complete -> W70 executor
 attachment gate report complete -> W71 disabled executor skeleton contract
 complete -> W72 disabled skeleton binding integrity report complete -> continue
-with LifeModel Maturation Loop End-to-End Goal preparation through
-plans/lifemodel_maturation_goal_plan.md. Any future default Chat executor
-implementation or route cutover remains a separate reviewed task that preserves
-default Chat legacy_stream until a route change is explicitly implemented,
-reviewed, verified, and authorized.
+with W73 LifeModel maturation readiness report complete -> W74 non-default
+maturation invocation. Any future default Chat executor implementation or route
+cutover remains a separate reviewed task that preserves default Chat
+legacy_stream until a route change is explicitly implemented, reviewed,
+verified, and authorized.
 ```
 
 For docs-only index整理, `git diff --check` plus targeted `rg` validation is
