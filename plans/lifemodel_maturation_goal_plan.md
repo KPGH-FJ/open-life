@@ -1,7 +1,7 @@
 # LifeModel Maturation Loop End-to-End Goal Plan
 
 > Last updated: 2026-06-02
-> Status: W74 non-default maturation invocation complete; W75 proposal outcome evidence link next
+> Status: W75 proposal outcome evidence link complete; W76 low-energy collaboration rule candidate next
 
 This document is the entry point for the next Goal-mode development block after
 W72. It does not authorize default Chat route migration, controlled adapter
@@ -45,7 +45,7 @@ Current completed default Chat adapter state:
 - Default Chat remains `legacy_stream`.
 - Ordinary `send_message` / `start_stream_message` may only use the W49-W55
   pure ordinary-entry guard/preflight and must not call W67-W72 proof/skeleton
-  code.
+  code or W73-W75 LifeModel maturation helper code.
 
 Current LifeModel maturation baseline:
 
@@ -60,6 +60,19 @@ Current LifeModel maturation baseline:
     Proposal records from RuntimeOutput candidates.
   - High-risk LifeModel candidates remain proposal-first.
   - Raw user input / assistant output is not copied into evidence/report audit.
+- `openlife-core/src/agent/proposal_outcome.rs`
+  - `MaturationProposalOutcome` and
+    `MaturationProposalOutcomeEvidenceReport` model proposal accept/reject/edit
+    outcome evidence.
+  - `evaluate_maturation_proposal_outcome_evidence` is pure/report-only.
+  - `record_maturation_proposal_outcome_evidence` writes metadata-safe
+    `ProposalOutcome` evidence only for maturation lineage proposals.
+- `src-tauri/src/commands/proposal.rs`
+  - `accept_proposal_with_state`, `reject_proposal_with_state`, and
+    `edit_proposal_with_state` call the W75 helper after successful proposal
+    status updates.
+  - Non-maturation proposals no-op; EvidenceStore/lineage issues do not block
+    existing proposal accept/reject/edit flows.
 - `openlife-core/src/agent/evidence_store.rs`
   - EvidenceStore supports metadata-safe candidate evidence, source refs,
     proposal links, AgentRun links, weakening/archive/contradiction/tombstone
@@ -68,6 +81,7 @@ Current LifeModel maturation baseline:
   - LifeModelGovernor already gates maturation candidates and blocks
     `proposal_only=false`.
 - Existing maturation tests pass:
+  - `cargo test -p openlife-core proposal_outcome -- --nocapture`
   - `cargo test -p openlife-core maturation_loop -- --nocapture`
   - `cargo test -p openlife-core runtime_output_life_event_candidates_do_not_persist_to_lifemodel_or_hs_stores -- --nocapture`
 
@@ -162,7 +176,7 @@ Acceptance:
 
 ### W75: Proposal Outcome Evidence Link
 
-Status: Next.
+Status: Done.
 
 Goal:
 
@@ -176,6 +190,9 @@ Acceptance:
 - Edited proposal outcome records edit metadata without storing raw reviewer
   text outside existing proposal semantics.
 - Existing proposal apply semantics remain unchanged.
+- Implemented as core helper/report plus minimal internal proposal command
+  wiring. It is not a maturation runtime migration and not a default Chat
+  migration.
 
 ### W76: Low-Energy Collaboration Rule Candidate
 
@@ -218,72 +235,38 @@ Acceptance:
 - Evidence/proposal/run lineage is visible by ids/digests/summaries only.
 - No raw prompt/output/tool payload leakage.
 
-## 6. First Agent Development Prompt
+## 6. Next Agent Development Prompt
 
 ```text
-你现在开发 W73: LifeModel Maturation End-to-End Readiness Report。
+你现在开发 W76: Low-Energy Collaboration Rule Candidate。
 
 当前基线：
-- W72 Default Chat Adapter Disabled Executor Skeleton Binding Integrity Report 已完成。
+- W73 LifeModel maturation readiness report 已完成。
+- W74 non-default maturation invocation 已完成。
+- W75 proposal outcome evidence link 已完成：maturation proposal accept/reject/edit 会写 metadata-safe ProposalOutcome evidence。
 - default Chat 仍是 legacy_stream。
-- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W67-W72，也不得调用本次 W73 readiness report。
-- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore。
-- 现有 maturation_loop tests 通过，但当前还没有端到端产品闭环，也没有普通 Chat 自动成熟化。
+- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W73-W75 maturation helper。
+- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore、proposal outcome evidence helper。
 
 开发目标：
-- 新增一个 read-only / metadata-safe 的 LifeModel maturation readiness report。
-- 该 report 用于判断是否可以进入下一步 non-default maturation invocation slice。
-- 不新增 default Chat route，不接普通 Chat，不运行 runtime/model/tool，不写 Evidence/Proposal/LifeModel/Memory/Heuristic/Chat/MCP audit/external write。
-- 首选在 openlife-core 中实现 pure evaluator/report；如必须暴露 Tauri command，只能是显式 read-only diagnostics command，并补测试证明无副作用。
-
-建议命名：
-- LifeModelMaturationReadinessReport
-- evaluate_lifemodel_maturation_readiness(...)
-- ensure_lifemodel_maturation_readiness(...)
-
-Report 至少包含：
-- readinessReady / ready
-- defaultChatUnchanged true
-- ordinaryChatEntrypointUnchanged true
-- runtimeOutputCandidateShapePresent
-- maturationServicePresent
-- evidenceStorePresent
-- proposalStorePresent
-- governorPresent
-- proposalFirstRequired true
-- directLifeModelWriteAllowed false
-- directMemoryWriteAllowed false
-- heuristicActivationAllowed false
-- lowEnergyPlanningDomainOnly true
-- metadataSafe true
-- containsRawContent false
-- sourceLineageRequired true
-- negativeEvidenceRequiredForRejection true
-- acceptedRuleRuntimePacketFutureOnly true
-- blockingReasons
-- nextAllowedStep = non_default_maturation_invocation
-
-必须 fail closed 的场景：
-- candidate metadata contains raw prompt / raw assistant output / raw memory context / tool payload / secret-like content。
-- candidate type is outside low-energy / low-pressure planning domain。
-- candidate confidence too low。
-- candidate proposal_only=false。
-- report would require direct LifeModel/Memory/Heuristic write。
-- report assumes default Chat route migration or ordinary Chat auto-maturation。
+- 聚合已接受/拒绝/编辑的 low-energy / low-pressure planning maturation proposal outcome evidence。
+- 生成一个 reviewable collaboration rule candidate proposal，而不是直接激活规则。
+- 只允许 metadata-safe report/evidence/proposal metadata；不包含 raw prompt/output/memory/tool payload/secrets。
+- Rejection/outcome negative evidence 必须弱化或阻止重复相似规则建议。
+- 不新增 default Chat route，不接普通 Chat，不运行 runtime/model/tool，不直接写 LifeModel/Memory/Heuristic active truth。
 
 测试要求：
-- 新增 focused Rust tests。
-- 覆盖 clean readiness。
-- 覆盖 raw content fail closed。
-- 覆盖 unsupported domain fail closed。
-- 覆盖 low confidence fail closed。
-- 覆盖 proposal_only=false fail closed。
-- 覆盖 no direct LifeModel/Memory/Heuristic writes。
-- 覆盖 ordinary send_message / start_stream_message 不调用 W73 readiness report。
-- 覆盖 debug/report serialization 不包含 raw prompt、assistant output、memory context、tool payload、secret/email。
+- 新增 focused core tests。
+- 覆盖 accepted outcome evidence 可推动 rule candidate。
+- 覆盖 rejected/negative/opposing outcome evidence 会阻止或弱化重复 rule candidate。
+- 覆盖 edited outcome evidence 只使用 metadata-safe digest/id，不泄露 raw edited payload。
+- 覆盖 evidence/proposal/source run lineage。
+- 覆盖 non-low-energy domain fail closed。
+- 覆盖不直接写 LifeModel/Memory/Heuristic，不调用 runtime/model/tool。
+- 覆盖 ordinary send_message / start_stream_message 不调用 W76 helper。
 
 至少运行：
-- cargo test -p openlife-core lifemodel_maturation_readiness -- --nocapture
+- cargo test -p openlife-core proposal_outcome -- --nocapture
 - cargo test -p openlife-core maturation_loop -- --nocapture
 - cargo test -p openlife-tauri default_chat_entrypoints_do_not_call_w19_w60_command_surfaces -- --nocapture
 - git diff --check

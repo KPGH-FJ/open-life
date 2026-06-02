@@ -5961,6 +5961,10 @@ mod hs_runtime_tests {
             "get_default_chat_adapter_cutover_plan_review_summary",
             "check_default_chat_adapter_cutover_plan_approval_readiness",
             "get_default_chat_runtime_boundary_status",
+            "record_maturation_proposal_outcome_evidence",
+            "evaluate_maturation_proposal_outcome_evidence",
+            "MaturationProposalOutcome",
+            "MaturationProposalOutcomeEvidenceReport",
         ];
 
         for forbidden in forbidden_command_surfaces {

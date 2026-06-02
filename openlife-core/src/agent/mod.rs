@@ -14,6 +14,7 @@ pub mod plan_execute;
 pub mod policy_store;
 pub mod proposal_engine;
 pub mod proposal_generators;
+pub mod proposal_outcome;
 pub mod proposal_store;
 pub mod reasoning;
 pub mod regression_suite;
@@ -90,6 +91,10 @@ pub use proposal_engine::{
     ToolProposalGenerator,
 };
 pub use proposal_generators::ChatProposalGenerator;
+pub use proposal_outcome::{
+    evaluate_maturation_proposal_outcome_evidence, record_maturation_proposal_outcome_evidence,
+    MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
+};
 pub use proposal_store::ProposalStore;
 pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{

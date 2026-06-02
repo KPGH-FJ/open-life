@@ -1,5 +1,7 @@
 use crate::{persist_life_model, storage::app_data_dir, AppState};
-use openlife_core::agent::{AgentProposal, ProposalStatus, ProposalType, RiskLevel};
+use openlife_core::agent::{
+    AgentProposal, MaturationProposalOutcome, ProposalStatus, ProposalType, RiskLevel,
+};
 use openlife_core::life_model::LifeModel;
 use serde_json::Value;
 use std::io::Write;
@@ -1103,6 +1105,12 @@ pub(crate) async fn accept_proposal_with_state(
     }
     proposal.accept();
     update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Accepted,
+    )
+    .await;
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -1135,8 +1143,33 @@ pub(crate) async fn reject_proposal_with_state(
     ensure_pending_or_postponed(&proposal)?;
     proposal.reject();
     update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Rejected,
+    )
+    .await;
     record_rejected_proactive_reminder_evidence(state, &proposal).await;
     Ok(())
+}
+
+async fn record_maturation_proposal_outcome_evidence_with_state(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    outcome: MaturationProposalOutcome,
+) {
+    let evidence_store = state.evidence_store.lock().await;
+    if let Err(e) = openlife_core::agent::record_maturation_proposal_outcome_evidence(
+        &evidence_store,
+        proposal,
+        outcome,
+    ) {
+        log::warn!(
+            "[LifeModel-Maturation] failed to record proposal outcome evidence for proposal {}: {}",
+            proposal.id,
+            e
+        );
+    }
 }
 
 async fn record_rejected_proactive_reminder_evidence(
@@ -1172,6 +1205,12 @@ pub(crate) async fn edit_proposal_with_state(
     }
     proposal.edit(new_after);
     update_proposal_with_state(state, &proposal).await?;
+    record_maturation_proposal_outcome_evidence_with_state(
+        state,
+        &proposal,
+        MaturationProposalOutcome::Edited,
+    )
+    .await;
     Ok(serde_json::json!({
         "success": true,
         "patch_result": result,
@@ -1334,7 +1373,9 @@ mod tests {
     use crate::{a2a_sidecar::A2ASidecar, HotMemoryCache, PrivacyEngine, SharedHotCache};
     use openlife_core::{
         agent::{
-            AgentProposal, ProposalEngine, ProposalSource, ProposalStore, ProposalType, RiskLevel,
+            AgentProposal, EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord,
+            EvidenceSourceRef, EvidenceSourceType, EvidenceType, ProposalEngine, ProposalSource,
+            ProposalStore, ProposalType, RiskLevel,
         },
         builder::BuilderSessionStore,
         config::AppConfig,
@@ -1423,6 +1464,68 @@ mod tests {
         })
     }
 
+    async fn create_maturation_source_evidence(
+        state: &Arc<AppState>,
+        proposal: &AgentProposal,
+    ) -> String {
+        state
+            .evidence_store
+            .lock()
+            .await
+            .create_evidence(
+                EvidenceDraft::new(
+                    EvidenceType::Preference,
+                    proposal.affected_path.clone(),
+                    proposal.confidence,
+                    proposal.risk_level,
+                    EvidencePrivacyLevel::Internal,
+                )
+                .with_summary("maturation candidate source evidence")
+                .with_source_ref(EvidenceSourceRef::from_digest(
+                    EvidenceSourceType::AgentRun,
+                    proposal.run_id.as_deref().unwrap_or("run-tauri-w75"),
+                    Some("maturation_candidate"),
+                    "candidate-digest-only",
+                ))
+                .with_linked_proposal(proposal.id.clone())
+                .with_linked_agent_run(proposal.run_id.as_deref().unwrap_or("run-tauri-w75")),
+            )
+            .unwrap()
+            .id
+    }
+
+    async fn proposal_outcome_records(
+        state: &Arc<AppState>,
+        proposal_id: &str,
+    ) -> Vec<EvidenceRecord> {
+        state
+            .evidence_store
+            .lock()
+            .await
+            .query(EvidenceQuery {
+                evidence_type: Some(EvidenceType::ProposalOutcome),
+                linked_proposal_id: Some(proposal_id.to_string()),
+                ..Default::default()
+            })
+            .unwrap()
+    }
+
+    fn assert_no_w75_raw_content(serialized: &str) {
+        for raw in [
+            "RAW_PROMPT_SECRET",
+            "RAW_ASSISTANT_OUTPUT_SECRET",
+            "RAW_MEMORY_TEXT_SECRET",
+            "RAW_TOOL_PAYLOAD_SECRET",
+            "RAW_EDITED_PAYLOAD_SECRET",
+            "unredacted reviewer note",
+        ] {
+            assert!(
+                !serialized.contains(raw),
+                "serialized W75 evidence leaked raw marker {raw}: {serialized}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn accept_life_model_proposal_updates_model_and_marks_accepted() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -1465,6 +1568,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accept_maturation_proposal_records_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W75 Accepted"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET unredacted reviewer note",
+            0.9,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-accept".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+
+        accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "accepted");
+        assert_eq!(evidence.linked_proposal_ids, vec![proposal_id.clone()]);
+        assert_eq!(evidence.linked_agent_run_ids, vec!["run-tauri-w75-accept"]);
+        assert_eq!(
+            evidence.run_metadata["sourceEvidenceIds"],
+            serde_json::json!([source_evidence_id])
+        );
+        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.identity.name, "W75 Accepted");
+    }
+
+    #[tokio::test]
+    async fn reject_maturation_proposal_records_negative_outcome_without_applying() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W75 Rejected Should Not Apply"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.86,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-reject".into());
+        proposal.source_detail = Some("maturation:goal.short_term".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        let source_evidence_id = create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "rejected");
+        assert_eq!(evidence.run_metadata["negative"], true);
+        assert_eq!(evidence.run_metadata["opposing"], true);
+        assert_eq!(evidence.opposing_refs, vec![source_evidence_id]);
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_ne!(model.identity.name, "W75 Rejected Should Not Apply");
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
+    }
+
+    #[tokio::test]
     async fn edit_life_model_proposal_applies_edited_value() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
@@ -1503,6 +1703,51 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Edited);
+    }
+
+    #[tokio::test]
+    async fn edit_maturation_proposal_records_outcome_without_raw_edited_payload() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            "state.current_focus",
+            serde_json::json!("before edit"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.82,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w75-edit".into());
+        proposal.source_detail = Some("maturation:state.current_focus".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        edit_proposal_with_state(
+            proposal_id.clone(),
+            serde_json::json!("RAW_EDITED_PAYLOAD_SECRET"),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 1);
+        let evidence = &records[0];
+        assert_eq!(evidence.run_metadata["outcome"], "edited");
+        assert_eq!(evidence.run_metadata["editedPayloadIncluded"], false);
+        assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
+
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.state.current_focus, "RAW_EDITED_PAYLOAD_SECRET");
     }
 
     #[tokio::test]

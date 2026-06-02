@@ -10,6 +10,7 @@ mod maturation_loop;
 mod multi_strategy_runtime;
 mod plan_execute;
 mod policy_store;
+mod proposal_outcome;
 mod regression_suite;
 mod runtime_contract;
 mod runtime_convergence;
