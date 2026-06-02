@@ -242,8 +242,10 @@ descriptor skeleton complete -> W66 controlled adapter contract report complete
 -> W67 non-default invocation harness complete -> W68 send-compatible proof
 complete -> W69 stream-compatible boundary proof complete -> W70 executor
 attachment gate report complete -> W71 disabled executor skeleton contract
-complete -> W72 disabled skeleton binding integrity report complete -> future
-executor implementation discussion may build on the proofs only through a
+complete -> W72 disabled skeleton binding integrity report complete -> enter
+LifeModel Maturation Loop End-to-End Goal preparation through
+plans/lifemodel_maturation_goal_plan.md. Future default Chat executor
+implementation discussion may build on the W65-W72 proofs only through a
 separately reviewed task; keep default Chat on legacy_stream unless that
 separate task explicitly implements, reviews, verifies, and authorizes a route
 change.

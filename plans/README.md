@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents, W72 disabled skeleton binding integrity report complete
+> Status: authoritative document index for Agents, W72 complete; LifeModel Maturation Goal preparation active
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -17,18 +17,21 @@ as reference only.
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
    - Compact W1-W72 completion/status index. This is not a second roadmap.
-5. Hard governance baselines:
+5. `plans/lifemodel_maturation_goal_plan.md`
+   - Current Goal-mode preparation plan for LifeModel Maturation Loop
+     End-to-End after W72.
+6. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-6. Scoped architecture/product baselines:
+7. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-7. Current execution helpers:
+8. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-8. Historical/reference documents.
+9. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
@@ -88,6 +91,12 @@ executor attachment, not route cutover, and not migration permission.
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
 reviewed route change is implemented and verified.
+
+The next active Goal-mode preparation entry is
+`plans/lifemodel_maturation_goal_plan.md`. It starts LifeModel Maturation Loop
+End-to-End with a narrow low-energy / low-pressure planning domain. That Goal
+must not migrate default Chat, attach the controlled adapter executor, directly
+write LifeModel/Memory/Heuristic truth, or bypass proposal-first governance.
 
 Hard current constraints:
 
@@ -157,6 +166,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
 | `plans/lifemodel_governed_runtime_progress.md` | W1-W72 structured status index and compressed guardrail map. |
+| `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -253,7 +263,9 @@ descriptor skeleton complete -> W66 controlled adapter contract report complete
 complete -> W69 stream-compatible boundary proof complete -> W70 executor
 attachment gate report complete -> W71 disabled executor skeleton contract
 complete -> W72 disabled skeleton binding integrity report complete -> continue
-only through a separately reviewed executor implementation task that preserves
+with LifeModel Maturation Loop End-to-End Goal preparation through
+plans/lifemodel_maturation_goal_plan.md. Any future default Chat executor
+implementation or route cutover remains a separate reviewed task that preserves
 default Chat legacy_stream until a route change is explicitly implemented,
 reviewed, verified, and authorized.
 ```

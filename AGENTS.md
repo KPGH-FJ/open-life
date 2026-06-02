@@ -10,7 +10,7 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：W72 Default Chat Adapter Disabled Executor Skeleton Binding Integrity Report 已完成。W64 已完成 W1-W63 文档权威压缩验收；W65 新增纯后端 metadata-safe descriptor / mapper；W66 新增 metadata-safe controlled adapter contract report / evaluator / ensure；W67 新增纯后端 non-default invocation harness；W68 新增纯后端 send-compatible proof/evaluator/ensure，只允许 `SendMessage` callsite ready；W69 新增纯后端 stream-compatible boundary proof/evaluator/ensure，只允许 `StartStreamMessage` callsite ready；W70 新增纯后端 executor attachment gate report/evaluator/ensure，同时汇总 W65-W67 metadata-safe descriptor/contract/harness、W68 send proof 和 W69 stream boundary proof；W71 在 W70 gate report 之上新增纯后端 disabled/unattached/no-run executor skeleton contract/evaluator/ensure，只保存 callsite、route metadata、input length/hash 和 requested shape，并返回 metadata-only placeholder；W72 在 W71 skeleton、W71 skeleton input 和 W70 gate report 之上新增纯后端 binding integrity report/evaluator/ensure，验证 input length/hash、route metadata、requested shape/callsite、skeleton output shape、legacy route、gate 和 executor/no-run/no-write/no-stream metadata 是否一致。W72 固定 executor_enabled=false、executor_attached=false、executor_runnable=false、invocation_allowed=false、route_cutover_permission=false、migrationPermission=false、selected_adapter_path=legacy_stream；不接真实 executor、不运行 runtime/model/tool、不 emit stream、不打开 event channel、不写 Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write、不切换 routing，不是 executor implementation、不是 executor attachment、不是 route cutover、不是 default Chat migration permission。
+- **当前阶段**：W72 Default Chat Adapter Disabled Executor Skeleton Binding Integrity Report 已完成。W64 已完成 W1-W63 文档权威压缩验收；W65 新增纯后端 metadata-safe descriptor / mapper；W66 新增 metadata-safe controlled adapter contract report / evaluator / ensure；W67 新增纯后端 non-default invocation harness；W68 新增纯后端 send-compatible proof/evaluator/ensure，只允许 `SendMessage` callsite ready；W69 新增纯后端 stream-compatible boundary proof/evaluator/ensure，只允许 `StartStreamMessage` callsite ready；W70 新增纯后端 executor attachment gate report/evaluator/ensure，同时汇总 W65-W67 metadata-safe descriptor/contract/harness、W68 send proof 和 W69 stream boundary proof；W71 在 W70 gate report 之上新增纯后端 disabled/unattached/no-run executor skeleton contract/evaluator/ensure，只保存 callsite、route metadata、input length/hash 和 requested shape，并返回 metadata-only placeholder；W72 在 W71 skeleton、W71 skeleton input 和 W70 gate report 之上新增纯后端 binding integrity report/evaluator/ensure，验证 input length/hash、route metadata、requested shape/callsite、skeleton output shape、legacy route、gate 和 executor/no-run/no-write/no-stream metadata 是否一致。W72 固定 executor_enabled=false、executor_attached=false、executor_runnable=false、invocation_allowed=false、route_cutover_permission=false、migrationPermission=false、selected_adapter_path=legacy_stream；不接真实 executor、不运行 runtime/model/tool、不 emit stream、不打开 event channel、不写 Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write、不切换 routing，不是 executor implementation、不是 executor attachment、不是 route cutover、不是 default Chat migration permission。下一阶段准备入口是 `plans/lifemodel_maturation_goal_plan.md`：LifeModel Maturation Loop End-to-End 只允许从低能量/低压力规划偏好的窄域、非默认、proposal-first、metadata-safe 闭环开始。
 - **Default Chat 硬约束**：default Chat 仍是 `legacy_stream`。普通 `Send` / `send_message` / `start_stream_message` 只能进入 legacy path；允许调用的 adapter 相关代码仅限 W49-W55 共享 pure ordinary-entry guard/preflight，并且只能 fail closed，不能切换路由。普通入口不得调用 W19-W60 command surfaces，也不得调用 W67 non-default invocation harness、W68 send-compatible proof、W69 stream boundary proof、W70 executor attachment gate、W71 disabled executor skeleton 或 W72 skeleton binding integrity report；W19-W60 readiness/review/preview/gate/draft/evidence/status 结果、W67 `harness_ready`、W68 `proof_ready`、W69 `proof_ready`、W70 `gate_report_metadata_ready`、W71 `skeleton_contract_ready` 和 W72 `binding_integrity_ready` 都不是 migration permission。
 - **文档入口**：`plans/README.md` 是文档权威地图，`plans/lifemodel_governed_runtime_progress.md` 是 W1-W72 结构化状态索引。若旧长段仍写 W60 latest、ready/approve 可迁移、或 W61-W72 会影响 default Chat，以本 W72 入口、`plans/README.md` 和 progress index 为准。
 - **仓库链接**：（需要人工补充）
@@ -22,16 +22,17 @@
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
 3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W72 结构化状态索引，按 stage id / 名称 / 状态 / command-surface 类型 / read-only-write-disabled-metadata-safe / default Chat 影响 / 下一步依赖整理；不是第二套路线图。
-4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
-5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
-6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
-7. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
-8. [`plans/lifemodel_hs_legacy_write_path_audit.md`](plans/lifemodel_hs_legacy_write_path_audit.md)：Legacy direct-write 收口地图，后续治理化开发必须参考。
-9. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013、MVP specs 和总纲接管实现入口。
-10. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准；实现顺序不得覆盖 LifeModel-Governed 总纲。
-11. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
-12. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
-13. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
+4. [`plans/lifemodel_maturation_goal_plan.md`](plans/lifemodel_maturation_goal_plan.md)：LifeModel Maturation Loop End-to-End Goal 准备入口。定义 W73-W78、窄域低能量/低压力规划偏好、非默认成熟化桥接、proposal-first 和 metadata-safe 验收边界。
+5. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
+6. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
+7. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
+8. [`plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`](plans/adr/0013-lifemodel-hs-source-of-truth-governance.md)：LifeModel-HS 的 source-of-truth、governance、privacy 和 materialized-view 硬约束。
+9. [`plans/lifemodel_hs_legacy_write_path_audit.md`](plans/lifemodel_hs_legacy_write_path_audit.md)：Legacy direct-write 收口地图，后续治理化开发必须参考。
+10. [`plans/lifemodel_hs_architecture_plan.md`](plans/lifemodel_hs_architecture_plan.md)：LifeModel-HS 设计基线，已由 ADR 0013、MVP specs 和总纲接管实现入口。
+11. [`OpenLife_PRD_v2_Agent_Framework.md`](OpenLife_PRD_v2_Agent_Framework.md)：产品定义与需求基准；实现顺序不得覆盖 LifeModel-Governed 总纲。
+12. [`plans/openlife_development_plan.md`](plans/openlife_development_plan.md)：当前开发路线，已按 Agent Framework 重写。
+13. [`README.md`](README.md)：面向用户与新开发者的当前状态说明。
+14. [`OpenLife_Final_PRD.md`](OpenLife_Final_PRD.md)：旧版 PRD，仅作为历史参考，不再作为当前架构唯一依据。
 
 ### 后续开发总原则
 
@@ -57,6 +58,7 @@
 - 高风险 LifeModel 更新、外部工具写操作、敏感数据上云必须可解释、可确认、可回滚。
 - LifeModel-HS 开发必须遵守 ADR 0013：增量落地、Proposal-first、privacy as hard Policy、metadata-safe audit、YAML 仅作为 compatibility materialized view。
 - LifeModel-HS 不是孤立功能区，而是跨 Chat、Builder、Calibration、Memory、Tools、ModelRouter、AgentRun、Proposal 的协议层；后续成熟化开发必须沿着 `LifeEvent -> Signal -> Evidence -> Governor -> Proposal -> Materialized View` 收敛。
+- LifeModel Maturation Loop End-to-End Goal 的第一阶段必须以 `plans/lifemodel_maturation_goal_plan.md` 为入口，从 W73 read-only readiness report 开始；不得自动接入 ordinary Chat，不得直接写 LifeModel/Memory/Heuristic active truth，不得绕过 Proposal/Governor，不得扩大到 identity/values/relationships/health/finance 等高风险域。
 - 插件在 Beta 阶段默认是本地 Manifest / declarative-only；除非存在真实安全 executor，否则 plugin-declared tool 不能显示为可执行能力。
 
 ---
