@@ -255,6 +255,156 @@ pub fn ensure_lifemodel_maturation_readiness(
     }
 }
 
+#[derive(Clone)]
+pub struct LifeModelMaturationNonDefaultInvocationInput {
+    pub runtime_output: RuntimeOutput,
+    pub default_chat_selected_adapter_path: String,
+    pub ordinary_chat_auto_maturation_enabled: bool,
+    pub require_direct_life_model_write: bool,
+    pub require_direct_memory_write: bool,
+    pub require_heuristic_activation: bool,
+}
+
+impl LifeModelMaturationNonDefaultInvocationInput {
+    pub fn for_runtime_output(runtime_output: RuntimeOutput) -> Self {
+        Self {
+            runtime_output,
+            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            ordinary_chat_auto_maturation_enabled: false,
+            require_direct_life_model_write: false,
+            require_direct_memory_write: false,
+            require_heuristic_activation: false,
+        }
+    }
+
+    pub fn run(
+        self,
+        evidence_store: &EvidenceStore,
+        proposal_store: &ProposalStore,
+    ) -> Result<LifeModelMaturationNonDefaultInvocationReport> {
+        run_lifemodel_maturation_non_default_invocation(self, evidence_store, proposal_store)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeModelMaturationNonDefaultInvocationReport {
+    pub invocation_ready: bool,
+    pub readiness_report: LifeModelMaturationReadinessReport,
+    pub non_default_invocation: bool,
+    pub default_chat_unchanged: bool,
+    pub ordinary_chat_entrypoint_unchanged: bool,
+    pub wrote_evidence_count: u32,
+    pub wrote_proposal_count: u32,
+    pub wrote_life_model_count: u32,
+    pub wrote_memory_count: u32,
+    pub wrote_heuristic_count: u32,
+    pub wrote_chat_message_count: u32,
+    pub wrote_agent_run_count: u32,
+    pub wrote_mcp_audit_count: u32,
+    pub wrote_external_count: u32,
+    pub ran_runtime: bool,
+    pub ran_model: bool,
+    pub ran_tool: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub source_run_id: Option<String>,
+    pub evidence_ids: Vec<String>,
+    pub proposal_ids: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+}
+
+pub fn run_lifemodel_maturation_non_default_invocation(
+    input: LifeModelMaturationNonDefaultInvocationInput,
+    evidence_store: &EvidenceStore,
+    proposal_store: &ProposalStore,
+) -> Result<LifeModelMaturationNonDefaultInvocationReport> {
+    let candidate_count = input.runtime_output.life_event_candidates.len();
+    let candidate = input.runtime_output.life_event_candidates.first().cloned();
+    let source_run_id = candidate
+        .as_ref()
+        .and_then(|candidate| candidate.source_run_id.clone());
+    let readiness_report =
+        evaluate_lifemodel_maturation_readiness(LifeModelMaturationReadinessInput {
+            candidate,
+            default_chat_selected_adapter_path: input.default_chat_selected_adapter_path,
+            ordinary_chat_auto_maturation_enabled: input.ordinary_chat_auto_maturation_enabled,
+            require_direct_life_model_write: input.require_direct_life_model_write,
+            require_direct_memory_write: input.require_direct_memory_write,
+            require_heuristic_activation: input.require_heuristic_activation,
+        });
+
+    let mut blocking_reasons = readiness_report.blocking_reasons.clone();
+    if candidate_count != 1 {
+        push_unique_reason(&mut blocking_reasons, "candidate_count_not_one");
+    }
+    if readiness_report.next_allowed_step != MATURATION_NEXT_ALLOWED_STEP {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "readiness_next_step_not_non_default_invocation",
+        );
+    }
+
+    let mut report = LifeModelMaturationNonDefaultInvocationReport {
+        invocation_ready: false,
+        default_chat_unchanged: readiness_report.default_chat_unchanged,
+        ordinary_chat_entrypoint_unchanged: readiness_report.ordinary_chat_entrypoint_unchanged,
+        non_default_invocation: true,
+        wrote_evidence_count: 0,
+        wrote_proposal_count: 0,
+        wrote_life_model_count: 0,
+        wrote_memory_count: 0,
+        wrote_heuristic_count: 0,
+        wrote_chat_message_count: 0,
+        wrote_agent_run_count: 0,
+        wrote_mcp_audit_count: 0,
+        wrote_external_count: 0,
+        ran_runtime: false,
+        ran_model: false,
+        ran_tool: false,
+        metadata_safe: readiness_report.metadata_safe,
+        contains_raw_content: readiness_report.contains_raw_content,
+        source_run_id,
+        evidence_ids: Vec::new(),
+        proposal_ids: Vec::new(),
+        blocking_reasons,
+        readiness_report,
+    };
+
+    if !report.readiness_report.ready || !report.blocking_reasons.is_empty() {
+        return Ok(report);
+    }
+
+    let maturation_report = MaturationService::default().mature_runtime_output(
+        &input.runtime_output,
+        evidence_store,
+        proposal_store,
+    )?;
+    report.evidence_ids = maturation_report.evidence_ids;
+    report.proposal_ids = maturation_report.proposal_ids;
+    report.wrote_evidence_count = report.evidence_ids.len() as u32;
+    report.wrote_proposal_count = report.proposal_ids.len() as u32;
+    report.invocation_ready = true;
+    Ok(report)
+}
+
+pub fn ensure_lifemodel_maturation_non_default_invocation(
+    input: LifeModelMaturationNonDefaultInvocationInput,
+    evidence_store: &EvidenceStore,
+    proposal_store: &ProposalStore,
+) -> Result<LifeModelMaturationNonDefaultInvocationReport> {
+    let report =
+        run_lifemodel_maturation_non_default_invocation(input, evidence_store, proposal_store)?;
+    if report.invocation_ready {
+        Ok(report)
+    } else {
+        Err(anyhow!(
+            "lifemodel maturation non-default invocation blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaturationInput {

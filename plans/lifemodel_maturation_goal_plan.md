@@ -1,7 +1,7 @@
 # LifeModel Maturation Loop End-to-End Goal Plan
 
 > Last updated: 2026-06-02
-> Status: W73 readiness report complete; W74 non-default maturation invocation next
+> Status: W74 non-default maturation invocation complete; W75 proposal outcome evidence link next
 
 This document is the entry point for the next Goal-mode development block after
 W72. It does not authorize default Chat route migration, controlled adapter
@@ -140,7 +140,7 @@ Acceptance:
 
 ### W74: Non-Default Maturation Invocation Command
 
-Status: Next.
+Status: Done.
 
 Goal:
 
@@ -156,8 +156,13 @@ Acceptance:
 - Stores only candidate digest, source refs, proposal id, AgentRun id, risk,
   confidence, reason code, and metadata-safe summary.
 - Rejects or redacts raw-content-bearing metadata.
+- Implemented as pure core explicit non-default harness/report in
+  `openlife-core/src/agent/maturation.rs`; no Tauri command or frontend surface
+  was added.
 
 ### W75: Proposal Outcome Evidence Link
+
+Status: Next.
 
 Goal:
 

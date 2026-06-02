@@ -4,6 +4,7 @@ mod evidence_store;
 mod governor;
 mod heuristic_store;
 mod integration;
+mod lifemodel_maturation_non_default_invocation;
 mod lifemodel_maturation_readiness;
 mod maturation_loop;
 mod multi_strategy_runtime;

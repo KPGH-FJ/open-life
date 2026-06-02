@@ -56,7 +56,9 @@ pub use hs_selector::{
     RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use maturation::{
-    ensure_lifemodel_maturation_readiness, evaluate_lifemodel_maturation_readiness,
+    ensure_lifemodel_maturation_non_default_invocation, ensure_lifemodel_maturation_readiness,
+    evaluate_lifemodel_maturation_readiness, run_lifemodel_maturation_non_default_invocation,
+    LifeModelMaturationNonDefaultInvocationInput, LifeModelMaturationNonDefaultInvocationReport,
     LifeModelMaturationReadinessInput, LifeModelMaturationReadinessReport,
     LifeModelMaturationReadinessSideEffectBudget, LifeModelMaturationService, MaturationDropReason,
     MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
