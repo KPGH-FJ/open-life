@@ -226,6 +226,39 @@ pub(crate) struct DefaultChatControlledAdapterDescriptor {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatControlledAdapterContractReport {
+    pub(crate) callsite_kind: String,
+    pub(crate) contract_shape: String,
+    pub(crate) descriptor_ready: bool,
+    pub(crate) contract_ready: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_content: bool,
+    pub(crate) mapper_side_effect_free: bool,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) required_callsite_path: String,
+    pub(crate) actual_callsite_path: String,
+    pub(crate) default_send_path: String,
+    pub(crate) start_stream_path: String,
+    pub(crate) controlled_adapter_candidate_path: String,
+    pub(crate) controlled_adapter_enabled: bool,
+    pub(crate) automatic_migration_enabled: bool,
+    pub(crate) controlled_adapter_invocation_allowed: bool,
+    pub(crate) controlled_adapter_executor_enabled: bool,
+    pub(crate) controlled_adapter_executor_attached: bool,
+    pub(crate) controlled_adapter_executor_state: String,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) side_effect_budget: DefaultChatAdapterDescriptorSideEffectBudget,
+    pub(crate) migration_permission: bool,
+    pub(crate) default_chat_unchanged: bool,
+    pub(crate) input_length_bytes: usize,
+    pub(crate) input_length_chars: usize,
+    pub(crate) input_sha256: String,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn resolve_default_chat_adapter_route() -> DefaultChatAdapterRoute {
     DefaultChatAdapterRoute {
         current_mode: LEGACY_STREAM_PATH.into(),
@@ -330,6 +363,145 @@ fn default_chat_adapter_metadata_sha256(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
+}
+
+#[allow(dead_code)]
+pub(crate) fn evaluate_default_chat_controlled_adapter_contract(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+    input: &str,
+) -> DefaultChatControlledAdapterContractReport {
+    let descriptor = describe_default_chat_controlled_adapter_candidate(callsite, route, input);
+    let default_chat_unchanged = descriptor.route_mode == LEGACY_STREAM_PATH
+        && descriptor.default_send_path == LEGACY_STREAM_PATH
+        && descriptor.start_stream_path == LEGACY_STREAM_PATH
+        && !descriptor.controlled_adapter_enabled
+        && !descriptor.automatic_migration_enabled;
+    let mut blocking_reasons = descriptor.blocking_reasons.clone();
+
+    if !descriptor.descriptor_ready {
+        push_unique_blocker(&mut blocking_reasons, "descriptor_not_ready");
+    }
+    if !descriptor.metadata_safe {
+        push_unique_blocker(&mut blocking_reasons, "descriptor_not_metadata_safe");
+    }
+    if descriptor.contains_raw_content {
+        push_unique_blocker(&mut blocking_reasons, "descriptor_contains_raw_content");
+    }
+    if !descriptor.mapper_side_effect_free {
+        push_unique_blocker(&mut blocking_reasons, "mapper_not_side_effect_free");
+    }
+    if descriptor.selected_adapter_path != LEGACY_STREAM_PATH {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "selected_adapter_path_not_legacy_stream",
+        );
+    }
+    if descriptor.required_callsite_path != LEGACY_STREAM_PATH {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "required_callsite_path_not_legacy_stream",
+        );
+    }
+    if descriptor.actual_callsite_path != LEGACY_STREAM_PATH {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "actual_callsite_path_not_legacy_stream",
+        );
+    }
+    if descriptor.controlled_adapter_invocation_allowed {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "controlled_adapter_invocation_allowed",
+        );
+    }
+    if descriptor.controlled_adapter_executor_enabled {
+        push_unique_blocker(&mut blocking_reasons, "controlled_adapter_executor_enabled");
+    }
+    if descriptor.controlled_adapter_executor_attached {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "controlled_adapter_executor_attached",
+        );
+    }
+    if descriptor.controlled_adapter_executor_state != CONTROLLED_ADAPTER_EXECUTOR_DISABLED_STATE {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "controlled_adapter_executor_not_disabled",
+        );
+    }
+    if descriptor.allow_writes {
+        push_unique_blocker(&mut blocking_reasons, "allow_writes_enabled");
+    }
+    if descriptor.max_tool_calls != 0 {
+        push_unique_blocker(&mut blocking_reasons, "max_tool_calls_not_zero");
+    }
+    if !descriptor.side_effect_budget.is_zero() {
+        push_unique_blocker(&mut blocking_reasons, "side_effect_budget_not_zero");
+    }
+    if descriptor.migration_permission {
+        push_unique_blocker(&mut blocking_reasons, "migration_permission_enabled");
+    }
+    if !default_chat_unchanged {
+        push_unique_blocker(&mut blocking_reasons, "default_chat_not_legacy_stream");
+    }
+
+    let contract_ready = blocking_reasons.is_empty();
+
+    DefaultChatControlledAdapterContractReport {
+        callsite_kind: descriptor.callsite_kind,
+        contract_shape: descriptor.contract_shape,
+        descriptor_ready: descriptor.descriptor_ready,
+        contract_ready,
+        metadata_safe: descriptor.metadata_safe,
+        contains_raw_content: descriptor.contains_raw_content,
+        mapper_side_effect_free: descriptor.mapper_side_effect_free,
+        selected_adapter_path: descriptor.selected_adapter_path,
+        required_callsite_path: descriptor.required_callsite_path,
+        actual_callsite_path: descriptor.actual_callsite_path,
+        default_send_path: descriptor.default_send_path,
+        start_stream_path: descriptor.start_stream_path,
+        controlled_adapter_candidate_path: descriptor.controlled_adapter_candidate_path,
+        controlled_adapter_enabled: descriptor.controlled_adapter_enabled,
+        automatic_migration_enabled: descriptor.automatic_migration_enabled,
+        controlled_adapter_invocation_allowed: descriptor.controlled_adapter_invocation_allowed,
+        controlled_adapter_executor_enabled: descriptor.controlled_adapter_executor_enabled,
+        controlled_adapter_executor_attached: descriptor.controlled_adapter_executor_attached,
+        controlled_adapter_executor_state: descriptor.controlled_adapter_executor_state,
+        allow_writes: descriptor.allow_writes,
+        max_tool_calls: descriptor.max_tool_calls,
+        side_effect_budget: descriptor.side_effect_budget,
+        migration_permission: descriptor.migration_permission,
+        default_chat_unchanged,
+        input_length_bytes: descriptor.input_length_bytes,
+        input_length_chars: descriptor.input_length_chars,
+        input_sha256: descriptor.input_sha256,
+        blocking_reasons,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn ensure_default_chat_controlled_adapter_contract(
+    callsite: DefaultChatAdapterCallsite,
+    route: &DefaultChatAdapterRoute,
+    input: &str,
+) -> Result<DefaultChatControlledAdapterContractReport, String> {
+    let report = evaluate_default_chat_controlled_adapter_contract(callsite, route, input);
+    if report.contract_ready {
+        Ok(report)
+    } else {
+        Err(format!(
+            "{} controlled_adapter_contract_not_ready: {}",
+            report.callsite_kind,
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
+fn push_unique_blocker(blocking_reasons: &mut Vec<String>, reason: &str) {
+    if !blocking_reasons.iter().any(|existing| existing == reason) {
+        blocking_reasons.push(reason.to_string());
+    }
 }
 
 pub(crate) fn evaluate_default_chat_adapter_cutover_harness(

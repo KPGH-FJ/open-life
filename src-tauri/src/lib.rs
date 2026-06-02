@@ -3873,6 +3873,166 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_adapter_controlled_adapter_contract_send_ready_without_migration_permission() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report = crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            "send raw prompt should be hashed only",
+        );
+
+        assert!(report.contract_ready);
+        assert!(report.descriptor_ready);
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_content);
+        assert!(report.mapper_side_effect_free);
+        assert_eq!(report.callsite_kind, "send_message");
+        assert_eq!(report.contract_shape, "send_message_compatible");
+        assert_eq!(report.selected_adapter_path, "legacy_stream");
+        assert_eq!(report.required_callsite_path, "legacy_stream");
+        assert_eq!(report.actual_callsite_path, "legacy_stream");
+        assert_eq!(report.default_send_path, "legacy_stream");
+        assert_eq!(report.start_stream_path, "legacy_stream");
+        assert_eq!(
+            report.controlled_adapter_candidate_path,
+            "controlled_adapter"
+        );
+        assert!(!report.controlled_adapter_enabled);
+        assert!(!report.automatic_migration_enabled);
+        assert!(!report.controlled_adapter_invocation_allowed);
+        assert!(!report.controlled_adapter_executor_enabled);
+        assert!(!report.controlled_adapter_executor_attached);
+        assert_eq!(
+            report.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!report.allow_writes);
+        assert_eq!(report.max_tool_calls, 0);
+        assert!(report.side_effect_budget.is_zero());
+        assert!(!report.migration_permission);
+        assert!(report.default_chat_unchanged);
+        assert!(report.blocking_reasons.is_empty());
+
+        crate::default_chat_adapter::ensure_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            "send raw prompt should be hashed only",
+        )
+        .expect("clean send route should produce a ready metadata-only contract report");
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_contract_stream_ready_without_migration_permission()
+    {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let report = crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+            &route,
+            "stream raw prompt should be hashed only",
+        );
+
+        assert!(report.contract_ready);
+        assert!(report.descriptor_ready);
+        assert_eq!(report.callsite_kind, "start_stream_message");
+        assert_eq!(report.contract_shape, "stream_message_compatible");
+        assert_eq!(report.selected_adapter_path, "legacy_stream");
+        assert_eq!(report.required_callsite_path, "legacy_stream");
+        assert_eq!(report.actual_callsite_path, "legacy_stream");
+        assert!(!report.controlled_adapter_invocation_allowed);
+        assert!(!report.controlled_adapter_executor_enabled);
+        assert!(!report.controlled_adapter_executor_attached);
+        assert!(!report.migration_permission);
+        assert!(report.default_chat_unchanged);
+        assert!(report.side_effect_budget.is_zero());
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_contract_fails_closed_for_route_drift() {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.current_mode = "controlled_adapter".into();
+        route.controlled_adapter_enabled = true;
+        route.automatic_migration_enabled = true;
+        route.start_stream_path = "controlled_adapter".into();
+        route.requires_separate_cutover_implementation = false;
+
+        let report = crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+            &route,
+            "blocked input",
+        );
+
+        assert!(!report.contract_ready);
+        assert!(!report.descriptor_ready);
+        assert!(!report.default_chat_unchanged);
+        assert_eq!(report.selected_adapter_path, "blocked");
+        assert!(!report.controlled_adapter_invocation_allowed);
+        assert!(!report.controlled_adapter_executor_enabled);
+        assert!(!report.controlled_adapter_executor_attached);
+        assert!(!report.migration_permission);
+        assert!(report
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"callsite_path_not_legacy_stream".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"separate_cutover_implementation_not_required".to_string()));
+
+        let error = crate::default_chat_adapter::ensure_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+            &route,
+            "blocked input",
+        )
+        .expect_err("route drift must fail closed");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("controlled_adapter_contract_not_ready"));
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_contract_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input =
+            "raw-user-secret prompt-token assistant-output tool-payload lifemodel-memory";
+
+        let report = crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_contract(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            raw_input,
+        );
+
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_content);
+        assert!(report.input_sha256.starts_with("sha256:"));
+        assert!(!report.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{report:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "lifemodel-memory",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "contract report leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
