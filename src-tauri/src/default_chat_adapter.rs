@@ -563,6 +563,69 @@ pub(crate) struct DefaultChatControlledAdapterDisabledExecutorSkeleton {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DefaultChatControlledAdapterSkeletonBindingIntegrityReport {
+    pub(crate) report_kind: String,
+    pub(crate) binding_integrity_ready: bool,
+    pub(crate) binding_metadata_ready: bool,
+    pub(crate) skeleton_contract_ready: bool,
+    pub(crate) gate_report_metadata_ready: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_content: bool,
+    pub(crate) input_gate_hash_match: bool,
+    pub(crate) input_gate_length_match: bool,
+    pub(crate) route_metadata_match: bool,
+    pub(crate) clean_route_legacy_stream: bool,
+    pub(crate) callsite_shape_match: bool,
+    pub(crate) skeleton_output_shape_match: bool,
+    pub(crate) callsite_kind: String,
+    pub(crate) requested_shape: String,
+    pub(crate) expected_shape_for_callsite: String,
+    pub(crate) skeleton_output_compatible_shape: String,
+    pub(crate) selected_adapter_path: String,
+    pub(crate) route_current_mode: String,
+    pub(crate) route_default_send_path: String,
+    pub(crate) route_start_stream_path: String,
+    pub(crate) gate_default_send_path: String,
+    pub(crate) gate_start_stream_path: String,
+    pub(crate) controlled_adapter_enabled: bool,
+    pub(crate) automatic_migration_enabled: bool,
+    pub(crate) executor_enabled: bool,
+    pub(crate) executor_attached: bool,
+    pub(crate) executor_runnable: bool,
+    pub(crate) invocation_allowed: bool,
+    pub(crate) route_cutover_permission: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) ordinary_default_chat_unchanged: bool,
+    pub(crate) stream_started: bool,
+    pub(crate) event_channel_opened: bool,
+    pub(crate) stream_events_emitted: bool,
+    pub(crate) runtime_call_enabled: bool,
+    pub(crate) model_call_enabled: bool,
+    pub(crate) tool_call_enabled: bool,
+    pub(crate) allow_writes: bool,
+    pub(crate) max_tool_calls: u32,
+    pub(crate) side_effect_budget: DefaultChatAdapterDescriptorSideEffectBudget,
+    pub(crate) side_effect_budget_zero: bool,
+    pub(crate) business_write_disabled: bool,
+    pub(crate) chat_message_saved: bool,
+    pub(crate) agent_run_recorded: bool,
+    pub(crate) evidence_recorded: bool,
+    pub(crate) proposal_created: bool,
+    pub(crate) memory_written: bool,
+    pub(crate) life_model_written: bool,
+    pub(crate) mcp_audit_written: bool,
+    pub(crate) external_write_recorded: bool,
+    pub(crate) input_length_bytes: usize,
+    pub(crate) input_length_chars: usize,
+    pub(crate) input_sha256: String,
+    pub(crate) gate_input_length_bytes: usize,
+    pub(crate) gate_input_length_chars: usize,
+    pub(crate) gate_input_sha256: String,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn resolve_default_chat_adapter_route() -> DefaultChatAdapterRoute {
     DefaultChatAdapterRoute {
         current_mode: LEGACY_STREAM_PATH.into(),
@@ -2178,6 +2241,333 @@ pub(crate) fn ensure_default_chat_controlled_adapter_disabled_executor_skeleton(
             "default_chat_controlled_adapter_disabled_executor_skeleton_not_ready: {}",
             skeleton.blocking_reasons.join(",")
         ))
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn evaluate_default_chat_controlled_adapter_skeleton_binding_integrity(
+    input: &DefaultChatControlledAdapterExecutorSkeletonInput,
+    gate_report: &DefaultChatControlledAdapterExecutorAttachmentGateReport,
+) -> DefaultChatControlledAdapterSkeletonBindingIntegrityReport {
+    let skeleton =
+        evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(input, gate_report);
+    let side_effect_budget = default_chat_adapter_sum_side_effect_budgets(&[
+        &skeleton.side_effect_budget,
+        &gate_report.side_effect_budget,
+    ]);
+    let expected_shape_for_callsite =
+        default_chat_executor_skeleton_expected_shape_for_callsite(&input.callsite_kind)
+            .unwrap_or("blocked")
+            .to_string();
+    let input_gate_hash_match = input.input_sha256 == gate_report.input_sha256;
+    let input_gate_length_match = input.input_length_bytes == gate_report.input_length_bytes
+        && input.input_length_chars == gate_report.input_length_chars;
+    let route_metadata_match = input.route_current_mode == gate_report.selected_adapter_path
+        && input.route_default_send_path == gate_report.default_send_path
+        && input.route_start_stream_path == gate_report.start_stream_path
+        && input.route_controlled_adapter_enabled == gate_report.controlled_adapter_enabled
+        && input.route_automatic_migration_enabled == gate_report.automatic_migration_enabled;
+    let clean_route_legacy_stream = input.route_current_mode == LEGACY_STREAM_PATH
+        && input.route_default_send_path == LEGACY_STREAM_PATH
+        && input.route_start_stream_path == LEGACY_STREAM_PATH
+        && gate_report.selected_adapter_path == LEGACY_STREAM_PATH
+        && gate_report.default_send_path == LEGACY_STREAM_PATH
+        && gate_report.start_stream_path == LEGACY_STREAM_PATH;
+    let callsite_shape_match = expected_shape_for_callsite != "blocked"
+        && input.requested_shape == expected_shape_for_callsite;
+    let skeleton_output_shape_match = skeleton.output.compatible_shape == input.requested_shape;
+    let selected_adapter_path = if skeleton.selected_adapter_path == LEGACY_STREAM_PATH
+        && gate_report.selected_adapter_path == LEGACY_STREAM_PATH
+    {
+        LEGACY_STREAM_PATH
+    } else {
+        "blocked"
+    }
+    .to_string();
+    let controlled_adapter_enabled = input.route_controlled_adapter_enabled
+        || gate_report.controlled_adapter_enabled
+        || skeleton.controlled_adapter_enabled;
+    let automatic_migration_enabled = input.route_automatic_migration_enabled
+        || gate_report.automatic_migration_enabled
+        || skeleton.automatic_migration_enabled;
+    let executor_enabled = gate_report.executor_enabled || skeleton.executor_enabled;
+    let executor_attached = gate_report.executor_attached || skeleton.executor_attached;
+    let executor_runnable = skeleton.executor_runnable;
+    let invocation_allowed =
+        gate_report.controlled_adapter_invocation_allowed || skeleton.invocation_allowed;
+    let route_cutover_permission =
+        gate_report.route_cutover_permission || skeleton.route_cutover_permission;
+    let migration_permission = gate_report.migration_permission || skeleton.migration_permission;
+    let ordinary_default_chat_unchanged =
+        gate_report.ordinary_default_chat_unchanged && skeleton.ordinary_default_chat_unchanged;
+    let stream_started = gate_report.stream_started || skeleton.stream_started;
+    let event_channel_opened = gate_report.event_channel_opened || skeleton.event_channel_opened;
+    let stream_events_emitted = gate_report.stream_events_emitted || skeleton.stream_events_emitted;
+    let allow_writes = gate_report.allow_writes || skeleton.allow_writes;
+    let max_tool_calls = gate_report.max_tool_calls.max(skeleton.max_tool_calls);
+    let runtime_call_enabled = gate_report.runtime_call_enabled
+        || skeleton.runtime_call_enabled
+        || side_effect_budget.runtime_calls != 0;
+    let model_call_enabled = gate_report.model_call_enabled
+        || skeleton.model_call_enabled
+        || side_effect_budget.model_calls != 0;
+    let tool_call_enabled = gate_report.tool_call_enabled
+        || skeleton.tool_call_enabled
+        || side_effect_budget.tool_calls != 0
+        || max_tool_calls != 0;
+    let chat_message_saved = gate_report.chat_message_saved
+        || skeleton.chat_message_saved
+        || side_effect_budget.chat_message_writes != 0;
+    let agent_run_recorded = gate_report.agent_run_recorded
+        || skeleton.agent_run_recorded
+        || side_effect_budget.agent_run_writes != 0;
+    let evidence_recorded = gate_report.evidence_recorded
+        || skeleton.evidence_recorded
+        || side_effect_budget.evidence_writes != 0;
+    let proposal_created = gate_report.proposal_created
+        || skeleton.proposal_created
+        || side_effect_budget.proposal_writes != 0;
+    let memory_written = gate_report.memory_written
+        || skeleton.memory_written
+        || side_effect_budget.memory_writes != 0;
+    let life_model_written = gate_report.life_model_written
+        || skeleton.life_model_written
+        || side_effect_budget.life_model_writes != 0;
+    let mcp_audit_written = gate_report.mcp_audit_written
+        || skeleton.mcp_audit_written
+        || side_effect_budget.mcp_audit_writes != 0;
+    let external_write_recorded = gate_report.external_write_recorded
+        || skeleton.external_write_recorded
+        || side_effect_budget.external_writes != 0;
+    let write_budget_nonzero = allow_writes
+        || side_effect_budget.store_writes != 0
+        || chat_message_saved
+        || agent_run_recorded
+        || evidence_recorded
+        || proposal_created
+        || memory_written
+        || life_model_written
+        || mcp_audit_written
+        || external_write_recorded;
+    let side_effect_budget_zero = side_effect_budget.is_zero()
+        && gate_report.side_effect_budget_zero
+        && skeleton.side_effect_budget_zero;
+    let business_write_disabled = gate_report.business_write_disabled
+        && skeleton.business_write_disabled
+        && !write_budget_nonzero;
+    let contains_raw_content = gate_report.contains_raw_content || skeleton.contains_raw_content;
+    let metadata_safe =
+        gate_report.metadata_safe && skeleton.metadata_safe && !contains_raw_content;
+    let mut blocking_reasons = Vec::new();
+
+    for reason in skeleton.blocking_reasons.iter() {
+        push_unique_blocker(&mut blocking_reasons, reason);
+    }
+    if !skeleton.skeleton_contract_ready {
+        push_unique_blocker(&mut blocking_reasons, "skeleton_contract_not_ready");
+    }
+    if !gate_report.gate_report_metadata_ready {
+        push_unique_blocker(&mut blocking_reasons, "w70_gate_report_not_metadata_ready");
+    }
+    if !input_gate_hash_match {
+        push_unique_blocker(&mut blocking_reasons, "input_gate_hash_mismatch");
+    }
+    if !input_gate_length_match {
+        push_unique_blocker(&mut blocking_reasons, "input_gate_length_mismatch");
+    }
+    if !route_metadata_match {
+        push_unique_blocker(&mut blocking_reasons, "route_metadata_mismatch");
+    }
+    if !callsite_shape_match {
+        push_unique_blocker(&mut blocking_reasons, "requested_shape_callsite_mismatch");
+    }
+    if !skeleton_output_shape_match {
+        push_unique_blocker(&mut blocking_reasons, "output_shape_mismatch");
+    }
+    if !clean_route_legacy_stream {
+        push_unique_blocker(&mut blocking_reasons, "route_drift_from_legacy_stream");
+    }
+    if selected_adapter_path != LEGACY_STREAM_PATH {
+        push_unique_blocker(
+            &mut blocking_reasons,
+            "selected_adapter_path_not_legacy_stream",
+        );
+    }
+    if controlled_adapter_enabled {
+        push_unique_blocker(&mut blocking_reasons, "controlled_adapter_enabled");
+    }
+    if automatic_migration_enabled {
+        push_unique_blocker(&mut blocking_reasons, "automatic_migration_enabled");
+    }
+    if executor_enabled {
+        push_unique_blocker(&mut blocking_reasons, "executor_enabled");
+    }
+    if executor_attached {
+        push_unique_blocker(&mut blocking_reasons, "executor_attached");
+    }
+    if executor_runnable {
+        push_unique_blocker(&mut blocking_reasons, "executor_runnable");
+    }
+    if invocation_allowed {
+        push_unique_blocker(&mut blocking_reasons, "invocation_allowed_unexpectedly");
+    }
+    if route_cutover_permission {
+        push_unique_blocker(&mut blocking_reasons, "route_cutover_permission_enabled");
+    }
+    if migration_permission {
+        push_unique_blocker(&mut blocking_reasons, "migration_permission_enabled");
+    }
+    if runtime_call_enabled || side_effect_budget.runtime_calls != 0 {
+        push_unique_blocker(&mut blocking_reasons, "runtime_budget_not_zero");
+    }
+    if model_call_enabled || side_effect_budget.model_calls != 0 {
+        push_unique_blocker(&mut blocking_reasons, "model_budget_not_zero");
+    }
+    if tool_call_enabled || side_effect_budget.tool_calls != 0 || max_tool_calls != 0 {
+        push_unique_blocker(&mut blocking_reasons, "tool_budget_not_zero");
+    }
+    if write_budget_nonzero || !business_write_disabled {
+        push_unique_blocker(&mut blocking_reasons, "write_budget_not_zero");
+    }
+    if stream_started {
+        push_unique_blocker(&mut blocking_reasons, "stream_started");
+    }
+    if event_channel_opened {
+        push_unique_blocker(&mut blocking_reasons, "event_channel_opened");
+    }
+    if stream_events_emitted {
+        push_unique_blocker(&mut blocking_reasons, "stream_events_emitted");
+    }
+    if !metadata_safe {
+        push_unique_blocker(&mut blocking_reasons, "metadata_not_safe");
+    }
+    if contains_raw_content {
+        push_unique_blocker(&mut blocking_reasons, "raw_content_present");
+    }
+    if !side_effect_budget_zero {
+        push_unique_blocker(&mut blocking_reasons, "side_effect_budget_not_zero");
+    }
+    if !ordinary_default_chat_unchanged {
+        push_unique_blocker(&mut blocking_reasons, "default_chat_not_legacy_stream");
+    }
+
+    let binding_metadata_ready = skeleton.skeleton_contract_ready
+        && gate_report.gate_report_metadata_ready
+        && metadata_safe
+        && input_gate_hash_match
+        && input_gate_length_match
+        && route_metadata_match
+        && clean_route_legacy_stream
+        && callsite_shape_match
+        && skeleton_output_shape_match;
+    let binding_integrity_ready = binding_metadata_ready
+        && !controlled_adapter_enabled
+        && !automatic_migration_enabled
+        && !executor_enabled
+        && !executor_attached
+        && !executor_runnable
+        && !invocation_allowed
+        && !route_cutover_permission
+        && !migration_permission
+        && selected_adapter_path == LEGACY_STREAM_PATH
+        && ordinary_default_chat_unchanged
+        && !runtime_call_enabled
+        && !model_call_enabled
+        && !tool_call_enabled
+        && !write_budget_nonzero
+        && !stream_started
+        && !event_channel_opened
+        && !stream_events_emitted
+        && side_effect_budget_zero
+        && business_write_disabled
+        && blocking_reasons.is_empty();
+
+    DefaultChatControlledAdapterSkeletonBindingIntegrityReport {
+        report_kind: "default_chat_controlled_adapter_skeleton_binding_integrity_report".into(),
+        binding_integrity_ready,
+        binding_metadata_ready,
+        skeleton_contract_ready: skeleton.skeleton_contract_ready,
+        gate_report_metadata_ready: gate_report.gate_report_metadata_ready,
+        metadata_safe,
+        contains_raw_content,
+        input_gate_hash_match,
+        input_gate_length_match,
+        route_metadata_match,
+        clean_route_legacy_stream,
+        callsite_shape_match,
+        skeleton_output_shape_match,
+        callsite_kind: input.callsite_kind.clone(),
+        requested_shape: input.requested_shape.clone(),
+        expected_shape_for_callsite,
+        skeleton_output_compatible_shape: skeleton.output.compatible_shape,
+        selected_adapter_path,
+        route_current_mode: input.route_current_mode.clone(),
+        route_default_send_path: input.route_default_send_path.clone(),
+        route_start_stream_path: input.route_start_stream_path.clone(),
+        gate_default_send_path: gate_report.default_send_path.clone(),
+        gate_start_stream_path: gate_report.start_stream_path.clone(),
+        controlled_adapter_enabled,
+        automatic_migration_enabled,
+        executor_enabled,
+        executor_attached,
+        executor_runnable,
+        invocation_allowed,
+        route_cutover_permission,
+        migration_permission,
+        ordinary_default_chat_unchanged,
+        stream_started,
+        event_channel_opened,
+        stream_events_emitted,
+        runtime_call_enabled,
+        model_call_enabled,
+        tool_call_enabled,
+        allow_writes,
+        max_tool_calls,
+        side_effect_budget,
+        side_effect_budget_zero,
+        business_write_disabled,
+        chat_message_saved,
+        agent_run_recorded,
+        evidence_recorded,
+        proposal_created,
+        memory_written,
+        life_model_written,
+        mcp_audit_written,
+        external_write_recorded,
+        input_length_bytes: input.input_length_bytes,
+        input_length_chars: input.input_length_chars,
+        input_sha256: input.input_sha256.clone(),
+        gate_input_length_bytes: gate_report.input_length_bytes,
+        gate_input_length_chars: gate_report.input_length_chars,
+        gate_input_sha256: gate_report.input_sha256.clone(),
+        blocking_reasons,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn ensure_default_chat_controlled_adapter_skeleton_binding_integrity(
+    input: &DefaultChatControlledAdapterExecutorSkeletonInput,
+    gate_report: &DefaultChatControlledAdapterExecutorAttachmentGateReport,
+) -> Result<DefaultChatControlledAdapterSkeletonBindingIntegrityReport, String> {
+    let report =
+        evaluate_default_chat_controlled_adapter_skeleton_binding_integrity(input, gate_report);
+    if report.binding_integrity_ready {
+        Ok(report)
+    } else {
+        Err(format!(
+            "default_chat_controlled_adapter_skeleton_binding_integrity_not_ready: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
+fn default_chat_executor_skeleton_expected_shape_for_callsite(
+    callsite_kind: &str,
+) -> Option<&'static str> {
+    match callsite_kind {
+        "send_message" => Some(DEFAULT_CHAT_EXECUTOR_SKELETON_SEND_MESSAGE_RESULT_SHAPE),
+        "start_stream_message" => Some(DEFAULT_CHAT_EXECUTOR_SKELETON_STREAM_BOUNDARY_SHAPE),
+        _ => None,
     }
 }
 
