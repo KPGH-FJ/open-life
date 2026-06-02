@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents, W66 controlled adapter contract report complete
+> Status: authoritative document index for Agents, W67 non-default invocation harness complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W66 completion/status index. This is not a second roadmap.
+   - Compact W1-W67 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -33,15 +33,19 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W66 controlled adapter contract report complete**.
+Current latest status is **W67 non-default invocation harness complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
-contract report/evaluator/ensure over that descriptor. W65-W66 add no command,
-no frontend change, no Settings surface, no runtime/model/tool call, no store
-write, and no routing change.
+contract report/evaluator/ensure over that descriptor. W67 adds a pure Rust
+backend-only non-default invocation harness that reads/reuses only the W66
+contract report and proves the future controlled adapter candidate invocation
+shape is metadata-safe, zero-side-effect, and executor-disabled/unattached.
+W65-W67 add no command, no frontend change, no Settings surface, no
+runtime/model/tool call, no store write, no executor attachment, and no routing
+change.
 
-The next state remains controlled adapter contract work only if a separate task
+Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
 reviewed route change is implemented and verified.
 
@@ -52,13 +56,16 @@ Hard current constraints:
 - W61-W63 are整理阶段, not default Chat migration.
 - Ordinary `send_message` / `start_stream_message` must not call W19-W60
   command surfaces.
+- Ordinary `send_message` / `start_stream_message` must not call the W67
+  non-default invocation harness.
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
-- W65-W66 backend-only descriptor/contract report work is metadata only and is
-  not migration permission.
+- W65-W67 backend-only descriptor/contract/harness work is metadata only and is
+  not migration permission. W67 `harness_ready` only means the non-default
+  invocation shape proof is safe.
 
-## 3. W1-W63 Compression Map
+## 3. W1-W67 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -79,6 +86,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W61-W64 | Docs/index整理, W1-W63 compression freeze, and authority validation | Docs only; no default Chat effect |
 | W65 | Backend-only controlled adapter descriptor skeleton | Internal metadata-safe mapper only; no default Chat effect |
 | W66 | Backend-only controlled adapter contract report | Internal metadata-safe contract evaluator only; no default Chat effect |
+| W67 | Backend-only non-default controlled invocation harness | Internal metadata-safe shape proof only; no command, executor, runtime, write, routing, or default Chat effect |
 
 ## 4. Current Authoritative Entry Points
 
@@ -86,7 +94,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W63 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W67 structured status index and compressed guardrail map. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -139,12 +147,18 @@ The only allowed ordinary-entry adapter code is W49-W55 pure guard/preflight
 logic, which is read-only/pure, write-disabled, metadata-safe, side-effect-free,
 and fail-closed.
 
+W67 is backend-only non-default harness code. It does not add a Tauri command,
+frontend surface, Settings surface, runtime/model/tool execution, business
+write, controlled executor attachment, route cutover, or migration permission.
+Ordinary default Chat entries must not call it, and default Chat remains
+`legacy_stream`.
+
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W63 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W67 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -158,9 +172,9 @@ and fail-closed.
 ```text
 W63 complete -> W64 authority compression validated -> W65 backend-only
 descriptor skeleton complete -> W66 controlled adapter contract report complete
--> prepare any future non-default invocation proof only if the task explicitly
-asks for implementation and preserves default Chat legacy_stream until
-separately reviewed.
+-> W67 non-default invocation harness complete -> continue only through a
+separately reviewed implementation task that preserves default Chat
+legacy_stream until a route change is explicitly implemented and authorized.
 ```
 
 For docs-only index整理, `git diff --check` plus targeted `rg` validation is

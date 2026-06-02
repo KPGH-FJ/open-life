@@ -10,9 +10,9 @@
 - **技术栈**：Rust (Tauri 2.x + 自定义核心库) + React 18 + TypeScript + Tailwind CSS + SQLite
 - **核心范式**：`LifeModel-HS Protocol Layer + Governed Agent Runtime + ReAct Default Strategy + Tool/Skill Execution + Memory/Feedback/Maturation Loop`
 - **产品定义**：OpenLife 不是单纯聊天应用，也不是普通成长管理 App。它应当让用户用私人 LifeModel 驱动本地或云端模型完成对话、规划、写作、复盘、工具调用和状态更新，并在用户确认下持续更新对用户的理解。
-- **当前阶段**：W66 Default Chat Adapter Controlled Contract Report 已完成。W64 已完成 W1-W63 文档权威压缩验收；W65 新增纯后端 metadata-safe descriptor / mapper，用于描述未来 controlled adapter candidate contract；W66 在纯后端新增 metadata-safe controlled adapter contract report / evaluator / ensure，用于验证 send/stream callsite 的 future controlled adapter candidate contract readiness。W66 不新增 Tauri command、不新增前端或 Settings surface、不运行 runtime/model/tool、不写 Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write、不切换 routing，不是 default Chat migration。
-- **Default Chat 硬约束**：default Chat 仍是 `legacy_stream`。普通 `Send` / `send_message` / `start_stream_message` 只能进入 legacy path；允许调用的 adapter 相关代码仅限 W49-W55 共享 pure ordinary-entry guard/preflight，并且只能 fail closed，不能切换路由。普通入口不得调用 W19-W60 command surfaces；W19-W60 readiness/review/preview/gate/draft/evidence/status 结果都不是 migration permission。
-- **文档入口**：`plans/README.md` 是文档权威地图，`plans/lifemodel_governed_runtime_progress.md` 是 W1-W66 结构化状态索引。若旧长段仍写 W60 latest、ready/approve 可迁移、或 W61-W66 会影响 default Chat，以本 W66 入口、`plans/README.md` 和 progress index 为准。
+- **当前阶段**：W67 Default Chat Adapter Non-Default Controlled Invocation Harness 已完成。W64 已完成 W1-W63 文档权威压缩验收；W65 新增纯后端 metadata-safe descriptor / mapper；W66 新增 metadata-safe controlled adapter contract report / evaluator / ensure；W67 新增纯后端 non-default invocation harness，只读取/复用 W66 contract report，用于证明 future controlled adapter candidate 的 invocation shape 可被安全描述。W67 不新增 Tauri command、不新增前端或 Settings surface、不接 controlled executor、不运行 runtime/model/tool、不写 Chat/AgentRun/Evidence/Proposal/Memory/LifeModel/MCP audit/external write、不切换 routing，不是 default Chat migration。
+- **Default Chat 硬约束**：default Chat 仍是 `legacy_stream`。普通 `Send` / `send_message` / `start_stream_message` 只能进入 legacy path；允许调用的 adapter 相关代码仅限 W49-W55 共享 pure ordinary-entry guard/preflight，并且只能 fail closed，不能切换路由。普通入口不得调用 W19-W60 command surfaces，也不得调用 W67 non-default invocation harness；W19-W60 readiness/review/preview/gate/draft/evidence/status 结果和 W67 `harness_ready` 都不是 migration permission。
+- **文档入口**：`plans/README.md` 是文档权威地图，`plans/lifemodel_governed_runtime_progress.md` 是 W1-W67 结构化状态索引。若旧长段仍写 W60 latest、ready/approve 可迁移、或 W61-W67 会影响 default Chat，以本 W67 入口、`plans/README.md` 和 progress index 为准。
 - **仓库链接**：（需要人工补充）
 
 ### 当前架构文档优先级
@@ -21,7 +21,7 @@
 
 1. [`plans/README.md`](plans/README.md)：文档权威地图。仓库和 GitHub 中旧计划很多，若文档互相冲突，以这里的优先级为准。
 2. [`plans/openlife_lifemodel_governed_agent_runtime.md`](plans/openlife_lifemodel_governed_agent_runtime.md)：下一阶段总纲。定义 LifeModel-HS 作为协议层、ReAct 作为默认策略、Maturation Loop 与未来 Multi-Strategy Runtime 的开发顺序，优先级最高。
-3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W66 结构化状态索引，按 stage id / 名称 / 状态 / command-surface 类型 / read-only-write-disabled-metadata-safe / default Chat 影响 / 下一步依赖整理；不是第二套路线图。
+3. [`plans/lifemodel_governed_runtime_progress.md`](plans/lifemodel_governed_runtime_progress.md)：W1-W67 结构化状态索引，按 stage id / 名称 / 状态 / command-surface 类型 / read-only-write-disabled-metadata-safe / default Chat 影响 / 下一步依赖整理；不是第二套路线图。
 4. [`plans/openlife_agent_framework_architecture.md`](plans/openlife_agent_framework_architecture.md)：Agent Framework 架构基准。现在应与总纲合读：ReAct 是当前默认 runtime strategy，不是唯一未来架构。
 5. [`plans/openlife_react_beta_roadmap.md`](plans/openlife_react_beta_roadmap.md)：Alpha+ 到 Beta 的 ReAct 执行能力路线图，定义 Beta Gate 和工具执行严肃性。
 6. [`plans/lifemodel_hs_mvp_task_specs.md`](plans/lifemodel_hs_mvp_task_specs.md)：Post-Beta LifeModel-HS MVP 的 coding-ready task specs。
@@ -38,14 +38,14 @@
 - 不推倒重写，继续复用现有模块。
 - 不继续平铺新页面，优先建立 Agent Runtime 主线。
 - ReAct 是当前默认执行策略：后续核心能力必须先收敛到 `Reason -> Act(tool/skill) -> Observe -> Follow-up -> Proposal/Permission -> Apply/Replay -> Audit`，但架构上要为 Plan-Execute、Workflow、Proactive 等 RuntimeStrategy 留出位置。
-- 当前分支已完成 W1-W66；W61-W64 是 docs/index整理和权威入口压缩验收，W65 是 backend-only descriptor skeleton，W66 是 backend-only controlled contract report。W65-W66 只描述并验证 future controlled adapter candidate contract，不接入 ordinary Chat callsite，不授权迁移。
+- 当前分支已完成 W1-W67；W61-W64 是 docs/index整理和权威入口压缩验收，W65 是 backend-only descriptor skeleton，W66 是 backend-only controlled contract report，W67 是 backend-only non-default invocation harness。W65-W67 只描述并验证 future controlled adapter candidate 的 contract / invocation shape，不接入 ordinary Chat callsite，不授权迁移。
 - W9-W18 只建立 non-default preview、preview audit 和 read-only migration gate/evidence surface；它们不替换 default Chat。
 - W19-W23 只提供 controlled pilot eligibility、显式 pilot、reviewed promotion、source binding 和 metadata-safe promotion evidence；普通 Send 仍不调用 eligibility/gate/preview。
 - W24-W48 的 readiness/review/preview/gate/draft/evidence 只允许人工审阅、对比、planning 或 implementation discussion；ready/approve/draftReady/previewReady 都不是 migration permission。
 - W49-W55 是 pure ordinary-entry guard/preflight：默认 `send_message` / `start_stream_message` 只能在 typed contract ready、controlled executor unattached、migration disabled、zero runtime/model/tool/write budget 下进入 `legacy_stream`，并只能 fail closed。
 - W56-W60 是 read-only/status/planning/review/readiness surfaces；普通 `Send` / `send_message` / `start_stream_message` 不得调用这些 command。
 - W61-W63 是 docs/index整理阶段，不运行 runtime/model/tool、不写记录、不切换 routing，不是 default Chat migration。
-- W64 是 W1-W63 文档权威压缩验收；W65 是纯后端 descriptor / mapper 骨架，metadata-safe、executor disabled/unattached、zero side-effect budget；W66 是纯后端 controlled adapter contract report / evaluator / ensure，复用 W65 descriptor 并保持 migrationPermission=false、controlled adapter invocation disabled、executor disabled/unattached、zero side-effect budget。W65-W66 都不是 command/surface，不是 default Chat migration。
+- W64 是 W1-W63 文档权威压缩验收；W65 是纯后端 descriptor / mapper 骨架，metadata-safe、executor disabled/unattached、zero side-effect budget；W66 是纯后端 controlled adapter contract report / evaluator / ensure，复用 W65 descriptor 并保持 migrationPermission=false、controlled adapter invocation disabled、executor disabled/unattached、zero side-effect budget；W67 是纯后端 non-default invocation harness，只复用 W66 contract report，`harness_ready` 仅表示 invocation shape proof safe，不表示可迁移。W65-W67 都不是 command/surface，不是 default Chat migration。
 - W10 的 preview AgentRun audit 是 metadata-safe 外层 run。ReAct payload 里的 inner run id 只能作为 child metadata 存在，不是 Runs 查询和产品 trace 的主 id。
 - 后续 Agent 不得默认替换 `send_message`、`start_stream_message` 或 Chat 主流程；任何迁移必须先从非默认 preview/debug 入口或受控子路径开始，并保留稳定 fallback。
 - Tools 是 Agent 的执行能力，不是附属页面。OpenLife Beta 必须具备 OpenClaw-like 的 tool execution seriousness，但必须叠加 LifeModel、Privacy、Permission、Proposal、Audit 约束。
@@ -812,6 +812,10 @@ pnpm tauri build --target x86_64-unknown-linux-gnu
 | 2026-06-02 | **W61: Progress Index Compression Prep**：docs-only 整理 W1-W60 长路线状态，准备结构化索引字段；不改 Rust/TS、不新增 command、不影响 default Chat | AI Agent |
 | 2026-06-02 | **W62: Plans README Authority Compression**：docs-only 压缩 `plans/README.md` 权威入口和阶段分组，保留 legacy_stream / ordinary-entry / not migration permission 硬约束；默认 Send 仍未迁移 | AI Agent |
 | 2026-06-02 | **W63: Narrow Adapter Implementation Entry Index Freeze**：docs-only 冻结 W1-W63 结构化索引入口，下一步仅为未来 W64 narrow adapter implementation slice 做上下文准备；W63 不授权 W64，不是 default Chat migration | AI Agent |
+| 2026-06-02 | **W64: W1-W63 Authority Compression Validation**：docs-only 验收压缩入口与结构化索引；不改 runtime/model/tool，不写记录，不影响 default Chat | AI Agent |
+| 2026-06-02 | **W65: Default Chat Adapter Backend-Only Descriptor Skeleton**：新增纯后端 metadata-safe descriptor / mapper，只记录 input length/hash 与 route metadata；controlled executor disabled/unattached、zero side-effect budget、migrationPermission=false；不新增 command/surface、不运行 runtime/model/tool、不写业务记录、不切 routing，default Chat 仍是 `legacy_stream` | AI Agent |
+| 2026-06-02 | **W66: Default Chat Adapter Controlled Contract Report**：新增纯后端 controlled adapter contract report / evaluator / ensure，复用 W65 descriptor 验证 send/stream contract shape；controlled adapter invocation disabled、executor disabled/unattached、zero side-effect budget、migrationPermission=false；不新增 command/surface、不接 executor、不影响 ordinary Chat | AI Agent |
+| 2026-06-02 | **W67: Default Chat Adapter Non-Default Controlled Invocation Harness**：新增纯后端 `DefaultChatControlledAdapterInvocationHarness`、`evaluate_default_chat_controlled_adapter_invocation_harness` 与 `ensure_default_chat_controlled_adapter_invocation_harness`，只读取/复用 W66 contract report，证明 future controlled adapter candidate 的 non-default invocation shape metadata-safe、zero-side-effect、executor disabled/unattached；`harness_ready` 不是 migration permission，不新增 command/surface、不接 executor、不运行 runtime/model/tool、不写业务记录、不切 routing，ordinary `send_message` / `start_stream_message` 不调用该 harness，default Chat 仍是 `legacy_stream` | AI Agent |
 
 ---
 

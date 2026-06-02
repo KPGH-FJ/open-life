@@ -4033,6 +4033,257 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_send_ready_keeps_legacy_without_migration_permission(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "send raw prompt should be metadata only";
+        let contract =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_contract(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        let harness =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        assert!(harness.harness_ready);
+        assert_eq!(
+            harness.harness_kind,
+            "default_chat_controlled_adapter_non_default_invocation_harness"
+        );
+        assert_eq!(harness.callsite_kind, "send_message");
+        assert_eq!(harness.contract_shape, contract.contract_shape);
+        assert!(harness.contract_ready);
+        assert!(harness.metadata_safe);
+        assert!(!harness.contains_raw_content);
+        assert!(harness.non_default);
+        assert!(harness.ordinary_default_chat_path_unchanged);
+        assert_eq!(harness.selected_adapter_path, "legacy_stream");
+        assert_eq!(harness.candidate_adapter_path, "controlled_adapter");
+        assert!(!harness.controlled_adapter_invocation_allowed);
+        assert!(!harness.controlled_adapter_executor_enabled);
+        assert!(!harness.controlled_adapter_executor_attached);
+        assert_eq!(
+            harness.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!harness.allow_writes);
+        assert_eq!(harness.max_tool_calls, 0);
+        assert!(!harness.migration_permission);
+        assert!(harness.blocking_reasons.is_empty());
+
+        crate::default_chat_adapter::ensure_default_chat_controlled_adapter_invocation_harness(
+            crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+            &route,
+            raw_input,
+        )
+        .expect("send harness should prove only the non-default invocation shape");
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_stream_ready_keeps_legacy_without_migration_permission(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let harness =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "stream raw prompt should be metadata only",
+            );
+
+        assert!(harness.harness_ready);
+        assert_eq!(harness.callsite_kind, "start_stream_message");
+        assert_eq!(harness.contract_shape, "stream_message_compatible");
+        assert!(harness.contract_ready);
+        assert!(harness.metadata_safe);
+        assert!(!harness.contains_raw_content);
+        assert!(harness.non_default);
+        assert!(harness.ordinary_default_chat_path_unchanged);
+        assert_eq!(harness.selected_adapter_path, "legacy_stream");
+        assert_eq!(harness.candidate_adapter_path, "controlled_adapter");
+        assert!(!harness.controlled_adapter_invocation_allowed);
+        assert!(!harness.controlled_adapter_executor_enabled);
+        assert!(!harness.controlled_adapter_executor_attached);
+        assert_eq!(
+            harness.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!harness.migration_permission);
+        assert!(harness.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_fails_closed_for_route_drift_controlled_adapter_and_auto_migration(
+    ) {
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.current_mode = "controlled_adapter".into();
+        route.controlled_adapter_enabled = true;
+        route.automatic_migration_enabled = true;
+        route.default_send_path = "controlled_adapter".into();
+        route.start_stream_path = "controlled_adapter".into();
+        route.requires_separate_cutover_implementation = false;
+
+        let harness =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "blocked raw input",
+            );
+
+        assert!(!harness.harness_ready);
+        assert!(!harness.contract_ready);
+        assert!(!harness.ordinary_default_chat_path_unchanged);
+        assert_eq!(harness.selected_adapter_path, "blocked");
+        assert_eq!(harness.candidate_adapter_path, "controlled_adapter");
+        assert!(!harness.controlled_adapter_invocation_allowed);
+        assert!(!harness.controlled_adapter_executor_enabled);
+        assert!(!harness.controlled_adapter_executor_attached);
+        assert_eq!(
+            harness.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!harness.migration_permission);
+        assert!(harness
+            .blocking_reasons
+            .contains(&"contract_not_ready".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"current_mode_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"start_stream_path_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"callsite_path_not_legacy_stream".to_string()));
+        assert!(harness
+            .blocking_reasons
+            .contains(&"separate_cutover_implementation_not_required".to_string()));
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                "blocked raw input",
+            )
+            .expect_err("route drift must fail the non-default invocation harness closed");
+        assert!(error.contains("start_stream_message"));
+        assert!(error.contains("controlled_adapter_invocation_harness_not_ready"));
+        assert!(error.contains("contract_not_ready"));
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_keeps_executor_unattached_and_side_effect_budget_zero(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+
+        let harness =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "metadata only",
+            );
+
+        assert!(harness.harness_ready);
+        assert!(!harness.controlled_adapter_executor_enabled);
+        assert!(!harness.controlled_adapter_executor_attached);
+        assert_eq!(
+            harness.controlled_adapter_executor_state,
+            "disabled_unattached"
+        );
+        assert!(!harness.runtime_call_enabled);
+        assert!(!harness.model_call_enabled);
+        assert!(!harness.tool_call_enabled);
+        assert!(harness.business_write_disabled);
+        assert!(!harness.allow_writes);
+        assert_eq!(harness.max_tool_calls, 0);
+        assert!(harness.side_effect_budget_zero);
+        assert_eq!(harness.side_effect_budget.runtime_calls, 0);
+        assert_eq!(harness.side_effect_budget.model_calls, 0);
+        assert_eq!(harness.side_effect_budget.tool_calls, 0);
+        assert_eq!(harness.side_effect_budget.store_writes, 0);
+        assert_eq!(harness.side_effect_budget.chat_message_writes, 0);
+        assert_eq!(harness.side_effect_budget.agent_run_writes, 0);
+        assert_eq!(harness.side_effect_budget.evidence_writes, 0);
+        assert_eq!(harness.side_effect_budget.proposal_writes, 0);
+        assert_eq!(harness.side_effect_budget.memory_writes, 0);
+        assert_eq!(harness.side_effect_budget.life_model_writes, 0);
+        assert_eq!(harness.side_effect_budget.mcp_audit_writes, 0);
+        assert_eq!(harness.side_effect_budget.external_writes, 0);
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_debug_dump_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input =
+            "raw-user-secret prompt-token assistant-output tool-payload lifemodel-memory";
+
+        let harness =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_invocation_harness(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+            );
+
+        assert!(harness.metadata_safe);
+        assert!(!harness.contains_raw_content);
+        assert!(harness.input_sha256.starts_with("sha256:"));
+        assert!(!harness.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{harness:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "lifemodel-memory",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "invocation harness leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_controlled_adapter_invocation_harness_is_not_called_by_ordinary_entrypoints(
+    ) {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_harness_calls = [
+            "evaluate_default_chat_controlled_adapter_invocation_harness",
+            "ensure_default_chat_controlled_adapter_invocation_harness",
+        ];
+
+        for forbidden in forbidden_harness_calls {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn default_chat_entrypoints_do_not_call_w19_w60_command_surfaces() {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
