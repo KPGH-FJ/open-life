@@ -696,6 +696,36 @@ pub struct DefaultChatAdapterOrdinaryEntryPreflightStatus {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+    pub source_session_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub required_approved_previews: Option<usize>,
+    #[serde(default)]
+    pub required_approved_candidates: Option<usize>,
+    #[serde(default)]
+    pub required_promotions: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultChatAdapterNarrowImplementationDiscussionGateReport {
+    pub eligible: bool,
+    pub default_chat_unchanged: bool,
+    pub cutover_plan_approval_ready: bool,
+    pub ordinary_entry_preflight_status_ready: bool,
+    pub send_preflight_ready: bool,
+    pub stream_preflight_ready: bool,
+    pub controlled_adapter_enabled: bool,
+    pub automatic_migration_enabled: bool,
+    pub default_send_path: String,
+    pub start_stream_path: String,
+    pub blocking_reasons: Vec<String>,
+    pub metadata_safe_summary: Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DefaultChatAdapterDryRunInput {
     pub session_id: String,
     pub message: String,
@@ -3513,6 +3543,172 @@ fn default_chat_adapter_ordinary_entry_preflight_check(
         evidence_recorded: preflight.evidence_recorded,
         blocking_reasons: preflight.blocking_reasons,
     }
+}
+
+#[tauri::command]
+pub async fn check_default_chat_adapter_narrow_implementation_discussion_gate(
+    input: DefaultChatAdapterNarrowImplementationDiscussionGateInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<DefaultChatAdapterNarrowImplementationDiscussionGateReport, String> {
+    check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+        input,
+        &state.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) async fn check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+    input: DefaultChatAdapterNarrowImplementationDiscussionGateInput,
+    state: &Arc<AppState>,
+) -> Result<DefaultChatAdapterNarrowImplementationDiscussionGateReport, String> {
+    check_default_chat_adapter_narrow_implementation_discussion_gate_with_state_and_route(
+        input,
+        state,
+        crate::default_chat_adapter::resolve_default_chat_adapter_route(),
+    )
+    .await
+}
+
+pub(crate) async fn check_default_chat_adapter_narrow_implementation_discussion_gate_with_state_and_route(
+    input: DefaultChatAdapterNarrowImplementationDiscussionGateInput,
+    state: &Arc<AppState>,
+    route: crate::default_chat_adapter::DefaultChatAdapterRoute,
+) -> Result<DefaultChatAdapterNarrowImplementationDiscussionGateReport, String> {
+    let cutover_plan_approval =
+        check_default_chat_adapter_cutover_plan_approval_readiness_with_state(
+            DefaultChatAdapterCutoverPlanApprovalReadinessInput {
+                source_session_id: input.source_session_id,
+                message: input.message,
+                required_approved_previews: input.required_approved_previews,
+                required_approved_candidates: input.required_approved_candidates,
+                required_promotions: input.required_promotions,
+            },
+            state,
+        )
+        .await?;
+    let ordinary_entry_preflight_status =
+        get_default_chat_adapter_ordinary_entry_preflight_status_with_route(route).await?;
+
+    let mut blocking_reasons = Vec::new();
+    for reason in &cutover_plan_approval.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+    for reason in &ordinary_entry_preflight_status.blocking_reasons {
+        push_unique_string(&mut blocking_reasons, reason.clone());
+    }
+
+    let cutover_plan_approval_ready = cutover_plan_approval.ready;
+    let ordinary_entry_preflight_status_ready = ordinary_entry_preflight_status.status_ready;
+    let send_preflight_ready = ordinary_entry_preflight_status
+        .send_message_preflight
+        .preflight_ready;
+    let stream_preflight_ready = ordinary_entry_preflight_status
+        .stream_message_preflight
+        .preflight_ready;
+    let default_chat_unchanged = cutover_plan_approval.default_chat_unchanged
+        && ordinary_entry_preflight_status.default_chat_unchanged
+        && ordinary_entry_preflight_status.current_mode == "legacy_stream"
+        && ordinary_entry_preflight_status.default_send_path == "legacy_stream"
+        && ordinary_entry_preflight_status.start_stream_path == "legacy_stream";
+    let controlled_adapter_enabled = cutover_plan_approval.controlled_adapter_enabled
+        || ordinary_entry_preflight_status.controlled_adapter_enabled;
+    let automatic_migration_enabled = cutover_plan_approval.automatic_migration_enabled
+        || ordinary_entry_preflight_status.automatic_migration_enabled;
+    let default_send_path = ordinary_entry_preflight_status.default_send_path.clone();
+    let start_stream_path = ordinary_entry_preflight_status.start_stream_path.clone();
+
+    if !cutover_plan_approval_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "cutover_plan_approval_readiness_not_ready".into(),
+        );
+    }
+    if !ordinary_entry_preflight_status_ready {
+        push_unique_string(
+            &mut blocking_reasons,
+            "ordinary_entry_preflight_status_not_ready".into(),
+        );
+    }
+    if !default_chat_unchanged {
+        push_unique_string(&mut blocking_reasons, "default_chat_changed".into());
+    }
+    if controlled_adapter_enabled {
+        push_unique_string(&mut blocking_reasons, "controlled_adapter_enabled".into());
+    }
+    if automatic_migration_enabled {
+        push_unique_string(&mut blocking_reasons, "automatic_migration_enabled".into());
+    }
+    if default_send_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "default_send_path_not_legacy_stream".into(),
+        );
+    }
+    if start_stream_path != "legacy_stream" {
+        push_unique_string(
+            &mut blocking_reasons,
+            "start_stream_path_not_legacy_stream".into(),
+        );
+    }
+
+    let blocking_reason_count = blocking_reasons.len();
+    let eligible = cutover_plan_approval_ready
+        && ordinary_entry_preflight_status_ready
+        && send_preflight_ready
+        && stream_preflight_ready
+        && default_chat_unchanged
+        && !controlled_adapter_enabled
+        && !automatic_migration_enabled
+        && default_send_path == "legacy_stream"
+        && start_stream_path == "legacy_stream"
+        && blocking_reasons.is_empty();
+    let summary_default_send_path = default_send_path.clone();
+    let summary_start_stream_path = start_stream_path.clone();
+
+    Ok(DefaultChatAdapterNarrowImplementationDiscussionGateReport {
+        eligible,
+        default_chat_unchanged,
+        cutover_plan_approval_ready,
+        ordinary_entry_preflight_status_ready,
+        send_preflight_ready,
+        stream_preflight_ready,
+        controlled_adapter_enabled,
+        automatic_migration_enabled,
+        default_send_path,
+        start_stream_path,
+        blocking_reasons,
+        metadata_safe_summary: json!({
+            "narrowImplementationDiscussionGate": "default_chat_adapter",
+            "metadataSafe": true,
+            "readOnly": true,
+            "eligible": eligible,
+            "defaultChatUnchanged": default_chat_unchanged,
+            "cutoverPlanApprovalReady": cutover_plan_approval_ready,
+            "ordinaryEntryPreflightStatusReady": ordinary_entry_preflight_status_ready,
+            "sendPreflightReady": send_preflight_ready,
+            "streamPreflightReady": stream_preflight_ready,
+            "controlledAdapterEnabled": controlled_adapter_enabled,
+            "automaticMigrationEnabled": automatic_migration_enabled,
+            "defaultSendPath": summary_default_send_path,
+            "startStreamPath": summary_start_stream_path,
+            "notAutomaticMigration": true,
+            "requiresSeparateImplementation": true,
+            "blockingReasonCount": blocking_reason_count,
+            "contentStorage": "none",
+            "toolStorage": "none",
+            "chatHistoryStorage": "none",
+            "proposalStorage": "none",
+            "lifeModelPatchStorage": "none",
+            "memoryStorage": "none",
+            "evidenceStorage": "read_only",
+            "mcpAuditStorage": "none",
+            "transcriptStorage": "none",
+            "agentRunStorage": "none",
+            "runtimeCallStorage": "none",
+            "modelCallStorage": "none",
+            "externalWriteStorage": "none",
+        }),
+    })
 }
 
 #[tauri::command]
@@ -15969,6 +16165,215 @@ mod tests {
         assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
         assert_eq!(before.model_version, after.model_version);
         assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_discussion_gate_blocks_when_cutover_plan_approval_not_ready(
+    ) {
+        let state = preview_state().await;
+        let report = check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+            DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                source_session_id: "session-narrow-gate-blocked".into(),
+                message: "Narrow implementation gate blocked probe.".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.eligible);
+        assert!(!report.cutover_plan_approval_ready);
+        assert!(report.ordinary_entry_preflight_status_ready);
+        assert!(report.default_chat_unchanged);
+        assert!(report
+            .blocking_reasons
+            .contains(&"cutover_plan_approval_readiness_not_ready".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"cutover_plan_review_approval_missing".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_discussion_gate_blocks_when_preflight_status_blocked(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation gate preflight drift probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-narrow-preflight-drift",
+            "run-preview-narrow-preflight-drift",
+            "session-narrow-gate",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-narrow-gate".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        let mut route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        route.default_send_path = "controlled_adapter".into();
+
+        let report =
+            check_default_chat_adapter_narrow_implementation_discussion_gate_with_state_and_route(
+                DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                    source_session_id: "session-narrow-gate".into(),
+                    message: message.into(),
+                    required_approved_previews: Some(1),
+                    required_approved_candidates: Some(1),
+                    required_promotions: Some(3),
+                },
+                &state,
+                route,
+            )
+            .await
+            .unwrap();
+
+        assert!(!report.eligible);
+        assert!(report.cutover_plan_approval_ready);
+        assert!(!report.ordinary_entry_preflight_status_ready);
+        assert!(!report.send_preflight_ready);
+        assert!(!report.stream_preflight_ready);
+        assert!(!report.default_chat_unchanged);
+        assert_eq!(report.default_send_path, "controlled_adapter");
+        assert!(report
+            .blocking_reasons
+            .contains(&"ordinary_entry_preflight_status_not_ready".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"default_chat_route_drifted".to_string()));
+        assert!(report
+            .blocking_reasons
+            .contains(&"default_send_path_not_legacy_stream".to_string()));
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_discussion_gate_eligible_with_current_approval_and_preflight(
+    ) {
+        let state = preview_state().await;
+        let message = "Narrow implementation gate ready probe.";
+        seed_default_chat_adapter_cutover_plan_ready(
+            &state,
+            "run-candidate-narrow-ready",
+            "run-preview-narrow-ready",
+            "session-narrow-gate-ready",
+            message,
+        )
+        .await;
+        record_default_chat_adapter_cutover_plan_review_decision_with_state(
+            DefaultChatAdapterCutoverPlanReviewDecisionInput {
+                decision_kind: "approve".into(),
+                source_session_id: "session-narrow-gate-ready".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+                optional_reviewer_note: Some("Ready gate note should not be stored raw.".into()),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let report = check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+            DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                source_session_id: "session-narrow-gate-ready".into(),
+                message: message.into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(report.eligible);
+        assert!(report.cutover_plan_approval_ready);
+        assert!(report.ordinary_entry_preflight_status_ready);
+        assert!(report.send_preflight_ready);
+        assert!(report.stream_preflight_ready);
+        assert!(report.default_chat_unchanged);
+        assert!(!report.controlled_adapter_enabled);
+        assert!(!report.automatic_migration_enabled);
+        assert_eq!(report.default_send_path, "legacy_stream");
+        assert_eq!(report.start_stream_path, "legacy_stream");
+        assert!(report.blocking_reasons.is_empty());
+        assert_eq!(
+            report.metadata_safe_summary["narrowImplementationDiscussionGate"],
+            "default_chat_adapter"
+        );
+        assert_eq!(report.metadata_safe_summary["eligible"], true);
+        assert_eq!(report.metadata_safe_summary["notAutomaticMigration"], true);
+        assert_eq!(report.metadata_safe_summary["readOnly"], true);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_discussion_gate_is_read_only_by_side_effect_counts(
+    ) {
+        let state = preview_state().await;
+        let before = side_effect_counts(&state).await;
+
+        let report = check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+            DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                source_session_id: "session-narrow-gate-read-only".into(),
+                message: "Narrow implementation gate read-only probe.".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(!report.eligible);
+        let after = side_effect_counts(&state).await;
+        assert_eq!(before.run_count, after.run_count);
+        assert_eq!(before.pending_proposal_count, after.pending_proposal_count);
+        assert_eq!(before.evidence_count, after.evidence_count);
+        assert_eq!(before.patch_count, after.patch_count);
+        assert_eq!(before.mcp_audit_count, after.mcp_audit_count);
+        assert_eq!(before.model_version, after.model_version);
+        assert_eq!(before.messages_json, after.messages_json);
+    }
+
+    #[tokio::test]
+    async fn default_chat_adapter_narrow_implementation_discussion_gate_serialized_output_is_metadata_safe(
+    ) {
+        let state = preview_state().await;
+        let report = check_default_chat_adapter_narrow_implementation_discussion_gate_with_state(
+            DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+                source_session_id: "session-narrow-gate-metadata".into(),
+                message: "secret@example.com raw output tool payload userOutput".into(),
+                required_approved_previews: Some(1),
+                required_approved_candidates: Some(1),
+                required_promotions: Some(3),
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("secret@example.com"));
+        assert!(!serialized.contains("raw output"));
+        assert!(!serialized.contains("rawPrompt"));
+        assert!(!serialized.contains("rawAssistantOutput"));
+        assert!(!serialized.contains("toolPayload"));
+        assert!(!serialized.contains("userOutput"));
     }
 
     #[tokio::test]

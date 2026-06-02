@@ -765,6 +765,29 @@ export interface DefaultChatAdapterOrdinaryEntryPreflightStatus {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface DefaultChatAdapterNarrowImplementationDiscussionGateInput {
+  sourceSessionId: string;
+  message: string;
+  requiredApprovedPreviews?: number;
+  requiredApprovedCandidates?: number;
+  requiredPromotions?: number;
+}
+
+export interface DefaultChatAdapterNarrowImplementationDiscussionGateReport {
+  eligible: boolean;
+  defaultChatUnchanged: boolean;
+  cutoverPlanApprovalReady: boolean;
+  ordinaryEntryPreflightStatusReady: boolean;
+  sendPreflightReady: boolean;
+  streamPreflightReady: boolean;
+  controlledAdapterEnabled: boolean;
+  automaticMigrationEnabled: boolean;
+  defaultSendPath: string;
+  startStreamPath: string;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export interface DefaultChatAdapterDryRunInput {
   sessionId: string;
   message: string;

@@ -22,6 +22,7 @@ import {
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   checkDefaultChatAdapterImplementationReadiness,
+  checkDefaultChatAdapterNarrowImplementationDiscussionGate,
   checkRuntimeMigrationGate,
   draftDefaultChatAdapterCutoverImplementationPlan,
   draftDefaultChatAdapterActivationPlan,
@@ -75,6 +76,7 @@ import type {
   DefaultChatAdapterDryRunReviewDecisionResult,
   DefaultChatAdapterDryRunReviewSummary,
   DefaultChatAdapterImplementationReadinessReport,
+  DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterOrdinaryEntryPreflightStatus,
   DefaultChatAdapterRoutingStatus,
   DefaultChatAdapterActivationReviewDecisionKind,
@@ -113,6 +115,7 @@ const SAFE_SUMMARY_KEYS = [
   "cutoverImplementationPlan",
   "cutoverPlanReview",
   "cutoverPlanApprovalReadiness",
+  "narrowImplementationDiscussionGate",
   "activationPlan",
   "activationReview",
   "activationImplementationGate",
@@ -137,6 +140,9 @@ const SAFE_SUMMARY_KEYS = [
   "defaultChatUnchanged",
   "defaultChatPathUnchanged",
   "readOnly",
+  "eligible",
+  "cutoverPlanApprovalReady",
+  "ordinaryEntryPreflightStatusReady",
   "ordinaryEntryPreflight",
   "statusReady",
   "sendPreflightReady",
@@ -487,6 +493,12 @@ export default function MultiStrategyPreviewSection() {
     useState<string | null>(null);
   const [adapterCutoverPlanApprovalReadinessReport, setAdapterCutoverPlanApprovalReadinessReport] =
     useState<DefaultChatAdapterCutoverPlanApprovalReadinessReport | null>(null);
+  const [narrowImplementationGateChecking, setNarrowImplementationGateChecking] = useState(false);
+  const [narrowImplementationGateError, setNarrowImplementationGateError] = useState<string | null>(
+    null
+  );
+  const [narrowImplementationGateReport, setNarrowImplementationGateReport] =
+    useState<DefaultChatAdapterNarrowImplementationDiscussionGateReport | null>(null);
 
   const summaryEntries = useMemo(
     () => safeSummaryEntries(result?.metadataSafeSummary ?? {}),
@@ -1168,6 +1180,25 @@ export default function MultiStrategyPreviewSection() {
       );
     } finally {
       setAdapterCutoverPlanApprovalReadinessChecking(false);
+    }
+  };
+
+  const handleNarrowImplementationGateCheck = async () => {
+    setNarrowImplementationGateChecking(true);
+    setNarrowImplementationGateError(null);
+    setNarrowImplementationGateReport(null);
+    try {
+      const report = await checkDefaultChatAdapterNarrowImplementationDiscussionGate({
+        sourceSessionId: "settings-dry-run",
+        message: "Settings adapter dry-run probe.",
+        requiredApprovedPreviews: 1,
+        requiredApprovedCandidates: 1,
+      });
+      setNarrowImplementationGateReport(report);
+    } catch (e) {
+      setNarrowImplementationGateError(`Narrow implementation gate failed: ${readableError(e)}`);
+    } finally {
+      setNarrowImplementationGateChecking(false);
     }
   };
 
@@ -5717,6 +5748,141 @@ export default function MultiStrategyPreviewSection() {
         ) : (
           <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
             No cutover plan approval readiness report loaded.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-stone-200 bg-white p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-stone-900">
+              Default Chat Adapter Narrow Implementation Discussion Gate
+            </div>
+            <div className="mt-1 max-w-xl text-xs leading-5 text-stone-600">
+              Read-only W57 gate over W48 cutover plan approval and W56 ordinary-entry preflight
+              status. Eligible means discussion-ready only, not a routing change.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleNarrowImplementationGateCheck}
+            disabled={narrowImplementationGateChecking}
+            className={classNames(
+              "inline-flex items-center gap-2 rounded-md px-3 py-2 text-xs font-medium",
+              narrowImplementationGateChecking
+                ? "bg-stone-100 text-stone-400"
+                : "bg-stone-900 text-amber-50 hover:bg-stone-800"
+            )}
+          >
+            <RefreshCw
+              size={13}
+              className={narrowImplementationGateChecking ? "animate-spin" : undefined}
+            />
+            {narrowImplementationGateChecking ? "Checking..." : "Check Narrow Implementation Gate"}
+          </button>
+        </div>
+
+        <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-600">
+          This gate does not call runtime, tools, models, previews, evidence recorders, or routing
+          toggles. It only combines existing readiness and preflight status.
+        </div>
+
+        {narrowImplementationGateError && (
+          <div className="mt-3 rounded-md border border-red-100 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {narrowImplementationGateError}
+          </div>
+        )}
+
+        {narrowImplementationGateReport ? (
+          <div className="mt-4 space-y-3">
+            <div
+              className={classNames(
+                "rounded-md border px-3 py-2 text-sm font-medium",
+                narrowImplementationGateReport.eligible
+                  ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                  : "border-red-100 bg-red-50 text-red-700"
+              )}
+            >
+              {narrowImplementationGateReport.eligible
+                ? "Narrow implementation discussion eligible"
+                : "Narrow implementation discussion blocked"}
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-3">
+              {[
+                ["eligible", String(narrowImplementationGateReport.eligible)],
+                [
+                  "defaultChatUnchanged",
+                  String(narrowImplementationGateReport.defaultChatUnchanged),
+                ],
+                [
+                  "cutoverPlanApprovalReady",
+                  String(narrowImplementationGateReport.cutoverPlanApprovalReady),
+                ],
+                [
+                  "ordinaryEntryPreflightStatusReady",
+                  String(narrowImplementationGateReport.ordinaryEntryPreflightStatusReady),
+                ],
+                ["sendPreflightReady", String(narrowImplementationGateReport.sendPreflightReady)],
+                [
+                  "streamPreflightReady",
+                  String(narrowImplementationGateReport.streamPreflightReady),
+                ],
+                [
+                  "controlledAdapterEnabled",
+                  String(narrowImplementationGateReport.controlledAdapterEnabled),
+                ],
+                [
+                  "automaticMigrationEnabled",
+                  String(narrowImplementationGateReport.automaticMigrationEnabled),
+                ],
+                ["defaultSendPath", narrowImplementationGateReport.defaultSendPath],
+                ["startStreamPath", narrowImplementationGateReport.startStreamPath],
+              ].map(([label, value]) => (
+                <div
+                  key={label}
+                  className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 font-mono text-xs text-stone-700"
+                >
+                  {label}: {value}
+                </div>
+              ))}
+            </div>
+
+            {safeSummaryEntries(narrowImplementationGateReport.metadataSafeSummary).length > 0 && (
+              <div className="flex flex-wrap gap-2 text-xs">
+                {safeSummaryEntries(narrowImplementationGateReport.metadataSafeSummary).map(
+                  ([key, value]) => (
+                    <span
+                      key={key}
+                      className="rounded-md border border-stone-200 bg-white px-2 py-1 text-stone-700"
+                    >
+                      {key}: {value}
+                    </span>
+                  )
+                )}
+              </div>
+            )}
+
+            {narrowImplementationGateReport.blockingReasons.length > 0 ? (
+              <div className="space-y-1">
+                {narrowImplementationGateReport.blockingReasons.map(reason => (
+                  <div
+                    key={reason}
+                    className="rounded-md border border-red-100 bg-red-50 px-2 py-1 text-xs text-red-700"
+                  >
+                    {reason}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+                No narrow implementation gate blockers returned.
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 rounded-md border border-stone-100 bg-stone-50 px-3 py-2 text-xs text-stone-600">
+            No narrow implementation gate report loaded.
           </div>
         )}
       </section>

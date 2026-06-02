@@ -16,6 +16,7 @@ import {
   checkDefaultChatAdapterActivationImplementationGate,
   checkDefaultChatAdapterContractHarness,
   checkDefaultChatAdapterImplementationReadiness,
+  checkDefaultChatAdapterNarrowImplementationDiscussionGate,
   checkDefaultChatAdapterControlledPreviewApprovalReadiness,
   checkDefaultChatAdapterCutoverPlanApprovalReadiness,
   draftDefaultChatAdapterCutoverImplementationPlan,
@@ -1057,6 +1058,54 @@ describe("tauri command argument aliases", () => {
     expect(result.sendMessagePreflight.callsite).toBe("send_message");
     expect(result.streamMessagePreflight.callsite).toBe("start_stream_message");
     expect(result.metadataSafeSummary.readOnly).toBe(true);
+  });
+
+  it("checks default chat adapter narrow implementation discussion gate as read-only", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      eligible: true,
+      defaultChatUnchanged: true,
+      cutoverPlanApprovalReady: true,
+      ordinaryEntryPreflightStatusReady: true,
+      sendPreflightReady: true,
+      streamPreflightReady: true,
+      controlledAdapterEnabled: false,
+      automaticMigrationEnabled: false,
+      defaultSendPath: "legacy_stream",
+      startStreamPath: "legacy_stream",
+      blockingReasons: [],
+      metadataSafeSummary: {
+        narrowImplementationDiscussionGate: "default_chat_adapter",
+        metadataSafe: true,
+        readOnly: true,
+        eligible: true,
+        notAutomaticMigration: true,
+      },
+    });
+
+    const result = await checkDefaultChatAdapterNarrowImplementationDiscussionGate({
+      sourceSessionId: "session-1",
+      message: "settings probe",
+      requiredApprovedPreviews: 1,
+      requiredApprovedCandidates: 1,
+      requiredPromotions: 3,
+    });
+
+    expect(invoke).toHaveBeenCalledWith(
+      "check_default_chat_adapter_narrow_implementation_discussion_gate",
+      {
+        input: {
+          sourceSessionId: "session-1",
+          message: "settings probe",
+          requiredApprovedPreviews: 1,
+          requiredApprovedCandidates: 1,
+          requiredPromotions: 3,
+        },
+      }
+    );
+    expect(result.eligible).toBe(true);
+    expect(result.cutoverPlanApprovalReady).toBe(true);
+    expect(result.ordinaryEntryPreflightStatusReady).toBe(true);
+    expect(result.metadataSafeSummary.notAutomaticMigration).toBe(true);
   });
 
   it("invokes default chat adapter contract harness as read-only", async () => {

@@ -2136,6 +2136,81 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
   });
 
+  it("checks default chat adapter narrow implementation discussion gate without migration controls", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "check_default_chat_adapter_narrow_implementation_discussion_gate") {
+        return Promise.resolve({
+          eligible: true,
+          defaultChatUnchanged: true,
+          cutoverPlanApprovalReady: true,
+          ordinaryEntryPreflightStatusReady: true,
+          sendPreflightReady: true,
+          streamPreflightReady: true,
+          controlledAdapterEnabled: false,
+          automaticMigrationEnabled: false,
+          defaultSendPath: "legacy_stream",
+          startStreamPath: "legacy_stream",
+          blockingReasons: [],
+          metadataSafeSummary: {
+            narrowImplementationDiscussionGate: "default_chat_adapter",
+            metadataSafe: true,
+            readOnly: true,
+            eligible: true,
+            defaultChatUnchanged: true,
+            cutoverPlanApprovalReady: true,
+            ordinaryEntryPreflightStatusReady: true,
+            sendPreflightReady: true,
+            streamPreflightReady: true,
+            notAutomaticMigration: true,
+          },
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    renderSettings();
+
+    await clickTab("实验");
+    expect(
+      await screen.findByText("Default Chat Adapter Narrow Implementation Discussion Gate")
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Check Narrow Implementation Gate" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "check_default_chat_adapter_narrow_implementation_discussion_gate",
+        {
+          input: {
+            sourceSessionId: "settings-dry-run",
+            message: "Settings adapter dry-run probe.",
+            requiredApprovedPreviews: 1,
+            requiredApprovedCandidates: 1,
+          },
+        }
+      );
+    });
+    expect(
+      await screen.findByText("Narrow implementation discussion eligible")
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("eligible: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("defaultChatUnchanged: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("cutoverPlanApprovalReady: true").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getAllByText("ordinaryEntryPreflightStatusReady: true").length
+    ).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("sendPreflightReady: true").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText("streamPreflightReady: true").length).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.getByText("narrowImplementationDiscussionGate: default_chat_adapter")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /save/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /promote/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /switch/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /migrate/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /enable/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /activate/i })).not.toBeInTheDocument();
+  });
+
   it("checks default chat adapter contract harness without routing controls", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "check_default_chat_adapter_contract_harness") {

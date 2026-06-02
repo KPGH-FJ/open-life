@@ -47,6 +47,8 @@ import type {
   DefaultChatAdapterContractHarnessInput,
   DefaultChatAdapterContractHarnessReport,
   DefaultChatAdapterOrdinaryEntryPreflightStatus,
+  DefaultChatAdapterNarrowImplementationDiscussionGateInput,
+  DefaultChatAdapterNarrowImplementationDiscussionGateReport,
   DefaultChatAdapterDryRunInput,
   DefaultChatAdapterDryRunReport,
   DefaultChatAdapterDryRunReviewDecisionInput,
@@ -483,6 +485,15 @@ export async function checkDefaultChatAdapterContractHarness(
 export async function getDefaultChatAdapterOrdinaryEntryPreflightStatus(): Promise<DefaultChatAdapterOrdinaryEntryPreflightStatus> {
   return safeInvoke<DefaultChatAdapterOrdinaryEntryPreflightStatus>(
     "get_default_chat_adapter_ordinary_entry_preflight_status"
+  );
+}
+
+export async function checkDefaultChatAdapterNarrowImplementationDiscussionGate(
+  input: DefaultChatAdapterNarrowImplementationDiscussionGateInput
+): Promise<DefaultChatAdapterNarrowImplementationDiscussionGateReport> {
+  return safeInvoke<DefaultChatAdapterNarrowImplementationDiscussionGateReport>(
+    "check_default_chat_adapter_narrow_implementation_discussion_gate",
+    { input }
   );
 }
 

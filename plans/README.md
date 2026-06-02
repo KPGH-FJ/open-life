@@ -1,6 +1,6 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-01
+> Last updated: 2026-06-02
 > Status: authoritative document index for Agents
 
 This file prevents old planning documents from accidentally steering new Agent
@@ -15,7 +15,7 @@ work. If two documents disagree, use the precedence below.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W56 completion/status index. This is not a second roadmap.
+   - Compact W1-W57 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -43,7 +43,7 @@ tool/proposal hygiene
 -> strategy abstraction
 ```
 
-Current implementation has completed W1-W56 through sustained Runtime Migration
+Current implementation has completed W1-W57 through sustained Runtime Migration
 Gate evidence, controlled Chat pilot eligibility, a very small explicit Chat
 Controlled Pilot with fallback, reviewed pilot response promotion,
 source-bound post-promotion validation, metadata-safe promotion evidence, a
@@ -83,11 +83,13 @@ status plus a pure ordinary-entry preflight / side-effect lock that keeps
 ordinary `send_message` and `start_stream_message` on `legacy_stream` with
 typed contract ready, controlled executor unattached, migration disabled, and
 zero runtime/model/tool/write pre-entry budget plus a read-only ordinary-entry
-preflight status surface for Settings review.
+preflight status surface for Settings review plus a read-only narrow
+implementation discussion gate over current W48 cutover plan approval readiness
+and W56 ordinary-entry preflight status.
 The next practical sequence is:
 
 ```text
-keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, and ordinary-entry preflight status only as implementation-discussion evidence; default Chat remains unchanged
+keep authority docs synced, then use cutover plan approval readiness, route guard scaffold, cutover invocation harness, invocation plan, invocation boundary, typed callsite contract, ordinary-entry preflight, ordinary-entry preflight status, and narrow implementation discussion gate only as implementation-discussion evidence; default Chat remains unchanged
 ```
 
 ## 3. Current Authoritative Entry Points
@@ -96,7 +98,7 @@ keep authority docs synced, then use cutover plan approval readiness, route guar
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, current constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W56 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight/ordinary-entry preflight status. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W57 completion/status index and preview/not-default/migration-gate/pilot-eligibility/controlled-pilot/promotion-validation/evidence-readiness/draft-planning/review-decision/implementation-gate/shadow-run/shadow-review/cutover-readiness/cutover-candidate/candidate-review/candidate-promotion-readiness/default-chat-boundary/activation-plan/activation-review/activation-implementation-gate/disabled-routing-scaffold/contract-harness/dry-run boundary/dry-run review evidence/implementation readiness/controlled preview/controlled preview review evidence/controlled preview approval readiness/cutover implementation plan draft/cutover plan review evidence/cutover plan approval readiness/route guard scaffold/cutover invocation harness/invocation plan/invocation boundary/typed callsite contract/authority roadmap sync/ordinary-entry preflight/ordinary-entry preflight status/narrow implementation discussion gate. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -547,6 +549,16 @@ send/stream preflight checks, exposes metadata-safe status summaries, and
 creates no AgentRun, Evidence, Proposal, Memory, LifeModel patch, MCP audit,
 chat message, external write, runtime call, model call, or tool call. It is a
 status surface for implementation discussion, not default Chat migration.
+
+W57 adds a read-only narrow implementation discussion gate through
+`check_default_chat_adapter_narrow_implementation_discussion_gate`, the frontend
+wrapper, and the Settings experimental panel. It combines current W48 cutover
+plan approval readiness with W56 ordinary-entry preflight status, requires
+default Chat to remain unchanged on `legacy_stream`, and requires controlled
+adapter execution plus automatic migration to remain disabled. It creates no
+records, runs no runtime/model/tool call, changes no routing, and only indicates
+whether a narrow adapter implementation slice may be discussed. It is not
+default Chat migration.
 
 ## 6. Agent Rules
 
