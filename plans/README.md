@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-02
-> Status: authoritative document index for Agents, W70 executor attachment gate report complete
+> Status: authoritative document index for Agents, W71 disabled executor skeleton contract complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W70 completion/status index. This is not a second roadmap.
+   - Compact W1-W71 completion/status index. This is not a second roadmap.
 5. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -33,7 +33,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W70 executor attachment gate report complete**.
+Current latest status is **W71 disabled executor skeleton contract complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -63,6 +63,17 @@ migrationPermission=false. Executor implementation missing, human review
 missing, and route cutover not authorized remain explicit blockers. W65-W70 add
 no command, no frontend change, no Settings surface, no runtime/model/tool call,
 no store write, no executor attachment, and no routing change.
+W71 adds a pure Rust backend-only disabled controlled executor skeleton
+contract/evaluator/ensure in `src-tauri/src/default_chat_adapter.rs`. It reuses
+the W70 gate report and stores only metadata-safe callsite, route metadata,
+input length/hash, and requested shape. Known send/stream shapes return
+metadata-only placeholders; unknown shapes fail closed. W71 fixes
+executor_skeleton_present=true, executor_enabled=false, executor_attached=false,
+executor_runnable=false, invocation_allowed=false,
+route_cutover_permission=false, and migrationPermission=false. W71 adds no
+command, no frontend change, no Settings surface, no runtime/model/tool call,
+no stream emission, no event channel, no business write, no executor
+attachment, no route cutover, and no migration permission.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -83,18 +94,21 @@ Hard current constraints:
   stream-compatible boundary proof.
 - Ordinary `send_message` / `start_stream_message` must not call the W70
   executor attachment gate.
+- Ordinary `send_message` / `start_stream_message` must not call the W71
+  disabled executor skeleton.
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
-- W65-W70 backend-only descriptor/contract/harness/proof/gate work is metadata only
+- W65-W71 backend-only descriptor/contract/harness/proof/gate/skeleton work is metadata only
   and is not migration permission. W67 `harness_ready` only means the
   non-default invocation shape proof is safe; W68 `proof_ready` only means the
   SendMessageResult-compatible metadata shape proof is safe; W69 `proof_ready`
   only means the stream-compatible metadata boundary proof is safe; W70
   `gate_report_metadata_ready` only means the attachment gate report metadata is
-  ready for executor skeleton discussion.
+  ready for executor skeleton discussion; W71 `skeleton_contract_ready` only
+  means the disabled skeleton contract metadata is safe and still no-run.
 
-## 3. W1-W70 Compression Map
+## 3. W1-W71 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -119,6 +133,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W68 | Backend-only send-compatible contract proof | Internal SendMessageResult-compatible metadata proof only; stream fails closed; no command, executor, runtime, write, routing, or default Chat effect |
 | W69 | Backend-only stream-compatible boundary proof | Internal `start_stream_message`-compatible metadata boundary proof only; SendMessage fails closed; no real stream, event channel, command, executor, runtime, write, routing, or default Chat effect |
 | W70 | Backend-only executor attachment gate report | Internal metadata-ready gate report only; executor attachment/cutover/migration permission all false; no command, executor, runtime, write, routing, or default Chat effect |
+| W71 | Backend-only disabled executor skeleton contract | Internal metadata-only placeholder contract only; executor disabled/unattached/not runnable, invocation disallowed, no stream/event channel, no command, runtime, write, routing, or default Chat effect |
 
 ## 4. Current Authoritative Entry Points
 
@@ -126,7 +141,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W70 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W71 structured status index and compressed guardrail map. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -181,24 +196,27 @@ and fail-closed.
 
 W67 is backend-only non-default harness code, W68 is backend-only
 send-compatible proof code, W69 is backend-only stream-compatible boundary
-proof code, and W70 is backend-only executor attachment gate report code. They
-do not add a Tauri command, frontend surface, Settings surface,
-runtime/model/tool execution, business write, controlled executor attachment,
-real stream emission, event channel, route cutover, or migration permission.
+proof code, W70 is backend-only executor attachment gate report code, and W71
+is backend-only disabled executor skeleton contract code. They do not add a
+Tauri command, frontend surface, Settings surface, runtime/model/tool execution,
+business write, controlled executor attachment, real stream emission, event
+channel, route cutover, or migration permission.
 Ordinary default Chat entries must not call any of them. W68 only proves a
 SendMessageResult-compatible metadata shape for a controlled adapter candidate;
 W69 only proves a `start_stream_message`-compatible metadata boundary with
 streamStarted/eventChannelOpened/streamEventsEmitted=false; W70 only reports
 metadata readiness for an executor skeleton discussion while keeping
 executor_attachment_allowed=false, route_cutover_permission=false, and
-migrationPermission=false; and default Chat remains `legacy_stream`.
+migrationPermission=false; W71 only defines disabled/unattached/no-run
+send/stream metadata-only placeholders while keeping executor_runnable=false
+and invocation_allowed=false; and default Chat remains `legacy_stream`.
 
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W70 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W71 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -214,9 +232,10 @@ W63 complete -> W64 authority compression validated -> W65 backend-only
 descriptor skeleton complete -> W66 controlled adapter contract report complete
 -> W67 non-default invocation harness complete -> W68 send-compatible proof
 complete -> W69 stream-compatible boundary proof complete -> W70 executor
-attachment gate report complete -> continue only through a separately reviewed
-executor skeleton task that preserves default Chat legacy_stream until a route
-change is explicitly implemented and authorized.
+attachment gate report complete -> W71 disabled executor skeleton contract
+complete -> continue only through a separately reviewed executor implementation
+task that preserves default Chat legacy_stream until a route change is
+explicitly implemented, reviewed, verified, and authorized.
 ```
 
 For docs-only index整理, `git diff --check` plus targeted `rg` validation is

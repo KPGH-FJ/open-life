@@ -4971,6 +4971,372 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_clean_legacy_route_is_metadata_safe_and_disabled(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "raw prompt should only become skeleton metadata";
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+                "send_message_result",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(skeleton.skeleton_contract_ready);
+        assert!(skeleton.metadata_safe);
+        assert!(!skeleton.contains_raw_content);
+        assert!(skeleton.executor_skeleton_present);
+        assert!(!skeleton.executor_enabled);
+        assert!(!skeleton.executor_attached);
+        assert!(!skeleton.executor_runnable);
+        assert!(!skeleton.invocation_allowed);
+        assert!(!skeleton.route_cutover_permission);
+        assert!(!skeleton.migration_permission);
+        assert_eq!(skeleton.selected_adapter_path, "legacy_stream");
+        assert!(skeleton.ordinary_default_chat_unchanged);
+        assert!(skeleton.blocking_reasons.is_empty());
+
+        crate::default_chat_adapter::ensure_default_chat_controlled_adapter_disabled_executor_skeleton(
+            &input,
+            &gate,
+        )
+        .expect("clean legacy metadata should satisfy the disabled skeleton contract");
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_send_shape_returns_send_result_placeholder()
+    {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "send raw prompt should not appear in the skeleton";
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+                "send_message_result",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(skeleton.skeleton_contract_ready);
+        assert_eq!(
+            skeleton.output.output_kind,
+            "default_chat_controlled_adapter_disabled_executor_skeleton_output"
+        );
+        assert_eq!(skeleton.output.compatible_shape, "send_message_result");
+        assert_eq!(skeleton.output.executor_state, "disabled_unattached");
+        assert!(skeleton.output.no_user_visible_output);
+        assert!(!skeleton.output.raw_output_present);
+        assert!(skeleton.output.blocking_reasons.is_empty());
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_stream_shape_returns_stream_boundary_placeholder_without_stream_emit(
+    ) {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "stream raw prompt should not open event channels";
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::StartStreamMessage,
+                &route,
+                raw_input,
+                "stream_boundary",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(skeleton.skeleton_contract_ready);
+        assert_eq!(skeleton.output.compatible_shape, "stream_boundary");
+        assert_eq!(skeleton.output.executor_state, "disabled_unattached");
+        assert!(skeleton.output.no_user_visible_output);
+        assert!(!skeleton.output.raw_output_present);
+        assert!(!skeleton.stream_started);
+        assert!(!skeleton.event_channel_opened);
+        assert!(!skeleton.stream_events_emitted);
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_unknown_shape_fails_closed() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "unknown shape raw prompt should not leak";
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+                "unexpected_shape",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(!skeleton.skeleton_contract_ready);
+        assert_eq!(skeleton.output.compatible_shape, "blocked");
+        assert!(skeleton
+            .blocking_reasons
+            .contains(&"unknown_requested_shape".to_string()));
+        assert!(skeleton
+            .output
+            .blocking_reasons
+            .contains(&"unknown_requested_shape".to_string()));
+
+        let error =
+            crate::default_chat_adapter::ensure_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            )
+            .expect_err("unknown shape must fail closed");
+        assert!(error.contains("disabled_executor_skeleton_not_ready"));
+        assert!(error.contains("unknown_requested_shape"));
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_route_drift_controlled_adapter_and_auto_migration_fail_closed(
+    ) {
+        let mut drift_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        drift_route.current_mode = "controlled_adapter".into();
+        drift_route.default_send_path = "controlled_adapter".into();
+        drift_route.start_stream_path = "controlled_adapter".into();
+        let drift_gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &drift_route,
+                "drift raw prompt",
+            );
+        let drift_input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &drift_route,
+                "drift raw prompt",
+                "send_message_result",
+            );
+        let drift_skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &drift_input,
+                &drift_gate,
+            );
+
+        assert!(!drift_skeleton.skeleton_contract_ready);
+        assert!(!drift_skeleton.ordinary_default_chat_unchanged);
+        assert!(drift_skeleton
+            .blocking_reasons
+            .contains(&"w70_gate_report_not_metadata_ready".to_string()));
+        assert!(drift_skeleton
+            .blocking_reasons
+            .contains(&"route_drift_from_legacy_stream".to_string()));
+        assert!(!drift_skeleton.executor_enabled);
+        assert!(!drift_skeleton.executor_attached);
+        assert!(!drift_skeleton.invocation_allowed);
+
+        let mut enabled_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        enabled_route.controlled_adapter_enabled = true;
+        let enabled_gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &enabled_route,
+                "enabled raw prompt",
+            );
+        let enabled_input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &enabled_route,
+                "enabled raw prompt",
+                "send_message_result",
+            );
+        let enabled_skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &enabled_input,
+                &enabled_gate,
+            );
+        assert!(!enabled_skeleton.skeleton_contract_ready);
+        assert!(enabled_skeleton
+            .blocking_reasons
+            .contains(&"controlled_adapter_enabled".to_string()));
+
+        let mut auto_route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        auto_route.automatic_migration_enabled = true;
+        let auto_gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &auto_route,
+                "auto migration raw prompt",
+            );
+        let auto_input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &auto_route,
+                "auto migration raw prompt",
+                "send_message_result",
+            );
+        let auto_skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &auto_input,
+                &auto_gate,
+            );
+        assert!(!auto_skeleton.skeleton_contract_ready);
+        assert!(!auto_skeleton.migration_permission);
+        assert!(auto_skeleton
+            .blocking_reasons
+            .contains(&"automatic_migration_enabled".to_string()));
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_debug_dump_omits_raw_content() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let raw_input = "raw-user-secret prompt-token assistant-output tool-payload LifeModel-memory memory-raw-content";
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                raw_input,
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                raw_input,
+                "send_message_result",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(skeleton.metadata_safe);
+        assert!(!skeleton.contains_raw_content);
+        assert_eq!(skeleton.input_length_bytes, raw_input.len());
+        assert_eq!(skeleton.input_length_chars, raw_input.chars().count());
+        assert!(skeleton.input_sha256.starts_with("sha256:"));
+        assert!(!skeleton.input_sha256.contains("raw-user-secret"));
+        assert!(input.input_sha256.starts_with("sha256:"));
+        assert!(!input.input_sha256.contains("raw-user-secret"));
+
+        let debug_dump = format!("{input:?} {skeleton:?}");
+        for forbidden in [
+            "raw-user-secret",
+            "prompt-token",
+            "assistant-output",
+            "tool-payload",
+            "LifeModel-memory",
+            "memory-raw-content",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "disabled executor skeleton leaked forbidden raw content: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_side_effect_budget_is_all_zero() {
+        let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
+        let gate =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_executor_attachment_gate(
+                &route,
+                "metadata only",
+            );
+        let input =
+            crate::default_chat_adapter::DefaultChatControlledAdapterExecutorSkeletonInput::from_request_metadata(
+                crate::default_chat_adapter::DefaultChatAdapterCallsite::SendMessage,
+                &route,
+                "metadata only",
+                "send_message_result",
+            );
+
+        let skeleton =
+            crate::default_chat_adapter::evaluate_default_chat_controlled_adapter_disabled_executor_skeleton(
+                &input,
+                &gate,
+            );
+
+        assert!(skeleton.side_effect_budget_zero);
+        assert_eq!(skeleton.side_effect_budget.runtime_calls, 0);
+        assert_eq!(skeleton.side_effect_budget.model_calls, 0);
+        assert_eq!(skeleton.side_effect_budget.tool_calls, 0);
+        assert_eq!(skeleton.side_effect_budget.store_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.chat_message_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.agent_run_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.evidence_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.proposal_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.memory_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.life_model_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.mcp_audit_writes, 0);
+        assert_eq!(skeleton.side_effect_budget.external_writes, 0);
+        assert!(!skeleton.runtime_call_enabled);
+        assert!(!skeleton.model_call_enabled);
+        assert!(!skeleton.tool_call_enabled);
+        assert!(skeleton.business_write_disabled);
+        assert!(!skeleton.chat_message_saved);
+        assert!(!skeleton.agent_run_recorded);
+        assert!(!skeleton.evidence_recorded);
+        assert!(!skeleton.proposal_created);
+        assert!(!skeleton.memory_written);
+        assert!(!skeleton.life_model_written);
+        assert!(!skeleton.mcp_audit_written);
+        assert!(!skeleton.external_write_recorded);
+    }
+
+    #[test]
+    fn default_chat_adapter_disabled_executor_skeleton_is_not_called_by_ordinary_entrypoints() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let forbidden_skeleton_calls = [
+            "DefaultChatControlledAdapterExecutorSkeletonInput",
+            "evaluate_default_chat_controlled_adapter_disabled_executor_skeleton",
+            "ensure_default_chat_controlled_adapter_disabled_executor_skeleton",
+        ];
+
+        for forbidden in forbidden_skeleton_calls {
+            assert!(
+                !send_body.contains(forbidden),
+                "send_message must not call {forbidden}"
+            );
+            assert!(
+                !stream_body.contains(forbidden),
+                "start_stream_message must not call {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn default_chat_adapter_executor_attachment_gate_is_not_called_by_ordinary_entrypoints() {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
