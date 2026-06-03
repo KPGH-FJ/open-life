@@ -20,6 +20,7 @@ pub mod bootstrap;
 pub mod commands;
 pub(crate) mod default_chat_adapter;
 pub mod errors;
+pub(crate) mod legacy_write_convergence;
 pub mod scheduler_runner;
 pub mod state;
 pub mod storage;
@@ -3267,6 +3268,9 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod legacy_write_convergence_tests;
+
+#[cfg(test)]
 mod hs_runtime_tests {
     use super::*;
 
@@ -5978,6 +5982,14 @@ mod hs_runtime_tests {
             "LowEnergyRuleTraceVisibilityReport",
             "evaluate_low_energy_rule_trace_visibility",
             "ensure_low_energy_rule_trace_visibility",
+            "LegacyWriteRiskClass",
+            "LegacyWriteConvergenceStatus",
+            "LegacyWritePathKind",
+            "LegacyWriteInventoryEntry",
+            "LegacyWriteConvergenceReport",
+            "legacy_write_convergence_inventory",
+            "evaluate_legacy_write_convergence_inventory",
+            "ensure_legacy_write_convergence_inventory_guard",
         ];
 
         for forbidden in forbidden_command_surfaces {

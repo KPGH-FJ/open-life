@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W78 trace visibility proof complete
+> Status: authoritative document index for Agents, W79 legacy direct-write inventory guard complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W78 completion/status index. This is not a second roadmap.
+   - Compact W1-W79 completion/status index. This is not a second roadmap.
 5. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
@@ -36,7 +36,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W78 trace visibility proof complete**.
+Current latest status is **W79 legacy direct-write inventory guard complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -160,6 +160,21 @@ default Chat route cutover, runtime/model/tool execution, AgentRun writes, or
 Heuristic activation. W78 adds no command/frontend surface, runs no
 runtime/model/tool, writes no AgentRun/LifeModel/Memory/Heuristic truth, does
 not activate a Heuristic, and does not affect default Chat.
+W79 adds a backend-only/internal Rust legacy direct-write convergence inventory
+guard in `src-tauri/src/legacy_write_convergence.rs` with
+`LegacyWriteRiskClass`, `LegacyWriteConvergenceStatus`,
+`LegacyWritePathKind`, `LegacyWriteInventoryEntry`,
+`LegacyWriteConvergenceReport`, `legacy_write_convergence_inventory`,
+`evaluate_legacy_write_convergence_inventory`, and
+`ensure_legacy_write_convergence_inventory_guard`. It turns
+`plans/lifemodel_hs_legacy_write_path_audit.md` into a machine-readable,
+metadata-safe development entry that covers LifeModel save/manual editor,
+Builder, Calibration, Feedback, restore/import, state/daily goal, raw
+chat/memory/vector, proposal application, and external proposal paths. W79
+reports known high-risk direct-write blockers and keeps
+`overall_converged=false` / `all_direct_writes_converged=false`; it does not
+converge any direct-write path, add commands/frontend, run runtime/model/tool,
+write stores, change product behavior, or affect default Chat.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -172,6 +187,8 @@ must not migrate default Chat, attach the controlled adapter executor, directly
 write LifeModel/Memory/Heuristic truth, or bypass proposal-first governance.
 W78 completes the current LifeModel maturation proof slice without authorizing
 runtime execution, persistent AgentRun trace writes, or default Chat migration.
+W79 completes only the inventory guard for the next Legacy Direct-Write
+Convergence phase; actual direct-write convergence remains future work.
 
 Hard current constraints:
 
@@ -204,6 +221,8 @@ Hard current constraints:
   accepted low-energy rule selection helper.
 - Ordinary `send_message` / `start_stream_message` must not call the W78
   low-energy rule trace visibility helper.
+- Ordinary `send_message` / `start_stream_message` must not call the W79
+  legacy write convergence inventory guard.
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
@@ -218,7 +237,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W78 Compression Map
+## 3. W1-W79 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -251,6 +270,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W76 | Low-energy collaboration rule candidate | Pure core evaluator/proposer only; aggregates metadata-safe ProposalOutcome evidence into a pending candidate proposal, blocks/weakens on opposing evidence, no active Heuristic/rule, no command/frontend/runtime/default Chat effect |
 | W77 | Accepted rule to RuntimeHSPacket selection proof | Pure core evaluator/report/ensure only; accepted W76 candidate proposal, planning task, low-energy domain, metadata-safe guidance, lineage retained, privacy/model route policy not relaxed, no command/frontend/runtime/default Chat effect |
 | W78 | Run trace visibility proof | Pure core evaluator/report/ensure only; W77 selected guidance and lineage can be shown as trace metadata using summary/hash/id/count/status/type fields, privacy/local-only proof preserved, raw payload/policy relaxation/execution/cutover hints fail closed, no command/frontend/runtime/AgentRun write/default Chat effect |
+| W79 | Legacy direct-write convergence inventory guard | Internal Rust inventory/report/ensure only; machine-readable metadata-safe audit over known direct-write/proposal-first/source-data paths, reports blockers and keeps overall convergence false, no command/frontend/runtime/write/default Chat effect |
 
 ## 4. Current Authoritative Entry Points
 
@@ -258,7 +278,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W78 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W79 structured status index and compressed guardrail map. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -337,13 +357,15 @@ invocation, proposal outcome evidence link, and low-energy collaboration rule
 candidate aggregation plus accepted-rule selection proof and trace visibility
 proof. They do not add default Chat routing authority or ordinary Chat
 auto-maturation.
+W79 is a legacy direct-write convergence inventory guard only; it makes the
+legacy audit map testable but does not complete direct-write convergence.
 
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W78 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W79 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -365,9 +387,11 @@ LifeModel maturation readiness report complete -> W74 non-default maturation
 invocation complete -> W75 proposal outcome evidence link complete -> W76
 low-energy collaboration rule candidate complete -> W77 accepted rule to
 RuntimeHSPacket selection proof complete -> W78 run trace visibility proof
-complete. Any
-future default Chat executor implementation or route cutover remains a separate
-reviewed task that preserves default Chat
+complete -> W79 legacy direct-write convergence inventory guard complete.
+Future direct-write convergence should start from the W79 inventory and the
+legacy audit map, without marking any blocker converged until code paths are
+actually changed and verified. Any future default Chat executor implementation
+or route cutover remains a separate reviewed task that preserves default Chat
 legacy_stream until a route change is explicitly implemented, reviewed,
 verified, and authorized.
 ```

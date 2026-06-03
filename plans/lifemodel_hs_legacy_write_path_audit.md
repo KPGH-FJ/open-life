@@ -20,6 +20,29 @@ Risk classes use the LMHS-10 vocabulary:
 - legacy direct write requiring future convergence
 - disabled/declarative-only
 
+## W79 Machine-Readable Inventory Guard
+
+W79 adds `src-tauri/src/legacy_write_convergence.rs` as a backend-only/internal
+Rust inventory guard over this audit map. The guard defines
+`LegacyWriteRiskClass`, `LegacyWriteConvergenceStatus`,
+`LegacyWritePathKind`, `LegacyWriteInventoryEntry`,
+`LegacyWriteConvergenceReport`, `legacy_write_convergence_inventory`,
+`evaluate_legacy_write_convergence_inventory`, and
+`ensure_legacy_write_convergence_inventory_guard`.
+
+This is an inventory and regression guard only. It does not remove, gate,
+rewrite, or converge any direct-write path; it does not add a Tauri command,
+frontend surface, runtime/model/tool execution, store write, product behavior
+change, or default Chat change. Its expected report has
+`inventory_ready=true` while keeping `overall_converged=false` and
+`all_direct_writes_converged=false`, because high-risk legacy direct-write
+blockers remain.
+
+W79 makes the table below a testable development entry for future convergence
+slices. Future work must update both the machine-readable inventory and this
+audit when an actual path is changed, and must not mark a blocker converged
+until the implementation and regression tests prove that convergence.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
@@ -72,7 +95,8 @@ Legacy direct-write paths still exist and are not converged: manual LifeModel
 editor save, Builder legacy apply/no-signal completion, Calibration direct
 apply/evolution, feedback evolution, restore/import, and several low-risk
 state/memory compatibility writes. These are known convergence items, not HS
-MVP additions.
+MVP additions. As of W79, they are also represented by a machine-readable
+inventory guard, but that guard is not convergence completion.
 
 ## Convergence Backlog
 
