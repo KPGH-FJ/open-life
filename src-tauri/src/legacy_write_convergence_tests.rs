@@ -1,7 +1,7 @@
 use crate::legacy_write_convergence::{
     ensure_legacy_write_convergence_inventory_guard, evaluate_legacy_write_convergence_inventory,
     legacy_write_convergence_inventory, LegacyWriteConvergenceStatus, LegacyWriteInventoryEntry,
-    LegacyWritePathKind, LegacyWriteRiskClass,
+    LegacyWritePathKind, LegacyWriteRiskClass, LegacyWriteSafeModeStatus,
 };
 
 fn entry<'a>(
@@ -150,6 +150,45 @@ fn legacy_write_convergence_reports_high_risk_direct_writes_as_blockers_not_conv
 
     ensure_legacy_write_convergence_inventory_guard()
         .expect("known convergence blockers should be reported without failing inventory guard");
+}
+
+#[test]
+fn legacy_write_convergence_manual_editor_w80_audit_guard_remains_blocker_not_converged() {
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+    let manual = entry(&entries, "manual_lifemodel_editor");
+
+    assert_eq!(
+        manual.risk_class,
+        LegacyWriteRiskClass::HighRiskLegacyDirectWrite
+    );
+    assert_eq!(
+        manual.current_status,
+        LegacyWriteConvergenceStatus::LegacyDirectWriteBlocker
+    );
+    assert_eq!(
+        manual.safe_mode_status,
+        LegacyWriteSafeModeStatus::GuardPresent
+    );
+    assert!(manual.requires_proposal_first);
+    assert!(manual.currently_direct_write);
+    assert!(manual.high_risk_durable_truth_write);
+    assert!(!manual.normal_product_allowed);
+    assert!(manual
+        .current_guard_summary
+        .contains("W80 metadata-safe manual override audit"));
+    assert!(manual
+        .required_convergence_action
+        .contains("proposal patch review"));
+    assert!(manual
+        .required_convergence_action
+        .contains("stronger manual override UX"));
+    assert!(report
+        .convergence_blockers
+        .iter()
+        .any(|blocker| blocker.contains("manual_lifemodel_editor")));
+    assert!(!report.overall_converged);
+    assert!(!report.all_direct_writes_converged);
 }
 
 #[test]
@@ -327,6 +366,9 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "evaluate_legacy_write_convergence_inventory",
         "ensure_legacy_write_convergence_inventory_guard",
         "LegacyWriteConvergenceReport",
+        "ManualLifeModelOverrideAuditReport",
+        "evaluate_manual_lifemodel_override_audit",
+        "record_manual_lifemodel_override_audit_with_state",
     ] {
         assert!(
             !send_body.contains(forbidden),

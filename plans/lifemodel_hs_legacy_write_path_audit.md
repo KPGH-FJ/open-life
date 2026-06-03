@@ -43,12 +43,31 @@ slices. Future work must update both the machine-readable inventory and this
 audit when an actual path is changed, and must not mark a blocker converged
 until the implementation and regression tests prove that convergence.
 
+## W80 Manual LifeModel Editor Override Audit Guard
+
+W80 adds a backend-only/internal metadata-safe audit guard to
+`src-tauri/src/commands/life_model.rs::save_life_model_with_state`. The manual
+editor save behavior remains available and remains a legacy direct write. After
+a successful save, `record_manual_lifemodel_override_audit_with_state` writes a
+`manual_lifemodel_override_audit` analytics event with only
+`source=manual_lifemodel_editor`, before/after hashes, rough changed section
+names/count, risk class, timestamp, command/function name, and
+manualOverride/proposalFirst/stillLegacyDirectWrite flags.
+
+The audit must not contain raw LifeModel JSON, raw identity values, raw goals,
+raw relationships, raw health/finance/privacy text, raw prompt/output/tool
+payload, or full before/after model payload. W80 does not create a Proposal,
+AgentRun, Heuristic, Patch, runtime/model/tool invocation, frontend surface, or
+default Chat integration. The W79 inventory marks the manual editor guard as
+present, but `manual_lifemodel_editor` remains a high-risk legacy direct-write
+blocker and must not be treated as proposal-first converged.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
 | --- | --- | --- | --- | --- |
 | LifeModel save primitive | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model` | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot; callers decide governance. | Keep as the compatibility materializer writer only; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance. |
-| Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | legacy direct write requiring future convergence | User-initiated editor save, central metadata preparation, optional daily snapshot. | Convert to patch/proposal review or an explicit manual-override path with audit. |
+| Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | legacy direct write requiring future convergence | W80 metadata-safe explicit manual override audit records source, before/after hashes, rough changed sections, risk class, timestamp, command/function name, and manualOverride/proposalFirst/stillLegacyDirectWrite flags after successful save. It does not record raw LifeModel content and does not make the path proposal-first. | Convert to patch/proposal review or stronger manual override UX with confirmation and richer governance. |
 | Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; preserve source-specific patch source instead of the current broad BuilderReview patch source. |
 | Low-risk batch proposal apply | `src-tauri/src/commands/proposal.rs::batch_accept_low_risk_proposals` | already proposal-first | Safe Mode guard; accepts only pending low-risk proposals. | Keep limited to low risk; do not extend to high-risk identity, values, mission, long-term goals, sensitive relationships, or privacy boundaries. |
 | Proposal storage | `openlife-core/src/agent/proposal_store.rs::{create_proposal,update_proposal}` | already proposal-first | Proposals are persisted with type, source, risk, status, run id, and before/after payloads; status transitions are explicit through Review Center commands. | Continue linking generated HS proposals to run/evidence ids. |
@@ -95,8 +114,9 @@ Legacy direct-write paths still exist and are not converged: manual LifeModel
 editor save, Builder legacy apply/no-signal completion, Calibration direct
 apply/evolution, feedback evolution, restore/import, and several low-risk
 state/memory compatibility writes. These are known convergence items, not HS
-MVP additions. As of W79, they are also represented by a machine-readable
-inventory guard, but that guard is not convergence completion.
+MVP additions. As of W79, they are represented by a machine-readable inventory
+guard; as of W80, manual LifeModel editor save also has a metadata-safe manual
+override audit guard. Neither guard is convergence completion.
 
 ## Convergence Backlog
 

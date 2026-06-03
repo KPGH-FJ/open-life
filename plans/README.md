@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W79 legacy direct-write inventory guard complete
+> Status: authoritative document index for Agents, W80 manual LifeModel override audit guard complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W79 completion/status index. This is not a second roadmap.
+   - Compact W1-W80 completion/status index. This is not a second roadmap.
 5. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
@@ -36,7 +36,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W79 legacy direct-write inventory guard complete**.
+Current latest status is **W80 manual LifeModel override audit guard complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -175,6 +175,22 @@ reports known high-risk direct-write blockers and keeps
 `overall_converged=false` / `all_direct_writes_converged=false`; it does not
 converge any direct-write path, add commands/frontend, run runtime/model/tool,
 write stores, change product behavior, or affect default Chat.
+W80 adds a backend-only/internal manual LifeModel editor explicit override
+audit guard in `src-tauri/src/commands/life_model.rs` with
+`ManualLifeModelOverrideAuditReport`,
+`evaluate_manual_lifemodel_override_audit`, and
+`record_manual_lifemodel_override_audit_with_state`. `save_life_model_with_state`
+preserves existing editor save behavior, but after a successful save it records
+a metadata-safe `manual_lifemodel_override_audit` analytics event with only
+source, before/after hashes, rough changed section names/count, risk class,
+timestamp, command/function name, and
+manualOverride/proposalFirst/stillLegacyDirectWrite flags. It does not record
+raw LifeModel JSON, identity values, goals, relationships, health/finance/privacy
+text, prompts, outputs, tool payloads, or full before/after payloads. It does
+not create Proposal/AgentRun/Heuristic/Patch records, run runtime/model/tool, or
+affect default Chat. W79 inventory now marks the manual editor guard present
+while keeping `manual_lifemodel_editor` as a high-risk legacy direct-write
+blocker and keeping convergence false.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -188,7 +204,9 @@ write LifeModel/Memory/Heuristic truth, or bypass proposal-first governance.
 W78 completes the current LifeModel maturation proof slice without authorizing
 runtime execution, persistent AgentRun trace writes, or default Chat migration.
 W79 completes only the inventory guard for the next Legacy Direct-Write
-Convergence phase; actual direct-write convergence remains future work.
+Convergence phase. W80 adds a metadata-safe manual override audit guard to the
+highest-risk manual editor save path; actual proposal-first convergence remains
+future work.
 
 Hard current constraints:
 
@@ -223,6 +241,8 @@ Hard current constraints:
   low-energy rule trace visibility helper.
 - Ordinary `send_message` / `start_stream_message` must not call the W79
   legacy write convergence inventory guard.
+- Ordinary `send_message` / `start_stream_message` must not call the W80
+  manual LifeModel override audit helper.
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
@@ -237,7 +257,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W79 Compression Map
+## 3. W1-W80 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -271,6 +291,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W77 | Accepted rule to RuntimeHSPacket selection proof | Pure core evaluator/report/ensure only; accepted W76 candidate proposal, planning task, low-energy domain, metadata-safe guidance, lineage retained, privacy/model route policy not relaxed, no command/frontend/runtime/default Chat effect |
 | W78 | Run trace visibility proof | Pure core evaluator/report/ensure only; W77 selected guidance and lineage can be shown as trace metadata using summary/hash/id/count/status/type fields, privacy/local-only proof preserved, raw payload/policy relaxation/execution/cutover hints fail closed, no command/frontend/runtime/AgentRun write/default Chat effect |
 | W79 | Legacy direct-write convergence inventory guard | Internal Rust inventory/report/ensure only; machine-readable metadata-safe audit over known direct-write/proposal-first/source-data paths, reports blockers and keeps overall convergence false, no command/frontend/runtime/write/default Chat effect |
+| W80 | Manual LifeModel editor explicit override audit guard | Internal backend save-path audit only; records metadata-safe manual override event after successful `save_life_model`, keeps manual editor a high-risk legacy direct-write blocker and keeps convergence false |
 
 ## 4. Current Authoritative Entry Points
 
@@ -278,7 +299,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W79 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W80 structured status index and compressed guardrail map. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -358,14 +379,16 @@ candidate aggregation plus accepted-rule selection proof and trace visibility
 proof. They do not add default Chat routing authority or ordinary Chat
 auto-maturation.
 W79 is a legacy direct-write convergence inventory guard only; it makes the
-legacy audit map testable but does not complete direct-write convergence.
+legacy audit map testable but does not complete direct-write convergence. W80
+adds metadata-safe audit to the manual editor direct save path, but it does not
+make that path proposal-first or fully converged.
 
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W79 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W80 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -387,10 +410,12 @@ LifeModel maturation readiness report complete -> W74 non-default maturation
 invocation complete -> W75 proposal outcome evidence link complete -> W76
 low-energy collaboration rule candidate complete -> W77 accepted rule to
 RuntimeHSPacket selection proof complete -> W78 run trace visibility proof
-complete -> W79 legacy direct-write convergence inventory guard complete.
-Future direct-write convergence should start from the W79 inventory and the
-legacy audit map, without marking any blocker converged until code paths are
-actually changed and verified. Any future default Chat executor implementation
+complete -> W79 legacy direct-write convergence inventory guard complete ->
+W80 manual LifeModel override audit guard complete.
+Future direct-write convergence should start from the W79 inventory, W80 manual
+editor audit state, and the legacy audit map, without marking any blocker
+converged until code paths are actually changed and verified. Any future
+default Chat executor implementation
 or route cutover remains a separate reviewed task that preserves default Chat
 legacy_stream until a route change is explicitly implemented, reviewed,
 verified, and authorized.

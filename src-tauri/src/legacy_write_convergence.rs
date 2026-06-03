@@ -117,7 +117,7 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
             true,
             "Central compatibility materializer for accepted proposal application, migration, and explicit manual override only; not a normal governed write path.",
             "Restrict to accepted proposal application, migration/manual override primitive, and compatibility materialization only.",
-            "W80 restrict and audit LifeModel materializer callers without changing existing save behavior.",
+            "Future LifeModel materializer caller restriction after manual editor audit.",
             &[
                 "compatibility_materializer_still_reachable_by_legacy_callers",
                 "must_not_be_marked_normal_governed_write_path",
@@ -138,11 +138,11 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
             true,
             true,
             true,
-            LegacyWriteSafeModeStatus::GuardRequired,
+            LegacyWriteSafeModeStatus::GuardPresent,
             true,
-            "User-initiated direct YAML save uses the central save primitive; it is a legacy manual override path, not already converged.",
-            "Convert editor saves to proposal patch review or an explicit audited manual override path.",
-            "W80 manual LifeModel editor proposal/override convergence design.",
+            "W80 metadata-safe manual override audit records source, before/after hashes, rough changed sections, risk class, timestamp, command, and legacy-direct-write flags; editor save remains a high-risk legacy direct write blocker.",
+            "Convert editor saves to proposal patch review or stronger manual override UX with confirmation and richer governance.",
+            "Post-W80 manual LifeModel editor proposal-first convergence or stronger manual override UX.",
             &[
                 "manual_editor_can_write_durable_lifemodel_truth_directly",
                 "proposal_review_not_required_today",
@@ -186,7 +186,7 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
             true,
             "Legacy direct apply is marked legacy in code/tests, but it can still persist accepted signals without Review Center.",
             "Move builder_apply_signals behind explicit dev/migration gating or remove; make no-signal completion no-op or proposal-first.",
-            "W80 Builder legacy direct apply convergence guard.",
+            "Future Builder legacy direct apply convergence guard.",
             &[
                 "builder_apply_signals_directly_updates_lifemodel",
                 "no_signal_completion_branch_needs_explicit_no_write_or_proposal_conversion",

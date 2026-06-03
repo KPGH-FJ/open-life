@@ -5990,6 +5990,9 @@ mod hs_runtime_tests {
             "legacy_write_convergence_inventory",
             "evaluate_legacy_write_convergence_inventory",
             "ensure_legacy_write_convergence_inventory_guard",
+            "ManualLifeModelOverrideAuditReport",
+            "evaluate_manual_lifemodel_override_audit",
+            "record_manual_lifemodel_override_audit_with_state",
         ];
 
         for forbidden in forbidden_command_surfaces {
