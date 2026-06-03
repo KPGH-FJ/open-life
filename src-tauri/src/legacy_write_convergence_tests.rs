@@ -1143,7 +1143,7 @@ fn legacy_write_convergence_w87_ordinary_chat_context_is_source_data_only() {
 }
 
 #[test]
-fn legacy_write_convergence_w87_proposal_apply_allowed_but_patch_mapping_not_complete() {
+fn legacy_write_convergence_w87_proposal_apply_allowed_but_w89_audit_not_complete() {
     let context = LifeModelMaterializerCallerContext::new(
         "proposal_apply_lifemodel_update",
         LifeModelMaterializerCallerKind::AcceptedProposalApply,
@@ -1159,7 +1159,7 @@ fn legacy_write_convergence_w87_proposal_apply_allowed_but_patch_mapping_not_com
     assert!(!report.proposal_first_convergence_complete);
     assert!(report
         .required_follow_up
-        .contains("source-specific patch mapping"));
+        .contains("source-specific patch audit/readiness"));
 }
 
 #[test]
@@ -1431,7 +1431,7 @@ fn legacy_write_convergence_w86_ordinary_chat_auto_checkin_is_source_data_only()
 }
 
 #[test]
-fn legacy_write_convergence_w86_proposal_apply_is_accepted_apply_but_mapping_not_complete() {
+fn legacy_write_convergence_w86_proposal_apply_is_accepted_apply_but_w89_audit_not_complete() {
     let entries = lifemodel_materializer_caller_matrix();
     let entry = materializer_entry(&entries, "proposal_apply_lifemodel_update");
     let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
@@ -1453,7 +1453,7 @@ fn legacy_write_convergence_w86_proposal_apply_is_accepted_apply_but_mapping_not
     assert!(!entry.proposal_first_convergence_complete);
     assert!(entry
         .required_follow_up
-        .contains("source-specific patch mapping"));
+        .contains("source-specific patch audit/readiness"));
     assert_eq!(report.proposal_first_count, 1);
     assert!(!report.proposal_first_convergence_complete);
 }

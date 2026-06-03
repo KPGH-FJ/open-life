@@ -4,8 +4,10 @@ use crate::legacy_write_convergence::{
 };
 use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{
-    AgentProposal, MaturationProposalOutcome, ProposalStatus, ProposalType, RiskLevel,
+    AgentProposal, MaturationProposalOutcome, ProposalSource, ProposalStatus, ProposalType,
+    RiskLevel,
 };
+use openlife_core::life_model::patch::PatchSource;
 use openlife_core::life_model::LifeModel;
 use serde_json::Value;
 use std::io::Write;
@@ -51,6 +53,141 @@ fn patch_result_for_proposal(
         operation: operation.to_string(),
         error,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifeModelProposalPatchSourceMappingReport {
+    proposal_source: ProposalSource,
+    patch_source: PatchSource,
+    exact_source_mapping: bool,
+    metadata_safe_fallback: bool,
+    apply_allowed: bool,
+    metadata_safe: bool,
+    contains_raw_proposal_payload: bool,
+    contains_raw_lifemodel_patch_value: bool,
+    contains_raw_memory_text: bool,
+    contains_raw_chat_text: bool,
+    contains_raw_tool_payload: bool,
+    default_chat_route_unchanged: bool,
+    default_chat_entrypoints_changed: bool,
+    default_chat_route: String,
+    proposal_first_convergence_complete: bool,
+    required_follow_up: String,
+    blocking_reasons: Vec<String>,
+}
+
+fn evaluate_lifemodel_proposal_patch_source_mapping(
+    proposal: &AgentProposal,
+) -> LifeModelProposalPatchSourceMappingReport {
+    let (patch_source, exact_source_mapping, fallback_reason) = match proposal.source {
+        ProposalSource::BuilderReview => (PatchSource::BuilderReview, true, None),
+        ProposalSource::CalibrationRun => (PatchSource::Calibration, true, None),
+        ProposalSource::FeedbackEvolution => (PatchSource::Evolution, true, None),
+        ProposalSource::Manual => (PatchSource::Manual, true, None),
+        ProposalSource::ChatConversation => (
+            PatchSource::Manual,
+            false,
+            Some("chat_conversation_patch_source_variant_missing"),
+        ),
+        ProposalSource::ProactiveAgent => (
+            PatchSource::Manual,
+            false,
+            Some("proactive_agent_patch_source_variant_missing"),
+        ),
+        ProposalSource::SkillRuntime => (
+            PatchSource::Manual,
+            false,
+            Some("skill_runtime_patch_source_variant_missing"),
+        ),
+        ProposalSource::Plugin => (
+            PatchSource::Manual,
+            false,
+            Some("plugin_patch_source_variant_missing"),
+        ),
+        ProposalSource::MemoryGovernance => (
+            PatchSource::Manual,
+            false,
+            Some("memory_governance_patch_source_variant_missing"),
+        ),
+    };
+
+    let mut blocking_reasons = Vec::new();
+    if let Some(reason) = fallback_reason {
+        blocking_reasons.push(format!("{reason}:using_manual_metadata_safe_fallback"));
+    }
+
+    let metadata_safe_fallback = !exact_source_mapping;
+    let required_follow_up = if metadata_safe_fallback {
+        format!(
+            "W89 must audit or add a dedicated PatchSource for {} before proposal source-specific audit/readiness is complete.",
+            proposal.source
+        )
+    } else {
+        "W89 must complete proposal application source-specific patch audit/readiness before marking proposal-first convergence complete.".to_string()
+    };
+
+    LifeModelProposalPatchSourceMappingReport {
+        proposal_source: proposal.source,
+        patch_source,
+        exact_source_mapping,
+        metadata_safe_fallback,
+        apply_allowed: true,
+        metadata_safe: true,
+        contains_raw_proposal_payload: false,
+        contains_raw_lifemodel_patch_value: false,
+        contains_raw_memory_text: false,
+        contains_raw_chat_text: false,
+        contains_raw_tool_payload: false,
+        default_chat_route_unchanged: true,
+        default_chat_entrypoints_changed: false,
+        default_chat_route: "legacy_stream".into(),
+        proposal_first_convergence_complete: false,
+        required_follow_up,
+        blocking_reasons,
+    }
+}
+
+fn ensure_lifemodel_proposal_patch_source_mapping(
+    proposal: &AgentProposal,
+) -> Result<LifeModelProposalPatchSourceMappingReport, String> {
+    let report = evaluate_lifemodel_proposal_patch_source_mapping(proposal);
+    if !report.apply_allowed {
+        return Err(format!(
+            "LifeModel proposal PatchSource mapping is unsupported for proposal source {}.",
+            proposal.source
+        ));
+    }
+    if !report.metadata_safe
+        || report.contains_raw_proposal_payload
+        || report.contains_raw_lifemodel_patch_value
+        || report.contains_raw_memory_text
+        || report.contains_raw_chat_text
+        || report.contains_raw_tool_payload
+    {
+        return Err(format!(
+            "LifeModel proposal PatchSource mapping report is not metadata-safe for proposal source {}.",
+            proposal.source
+        ));
+    }
+    if proposal.source != ProposalSource::BuilderReview
+        && report.patch_source == PatchSource::BuilderReview
+    {
+        return Err(format!(
+            "LifeModel proposal source {} must not be mapped to BuilderReview.",
+            proposal.source
+        ));
+    }
+    if !report.exact_source_mapping && !report.metadata_safe_fallback {
+        return Err(format!(
+            "LifeModel proposal source {} has neither an exact PatchSource mapping nor a metadata-safe fallback.",
+            proposal.source
+        ));
+    }
+    Ok(report)
+}
+
+fn resolve_lifemodel_patch_source_for_proposal(proposal: &AgentProposal) -> PatchSource {
+    evaluate_lifemodel_proposal_patch_source_mapping(proposal).patch_source
 }
 
 /// Check if any component of the path is a symlink.
@@ -546,6 +683,17 @@ async fn apply_proposal_to_state(
                 openlife_core::life_model::patch::dot_to_pointer(&proposal.affected_path);
             let path_display =
                 openlife_core::life_model::patch::pointer_to_display(&path_pointer, &model);
+            let source_mapping = ensure_lifemodel_proposal_patch_source_mapping(proposal)?;
+            if source_mapping.metadata_safe_fallback {
+                log::warn!(
+                    "[proposal] W88 PatchSource metadata-safe fallback: proposal_source={}, patch_source={}, follow_up={}, blockers={}",
+                    proposal.source,
+                    source_mapping.patch_source,
+                    source_mapping.required_follow_up,
+                    source_mapping.blocking_reasons.join("|")
+                );
+            }
+            let patch_source = resolve_lifemodel_patch_source_for_proposal(proposal);
 
             let patch = openlife_core::life_model::patch::LifeModelPatch::from_proposal(
                 &proposal.id,
@@ -557,7 +705,7 @@ async fn apply_proposal_to_state(
                 &proposal.reason,
                 proposal.confidence,
                 proposal.risk_level,
-                openlife_core::life_model::patch::PatchSource::BuilderReview,
+                patch_source,
             );
 
             // 3. Apply Patch using new engine
@@ -1395,7 +1543,7 @@ mod tests {
         config::AppConfig,
         feedback::FeedbackStore,
         layer_router::LayerRouter,
-        life_model::LifeModelManager,
+        life_model::{patch::PatchSource, LifeModelManager},
         mcp::McpRegistry,
         mcp_audit::McpAuditStore,
         memory::MemoryStore,
@@ -1538,6 +1686,241 @@ mod tests {
                 "serialized W75 evidence leaked raw marker {raw}: {serialized}"
             );
         }
+    }
+
+    fn test_lifemodel_source_proposal(source: ProposalSource) -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W88 mapped name"),
+            "W88 source mapping fixture",
+            0.9,
+            RiskLevel::Low,
+            source,
+        )
+    }
+
+    fn extract_rust_function_body(source: &str, signature: &str) -> String {
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("missing function signature {signature}"));
+        let body_start = source[start..]
+            .find('{')
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| panic!("missing function body for {signature}"));
+        let mut depth = 0usize;
+        let mut end = body_start;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = body_start + offset + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        source[body_start..end].to_string()
+    }
+
+    async fn accept_lifemodel_proposal_and_patch_source(
+        source: ProposalSource,
+    ) -> (PatchSource, serde_json::Value) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let proposal = test_lifemodel_source_proposal(source);
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let patches = state
+            .patch_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_patches_by_proposal(&proposal_id)
+            .unwrap();
+        assert_eq!(patches.len(), 1);
+        (patches[0].source, result)
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_is_source_specific() {
+        for (source, expected) in [
+            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
+            (ProposalSource::CalibrationRun, PatchSource::Calibration),
+            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
+            (ProposalSource::Manual, PatchSource::Manual),
+        ] {
+            let proposal = test_lifemodel_source_proposal(source);
+            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+            assert_eq!(report.proposal_source, source);
+            assert_eq!(report.patch_source, expected);
+            assert!(report.exact_source_mapping);
+            assert!(!report.metadata_safe_fallback);
+            assert!(report.blocking_reasons.is_empty());
+            assert_eq!(
+                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
+                    .unwrap()
+                    .patch_source,
+                expected
+            );
+            assert_eq!(
+                resolve_lifemodel_patch_source_for_proposal(&proposal),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_sources_without_patch_variants_use_safe_manual_fallback() {
+        for source in [
+            ProposalSource::ChatConversation,
+            ProposalSource::ProactiveAgent,
+            ProposalSource::SkillRuntime,
+            ProposalSource::Plugin,
+            ProposalSource::MemoryGovernance,
+        ] {
+            let proposal = test_lifemodel_source_proposal(source);
+            let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+            assert_eq!(report.proposal_source, source);
+            assert_eq!(report.patch_source, PatchSource::Manual);
+            assert_ne!(report.patch_source, PatchSource::BuilderReview);
+            assert!(!report.exact_source_mapping);
+            assert!(report.metadata_safe_fallback);
+            assert!(report.apply_allowed);
+            assert!(report.metadata_safe);
+            assert!(report.default_chat_route_unchanged);
+            assert!(!report.proposal_first_convergence_complete);
+            assert!(report
+                .blocking_reasons
+                .iter()
+                .any(|reason| reason.contains("patch_source_variant_missing")));
+            assert!(report.required_follow_up.contains("W89"));
+            assert_eq!(
+                ensure_lifemodel_proposal_patch_source_mapping(&proposal)
+                    .unwrap()
+                    .patch_source,
+                PatchSource::Manual
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn w88_accept_lifemodel_proposal_writes_source_specific_patch_store_source() {
+        for (source, expected) in [
+            (ProposalSource::BuilderReview, PatchSource::BuilderReview),
+            (ProposalSource::CalibrationRun, PatchSource::Calibration),
+            (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
+            (ProposalSource::Manual, PatchSource::Manual),
+        ] {
+            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
+            assert_eq!(result["success"], true);
+            assert_eq!(actual, expected, "{source} must map to {expected}");
+        }
+    }
+
+    #[tokio::test]
+    async fn w88_non_typical_lifemodel_proposal_sources_are_not_marked_builder_review() {
+        for source in [
+            ProposalSource::ChatConversation,
+            ProposalSource::ProactiveAgent,
+            ProposalSource::SkillRuntime,
+            ProposalSource::Plugin,
+            ProposalSource::MemoryGovernance,
+        ] {
+            let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
+            assert_eq!(result["success"], true);
+            assert_ne!(
+                actual,
+                PatchSource::BuilderReview,
+                "{source} must not be masqueraded as BuilderReview"
+            );
+            assert_eq!(actual, PatchSource::Manual);
+        }
+    }
+
+    #[test]
+    fn w88_apply_proposal_to_state_no_longer_hardcodes_builder_review_patch_source() {
+        let source = std::fs::read_to_string(format!(
+            "{}/src/commands/proposal.rs",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .expect("read proposal.rs");
+        let body = extract_rust_function_body(&source, "async fn apply_proposal_to_state(");
+        assert!(
+            !body.contains("PatchSource::BuilderReview"),
+            "apply_proposal_to_state must use the W88 source-specific resolver, not a hardcoded BuilderReview PatchSource"
+        );
+        assert!(body.contains("resolve_lifemodel_patch_source_for_proposal"));
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_report_is_metadata_safe() {
+        let mut proposal = AgentProposal::new(
+            ProposalType::LifeModelUpdate,
+            "state.current_focus",
+            serde_json::json!({
+                "raw": "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
+                "memory": "W88_RAW_MEMORY_TEXT_SECRET",
+                "chat": "W88_RAW_CHAT_TEXT_SECRET",
+                "tool": "W88_RAW_TOOL_PAYLOAD_SECRET"
+            }),
+            "W88_RAW_PROPOSAL_REASON_SECRET",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::ChatConversation,
+        );
+        proposal.before = Some(serde_json::json!("W88_RAW_BEFORE_VALUE_SECRET"));
+        proposal.source_detail = Some("W88_RAW_SOURCE_DETAIL_SECRET".into());
+
+        let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
+        assert!(report.metadata_safe);
+        assert!(!report.contains_raw_proposal_payload);
+        assert!(!report.contains_raw_lifemodel_patch_value);
+        assert!(!report.contains_raw_memory_text);
+        assert!(!report.contains_raw_chat_text);
+        assert!(!report.contains_raw_tool_payload);
+
+        let debug_dump = format!("{report:?}");
+        for forbidden in [
+            "W88_RAW_LIFEMODEL_PATCH_VALUE_SECRET",
+            "W88_RAW_MEMORY_TEXT_SECRET",
+            "W88_RAW_CHAT_TEXT_SECRET",
+            "W88_RAW_TOOL_PAYLOAD_SECRET",
+            "W88_RAW_PROPOSAL_REASON_SECRET",
+            "W88_RAW_BEFORE_VALUE_SECRET",
+            "W88_RAW_SOURCE_DETAIL_SECRET",
+        ] {
+            assert!(
+                !debug_dump.contains(forbidden),
+                "W88 source mapping report leaked raw marker {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn w88_lifemodel_proposal_patch_source_mapping_keeps_default_chat_legacy_stream() {
+        let report = evaluate_lifemodel_proposal_patch_source_mapping(
+            &test_lifemodel_source_proposal(ProposalSource::ChatConversation),
+        );
+        assert!(report.default_chat_route_unchanged);
+        assert_eq!(report.default_chat_route, "legacy_stream");
+        assert!(!report.default_chat_entrypoints_changed);
     }
 
     #[tokio::test]

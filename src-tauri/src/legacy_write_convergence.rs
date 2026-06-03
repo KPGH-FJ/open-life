@@ -683,9 +683,9 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
             true,
             LegacyWriteSafeModeStatus::ProposalFirstGuardPresent,
             false,
-            "Review Center apply/edit is the governed convergence target; high-risk durable writes occur only after accepted proposal review.",
-            "Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; preserve source-specific PatchStore mapping.",
-            "W87 Source-specific proposal application patch mapping.",
+            "Review Center apply/edit is the governed convergence target; high-risk durable writes occur only after accepted proposal review; W88 now resolves LifeModel PatchStore source by proposal source with metadata-safe fallbacks.",
+            "Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; complete W89 source-specific proposal application audit/readiness before marking convergence complete.",
+            "W89 Proposal application source-specific patch audit/readiness.",
             &[],
         ),
         entry(
@@ -1454,7 +1454,7 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
             false,
             false,
             true,
-            "Accepted proposal apply is the convergence target, but W88-W89 still need source-specific patch mapping before proposal-first convergence can be marked complete.",
+            "Accepted proposal apply is the convergence target and W88 replaces the hardcoded BuilderReview PatchSource with proposal-source mapping, but W89 still needs source-specific patch audit/readiness before proposal-first convergence can be marked complete.",
             &[],
         ),
         caller_matrix_entry(
