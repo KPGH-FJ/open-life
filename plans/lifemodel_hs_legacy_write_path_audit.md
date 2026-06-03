@@ -248,16 +248,43 @@ proposal payloads, raw LifeModel patch values, memory text, chat text, or tool
 payloads. W88 adds no Tauri command, frontend/Settings surface,
 runtime/model/tool execution, default Chat routing change, or legacy path
 retirement. Accepted proposal apply remains
-`proposal_first_convergence_complete=false`; W89 still needs source-specific
-patch audit/readiness before convergence can be marked complete.
+`proposal_first_convergence_complete=false`; W89 source-specific patch
+audit/readiness is now complete, but fallback source policy must be confirmed
+before convergence can be marked complete.
+
+## W89 Proposal Application Source-Specific Patch Audit / Readiness
+
+W89 adds a backend-only/internal readiness entry/report/evaluator/ensure in
+`src-tauri/src/commands/proposal.rs` for the W88 ProposalSource -> PatchSource
+mapping. It is audit/readiness proof only: no Tauri command, frontend/Settings
+surface, runtime/model/tool execution, product behavior expansion, legacy path
+retirement, or default Chat routing change.
+
+The W89 readiness report proves `apply_proposal_to_state` still calls
+`ensure_lifemodel_proposal_patch_source_mapping`, still passes
+`resolve_lifemodel_patch_source_for_proposal(proposal)` into
+`LifeModelPatch::from_proposal`, and does not reintroduce a hardcoded
+`PatchSource::BuilderReview` in the apply path. It also proves ordinary
+`send_message` / `start_stream_message` do not call the W88/W89 proposal
+PatchSource mapping or readiness helpers.
+
+The exact mappings remain BuilderReview -> BuilderReview, CalibrationRun ->
+Calibration, FeedbackEvolution -> Evolution, and Manual -> Manual. The
+metadata-safe fallback mappings remain ChatConversation, ProactiveAgent,
+SkillRuntime, Plugin, and MemoryGovernance -> Manual, with W90+ follow-up to
+confirm dedicated PatchSource variants or an accepted Manual fallback policy.
+The report is metadata-safe and contains no raw proposal payload, raw
+LifeModel patch value, memory text, chat text, or tool payload. Because fallback
+strategy is still unconfirmed, `readiness_ready=false` and
+`proposal_first_convergence_complete=false` remain explicit.
 
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
 | --- | --- | --- | --- | --- |
-| LifeModel save primitive / materializer caller restriction | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model`; W86 `lifemodel_materializer_caller_matrix`; W87 `LifeModelMaterializerCallerContext` / restriction report | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot. W86 classifies every current production materializer/save entry; W87 requires every production `persist_life_model` caller to pass typed context and guards snapshot restore's direct `LifeModelManager::save`. W88 maps accepted LifeModel proposal PatchSource by proposal source. W87/W88 keep migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false; no default Chat routing change and no legacy path retirement. | W89 should complete source-specific proposal application patch audit/readiness; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance before marking convergence. |
+| LifeModel save primitive / materializer caller restriction | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model`; W86 `lifemodel_materializer_caller_matrix`; W87 `LifeModelMaterializerCallerContext` / restriction report | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot. W86 classifies every current production materializer/save entry; W87 requires every production `persist_life_model` caller to pass typed context and guards snapshot restore's direct `LifeModelManager::save`. W88 maps accepted LifeModel proposal PatchSource by proposal source; W89 audits that mapping and apply-path usage. W87-W89 keep migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false; no default Chat routing change and no legacy path retirement. | Confirm fallback source policy separately; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance before marking convergence. |
 | Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | legacy direct write requiring future convergence | W80 metadata-safe explicit manual override audit records source, before/after hashes, rough changed sections, risk class, timestamp, command/function name, and manualOverride/proposalFirst/stillLegacyDirectWrite flags after successful save. It does not record raw LifeModel content and does not make the path proposal-first. | Convert to patch/proposal review or stronger manual override UX with confirmation and richer governance. |
-| Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; W88 maps PatchStore source by ProposalSource instead of hardcoding BuilderReview; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; complete W89 source-specific patch audit/readiness before marking proposal-first convergence complete. |
+| Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; W88 maps PatchStore source by ProposalSource instead of hardcoding BuilderReview; W89 proves the apply path still uses the mapping ensure and resolver, and that fallback sources are not mislabeled as BuilderReview; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; confirm fallback source policy before marking proposal-first convergence complete. |
 | Low-risk batch proposal apply | `src-tauri/src/commands/proposal.rs::batch_accept_low_risk_proposals` | already proposal-first | Safe Mode guard; accepts only pending low-risk proposals. | Keep limited to low risk; do not extend to high-risk identity, values, mission, long-term goals, sensitive relationships, or privacy boundaries. |
 | Proposal storage | `openlife-core/src/agent/proposal_store.rs::{create_proposal,update_proposal}` | already proposal-first | Proposals are persisted with type, source, risk, status, run id, and before/after payloads; status transitions are explicit through Review Center commands. | Continue linking generated HS proposals to run/evidence ids. |
 | Builder normal flow | `src-tauri/src/commands/builder.rs::builder_create_proposals`; `frontend/src/pages/BuilderPage.test.tsx` | already proposal-first | Finished sessions with pending signals are sent to ProposalStore; frontend tests assert `builder_apply_signals` is not called in the normal review flow. | Keep this as the only product Builder write path. |
@@ -324,8 +351,10 @@ entries without changing behavior, routing, signatures, or legacy path
 availability; as of W87, `persist_life_model` requires typed W86 caller
 context and snapshot restore's direct `LifeModelManager::save` has a W87
 restriction guard; as of W88, accepted LifeModel proposal apply maps PatchStore
-source by ProposalSource instead of hardcoding BuilderReview. These guards,
-matrices, restrictions, mappings, and proofs are not convergence completion.
+source by ProposalSource instead of hardcoding BuilderReview; as of W89, that
+mapping has a metadata-safe readiness proof with fallback blockers still
+explicit. These guards, matrices, restrictions, mappings, and proofs are not
+convergence completion.
 
 ## Convergence Backlog
 
@@ -349,5 +378,9 @@ matrices, restrictions, mappings, and proofs are not convergence completion.
 8. W88 complete: accepted LifeModel proposal apply now uses source-specific
    PatchSource mapping and metadata-safe fallback reporting instead of
    hardcoded BuilderReview.
-9. W89: complete Proposal Application Source-Specific Patch Audit / Readiness
-   before marking proposal-first convergence complete.
+9. W89 complete: Proposal Application Source-Specific Patch Audit / Readiness
+   proves apply-path mapping usage and exact/fallback source classification,
+   while keeping fallback strategy blockers and
+   `proposal_first_convergence_complete=false`.
+10. W90: retire or convert Builder legacy direct apply override before marking
+    Builder convergence complete.

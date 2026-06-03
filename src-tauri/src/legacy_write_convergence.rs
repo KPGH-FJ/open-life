@@ -1454,7 +1454,7 @@ pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterialize
             false,
             false,
             true,
-            "Accepted proposal apply is the convergence target and W88 replaces the hardcoded BuilderReview PatchSource with proposal-source mapping, but W89 still needs source-specific patch audit/readiness before proposal-first convergence can be marked complete.",
+            "Accepted proposal apply is the convergence target; W88 replaces the hardcoded BuilderReview PatchSource with proposal-source mapping and W89 proves the mapping readiness, but fallback source policy remains unconfirmed before proposal-first convergence can be marked complete.",
             &[],
         ),
         caller_matrix_entry(

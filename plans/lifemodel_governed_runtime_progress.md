@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W88 Proposal Application Source-Specific Patch Mapping complete
+> Status: W89 Proposal Application Source-Specific Patch Audit / Readiness complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W88 Proposal Application Source-Specific Patch Mapping complete**.
+Current latest status is **W89 Proposal Application Source-Specific Patch Audit / Readiness complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -279,8 +279,22 @@ use explicit metadata-safe Manual fallback with W89 follow-up/blocking metadata
 because PatchSource has no dedicated variants for those proposal sources. W88
 adds no command/frontend/Settings surface, runs no runtime/model/tool, changes
 no default Chat routing, retires no legacy path, and keeps
-`proposal_first_convergence_complete=false` until W89 source-specific patch
-audit/readiness.
+`proposal_first_convergence_complete=false` pending W89 source-specific patch
+audit/readiness and fallback policy.
+W89 adds a backend-only/internal readiness entry/report/evaluator/ensure in
+`src-tauri/src/commands/proposal.rs` for the W88 accepted LifeModel proposal
+PatchSource mapping. It proves exact mappings for BuilderReview, CalibrationRun,
+FeedbackEvolution, and Manual; metadata-safe Manual fallback mappings for
+ChatConversation, ProactiveAgent, SkillRuntime, Plugin, and MemoryGovernance;
+`unsupported_or_unclassified_count=0`; BuilderReview is used only for
+BuilderReview; `apply_proposal_to_state` still calls the W88 mapping ensure and
+resolver before `LifeModelPatch::from_proposal`; the apply path does not
+hardcode BuilderReview; and ordinary `send_message` / `start_stream_message`
+do not call W88/W89 proposal PatchSource helpers. The report is metadata-safe
+and raw-payload-free. W89 adds no command/frontend/Settings surface, runs no
+runtime/model/tool, changes no product behavior or default Chat routing, retires
+no legacy path, and keeps fallback blockers plus
+`proposal_first_convergence_complete=false`.
 
 Hard boundaries:
 
@@ -350,6 +364,8 @@ Hard boundaries:
   no migration/runtime authority.
 - Ordinary `send_message` / `start_stream_message` must not call the W88
   proposal PatchSource mapping helper.
+- Ordinary `send_message` / `start_stream_message` must not call the W89
+  proposal PatchSource readiness helper.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -359,7 +375,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W88 progress index
+4. This W1-W89 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -378,7 +394,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W88 Structured Index
+## W1-W89 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -469,7 +485,8 @@ permission.
 | W85 | State / Daily Goal Source Data Boundary Proof | Done | Internal Rust report/evaluator/ensure in `legacy_write_convergence.rs` | MS source-data boundary proof only; `state_daily_goal_direct_writes` remains LowRiskTransientSourceData and explicitly lists `persist_life_model`; compatibility_lifemodel_materialized_write=true, writes_current_lifemodel_compatibility_view=true, accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false, proposal_required_for_hs_truth_promotion=true; no command/frontend/runtime/model/tool/store behavior change, not proposal-first conversion, not fully converged | No; ordinary send/stream stay `legacy_stream` and do not call it | Future StateStore TTL/source/confidence split or separate proposal-first truth promotion bridge |
 | W86 | LifeModel Compatibility Materializer Caller Matrix | Done | Internal Rust matrix/report/evaluator/ensure in `legacy_write_convergence.rs` | MS caller matrix only; covers current production `persist_life_model` callsites and production `LifeModelManager::save` related entries; classifies materializer root, ordinary Chat auto-checkin source-data compatibility, State/Daily Goal source-data compatibility, accepted proposal apply, audited manual override, guarded legacy dev-migration overrides, and gated restore/import overrides; no command/frontend/runtime/model/tool/store behavior change, no `persist_life_model` signature change, no legacy path retirement, migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W87 LifeModel materializer caller restriction |
 | W87 | LifeModel Materializer Caller Restriction | Done | Internal typed caller context/restriction evaluator in `legacy_write_convergence.rs`, `persist_life_model` signature update, and snapshot restore direct-save guard | MS caller restriction only; all 16 production `persist_life_model` callsites pass explicit W86 stable id + kind + purpose context; snapshot restore direct `LifeModelManager::save` has a W87 guard after the W84 override; unknown/mismatched callers fail closed; metadata-safe and raw-content-free; keeps migration_permission=false/runtime_authority_granted=false/proposal_first_convergence_complete=false; not full convergence, no legacy path retirement | No; ordinary send/stream stay `legacy_stream` and only pass source-data compatibility context for existing daily-goal auto-checkin | W88 mapping, then W89 audit/readiness |
-| W88 | Proposal Application Source-Specific Patch Mapping | Done | Backend-only private mapper/report/ensure in `commands/proposal.rs` | MS mapping only; accepted LifeModel proposal apply no longer hardcodes BuilderReview; BuilderReview->BuilderReview, CalibrationRun->Calibration, FeedbackEvolution->Evolution, Manual->Manual; ChatConversation/ProactiveAgent/SkillRuntime/Plugin/MemoryGovernance use metadata-safe Manual fallback with W89 follow-up/blocking metadata; no command/frontend/runtime/model/tool/store behavior change, no legacy path retirement, proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W89 Proposal Application Source-Specific Patch Audit / Readiness |
+| W88 | Proposal Application Source-Specific Patch Mapping | Done | Backend-only private mapper/report/ensure in `commands/proposal.rs` | MS mapping only; accepted LifeModel proposal apply no longer hardcodes BuilderReview; BuilderReview->BuilderReview, CalibrationRun->Calibration, FeedbackEvolution->Evolution, Manual->Manual; ChatConversation/ProactiveAgent/SkillRuntime/Plugin/MemoryGovernance use metadata-safe Manual fallback with W89 follow-up/blocking metadata; no command/frontend/runtime/model/tool/store behavior change, no legacy path retirement, proposal_first_convergence_complete=false pending W89 audit/readiness and fallback policy | No; ordinary send/stream stay `legacy_stream` and do not call it | W89 Proposal Application Source-Specific Patch Audit / Readiness |
+| W89 | Proposal Application Source-Specific Patch Audit / Readiness | Done | Backend-only private readiness entry/report/evaluator/ensure in `commands/proposal.rs` | MS readiness proof only; exact_mapping_count=4, metadata_safe_fallback_count=5, unsupported_or_unclassified_count=0; BuilderReview only maps from BuilderReview; apply path uses the W88 mapping ensure and resolver before `LifeModelPatch::from_proposal`; no hardcoded BuilderReview in apply path; metadata-safe/raw-payload-free; fallback source strategy remains a blocker and proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call W88/W89 helpers | W90 Legacy Override Retirement: Builder Direct Apply |
 
 ## Folded Boundary Summary
 
@@ -556,7 +573,11 @@ above. The boundary meaning is preserved:
   fixes accepted LifeModel proposal PatchStore/audit source semantics, but it
   still does not change default Chat routing, retire legacy paths, grant
   migration/runtime authority, or mark proposal-first convergence complete.
-  W89 must complete source-specific patch audit/readiness.
+- W89 adds only backend/internal proposal application PatchSource
+  audit/readiness proof. It verifies the W88 exact/fallback mapping table,
+  apply-path ensure/resolver usage, no hardcoded BuilderReview reintroduction,
+  and no default Chat helper calls. Fallback source strategy remains a blocker,
+  so proposal-first convergence is still not complete.
 
 ## Next Recommended Sequence
 
@@ -581,12 +602,13 @@ complete -> W85 State / Daily Goal source-data boundary proof complete -> W86
 LifeModel materializer caller matrix complete -> W87 LifeModel materializer
 caller restriction complete -> W88 Proposal Application Source-Specific Patch
 Mapping complete -> W89 Proposal Application Source-Specific Patch Audit /
-Readiness.
+Readiness complete -> W90 Legacy Override Retirement: Builder Direct Apply.
 Future direct-write convergence slices must start from the W79 inventory, the
 W80 manual editor audit state, W81 Builder guard state, W82 Calibration guard
 state, W83 Feedback evolution guard state, W84 restore/import guard state, W85
 State/Daily Goal source-data boundary state, W86 materializer caller matrix,
-and W87 caller restriction state, and must not mark a blocker
+W87 caller restriction state, W88 proposal PatchSource mapping state, and W89
+proposal PatchSource readiness state, and must not mark a blocker
 converged until the actual path is changed and verified. Future default Chat executor implementation
 discussion may build on the W65-W72 proofs only through a separately reviewed
 task; keep default Chat on legacy_stream unless that separate task explicitly
