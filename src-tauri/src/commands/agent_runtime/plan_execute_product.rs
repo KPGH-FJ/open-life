@@ -4,7 +4,7 @@ use openlife_core::agent::{
     AgentTaskKind, ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
     PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteStepEdit,
     PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace, RedactionLevel, RiskLevel,
-    RuntimeInput,
+    RuntimeInput, RuntimeStrategyRegistry,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
@@ -433,11 +433,21 @@ fn new_plan_execute_product_run(session_id: &str) -> AgentRun {
     run.context_summary = Some(plan_execute_context_summary(false));
     run.reasoning_trace = Some(ReasoningTrace {
         strategy_result: Some(json!({
+            "runtimeStrategyTraceKind": "plan_execute_product",
             "planExecuteProductVertical": true,
             "scenarioId": "weekly_planning",
             "status": "started",
             "strategyKind": "plan_execute",
+            "selectedStrategyKind": "plan_execute",
+            "payloadKind": "plan_execute",
+            "strategyDescriptorId": "plan_execute",
+            "strategyCapabilityIds": ["planning.plan_execute", "proposal_first_steps", "metadata_safe_trace"],
+            "selectionReasonCode": "weekly_planning_product",
+            "governanceDecisionKind": "allow",
+            "registryReady": RuntimeStrategyRegistry::fixed_readiness_report().ready,
             "metadataSafe": true,
+            "defaultChatUnchanged": true,
+            "sideEffectBudget": plan_execute_trace_side_effect_budget(),
             "rawPromptStored": false,
             "rawWeeklyPlanProseStored": false,
             "directLifeModelWrites": false,
@@ -550,10 +560,18 @@ fn plan_execute_trace_metadata(session: &PlanExecuteSession) -> Value {
         }
     }
     json!({
+        "runtimeStrategyTraceKind": "plan_execute_product",
         "planExecuteProductVertical": true,
         "scenarioId": session.scenario.as_id(),
         "planSessionId": session.session_id,
         "strategyKind": "plan_execute",
+        "selectedStrategyKind": "plan_execute",
+        "payloadKind": "plan_execute",
+        "strategyDescriptorId": "plan_execute",
+        "strategyCapabilityIds": ["planning.plan_execute", "proposal_first_steps", "metadata_safe_trace"],
+        "selectionReasonCode": "weekly_planning_product",
+        "governanceDecisionKind": plan_execute_trace_governance_decision_kind(proposal_required, blocked),
+        "registryReady": RuntimeStrategyRegistry::fixed_readiness_report().ready,
         "status": session.status.to_string(),
         "sourceAgentRunId": session.source_agent_run_id,
         "sourceChatSessionId": session.source_chat_session_id,
@@ -573,6 +591,8 @@ fn plan_execute_trace_metadata(session: &PlanExecuteSession) -> Value {
         },
         "warningCount": session.warnings.len(),
         "metadataSafe": true,
+        "defaultChatUnchanged": true,
+        "sideEffectBudget": plan_execute_trace_side_effect_budget(),
         "rawPromptStored": false,
         "rawWeeklyPlanProseStored": false,
         "rawLifeModelStored": false,
@@ -581,6 +601,33 @@ fn plan_execute_trace_metadata(session: &PlanExecuteSession) -> Value {
         "rawProposalPayloadStored": false,
         "directLifeModelWrites": false,
         "externalWritesExecuted": false,
+    })
+}
+
+fn plan_execute_trace_governance_decision_kind(
+    proposal_required: usize,
+    blocked: usize,
+) -> &'static str {
+    if blocked > 0 {
+        "block"
+    } else if proposal_required > 0 {
+        "require_proposal"
+    } else {
+        "allow"
+    }
+}
+
+fn plan_execute_trace_side_effect_budget() -> Value {
+    json!({
+        "runtimeCalls": 0,
+        "modelCalls": 0,
+        "toolCalls": 0,
+        "storeWrites": 0,
+        "proposalWrites": 0,
+        "memoryWrites": 0,
+        "lifeModelWrites": 0,
+        "mcpAuditWrites": 0,
+        "externalWrites": 0,
     })
 }
 
@@ -651,6 +698,14 @@ mod tests {
         assert_eq!(trace["planExecuteProductVertical"], true);
         assert_eq!(trace["scenarioId"], "weekly_planning");
         assert_eq!(trace["planSessionId"], session.session_id);
+        assert_eq!(trace["runtimeStrategyTraceKind"], "plan_execute_product");
+        assert_eq!(trace["selectedStrategyKind"], "plan_execute");
+        assert_eq!(trace["payloadKind"], "plan_execute");
+        assert_eq!(trace["strategyDescriptorId"], "plan_execute");
+        assert_eq!(trace["selectionReasonCode"], "weekly_planning_product");
+        assert_eq!(trace["registryReady"], true);
+        assert_eq!(trace["defaultChatUnchanged"], true);
+        assert_eq!(trace["sideEffectBudget"]["externalWrites"], 0);
         assert!(!serialized.contains("Use my LifeModel"));
         assert!(!serialized.contains("raw weekly"));
     }

@@ -267,6 +267,80 @@ export interface MultiStrategyAgentPreviewOutput {
   governanceDecisionKind?: MultiStrategyAgentPreviewGovernanceDecisionKind;
 }
 
+export interface RuntimeStrategySideEffectBudget {
+  runtimeCalls: number;
+  modelCalls: number;
+  toolCalls: number;
+  storeWrites: number;
+  proposalWrites: number;
+  memoryWrites: number;
+  lifeModelWrites: number;
+  mcpAuditWrites: number;
+  externalWrites: number;
+}
+
+export interface RuntimeStrategyDescriptor {
+  strategyKind: string;
+  metadataSafeId: string;
+  metadataSafeName: string;
+  payloadKind: string;
+  capabilityIds: string[];
+  supportedTaskCategories: string[];
+  writePolicy: string;
+  sideEffectBudget: RuntimeStrategySideEffectBudget;
+  proposalFirstRequired: boolean;
+  metadataSafeTraceSupported: boolean;
+  defaultChatMigrationPermission: boolean;
+  metadataSafe: boolean;
+  executable: boolean;
+}
+
+export interface RuntimeStrategyDeclarativeDescriptor {
+  strategyKind: string;
+  metadataSafeId: string;
+  metadataSafeName: string;
+  capabilityIds: string[];
+  supportedTaskCategories: string[];
+  writePolicy: string;
+  sideEffectBudget: RuntimeStrategySideEffectBudget;
+  declarativeOnly: boolean;
+  executable: boolean;
+  defaultChatMigrationPermission: boolean;
+  metadataSafe: boolean;
+}
+
+export interface RuntimeStrategyRegistryReadinessReport {
+  reportKind: "runtime_strategy_registry_readiness";
+  ready: boolean;
+  metadataSafe: boolean;
+  executableStrategyCount: number;
+  executableDescriptors: RuntimeStrategyDescriptor[];
+  futureStrategyDescriptors: RuntimeStrategyDeclarativeDescriptor[];
+  requiredStrategyKinds: string[];
+  blockingReasons: string[];
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface MultiStrategyRuntimeMaturityReport {
+  reportKind: "multi_strategy_runtime_maturity";
+  maturityReady: boolean;
+  registryReadiness: RuntimeStrategyRegistryReadinessReport;
+  executableStrategies: RuntimeStrategyDescriptor[];
+  futureStrategyDescriptors: RuntimeStrategyDeclarativeDescriptor[];
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  statusCommandSideEffectBudget: RuntimeStrategySideEffectBudget;
+  blockingReasons: string[];
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export type PlanExecuteScenario = "weekly_planning";
 export type PlanExecuteSessionStatus =
   | "draft"

@@ -30,6 +30,7 @@ import {
   getDefaultChatAdapterRoutingStatus,
   getDefaultChatAdapterOrdinaryEntryPreflightStatus,
   getDefaultChatRuntimeBoundaryStatus,
+  getRuntimeStrategyRegistryStatus,
   runDefaultChatAdapterControlledPreview,
   getDefaultChatAdapterControlledPreviewReviewSummary,
   recordDefaultChatAdapterControlledPreviewReviewDecision,
@@ -271,6 +272,39 @@ describe("tauri command argument aliases", () => {
       }),
     });
     expect(result.runId).toBe("run-preview-1");
+  });
+
+  it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "multi_strategy_runtime_maturity",
+      maturityReady: true,
+      defaultChatUnchanged: true,
+      migrationPermission: false,
+      noRuntimeModelToolExecution: true,
+      noBusinessWrites: true,
+      registryReadiness: {
+        ready: true,
+        executableStrategyCount: 2,
+        blockingReasons: [],
+      },
+      executableStrategies: [],
+      futureStrategyDescriptors: [],
+      statusCommandSideEffectBudget: {
+        runtimeCalls: 0,
+        modelCalls: 0,
+        toolCalls: 0,
+      },
+      blockingReasons: [],
+      metadataSafe: true,
+      metadataSafeSummary: {},
+    });
+
+    const result = await getRuntimeStrategyRegistryStatus();
+
+    expect(invoke).toHaveBeenCalledWith("get_runtime_strategy_registry_status", undefined);
+    expect(result.maturityReady).toBe(true);
+    expect(result.defaultChatUnchanged).toBe(true);
+    expect(result.migrationPermission).toBe(false);
   });
 
   it("invokes runtime migration gate as explicit read-only diagnostic", async () => {

@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W105 Plan-Execute Product Vertical complete
+> Status: W113 RuntimeStrategy / Multi-Strategy Runtime Maturity complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,8 @@ route text.
 
 ## Current Position
 
-Current latest status is **W105 Plan-Execute Product Vertical complete**.
+Current latest status is **W113 RuntimeStrategy / Multi-Strategy Runtime
+Maturity complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -35,6 +36,18 @@ Review Center proposals only; they do not directly write durable LifeModel-HS
 truth, Memory, external provider state, calendar, email, files, or plugin
 state. Ordinary `send_message` / `start_stream_message` still remain on
 `legacy_stream` and must not call W98-W105 product commands or helpers.
+W106-W113 mature the RuntimeStrategy / Multi-Strategy Runtime layer without
+migrating default Chat: executable ReAct and PlanExecute strategies now have
+metadata-safe capability descriptors; registry readiness fails closed for
+missing, duplicate, mismatched, unsafe-write, metadata-unsafe, or default Chat
+migration-granting descriptors; StrategySelector emits a metadata-safe
+candidate matrix/explanation; MultiStrategy outputs preserve a stable execution
+report envelope; `get_runtime_strategy_registry_status` is an explicit
+non-default read-only maturity command with no runtime/model/tool execution and
+no business writes; preview and Plan-Execute product traces share strategy trace
+vocabulary; and Direct, Layered, Workflow, Proactive, and Reflective are
+future/declarative-only descriptors, not executable capabilities. W106-W113 is
+not ReAct Beta execution hardening and is not migration permission.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -398,7 +411,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W105 progress index
+4. This W1-W113 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -417,7 +430,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W105 Structured Index
+## W1-W113 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -525,7 +538,15 @@ permission.
 | W102 | Plan-Execute AgentRun Trace / Proposal Linkage | Done | `plan_execute_product` AgentRun trace | Metadata-safe session/status/governance/proposal counts; source run/session linkage; raw prompt/plan/LifeModel/memory/tool/proposal payloads not stored | No; product traces only | W103 |
 | W103 | Frontend Weekly Planning Surface | Done | Workspace panel plus Tauri wrappers and tests | Create, edit, save draft, finalize, execute, observation/proposal/source-run links; explicit product commands only | No; ordinary Chat unchanged | W104 |
 | W104 | Safety / Isolation / Regression Hardening | Done | Regression tests and command guard updates | Default Chat entrypoint forbidden list includes product commands; `PlanningSession` proposal/patch source mapping; metadata-safe UI trace tests | No; guard only for ordinary Chat | W105 |
-| W105 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | W105 authority docs and UI trace status synced; default Chat remains `legacy_stream`; RuntimeStrategy maturity still future work | No; docs/status only | Next architecture work |
+| W105 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | W105 authority docs and UI trace status synced; default Chat remains `legacy_stream`; RuntimeStrategy maturity was still future work at the W105 boundary | No; docs/status only | W106 |
+| W106 | RuntimeStrategy Descriptor / Registry Readiness | Done | Core RuntimeStrategy descriptor/readiness report | ReAct/PlanExecute executable descriptors are metadata-safe; readiness fails closed for missing, duplicate, mismatched, write-without-proposal-first, migration-granting, or metadata-unsafe descriptors | No; readiness only, no adapter execution | W107 |
+| W107 | Strategy Selection Candidate Matrix | Done | Core StrategySelector report | Candidate matrix/explanation covers ReAct/PlanExecute support, reason code, governance, risk, planning, local model, HS packet, fallback and blocked state without raw prompt/tools/memory | No; selector only, no adapter/store writes | W108 |
+| W108 | MultiStrategy Runtime Execution Report Envelope | Done | Core MultiStrategyRuntime output report | Output includes selector, registry, descriptor, payload, governance, side-effect budget, metadata-safe adapter summary, blocked state, and default Chat unchanged | No; preview/runtime surface only, default Chat unchanged | W109 |
+| W109 | Runtime Strategy Registry Status Command | Done | Explicit Tauri command `get_runtime_strategy_registry_status` plus frontend wrapper | Non-default read-only maturity report lists executable and declarative future descriptors, reports no runtime/model/tool execution, no business writes, migration permission false | No; command is read-only and ordinary Chat does not call it | W110 |
+| W110 | Preview/Product Strategy Trace Convergence | Done | Preview audit, Plan-Execute product trace, frontend trace parsing/UI | Shared vocabulary includes runtimeStrategyTraceKind, selectedStrategyKind, payloadKind, strategyDescriptorId, strategyCapabilityIds, selectionReasonCode, governanceDecisionKind, sideEffectBudget, registryReady, metadataSafe, defaultChatUnchanged | No; trace metadata only | W111 |
+| W111 | Future Strategy Boundary Descriptors | Done | Declarative future strategy descriptors | Direct, Layered, Workflow, Proactive, Reflective appear as disabled/declarative-only future descriptors and are not executable/selectable capabilities | No; future taxonomy only | W112 |
+| W112 | Default Chat Isolation / Side-Effect Hardening | Done | Regression tests and forbidden-call guard updates | Ordinary send/stream forbidden list includes W106-W113 command/helpers; readiness/status does not create AgentRun/Proposal/Evidence/Memory/LifeModel/MCP/Chat/external writes and is not migration authority | No; default Chat remains `legacy_stream` | W113 |
+| W113 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | W113 authority docs synced; RuntimeStrategy maturity complete; next block can start ReAct Beta Execution Hardening from a stable strategy protocol | No; docs/status only | ReAct Beta Execution Hardening |
 
 ## Folded Boundary Summary
 
@@ -652,10 +673,16 @@ store and non-default command surface complete -> W100 review/edit/finalize
 lifecycle complete -> W101 proposal-first step execution complete -> W102
 AgentRun trace/proposal linkage complete -> W103 frontend weekly planning
 surface complete -> W104 safety/isolation regression hardening complete -> W105
-docs/progress/verification sync complete.
-Future default Chat executor implementation discussion may build on the
-W65-W72 proofs only through a separately reviewed task; keep default Chat on
-legacy_stream unless that separate task explicitly implements, reviews,
+docs/progress/verification sync complete -> W106 RuntimeStrategy
+descriptor/readiness complete -> W107 selection candidate matrix complete ->
+W108 execution report envelope complete -> W109 non-default registry status
+command complete -> W110 preview/product trace convergence complete -> W111
+future strategy declarative boundary complete -> W112 default Chat isolation
+hardening complete -> W113 docs/progress/verification sync complete.
+Future ReAct Beta Execution Hardening may start from the W113 strategy protocol
+baseline. Future default Chat executor implementation discussion may build on
+the W65-W72 proofs only through a separately reviewed task; keep default Chat
+on legacy_stream unless that separate task explicitly implements, reviews,
 verifies, and authorizes a route change.
 ```
 

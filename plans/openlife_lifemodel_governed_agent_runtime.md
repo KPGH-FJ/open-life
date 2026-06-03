@@ -340,14 +340,19 @@ Current implementation note:
 
 - Direct and Layered exist as reasoning strategies inside `AgentRuntime`.
 - ReAct exists as `AgentLoop`.
-- StrategySelector and MultiStrategyRuntime exist for preview/core orchestration.
+- StrategySelector and MultiStrategyRuntime exist for preview/core orchestration
+  with W113 metadata-safe selection reports, registry readiness, and execution
+  report envelopes.
 - `run_multi_strategy_agent_preview` exposes the orchestrator as a non-default
   preview/beta command and persists metadata-safe outer AgentRun audit.
-- A lightweight first-class `RuntimeStrategy` trait now exists for fixed
-  ReAct/PlanExecute adapters.
+- A first-class `RuntimeStrategy` trait now exists for fixed ReAct/PlanExecute
+  adapters with W113 capability descriptors and registry readiness.
 - PlanExecute exists as a governed V1 runtime payload/report path and, as of
-  W105, one explicit weekly-planning product vertical. This is not default Chat
-  migration and not full RuntimeStrategy maturity.
+  W105, one explicit weekly-planning product vertical. As of W113, ReAct and
+  PlanExecute are descriptor/registry-ready executable RuntimeStrategy
+  adapters; Direct, Layered, Workflow, Proactive, and Reflective remain
+  declarative-only future strategy descriptors unless separately implemented.
+  This is not default Chat migration and not ReAct Beta execution hardening.
 
 ## 8. Development Order
 
@@ -725,6 +730,7 @@ make ci
 | W15 PlanExecute Governed Vertical Slice | Done | PlanExecuteReport records metadata-safe plan/governance/read-only observation summaries. |
 | W16 RuntimeStrategy Trait | Done | ReAct and PlanExecute execute through lightweight fixed adapters and registry. |
 | W98-W105 Plan-Execute Product Vertical | Done | Non-default weekly planning surface with durable PlanExecute sessions, review/edit/finalize lifecycle, proposal-first step execution, metadata-safe AgentRun trace/proposal linkage, and default Chat unchanged. |
+| W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity | Done | RuntimeStrategy descriptors/readiness, StrategySelector candidate matrix, MultiStrategy execution report envelope, non-default read-only registry status command, shared preview/product trace vocabulary, declarative-only future strategy taxonomy, and default Chat isolation hardening. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | Read-only gate reports default Chat unchanged, preview health, metadata-safe trace, fallback, no external writes, proposal-first, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings exposes the gate report as a read-only pass/block evidence panel with visible blocking reasons; normal Chat Send still does not call gate or preview. |
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | Read-only eligibility checks the latest 3 preview gate reports, clean run count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation. |
@@ -804,8 +810,9 @@ Status: Done for runtime V1 slice.
   counts, governance summaries, read-only observations, and warnings.
 - Read-only internal steps can execute; write-like steps require proposal and
   are not executed.
-- Product weekly planning now exists as the W98-W105 non-default product
-  vertical; broader Plan-Execute strategy maturity remains future work.
+- Product weekly planning exists as the W98-W105 non-default product vertical.
+  RuntimeStrategy / Multi-Strategy Runtime maturity is complete as W106-W113;
+  readiness/status remains non-default and is not migration permission.
 
 ### W16: RuntimeStrategy Trait
 

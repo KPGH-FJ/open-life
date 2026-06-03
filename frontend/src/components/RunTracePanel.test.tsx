@@ -70,11 +70,19 @@ describe("RunTracePanel", () => {
       reasoningTrace: {
         strategy_result: {
           previewRuntime: "multi_strategy",
+          runtimeStrategyTraceKind: "multi_strategy_preview",
+          selectedStrategyKind: "planExecute",
           strategyKind: "planExecute",
           payloadKind: "planExecute",
+          strategyDescriptorId: "plan_execute",
+          strategyCapabilityIds: ["planning.plan_execute"],
           governanceDecisionKind: "warn",
+          selectionReasonCode: "write_like_intent",
           riskLevel: "medium",
           reasonCode: "write_like_intent",
+          registryReady: true,
+          defaultChatUnchanged: true,
+          sideEffectBudget: { externalWrites: 0 },
           hasHsPacket: true,
           planStepCount: 1,
           planStepStatuses: ["requires_proposal"],
@@ -88,6 +96,8 @@ describe("RunTracePanel", () => {
 
     expect(screen.getByText("Multi-strategy preview trace")).toBeInTheDocument();
     expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
+    expect(screen.getByText("Descriptor: plan_execute")).toBeInTheDocument();
+    expect(screen.getByText("Registry: ready")).toBeInTheDocument();
     expect(screen.getByText("Governance: warn")).toBeInTheDocument();
     expect(screen.getByText("write_like_intent")).toBeInTheDocument();
     expect(screen.getByText("requires_proposal")).toBeInTheDocument();
@@ -104,9 +114,19 @@ describe("RunTracePanel", () => {
       reasoningTrace: {
         strategy_result: {
           planExecuteProductVertical: true,
+          runtimeStrategyTraceKind: "plan_execute_product",
           scenarioId: "weekly_planning",
           planSessionId: "plan-session-1",
           strategyKind: "plan_execute",
+          selectedStrategyKind: "plan_execute",
+          payloadKind: "plan_execute",
+          strategyDescriptorId: "plan_execute",
+          strategyCapabilityIds: ["planning.plan_execute"],
+          selectionReasonCode: "weekly_planning_product",
+          governanceDecisionKind: "require_proposal",
+          registryReady: true,
+          defaultChatUnchanged: true,
+          sideEffectBudget: { externalWrites: 0 },
           status: "finalized",
           sourceAgentRunId: "run-plan-1",
           sourceChatSessionId: "workspace_weekly_planning",
@@ -140,6 +160,8 @@ describe("RunTracePanel", () => {
     });
 
     expect(screen.getByText("Plan-Execute product trace")).toBeInTheDocument();
+    expect(screen.getByText("Descriptor: plan_execute")).toBeInTheDocument();
+    expect(screen.getByText("Registry: ready")).toBeInTheDocument();
     expect(screen.getByText("Scenario: weekly_planning")).toBeInTheDocument();
     expect(screen.getByText("Session: plan-session-1")).toBeInTheDocument();
     expect(screen.getByText("Steps: 3")).toBeInTheDocument();

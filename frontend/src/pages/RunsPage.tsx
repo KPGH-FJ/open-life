@@ -121,7 +121,7 @@ export default function RunsPage() {
       const audit = getMultiStrategyPreviewAudit(run);
       const productTrace = getPlanExecuteProductTrace(run);
       const auditText = audit
-        ? `${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.reasonCode ?? ""}`
+        ? `${audit.runtimeStrategyTraceKind ?? ""} ${audit.selectedStrategyKind ?? ""} ${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.strategyDescriptorId ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.selectionReasonCode ?? ""} ${audit.reasonCode ?? ""} ${(audit.strategyCapabilityIds ?? []).join(" ")}`
         : "";
       const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
       const outputText = productTrace ? "" : (run.outputPreview ?? "");

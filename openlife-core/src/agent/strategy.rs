@@ -12,7 +12,7 @@ pub enum RuntimeStrategyKind {
 }
 
 impl RuntimeStrategyKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             RuntimeStrategyKind::ReAct => "react",
             RuntimeStrategyKind::PlanExecute => "plan_execute",
@@ -35,8 +35,64 @@ pub struct StrategySelection {
     #[serde(default)]
     pub governance_decision: Option<GovernanceDecision>,
     pub metadata_safe_summary: Value,
+    pub report: StrategySelectionReport,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyCandidateEvaluation {
+    pub strategy_kind: RuntimeStrategyKind,
+    pub supported: bool,
+    pub reason_code: String,
+    pub governance_decision_kind: String,
+    pub risk_level: String,
+    pub planning_allowed: bool,
+    pub local_model_available: bool,
+    pub has_hs_packet: bool,
+    pub blocked: bool,
+    pub fallback: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategySelectionReport {
+    pub report_kind: String,
+    pub selected_strategy_kind: RuntimeStrategyKind,
+    pub selection_reason_code: String,
+    pub governance_decision_kind: String,
+    pub risk_level: String,
+    pub planning_allowed: bool,
+    pub local_model_available: bool,
+    pub has_hs_packet: bool,
+    pub blocked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_kind: Option<RuntimeStrategyKind>,
+    pub candidates: Vec<StrategyCandidateEvaluation>,
+    pub metadata_safe: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+impl Default for StrategySelectionReport {
+    fn default() -> Self {
+        Self {
+            report_kind: "strategy_selection_report".into(),
+            selected_strategy_kind: RuntimeStrategyKind::ReAct,
+            selection_reason_code: "default_react".into(),
+            governance_decision_kind: "allow".into(),
+            risk_level: "low".into(),
+            planning_allowed: false,
+            local_model_available: false,
+            has_hs_packet: false,
+            blocked: false,
+            fallback_kind: None,
+            candidates: Vec::new(),
+            metadata_safe: true,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -108,6 +164,19 @@ impl StrategySelector {
             )
         };
 
+        let governance_decision_kind = governance_decision_kind_str(governance_decision.kind);
+        let report = selection_report(SelectionReportContext {
+            selected_kind: kind,
+            intent,
+            planning_allowed: input.allow_planning,
+            local_model_available: input.local_model_available,
+            has_hs_packet,
+            risk_level,
+            governance_decision_kind: governance_decision.kind,
+            reason_code,
+            warnings: &warnings,
+        });
+
         StrategySelection {
             kind,
             reason,
@@ -120,6 +189,10 @@ impl StrategySelector {
                 governance_decision.kind,
                 reason_code,
             ),
+            report: StrategySelectionReport {
+                governance_decision_kind: governance_decision_kind.into(),
+                ..report
+            },
             warnings,
         }
     }
@@ -130,6 +203,18 @@ struct StrategyIntent {
     planning: bool,
     write_like: bool,
     tool_or_observation: bool,
+}
+
+struct SelectionReportContext<'a> {
+    selected_kind: RuntimeStrategyKind,
+    intent: StrategyIntent,
+    planning_allowed: bool,
+    local_model_available: bool,
+    has_hs_packet: bool,
+    risk_level: RiskLevel,
+    governance_decision_kind: GovernanceDecisionKind,
+    reason_code: &'a str,
+    warnings: &'a [String],
 }
 
 impl StrategyIntent {
@@ -179,6 +264,145 @@ fn selection_summary(
         "governanceDecisionKind": governance_decision_kind_str(governance_decision_kind),
         "reasonCode": reason_code,
     })
+}
+
+fn selection_report(context: SelectionReportContext<'_>) -> StrategySelectionReport {
+    let SelectionReportContext {
+        selected_kind,
+        intent,
+        planning_allowed,
+        local_model_available,
+        has_hs_packet,
+        risk_level,
+        governance_decision_kind,
+        reason_code,
+        warnings,
+    } = context;
+    let blocked = governance_decision_kind == GovernanceDecisionKind::Block;
+    let fallback_kind = if reason_code == "planning_disabled_fallback" {
+        Some(RuntimeStrategyKind::PlanExecute)
+    } else {
+        None
+    };
+    let governance_decision_kind_text = governance_decision_kind_str(governance_decision_kind);
+    let risk_level_text = risk_level.to_string();
+
+    StrategySelectionReport {
+        report_kind: "strategy_selection_report".into(),
+        selected_strategy_kind: selected_kind,
+        selection_reason_code: reason_code.into(),
+        governance_decision_kind: governance_decision_kind_text.into(),
+        risk_level: risk_level_text.clone(),
+        planning_allowed,
+        local_model_available,
+        has_hs_packet,
+        blocked,
+        fallback_kind,
+        candidates: vec![
+            react_candidate(
+                selected_kind,
+                intent,
+                planning_allowed,
+                local_model_available,
+                has_hs_packet,
+                blocked,
+                reason_code,
+                governance_decision_kind_text,
+                &risk_level_text,
+            ),
+            plan_execute_candidate(
+                selected_kind,
+                intent,
+                planning_allowed,
+                local_model_available,
+                has_hs_packet,
+                blocked,
+                reason_code,
+                governance_decision_kind_text,
+                &risk_level_text,
+            ),
+        ],
+        metadata_safe: true,
+        warnings: warnings.to_vec(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn react_candidate(
+    selected_kind: RuntimeStrategyKind,
+    intent: StrategyIntent,
+    planning_allowed: bool,
+    local_model_available: bool,
+    has_hs_packet: bool,
+    blocked: bool,
+    selected_reason_code: &str,
+    governance_decision_kind: &str,
+    risk_level: &str,
+) -> StrategyCandidateEvaluation {
+    let supported = selected_kind == RuntimeStrategyKind::ReAct && !blocked;
+    let reason_code = if blocked {
+        "governance_blocked"
+    } else if selected_kind == RuntimeStrategyKind::ReAct {
+        selected_reason_code
+    } else if intent.planning || intent.write_like {
+        "plan_execute_preferred"
+    } else {
+        "not_selected"
+    };
+
+    StrategyCandidateEvaluation {
+        strategy_kind: RuntimeStrategyKind::ReAct,
+        supported,
+        reason_code: reason_code.into(),
+        governance_decision_kind: governance_decision_kind.into(),
+        risk_level: risk_level.into(),
+        planning_allowed,
+        local_model_available,
+        has_hs_packet,
+        blocked,
+        fallback: selected_reason_code == "planning_disabled_fallback",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_execute_candidate(
+    selected_kind: RuntimeStrategyKind,
+    intent: StrategyIntent,
+    planning_allowed: bool,
+    local_model_available: bool,
+    has_hs_packet: bool,
+    blocked: bool,
+    selected_reason_code: &str,
+    governance_decision_kind: &str,
+    risk_level: &str,
+) -> StrategyCandidateEvaluation {
+    let supported = selected_kind == RuntimeStrategyKind::PlanExecute && !blocked;
+    let reason_code = if blocked {
+        "governance_blocked"
+    } else if selected_kind == RuntimeStrategyKind::PlanExecute {
+        selected_reason_code
+    } else if intent.planning || intent.write_like {
+        if planning_allowed {
+            "not_selected"
+        } else {
+            "planning_disabled"
+        }
+    } else {
+        "no_planning_or_write_intent"
+    };
+
+    StrategyCandidateEvaluation {
+        strategy_kind: RuntimeStrategyKind::PlanExecute,
+        supported,
+        reason_code: reason_code.into(),
+        governance_decision_kind: governance_decision_kind.into(),
+        risk_level: risk_level.into(),
+        planning_allowed,
+        local_model_available,
+        has_hs_packet,
+        blocked,
+        fallback: false,
+    }
 }
 
 fn governance_decision_kind_str(kind: GovernanceDecisionKind) -> &'static str {

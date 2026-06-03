@@ -70,7 +70,7 @@ use commands::agent_runtime::{
     get_default_chat_adapter_narrow_implementation_plan_review_summary,
     get_default_chat_adapter_ordinary_entry_preflight_status,
     get_default_chat_adapter_routing_status, get_default_chat_runtime_boundary_status,
-    get_plan_execute_session, list_plan_execute_sessions,
+    get_plan_execute_session, get_runtime_strategy_registry_status, list_plan_execute_sessions,
     record_controlled_chat_cutover_candidate_review_decision,
     record_controlled_chat_migration_review_decision,
     record_controlled_chat_migration_shadow_review_decision,
@@ -3131,6 +3131,7 @@ pub fn run() {
             restore_agent_run,
             replay_agent_action,
             run_multi_strategy_agent_preview,
+            get_runtime_strategy_registry_status,
             create_plan_execute_session,
             get_plan_execute_session,
             list_plan_execute_sessions,
@@ -5970,6 +5971,10 @@ mod hs_runtime_tests {
         let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
         let forbidden_command_surfaces = [
             "run_multi_strategy_agent_preview",
+            "get_runtime_strategy_registry_status",
+            "get_runtime_strategy_registry_status_with_state",
+            "MultiStrategyRuntimeMaturityReport",
+            "RuntimeStrategyRegistry::maturity_report",
             "create_plan_execute_session",
             "get_plan_execute_session",
             "list_plan_execute_sessions",
@@ -6093,6 +6098,7 @@ mod hs_runtime_tests {
             "recordDefaultChatAdapter",
             "checkDefaultChatAdapter",
             "getDefaultChatAdapter",
+            "getRuntimeStrategyRegistryStatus",
         ];
 
         for path in chat_paths {

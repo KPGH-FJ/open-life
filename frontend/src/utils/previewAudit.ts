@@ -1,15 +1,23 @@
 import type { AgentRun } from "../tauri";
 
 export interface MultiStrategyPreviewAudit {
+  runtimeStrategyTraceKind?: string;
   previewRuntime?: string;
   taskKind?: string;
+  selectedStrategyKind?: string;
   strategyKind?: string;
   payloadKind?: string;
+  strategyDescriptorId?: string;
+  strategyCapabilityIds?: string[];
   governanceDecisionKind?: string;
   governancePolicyKind?: string;
+  selectionReasonCode?: string;
   reasonCode?: string;
   riskLevel?: string;
   hasHsPacket?: boolean;
+  registryReady?: boolean;
+  defaultChatUnchanged?: boolean;
+  sideEffectBudget?: Record<string, number>;
   warnings?: string[];
   proposalIds?: string[];
   planStepCount?: number;

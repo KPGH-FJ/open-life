@@ -4,9 +4,9 @@ use crate::agent::{
     HeuristicQuery, HeuristicStore, ModelRouter, MultiStrategyRuntime, MultiStrategyRuntimeInput,
     MultiStrategyRuntimePayload, PlanExecuteRuntimeStrategy, PlanStepStatus, ProposalStore,
     ProviderAvailability, RuntimeHSPacket, RuntimeInput, RuntimeOutput, RuntimeStrategy,
-    RuntimeStrategyInput, RuntimeStrategyKind, RuntimeStrategyOutput, RuntimeStrategyPayload,
-    RuntimeStrategyPayloadKind, RuntimeStrategyRegistry, SelectedPolicyRef, StrategySelectionInput,
-    StrategySelector,
+    RuntimeStrategyDescriptor, RuntimeStrategyInput, RuntimeStrategyKind, RuntimeStrategyOutput,
+    RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry, SelectedPolicyRef,
+    StrategySelectionInput, StrategySelector,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -226,6 +226,43 @@ impl RuntimeStrategy for CountingRuntimeStrategy {
     }
 }
 
+#[derive(Clone)]
+struct DefaultChatMigrationRuntimeStrategy {
+    inner: CountingRuntimeStrategy,
+}
+
+#[async_trait::async_trait]
+impl RuntimeStrategy for DefaultChatMigrationRuntimeStrategy {
+    fn kind(&self) -> RuntimeStrategyKind {
+        self.inner.kind()
+    }
+
+    fn metadata_safe_id(&self) -> &'static str {
+        self.inner.metadata_safe_id()
+    }
+
+    fn metadata_safe_name(&self) -> &'static str {
+        self.inner.metadata_safe_name()
+    }
+
+    fn payload_kind(&self) -> RuntimeStrategyPayloadKind {
+        self.inner.payload_kind()
+    }
+
+    fn descriptor(&self) -> RuntimeStrategyDescriptor {
+        let mut descriptor = self.inner.descriptor();
+        descriptor.default_chat_migration_permission = true;
+        descriptor
+    }
+
+    async fn execute(
+        &self,
+        input: RuntimeStrategyInput,
+    ) -> Result<RuntimeStrategyOutput, crate::agent::AgentRuntimeError> {
+        self.inner.execute(input).await
+    }
+}
+
 fn counting_runtime(
     react_count: Arc<AtomicUsize>,
     plan_count: Arc<AtomicUsize>,
@@ -243,6 +280,107 @@ fn counting_runtime(
                 seen_summaries,
             ))),
     )
+}
+
+#[test]
+fn runtime_strategy_registry_readiness_passes_for_react_and_plan_execute_descriptors() {
+    let react_count = Arc::new(AtomicUsize::new(0));
+    let plan_count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+    let registry = RuntimeStrategyRegistry::new()
+        .with_strategy(Box::new(CountingRuntimeStrategy::react(
+            Arc::clone(&react_count),
+            Arc::clone(&seen_summaries),
+        )))
+        .with_strategy(Box::new(CountingRuntimeStrategy::plan_execute(
+            Arc::clone(&plan_count),
+            seen_summaries,
+        )));
+
+    let report = registry.readiness_report();
+
+    assert!(report.ready);
+    assert!(report.metadata_safe);
+    assert_eq!(report.executable_strategy_count, 2);
+    assert!(report.blocking_reasons.is_empty());
+    assert!(report
+        .executable_descriptors
+        .iter()
+        .any(
+            |descriptor| descriptor.strategy_kind == RuntimeStrategyKind::ReAct
+                && descriptor.payload_kind == RuntimeStrategyPayloadKind::ReAct
+                && !descriptor.default_chat_migration_permission
+        ));
+    assert!(report
+        .executable_descriptors
+        .iter()
+        .any(
+            |descriptor| descriptor.strategy_kind == RuntimeStrategyKind::PlanExecute
+                && descriptor.payload_kind == RuntimeStrategyPayloadKind::PlanExecute
+                && descriptor.proposal_first_required
+        ));
+    assert!(report
+        .future_strategy_descriptors
+        .iter()
+        .any(|descriptor| descriptor.strategy_kind == "workflow"
+            && descriptor.declarative_only
+            && !descriptor.executable));
+    assert_eq!(react_count.load(Ordering::SeqCst), 0);
+    assert_eq!(plan_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn runtime_strategy_registry_readiness_fails_closed_for_missing_duplicate_and_migration_grants() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+
+    let missing_report = RuntimeStrategyRegistry::new()
+        .with_strategy(Box::new(CountingRuntimeStrategy::react(
+            Arc::clone(&count),
+            Arc::clone(&seen_summaries),
+        )))
+        .readiness_report();
+    assert!(!missing_report.ready);
+    assert!(missing_report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason == "missing_required_strategy:plan_execute"));
+
+    let duplicate_report = RuntimeStrategyRegistry::new()
+        .with_strategy(Box::new(CountingRuntimeStrategy::react(
+            Arc::clone(&count),
+            Arc::clone(&seen_summaries),
+        )))
+        .with_strategy(Box::new(CountingRuntimeStrategy::react(
+            Arc::clone(&count),
+            Arc::clone(&seen_summaries),
+        )))
+        .with_strategy(Box::new(CountingRuntimeStrategy::plan_execute(
+            Arc::clone(&count),
+            Arc::clone(&seen_summaries),
+        )))
+        .readiness_report();
+    assert!(!duplicate_report.ready);
+    assert!(duplicate_report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason == "duplicate_strategy_kind:react"));
+
+    let migration_report = RuntimeStrategyRegistry::new()
+        .with_strategy(Box::new(DefaultChatMigrationRuntimeStrategy {
+            inner: CountingRuntimeStrategy::react(Arc::clone(&count), Arc::clone(&seen_summaries)),
+        }))
+        .with_strategy(Box::new(CountingRuntimeStrategy::plan_execute(
+            Arc::clone(&count),
+            seen_summaries,
+        )))
+        .readiness_report();
+    assert!(!migration_report.ready);
+    assert!(migration_report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason == "default_chat_migration_permission_granted:react"));
+    assert_eq!(count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -296,6 +434,25 @@ async fn simple_chat_executes_selected_react_adapter() {
     .unwrap();
 
     assert_eq!(output.selection.kind, RuntimeStrategyKind::ReAct);
+    assert_eq!(
+        output.execution_report.report_kind,
+        "runtime_strategy_execution_report"
+    );
+    assert_eq!(
+        output.execution_report.selected_strategy_kind,
+        RuntimeStrategyKind::ReAct
+    );
+    assert_eq!(
+        output.execution_report.payload_kind,
+        RuntimeStrategyPayloadKind::ReAct
+    );
+    assert_eq!(output.execution_report.strategy_descriptor_id, "test_react");
+    assert!(output.execution_report.registry_ready);
+    assert!(output.execution_report.default_chat_unchanged);
+    assert_eq!(
+        output.execution_report.strategy_output_summary["strategyId"],
+        "test_react"
+    );
     assert_eq!(react_count.load(Ordering::SeqCst), 1);
     assert_eq!(plan_count.load(Ordering::SeqCst), 0);
     match output.payload {
@@ -364,6 +521,22 @@ async fn planning_intent_executes_selected_plan_execute_adapter_and_keeps_report
     .unwrap();
 
     assert_eq!(output.selection.kind, RuntimeStrategyKind::PlanExecute);
+    assert_eq!(
+        output.execution_report.selected_strategy_kind,
+        RuntimeStrategyKind::PlanExecute
+    );
+    assert_eq!(
+        output.execution_report.payload_kind,
+        RuntimeStrategyPayloadKind::PlanExecute
+    );
+    assert_eq!(
+        output.execution_report.strategy_descriptor_id,
+        "test_plan_execute"
+    );
+    assert_eq!(
+        output.execution_report.selection_reason_code,
+        "planning_intent_allowed"
+    );
     assert_eq!(react_count.load(Ordering::SeqCst), 0);
     assert_eq!(plan_count.load(Ordering::SeqCst), 1);
     match &output.payload {
@@ -503,9 +676,50 @@ async fn blocked_local_only_selection_does_not_execute_any_strategy_adapter() {
         output.payload,
         MultiStrategyRuntimePayload::Blocked
     ));
+    assert!(output.execution_report.blocked);
+    assert_eq!(
+        output.execution_report.payload_kind,
+        RuntimeStrategyPayloadKind::Blocked
+    );
+    assert_eq!(
+        output.execution_report.selection_reason_code,
+        "governance_blocked"
+    );
     assert_eq!(react_count.load(Ordering::SeqCst), 0);
     assert_eq!(plan_count.load(Ordering::SeqCst), 0);
     assert!(seen_summaries.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_strategy_missing_selected_adapter_fails_closed_without_raw_input() {
+    let react_count = Arc::new(AtomicUsize::new(0));
+    let plan_count = Arc::new(AtomicUsize::new(0));
+    let seen_summaries = Arc::new(Mutex::new(Vec::new()));
+    let runtime = MultiStrategyRuntime::with_strategy_registry(
+        StrategySelector::default(),
+        RuntimeStrategyRegistry::new().with_strategy(Box::new(
+            CountingRuntimeStrategy::plan_execute(plan_count, seen_summaries),
+        )),
+    );
+
+    let error = runtime
+        .execute(multi_input(
+            runtime_input(
+                "Simple chat for Alice and alice@example.com must not leak.",
+                "Available tools: email.send with body payloads",
+            ),
+            true,
+            true,
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("runtime_strategy_missing:react"));
+    assert!(!error.contains("Alice"));
+    assert!(!error.contains("alice@example.com"));
+    assert!(!error.contains("email.send"));
+    assert_eq!(react_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

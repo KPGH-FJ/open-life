@@ -7,6 +7,7 @@ import type {
   StateAlert,
   MultiStrategyAgentPreviewInput,
   MultiStrategyAgentPreviewOutput,
+  MultiStrategyRuntimeMaturityReport,
   ControlledChatPilotEligibilityCheckInput,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceInput,
@@ -326,6 +327,10 @@ export async function runMultiStrategyAgentPreview(
   input: MultiStrategyAgentPreviewInput
 ): Promise<MultiStrategyAgentPreviewOutput> {
   return safeInvoke<MultiStrategyAgentPreviewOutput>("run_multi_strategy_agent_preview", { input });
+}
+
+export async function getRuntimeStrategyRegistryStatus(): Promise<MultiStrategyRuntimeMaturityReport> {
+  return safeInvoke<MultiStrategyRuntimeMaturityReport>("get_runtime_strategy_registry_status");
 }
 
 export async function createPlanExecuteSession(

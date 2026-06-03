@@ -87,6 +87,56 @@ fn simple_chat_selects_react() {
 }
 
 #[test]
+fn runtime_strategy_selection_report_includes_metadata_safe_candidate_matrix() {
+    let selection = select(
+        runtime_input(
+            "What should I focus on today without exposing alice@example.com?",
+            "Available tools: email.send with full payloads",
+            None,
+        ),
+        true,
+        true,
+    );
+
+    assert_eq!(selection.report.report_kind, "strategy_selection_report");
+    assert_eq!(
+        selection.report.selected_strategy_kind,
+        RuntimeStrategyKind::ReAct
+    );
+    assert_eq!(selection.report.selection_reason_code, "default_react");
+    assert!(!selection.report.blocked);
+    assert_eq!(selection.report.candidates.len(), 2);
+
+    let react = selection
+        .report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.strategy_kind == RuntimeStrategyKind::ReAct)
+        .expect("ReAct candidate is reported");
+    assert!(react.supported);
+    assert_eq!(react.reason_code, "default_react");
+    assert!(react.planning_allowed);
+    assert!(react.local_model_available);
+    assert!(!react.has_hs_packet);
+    assert!(!react.blocked);
+    assert!(!react.fallback);
+
+    let plan_execute = selection
+        .report
+        .candidates
+        .iter()
+        .find(|candidate| candidate.strategy_kind == RuntimeStrategyKind::PlanExecute)
+        .expect("PlanExecute candidate is reported");
+    assert!(!plan_execute.supported);
+    assert_eq!(plan_execute.reason_code, "no_planning_or_write_intent");
+
+    let serialized = serde_json::to_string(&selection.report).unwrap();
+    assert!(!serialized.contains("alice@example.com"));
+    assert!(!serialized.contains("email.send"));
+    assert!(!serialized.contains("full payloads"));
+}
+
+#[test]
 fn planning_intent_selects_plan_execute_when_allowed() {
     let selection = select(
         runtime_input("Create a plan with steps for my afternoon.", "", None),
@@ -181,6 +231,13 @@ fn sensitive_local_only_without_local_model_returns_blocked_selection() {
         serde_json::json!("block")
     );
     assert!(selection.reason.contains("blocked"));
+    assert!(selection.report.blocked);
+    assert_eq!(selection.report.selection_reason_code, "governance_blocked");
+    assert!(selection
+        .report
+        .candidates
+        .iter()
+        .any(|candidate| candidate.blocked));
 }
 
 #[test]

@@ -53,8 +53,13 @@ describe("RunsPage contract", () => {
             reasoningTrace: {
               strategy_result: {
                 previewRuntime: "multi_strategy",
+                runtimeStrategyTraceKind: "multi_strategy_preview",
+                selectedStrategyKind: "planExecute",
                 strategyKind: "planExecute",
                 payloadKind: "planExecute",
+                strategyDescriptorId: "plan_execute",
+                selectionReasonCode: "write_like_intent",
+                registryReady: true,
                 governanceDecisionKind: "warn",
                 riskLevel: "medium",
                 reasonCode: "write_like_intent",
@@ -77,9 +82,15 @@ describe("RunsPage contract", () => {
             reasoningTrace: {
               strategy_result: {
                 planExecuteProductVertical: true,
+                runtimeStrategyTraceKind: "plan_execute_product",
                 scenarioId: "weekly_planning",
                 planSessionId: "plan-session-1",
                 strategyKind: "plan_execute",
+                selectedStrategyKind: "plan_execute",
+                payloadKind: "plan_execute",
+                strategyDescriptorId: "plan_execute",
+                selectionReasonCode: "weekly_planning_product",
+                registryReady: true,
                 status: "finalized",
                 stepCount: 3,
                 stepStatusCounts: {
@@ -139,6 +150,11 @@ describe("RunsPage contract", () => {
 
     fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
       target: { value: "plan-session-1" },
+    });
+    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
+      target: { value: "weekly_planning_product" },
     });
     expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
 

@@ -5,10 +5,10 @@ use openlife_core::agent::{
     AgentRuntime, AgentTask, AgentTaskKind, ContextSummary, ControlledChatPilotEligibilityReport,
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceSourceRef, EvidenceSourceType,
     EvidenceType, GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit,
-    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeOutput,
-    MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus, RedactionLevel, RiskLevel,
-    RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
-    DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
+    MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeMaturityReport,
+    MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
+    RedactionLevel, RiskLevel, RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
+    RuntimeStrategyRegistry, DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -1630,6 +1630,19 @@ pub async fn run_multi_strategy_agent_preview(
     run_multi_strategy_agent_preview_with_state(input, &state.inner().clone()).await
 }
 
+#[tauri::command]
+pub async fn get_runtime_strategy_registry_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<MultiStrategyRuntimeMaturityReport, String> {
+    get_runtime_strategy_registry_status_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_runtime_strategy_registry_status_with_state(
+    _state: &Arc<AppState>,
+) -> Result<MultiStrategyRuntimeMaturityReport, String> {
+    Ok(RuntimeStrategyRegistry::maturity_report())
+}
+
 async fn find_preview_run_for_gate(
     input: RuntimeMigrationGateCheckInput,
     state: &Arc<AppState>,
@@ -2633,23 +2646,32 @@ fn preview_audit_summary(output: &MultiStrategyRuntimeOutput, warnings: &[String
     let plan_step_statuses = preview_plan_step_statuses(&output.payload);
     let write_control = preview_write_control(&output.payload);
     let blocked = matches!(output.payload, MultiStrategyRuntimePayload::Blocked);
+    let execution_report = &output.execution_report;
 
     json!({
+        "runtimeStrategyTraceKind": "multi_strategy_preview",
         "previewRuntime": "multi_strategy",
+        "selectedStrategyKind": strategy_kind,
         "taskKind": task_kind,
         "strategyKind": strategy_kind,
         "payloadKind": payload_kind,
+        "strategyDescriptorId": execution_report.strategy_descriptor_id.clone(),
+        "strategyCapabilityIds": execution_report.strategy_capability_ids.clone(),
         "governanceDecisionKind": governance_decision_kind,
         "governancePolicyKind": governance_policy_kind,
+        "selectionReasonCode": execution_report.selection_reason_code.clone(),
         "reasonCode": reason_code,
         "riskLevel": risk_level,
         "hasHsPacket": has_hs_packet,
+        "registryReady": execution_report.registry_ready,
         "warnings": warnings,
         "proposalIds": proposal_ids,
         "planStepCount": plan_step_count,
         "planStepStatuses": plan_step_statuses,
         "blocked": blocked,
         "metadataSafe": true,
+        "defaultChatUnchanged": execution_report.default_chat_unchanged,
+        "sideEffectBudget": execution_report.side_effect_budget.clone(),
         "innerRunId": inner_run_id,
         "writeControl": write_control,
     })
@@ -2800,6 +2822,94 @@ mod tests {
             layer: None,
             execution_budget: None,
         }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct StatusSideEffectCounts {
+        agent_runs: usize,
+        proposals: usize,
+        evidence: usize,
+        memory_messages: usize,
+        mcp_audit_logs: usize,
+        plan_sessions: usize,
+    }
+
+    async fn status_side_effect_counts(state: &Arc<crate::AppState>) -> StatusSideEffectCounts {
+        let agent_runs = {
+            let store = state.agent_run_store.as_ref().unwrap().lock().await;
+            store.list_runs(100, 0).unwrap().len()
+        };
+        let proposals = {
+            let store = state.proposal_store.as_ref().unwrap().lock().await;
+            store.list_all_proposals(100, 0).unwrap().len()
+        };
+        let evidence = {
+            let store = state.evidence_store.lock().await;
+            store.query(EvidenceQuery::default()).unwrap().len()
+        };
+        let memory_messages = {
+            let store = state.memory_store.lock().await;
+            store.export_all_messages().unwrap().len()
+        };
+        let mcp_audit_logs = {
+            let store = state.mcp_audit_store.lock().await;
+            store.list_logs(100).unwrap().len()
+        };
+        let plan_sessions = {
+            let store = state
+                .plan_execute_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store.list_sessions(100).unwrap().len()
+        };
+
+        StatusSideEffectCounts {
+            agent_runs,
+            proposals,
+            evidence,
+            memory_messages,
+            mcp_audit_logs,
+            plan_sessions,
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_strategy_registry_status_command_reports_ready_and_read_only() {
+        let state = preview_state().await;
+        let before = status_side_effect_counts(&state).await;
+
+        let report = get_runtime_strategy_registry_status_with_state(&state)
+            .await
+            .unwrap();
+
+        assert!(report.maturity_ready);
+        assert!(report.registry_readiness.ready);
+        assert!(report.default_chat_unchanged);
+        assert!(!report.migration_permission);
+        assert!(report.no_runtime_model_tool_execution);
+        assert!(report.no_business_writes);
+        assert_eq!(report.status_command_side_effect_budget.runtime_calls, 0);
+        assert_eq!(report.status_command_side_effect_budget.model_calls, 0);
+        assert_eq!(report.status_command_side_effect_budget.tool_calls, 0);
+        assert!(report
+            .future_strategy_descriptors
+            .iter()
+            .any(|descriptor| descriptor.strategy_kind == "workflow"
+                && descriptor.declarative_only
+                && !descriptor.executable));
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("assistant output"));
+        assert!(!serialized.contains("LifeModel text"));
+        assert!(!serialized.contains("memory context"));
+        assert!(!serialized.contains("tool payload"));
+        assert!(!serialized.contains("alice@example.com"));
+
+        let after = status_side_effect_counts(&state).await;
+        assert_eq!(before, after);
     }
 
     async fn stored_preview_run(state: &Arc<crate::AppState>, run_id: &str) -> AgentRun {
@@ -10665,6 +10775,14 @@ mod tests {
         let audit = preview_audit(&run);
         assert_eq!(audit["strategyKind"], "planExecute");
         assert_eq!(audit["payloadKind"], "planExecute");
+        assert_eq!(audit["runtimeStrategyTraceKind"], "multi_strategy_preview");
+        assert_eq!(audit["selectedStrategyKind"], "planExecute");
+        assert_eq!(audit["strategyDescriptorId"], "plan_execute");
+        assert_eq!(audit["strategyCapabilityIds"][0], "planning.plan_execute");
+        assert_eq!(audit["selectionReasonCode"], "planning_intent_allowed");
+        assert_eq!(audit["registryReady"], true);
+        assert_eq!(audit["defaultChatUnchanged"], true);
+        assert_eq!(audit["sideEffectBudget"]["externalWrites"], 0);
         assert_eq!(audit["planStepCount"], 1);
         assert_eq!(audit["planStepStatuses"][0], "executed");
     }

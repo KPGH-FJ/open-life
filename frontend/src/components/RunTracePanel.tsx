@@ -90,6 +90,16 @@ export default function RunTracePanel({ run, trace }: Props) {
           </div>
 
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            {productTrace.strategyDescriptorId && (
+              <span className="rounded border border-violet-100 bg-violet-50 px-2 py-0.5 text-violet-700">
+                Descriptor: {productTrace.strategyDescriptorId}
+              </span>
+            )}
+            {productTrace.registryReady !== undefined && (
+              <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-emerald-700">
+                Registry: {productTrace.registryReady ? "ready" : "blocked"}
+              </span>
+            )}
             {productTrace.scenarioId && (
               <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700">
                 Scenario: {productTrace.scenarioId}
@@ -186,6 +196,16 @@ export default function RunTracePanel({ run, trace }: Props) {
             )}
           </div>
           <div className="mt-2 flex flex-wrap gap-2 text-xs">
+            {previewAudit.strategyDescriptorId && (
+              <span className="rounded border border-violet-100 bg-violet-50 px-2 py-0.5 text-violet-700">
+                Descriptor: {previewAudit.strategyDescriptorId}
+              </span>
+            )}
+            {previewAudit.registryReady !== undefined && (
+              <span className="rounded border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-emerald-700">
+                Registry: {previewAudit.registryReady ? "ready" : "blocked"}
+              </span>
+            )}
             {previewAudit.strategyKind && (
               <span className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700">
                 Strategy: {previewAudit.strategyKind}

@@ -107,6 +107,7 @@ logs/
 .DS_Store
 .DS_Store?
 ._*
+*.icloud
 .Spotlight-V100
 .Trashes
 ehthumbs.db

@@ -45,14 +45,13 @@ Current completed preparation:
 - W90-W97 converged legacy direct writes, so high-risk durable LifeModel-HS
   mutation must now go through proposal/governed operation boundaries.
 
-Known limitations that remain real:
+Historical pre-W98 limitations that were addressed by W98-W105:
 
-- PlanExecute is not productized for weekly planning.
-- There is no dedicated Plan-Execute session/store/lifecycle.
-- There is no review/edit/freeze step before execution.
-- There is no user-facing product surface for a planned week or plan step list.
-- Write-like plan steps are not bridged into concrete Review Center proposals
-  for this product vertical.
+At the pre-W98 baseline, weekly planning had no PlanExecute product surface,
+dedicated Plan-Execute session/store/lifecycle, review/edit/freeze step before
+execution, user-facing planned-week or step-list surface, or concrete Review
+Center proposal bridge for write-like plan steps. W98-W105 now close those
+specific product-vertical gaps.
 - Existing MultiStrategy preview is an experimental/runtime surface, not the
   product workflow.
 - Default Chat still uses `legacy_stream` and must stay unchanged.
@@ -675,7 +674,8 @@ Read and follow:
 
 Current baseline:
 - W97 Legacy Direct-Write Convergence is complete.
-- Existing PlanExecute core/runtime V1 exists, but product weekly planning is still future work.
+- Existing PlanExecute core/runtime V1 exists, but at the pre-W98 baseline
+  the weekly planning product surface had not yet shipped.
 - Default Chat remains legacy_stream.
 
 Goal:

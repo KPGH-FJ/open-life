@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W105 Plan-Execute Product Vertical complete
+> Status: authoritative document index for Agents, W113 RuntimeStrategy / Multi-Strategy Runtime Maturity complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,33 +16,37 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W105 completion/status index. This is not a second roadmap.
-5. `plans/plan_execute_product_vertical_goal_spec.md`
+   - Compact W1-W113 completion/status index. This is not a second roadmap.
+5. `plans/runtime_strategy_maturity_goal_spec.md`
+   - Completed CLI Goal-mode spec and audit trail for RuntimeStrategy /
+     Multi-Strategy Runtime Maturity W106-W113.
+6. `plans/plan_execute_product_vertical_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for the Plan-Execute Product
      Vertical W98-W105.
-6. `plans/legacy_direct_write_convergence_goal_spec.md`
+7. `plans/legacy_direct_write_convergence_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
-7. `plans/lifemodel_maturation_goal_plan.md`
+8. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
-8. Hard governance baselines:
+9. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-9. Scoped architecture/product baselines:
+10. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-10. Current execution helpers:
+11. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-11. Historical/reference documents.
+12. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
 
-Current latest status is **W105 Plan-Execute Product Vertical complete**.
+Current latest status is **W113 RuntimeStrategy / Multi-Strategy Runtime
+Maturity complete**.
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -64,10 +68,27 @@ W98-W105 Goal-mode spec and audit trail. W98-W105 implement a narrow
 Plan-Execute Product Vertical: a non-default weekly planning workflow with a
 typed product contract, durable plan sessions, review/edit/finalize lifecycle,
 step-by-step execution, proposal-first write-like steps, AgentRun/trace
-linkage, and Workspace/Runs frontend surfaces. It is not default Chat migration,
-not full RuntimeStrategy maturity, and not external provider write execution.
+linkage, and Workspace/Runs frontend surfaces. It is not default Chat migration
+or external provider write execution. W98-W105 alone did not complete full
+RuntimeStrategy maturity; W106-W113 now complete the RuntimeStrategy maturity
+layer as a separate non-default boundary.
 Ordinary `send_message` / `start_stream_message` do not call the W98-W105
 Plan-Execute product commands or helpers.
+
+`plans/runtime_strategy_maturity_goal_spec.md` is retained as the completed
+W106-W113 Goal-mode spec and audit trail. W106-W113 mature RuntimeStrategy /
+Multi-Strategy Runtime with metadata-safe strategy capability descriptors,
+registry readiness, StrategySelector candidate matrix/explanation,
+MultiStrategy execution report envelope, an explicit non-default read-only
+`get_runtime_strategy_registry_status` command, preview/product trace
+vocabulary convergence, declarative-only future strategy boundaries, and
+default Chat isolation hardening. ReAct and PlanExecute are executable
+descriptor/registry-ready strategies. Direct, Layered, Workflow, Proactive, and
+Reflective are future/declarative-only descriptors unless separately
+implemented with full governance. W106-W113 is not default Chat migration and
+not ReAct Beta execution hardening; readiness/status/maturity reports are not
+migration permission. Ordinary `send_message` / `start_stream_message` do not
+call W106-W113 helpers or commands.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -462,7 +483,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W105 Compression Map
+## 3. W1-W113 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -522,6 +543,14 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W103 | Frontend weekly planning surface | Workspace weekly planning panel supports create, edit, finalize, execute, observation display, proposal links, and source run link |
 | W104 | Safety/isolation hardening | Default Chat entrypoint guard list includes product commands; proposal mapping has `PlanningSession`; regression tests cover metadata and isolation |
 | W105 | Docs and verification sync | Authority docs, progress index, trace/Runs UI, and verification matrix synced; default Chat remains `legacy_stream` |
+| W106 | RuntimeStrategy descriptor and registry readiness | ReAct/PlanExecute executable descriptors are metadata-safe; readiness fails closed for missing/duplicate/mismatched/migration-granting descriptors |
+| W107 | Strategy selection candidate matrix | StrategySelector emits metadata-safe candidate matrix/explanation while preserving ReAct/PlanExecute selection behavior and local-only blocking |
+| W108 | MultiStrategy execution report envelope | Runtime output includes selector/registry/descriptor/payload/governance/side-effect/default-Chat report; blocked paths still report without adapter execution |
+| W109 | Non-default registry status command | `get_runtime_strategy_registry_status` returns read-only maturity status, executable descriptors, future descriptors, and zero execution/write proof |
+| W110 | Preview/product trace convergence | MultiStrategy preview and Plan-Execute product traces share runtime strategy trace vocabulary without raw prompt/output/plan/tool/proposal payloads |
+| W111 | Future strategy boundary descriptors | Direct, Layered, Workflow, Proactive, and Reflective are disabled/declarative-only future descriptors, not executable capabilities |
+| W112 | Default Chat isolation hardening | Ordinary `send_message` / `start_stream_message` forbidden-call tests include W106-W113 command/helpers; readiness/status is not migration authority |
+| W113 | Docs and verification sync | Authority docs and progress index synced to W113; next block can start ReAct Beta Execution Hardening from a stable strategy protocol |
 
 ## 4. Current Authoritative Entry Points
 
@@ -529,7 +558,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W105 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W113 structured status index and compressed guardrail map. |
+| `plans/runtime_strategy_maturity_goal_spec.md` | Completed W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity spec/audit trail. |
 | `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
@@ -698,11 +728,18 @@ W98 product contract complete -> W99 durable session store and commands complete
 -> W100 review/edit/finalize lifecycle complete -> W101 proposal-first step
 execution complete -> W102 AgentRun trace/proposal linkage complete -> W103
 frontend weekly planning surface complete -> W104 safety/isolation hardening
-complete -> W105 docs/progress/verification sync complete.
-The next architecture block can start from the W105 governed product baseline.
-Any future default Chat executor implementation or route cutover remains a
-separate reviewed task that preserves default Chat legacy_stream until a route
-change is explicitly implemented, reviewed, verified, and authorized.
+complete -> W105 docs/progress/verification sync complete -> W106
+RuntimeStrategy descriptor/readiness complete -> W107 selection candidate
+matrix complete -> W108 execution report envelope complete -> W109 non-default
+registry status command complete -> W110 preview/product trace convergence
+complete -> W111 future strategy declarative boundary complete -> W112 default
+Chat isolation hardening complete -> W113 docs/progress/verification sync
+complete.
+The next architecture block can start ReAct Beta Execution Hardening from the
+W113 governed strategy protocol baseline. Any future default Chat executor
+implementation or route cutover remains a separate reviewed task that preserves
+default Chat legacy_stream until a route change is explicitly implemented,
+reviewed, verified, and authorized.
 ```
 
 For docs-only index整理, `git diff --check` plus targeted `rg` validation is

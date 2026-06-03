@@ -32,9 +32,11 @@ controlled executor disabled/unattached, writes nothing, runs nothing, and does
 not route default Chat.
 
 The important current boundary is that MultiStrategy Runtime is
-preview/audit-ready, not productized as the default Chat path. Future work must
-move from preview to controlled product migration without directly replacing
-`send_message` or the existing Chat main flow.
+descriptor/readiness/report/status-ready and preview/audit-ready, but it is not
+productized as the default Chat path. W106-W113 status/readiness/maturity
+reports are not migration permission. Future work must move from preview to
+controlled product migration without directly replacing `send_message` or the
+existing Chat main flow.
 
 The immediate order is defined in
 [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md):
@@ -472,7 +474,7 @@ Every major development round should verify:
 | --- | --- | --- |
 | W1-W3 | ✅ Done | Tool/proposal hygiene, thin runtime spine, ReAct runtime contract convergence. |
 | W4-W5 | ✅ Done | Maturation/Governor foundations exist. |
-| W6 | ✅ Done | PlanExecute core MVP exists; not productized weekly planning. |
+| W6 | ✅ Done | Historical core MVP slice; PlanExecute weekly planning is now productized as W98-W105 and RuntimeStrategy maturity is complete as W106-W113. |
 | W7-W8 | ✅ Done | StrategySelector and MultiStrategy orchestrator exist. |
 | W9-W10 | ✅ Done | Preview command exists and writes metadata-safe outer AgentRun audit. |
 | W11-W13 | ✅ Done | Docs/status sync, non-default preview UI, and guarded Chat preview subpath exist. |
