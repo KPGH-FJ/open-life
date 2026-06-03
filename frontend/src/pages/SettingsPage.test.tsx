@@ -157,6 +157,17 @@ describe("SettingsPage", () => {
     expect(await screen.findByText(/应用版本 0.1.0/)).toBeInTheDocument();
   });
 
+  it("shows feedback evolution report as read-only candidates, not applied rules", async () => {
+    renderSettings();
+
+    await clickTab("数据");
+    fireEvent.click(await screen.findByRole("button", { name: "生成进化报告" }));
+
+    expect(await screen.findByText(/只读进化报告：候选 3 条，已应用 0 条/)).toBeInTheDocument();
+    expect(screen.queryByText(/已应用规则/)).not.toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("generate_evolution_report", undefined);
+  });
+
   it("tests the current DeepSeek form config instead of only saved config", async () => {
     renderSettings();
 

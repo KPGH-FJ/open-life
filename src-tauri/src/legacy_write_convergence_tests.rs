@@ -46,6 +46,20 @@ fn legacy_write_convergence_inventory_covers_required_paths() {
         ),
         (
             "feedback_evolution_direct_writes",
+            "FeedbackEvolutionLegacyDirectApplyOverride",
+        ),
+        ("feedback_signals_source_data", "save_feedback"),
+        ("feedback_signals_source_data", "log_analytics_event"),
+        (
+            "feedback_signals_source_data",
+            "FeedbackStore::save_conversation_inference",
+        ),
+        (
+            "feedback_signals_source_data",
+            "FeedbackStore::fetch_evolution_signals",
+        ),
+        (
+            "feedback_evolution_read_only_report",
             "generate_evolution_report",
         ),
         ("snapshot_restore", "restore_snapshot"),
@@ -150,6 +164,76 @@ fn legacy_write_convergence_reports_high_risk_direct_writes_as_blockers_not_conv
 
     ensure_legacy_write_convergence_inventory_guard()
         .expect("known convergence blockers should be reported without failing inventory guard");
+}
+
+#[test]
+fn legacy_write_convergence_feedback_w83_guard_present_but_still_blocker() {
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+    let feedback_legacy = entry(&entries, "feedback_evolution_direct_writes");
+    let feedback_report = entry(&entries, "feedback_evolution_read_only_report");
+
+    assert_eq!(
+        feedback_legacy.risk_class,
+        LegacyWriteRiskClass::HighRiskLegacyDirectWrite
+    );
+    assert_eq!(
+        feedback_legacy.current_status,
+        LegacyWriteConvergenceStatus::LegacyDirectWriteBlocker
+    );
+    assert_eq!(
+        feedback_legacy.safe_mode_status,
+        LegacyWriteSafeModeStatus::GuardPresent
+    );
+    assert!(!feedback_legacy.normal_product_allowed);
+    assert!(feedback_legacy.requires_proposal_first);
+    assert!(feedback_legacy.currently_direct_write);
+    assert!(feedback_legacy.high_risk_durable_truth_write);
+    assert!(feedback_legacy.current_guard_summary.contains("W83"));
+    assert!(feedback_legacy
+        .current_guard_summary
+        .contains("dev/migration"));
+    assert!(feedback_legacy
+        .current_guard_summary
+        .contains("metadata-safe"));
+    assert!(feedback_legacy
+        .required_convergence_action
+        .contains("Proposal"));
+    assert!(feedback_legacy
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("dev_migration_override")));
+    assert!(has_function(
+        feedback_legacy,
+        "FeedbackEvolutionLegacyDirectApplyOverride"
+    ));
+    assert!(!has_function(feedback_legacy, "generate_evolution_report"));
+    assert!(report
+        .convergence_blockers
+        .iter()
+        .any(|blocker| blocker.contains("feedback_evolution_direct_writes")));
+
+    assert_eq!(
+        feedback_report.current_status,
+        LegacyWriteConvergenceStatus::LowRiskTransientSourceData
+    );
+    assert!(!feedback_report.currently_direct_write);
+    assert!(!feedback_report.high_risk_durable_truth_write);
+    assert!(feedback_report.normal_product_allowed);
+    assert!(feedback_report.current_guard_summary.contains("read-only"));
+    assert!(feedback_report
+        .current_guard_summary
+        .contains("does not write LifeModel"));
+    assert!(
+        !report
+            .convergence_blockers
+            .iter()
+            .any(|blocker| blocker.contains("feedback_evolution_read_only_report")),
+        "read-only feedback report must not be a legacy direct-write blocker"
+    );
+
+    assert!(!report.overall_converged);
+    assert!(!report.all_direct_writes_converged);
 }
 
 #[test]
@@ -343,6 +427,7 @@ fn legacy_write_convergence_low_risk_source_data_is_not_durable_lifemodel_truth(
     let entries = legacy_write_convergence_inventory();
 
     for stable_id in [
+        "feedback_signals_source_data",
         "state_daily_goal_direct_writes",
         "raw_chat_memory_vector_source_writes",
     ] {
@@ -361,6 +446,43 @@ fn legacy_write_convergence_low_risk_source_data_is_not_durable_lifemodel_truth(
             .required_convergence_action
             .contains("proposal-first before durable LifeModel truth"));
     }
+}
+
+#[test]
+fn legacy_write_convergence_feedback_signals_are_low_risk_source_data_not_accepted_truth() {
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+    let feedback_signals = entry(&entries, "feedback_signals_source_data");
+
+    assert_eq!(
+        feedback_signals.risk_class,
+        LegacyWriteRiskClass::LowRiskSourceData
+    );
+    assert_eq!(
+        feedback_signals.current_status,
+        LegacyWriteConvergenceStatus::LowRiskTransientSourceData
+    );
+    assert_eq!(
+        feedback_signals.safe_mode_status,
+        LegacyWriteSafeModeStatus::LowRiskSourceDataGuardNotRequired
+    );
+    assert!(feedback_signals.normal_product_allowed);
+    assert!(feedback_signals.currently_direct_write);
+    assert!(!feedback_signals.high_risk_durable_truth_write);
+    assert!(!feedback_signals.requires_proposal_first);
+    assert!(feedback_signals
+        .current_guard_summary
+        .contains("signals, not accepted LifeModel truth"));
+    assert!(feedback_signals
+        .required_convergence_action
+        .contains("Proposal"));
+    assert!(
+        !report
+            .convergence_blockers
+            .iter()
+            .any(|blocker| blocker.contains("feedback_signals_source_data")),
+        "Feedback signal source data must not be reported as accepted truth blocker"
+    );
 }
 
 #[test]
@@ -395,6 +517,9 @@ fn legacy_write_convergence_report_is_metadata_safe_and_raw_content_free() {
         "W82_RAW_CALIBRATION_REASON_SECRET",
         "W82_RAW_EVOLUTION_TARGET_SECRET",
         "W82_RAW_EVOLUTION_REASON_SECRET",
+        "W83_RAW_FEEDBACK_TEXT_SECRET",
+        "W83_RAW_CONVERSATION_INFERENCE_SECRET",
+        "W83_RAW_EXISTING_EVOLUTION_RULE_SECRET",
     ] {
         assert!(
             !debug_dump.contains(forbidden),
@@ -500,6 +625,8 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "apply_calibration_with_state_for_dev_migration",
         "run_micro_evolution_with_state_for_dev_migration",
         "CalibrationLegacyDirectApplyDevMigrationOverride",
+        "apply_feedback_evolution_with_state_for_dev_migration",
+        "FeedbackEvolutionLegacyDirectApplyOverride",
     ] {
         assert!(
             !send_body.contains(forbidden),

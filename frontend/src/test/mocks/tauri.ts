@@ -1837,6 +1837,22 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         messages: [],
         vectors: [],
       } as T);
+    case "generate_evolution_report":
+      return Promise.resolve({
+        success: true,
+        read_only: true,
+        metadata_safe: true,
+        durable_lifemodel_write: false,
+        evolution_rules_write: false,
+        applied_rule_count: 0,
+        liked_pattern_count: 2,
+        disliked_pattern_count: 1,
+        suggested_rule_count: 3,
+        proposal_candidate_count: 3,
+        candidate_status: "review_required_not_activated",
+        summary:
+          "Read-only feedback evolution report: 2 liked pattern(s), 1 disliked pattern(s), 3 review candidate(s).",
+      } as T);
     case "test_llm_connection":
       return Promise.resolve({
         ok: true,

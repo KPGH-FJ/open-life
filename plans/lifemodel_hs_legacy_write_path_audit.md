@@ -98,6 +98,23 @@ Because an override can still write durable LifeModel truth, Calibration
 direct/evolution remains a high-risk legacy direct-write blocker until removed
 or converted to proposal-first.
 
+## W83 Feedback Evolution Legacy Direct Apply Gate / Proposal-First Candidate Path
+
+W83 adds a backend dev/migration gate to
+`src-tauri/src/commands/feedback.rs::apply_feedback_evolution`. The command now
+fails closed by default and only enters legacy direct persistence when an
+explicit `FeedbackEvolutionLegacyDirectApplyOverride` with dev/migration
+purpose is supplied. The legacy response is metadata-safe: it returns
+counts/status/warnings only and does not return raw feedback text, raw
+conversation inference, raw LifeModel, or raw evolution rule payloads.
+
+`generate_evolution_report` is now read-only. It returns metadata-safe
+counts/status and does not write LifeModel or `evolution_rules` truth. Feedback
+signals remain low-risk source data, not accepted truth. Because an override can
+still write durable LifeModel truth, Feedback evolution direct apply remains a
+high-risk legacy direct-write blocker until removed or converted to
+proposal/evidence-first.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
@@ -112,8 +129,9 @@ or converted to proposal-first.
 | Builder session persistence | `openlife-core/src/builder/store.rs`; `src-tauri/src/commands/builder.rs::{builder_start,builder_step,builder_delete_session}` | low-risk transient state | Stores unfinished/review sessions separately from accepted LifeModel truth. | Keep as transient workflow state; delete or expire stale sessions. |
 | Calibration proposal flow | `src-tauri/src/commands/calibration.rs::calibration_create_proposals`; `apply_calibration(mode = "proposal")`; `frontend/src/pages/CalibrationPage.tsx`; `frontend/src/pages/DashboardPage.tsx` | already proposal-first | Change risk is assessed before proposal creation; identity values, long-term goals, and similar paths are high risk; proposals link to AgentRun; normal Calibration/Dashboard product flow writes ProposalStore rather than durable LifeModel truth. | Keep this as the product default and route all calibration changes through Review Center. |
 | Calibration direct/evolution apply | `src-tauri/src/commands/calibration.rs::{run_micro_evolution,apply_calibration(mode = "direct")}` | legacy direct write requiring future convergence | W82 guard present: both commands fail closed by default and require explicit Calibration legacy direct apply dev/migration override for remaining legacy persistence; responses are metadata-safe and omit raw LifeModel/calibration/evolution payloads. | Remove the remaining override capability or convert direct/evolution fully to proposal-first before treating Calibration as converged. |
-| Feedback signals | `openlife-core/src/feedback.rs::{save_feedback,log_event,save_conversation_inference,fetch_evolution_signals}`; `src-tauri/src/lib.rs::capture_conversation_signals` | low-risk transient state | Append-only local feedback, analytics, and inference rows; they are signals, not accepted LifeModel truth. | Promote useful signals into EvidenceStore records and proposals; add retention/deletion policy per ADR 0013. |
-| Feedback evolution direct writes | `src-tauri/src/commands/feedback.rs::{apply_feedback_evolution,generate_evolution_report}` | legacy direct write requiring future convergence | User/settings command path; central save creates metadata/snapshot where requested. | Convert suggested rules and feedback-driven model changes into proposals or HS evidence/heuristic candidates. |
+| Feedback signals | `openlife-core/src/feedback.rs::{save_feedback,log_event,save_conversation_inference,fetch_evolution_signals}`; `src-tauri/src/commands/feedback.rs::{save_feedback,log_analytics_event}`; `src-tauri/src/lib.rs::capture_conversation_signals` | low-risk transient state | Append-only local feedback, analytics, and inference rows; they are source data signals, not accepted LifeModel truth. | Promote useful signals into EvidenceStore records and proposals; add retention/deletion policy per ADR 0013. |
+| Feedback evolution direct apply | `src-tauri/src/commands/feedback.rs::apply_feedback_evolution` | legacy direct write requiring future convergence | W83 guard present: command fails closed by default and requires explicit Feedback evolution legacy direct apply dev/migration override for the remaining legacy direct apply path; response is metadata-safe and omits raw feedback, conversation inference, LifeModel, and evolution rule payloads. | Remove the remaining override capability or convert feedback-driven model changes fully to proposal/evidence-first before treating Feedback evolution as converged. |
+| Feedback evolution report | `src-tauri/src/commands/feedback.rs::generate_evolution_report`; `openlife-core/src/feedback.rs::generate_evolution_report` | read-only low-risk report | W83 read-only report: command returns metadata-safe counts/status only and does not write LifeModel or `evolution_rules` truth. | Keep report read-only; future candidate creation may write only reviewable Proposal/Evidence records, not active rules or LifeModel truth. |
 | State history and current state | `openlife-core/src/memory.rs::record_state_entry`; `src-tauri/src/commands/state.rs::record_state` | low-risk transient state | User-initiated state samples append to `state_history`; current custom state dimension and `last_updated` are updated directly, not identity/values. | Move to StateStore with TTL, source, confidence, and privacy metadata; require proposals before promoting to durable identity/preference. |
 | Daily goals and chat check-in | `src-tauri/src/commands/state.rs::{add_daily_goal,update_daily_goal,delete_daily_goal,toggle_daily_goal}`; `src-tauri/src/lib.rs::try_auto_checkin_daily_goals` call sites | low-risk transient state | Directly mutates daily goals/task completion only; chat auto-check-in is keyword-triggered and does not edit long-term goal definitions. | Keep as short-lived task state or migrate to StateStore; any promotion to long-term goals remains proposal-first. |
 | Raw chat and memory records | `openlife-core/src/memory.rs::{save_message,save_memory_record}`; `src-tauri/src/lib.rs::persist_chat_message_if_needed`; `src-tauri/src/commands/memory.rs::index_memory_chunk` | low-risk transient state | Local raw/source records with privacy tags; user/manual indexing is explicit; raw memory is not accepted HS truth. | Preserve as raw life data with retention/deletion controls; generated durable memory claims should use MemoryWrite proposals or EvidenceStore. |
@@ -155,7 +173,9 @@ guard; as of W80, manual LifeModel editor save also has a metadata-safe manual
 override audit guard; as of W81, Builder legacy direct apply defaults fail
 closed and no-signal completion is no-write/session-only; as of W82,
 Calibration direct/evolution defaults fail closed and normal flow is
-proposal-first. These guards are not convergence completion.
+proposal-first; as of W83, Feedback evolution direct apply defaults fail
+closed and `generate_evolution_report` is read-only/no LifeModel or
+`evolution_rules` write. These guards are not convergence completion.
 
 ## Convergence Backlog
 
@@ -165,8 +185,9 @@ proposal-first. These guards are not convergence completion.
 3. Remove or fully proposal-first-convert Calibration direct mode and
    micro-evolution legacy persistence; keep normal UI flow on
    `calibration_create_proposals`.
-4. Convert feedback evolution and `evolution_rules` updates into EvidenceStore
-   records plus heuristic or LifeModel proposals.
+4. Remove or fully proposal/evidence-first-convert Feedback evolution direct
+   apply and `evolution_rules` updates; keep `generate_evolution_report`
+   read-only unless it creates only reviewable Proposal/Evidence records.
 5. Split transient state into StateStore with TTL/source/confidence/privacy
    metadata; require proposals before durable preference or identity promotion.
 6. Keep raw chat/memory/vector writes as local source data with retention,

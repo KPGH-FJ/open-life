@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W82 Calibration direct apply legacy gate complete
+> Status: authoritative document index for Agents, W83 Feedback evolution legacy direct apply gate complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W82 completion/status index. This is not a second roadmap.
+   - Compact W1-W83 completion/status index. This is not a second roadmap.
 5. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
@@ -36,7 +36,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W82 Calibration direct apply legacy gate complete**.
+Current latest status is **W83 Feedback evolution legacy direct apply gate complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -210,6 +210,18 @@ LifeModel, raw calibration, or raw evolution payloads. Normal Calibration and
 Dashboard product flow uses `calibration_create_proposals` / proposal mode and
 writes ProposalStore entries; Calibration direct/evolution capability remains a
 high-risk direct-write blocker and is not fully converged.
+W83 adds a backend Feedback evolution legacy direct apply dev/migration gate in
+`src-tauri/src/commands/feedback.rs`. `apply_feedback_evolution` now fails
+closed by default and only enters the legacy direct write path when an explicit
+`FeedbackEvolutionLegacyDirectApplyOverride` is supplied. Legacy responses are
+metadata-safe and do not return raw feedback text, raw conversation inference,
+raw LifeModel, or raw evolution rule payloads. `generate_evolution_report` is
+now read-only and returns metadata-safe counts/status only; it does not write
+LifeModel or `evolution_rules` truth. The settings UI presents the result as a
+read-only candidate report. The W79 inventory separates Feedback signals as
+low-risk source data and the read-only report from the Feedback evolution
+direct-apply blocker; the remaining override capability means Feedback
+evolution direct apply is still not fully converged.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -232,6 +244,10 @@ W82 reduces Calibration direct/evolution risk with a default fail-closed
 dev/migration gate and keeps normal Calibration/Dashboard flow proposal-first,
 but the remaining override capability still means Calibration direct/evolution
 is not fully converged.
+W83 reduces Feedback evolution direct-apply risk with a default fail-closed
+dev/migration gate and makes `generate_evolution_report` read-only, but the
+remaining override capability still means Feedback evolution direct apply is
+not fully converged.
 
 Hard current constraints:
 
@@ -286,7 +302,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W82 Compression Map
+## 3. W1-W83 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -323,6 +339,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W80 | Manual LifeModel editor explicit override audit guard | Internal backend save-path audit only; records metadata-safe manual override event after successful `save_life_model`, keeps manual editor a high-risk legacy direct-write blocker and keeps convergence false |
 | W81 | Builder legacy direct apply dev-gate / no-signal completion guard | Backend Builder guard only; `builder_apply_signals` defaults fail closed and requires explicit dev/migration override for legacy direct apply, no-signal completion is session-only/no durable LifeModel write, normal `builder_create_proposals` remains proposal-first; Builder legacy path remains a high-risk blocker |
 | W82 | Calibration direct apply legacy gate / proposal-first default | Backend Calibration guard plus Dashboard normal-flow update; `apply_calibration(mode="direct")` and `run_micro_evolution` default fail closed and require explicit Calibration legacy direct apply dev/migration override, legacy output is metadata-safe, normal `calibration_create_proposals` / proposal mode writes ProposalStore; Calibration direct/evolution remains a high-risk blocker |
+| W83 | Feedback evolution legacy direct apply gate / read-only report | Backend Feedback guard plus settings UI copy update; `apply_feedback_evolution` defaults fail closed and requires explicit Feedback evolution legacy direct apply dev/migration override, legacy output is metadata-safe, `generate_evolution_report` is read-only/no LifeModel or `evolution_rules` write; Feedback evolution direct apply remains a high-risk blocker |
 
 ## 4. Current Authoritative Entry Points
 
@@ -330,7 +347,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W82 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W83 structured status index and compressed guardrail map. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -422,13 +439,18 @@ and micro-evolution persistence, keeps legacy responses metadata-safe, and
 keeps normal product flow on `calibration_create_proposals`; Calibration
 direct/evolution remains a high-risk blocker until removed or converted to
 proposal-first.
+W83 adds a default fail-closed dev/migration gate to Feedback evolution direct
+apply, keeps legacy responses metadata-safe, and makes
+`generate_evolution_report` read-only/no active `evolution_rules` write;
+Feedback evolution direct apply remains a high-risk blocker until removed or
+converted to proposal-first.
 
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W82 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W83 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -452,10 +474,11 @@ low-energy collaboration rule candidate complete -> W77 accepted rule to
 RuntimeHSPacket selection proof complete -> W78 run trace visibility proof
 complete -> W79 legacy direct-write convergence inventory guard complete ->
 W80 manual LifeModel override audit guard complete -> W81 Builder legacy direct
-apply dev-gate complete -> W82 Calibration direct apply legacy gate complete.
+apply dev-gate complete -> W82 Calibration direct apply legacy gate complete
+-> W83 Feedback evolution legacy direct apply gate complete.
 Future direct-write convergence should start from the W79 inventory, W80 manual
-editor audit state, W81 Builder guard state, W82 Calibration guard state, and
-the legacy audit map, without
+editor audit state, W81 Builder guard state, W82 Calibration guard state, W83
+Feedback evolution guard state, and the legacy audit map, without
 marking any blocker converged until code paths are actually changed and
 verified. Any future
 default Chat executor implementation

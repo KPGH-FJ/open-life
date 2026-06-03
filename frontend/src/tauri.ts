@@ -930,17 +930,38 @@ export async function getFeedbackSummary(): Promise<{
   return safeInvoke("get_feedback_summary");
 }
 
-export async function applyFeedbackEvolution(): Promise<string> {
-  return safeInvoke<string>("apply_feedback_evolution");
+export interface FeedbackEvolutionLegacyDirectApplyResult {
+  success: boolean;
+  legacy: boolean;
+  warning: string;
+  applied: boolean;
+  applied_change_count: number;
+  durable_lifemodel_write: boolean;
+  message: string;
+  metadata_safe: boolean;
 }
 
-export async function generateEvolutionReport(): Promise<{
+export interface FeedbackEvolutionReportResult {
+  success: boolean;
+  read_only: boolean;
+  metadata_safe: boolean;
+  durable_lifemodel_write: boolean;
+  evolution_rules_write: boolean;
+  applied_rule_count: number;
+  liked_pattern_count: number;
+  disliked_pattern_count: number;
+  suggested_rule_count: number;
+  proposal_candidate_count: number;
+  candidate_status: string;
   summary: string;
-  liked_patterns: string[];
-  disliked_patterns: string[];
-  applied_rules: string[];
-}> {
-  return safeInvoke("generate_evolution_report");
+}
+
+export async function applyFeedbackEvolution(): Promise<FeedbackEvolutionLegacyDirectApplyResult> {
+  return safeInvoke<FeedbackEvolutionLegacyDirectApplyResult>("apply_feedback_evolution");
+}
+
+export async function generateEvolutionReport(): Promise<FeedbackEvolutionReportResult> {
+  return safeInvoke<FeedbackEvolutionReportResult>("generate_evolution_report");
 }
 
 export async function runMicroEvolution(): Promise<{
