@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-06-02
-> Status: W77 accepted rule selection proof complete
+> Last updated: 2026-06-03
+> Status: W78 trace visibility proof complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W77 accepted rule selection proof complete**.
+Current latest status is **W78 trace visibility proof complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -119,6 +119,22 @@ AgentRun ids. Privacy/model route policy cannot be relaxed; local-only policy
 is kept or strengthened. W77 adds no command/frontend surface, runs no
 runtime/model/tool, writes no LifeModel/Memory/Heuristic truth, does not
 activate a Heuristic, and does not affect default Chat.
+W78 adds a pure core low-energy rule trace visibility proof in
+`openlife-core/src/agent/maturation.rs`. It defines
+`LowEnergyRuleTraceVisibilityInput`,
+`LowEnergyRuleTraceVisibilityReport`, `LowEnergyRuleTraceMetadata`,
+`evaluate_low_energy_rule_trace_visibility`, and
+`ensure_low_energy_rule_trace_visibility`. W78 proves that W77 selected
+guidance can be exposed by future runtime/run trace metadata without raw
+content: selected guidance summary/hash, candidate proposal id/hash, candidate
+rule digest, evidence/proposal/AgentRun lineage id/hash/count/status/type,
+selected policy ids, enforced route policy, and report/payload hashes. Blocked
+or non-selected W77 reports, non-planning tasks, non-low-energy domains, raw
+trace payloads, privacy/model route relaxation, default Chat cutover hints,
+runtime/model/tool execution hints, AgentRun writes, and Heuristic activation
+fail closed. W78 adds no command/frontend surface, runs no runtime/model/tool,
+writes no AgentRun/LifeModel/Memory/Heuristic truth, does not activate a
+Heuristic, and does not affect default Chat.
 
 Hard boundaries:
 
@@ -163,6 +179,8 @@ Hard boundaries:
   low-energy collaboration rule candidate helper.
 - Ordinary `send_message` / `start_stream_message` must not call the W77
   accepted low-energy rule selection helper.
+- Ordinary `send_message` / `start_stream_message` must not call the W78
+  low-energy rule trace visibility helper.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -172,7 +190,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W77 progress index
+4. This W1-W78 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -191,7 +209,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W77 Structured Index
+## W1-W78 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -271,7 +289,8 @@ permission.
 | W74 | Non-Default LifeModel Maturation Invocation | Done | Pure core explicit invocation harness/report in `maturation.rs` | MS non-default invocation only; calls W73 first, blocked writes no stores, ready writes EvidenceStore + ProposalStore only, no runtime/model/tool, no direct LifeModel/Memory/Heuristic/Chat/AgentRun/MCP audit/external write | No; ordinary send/stream stay `legacy_stream` and do not call it | W75 proposal outcome evidence link |
 | W75 | LifeModel Maturation Proposal Outcome Evidence Link | Done | Core helper/report plus minimal internal proposal accept/reject/edit wiring | MS ProposalOutcome evidence only for maturation lineage proposals; accept/edit keep existing apply semantics, reject records negative/opposing evidence without apply; no runtime/model/tool, no new direct LifeModel/Memory/Heuristic writes | No; ordinary send/stream stay `legacy_stream` and do not call it | W76 low-energy collaboration rule candidate |
 | W76 | Low-Energy Collaboration Rule Candidate | Done | Pure core evaluator/proposer in `maturation.rs` | MS candidate aggregation only; accepted/edited/rejected outcome ids plus source/proposal/run lineage, opposing evidence blocks/weakens, ready writes only pending ProposalStore candidate proposal, no active Heuristic/rule | No; ordinary send/stream stay `legacy_stream` and do not call it | W77 accepted rule selection proof |
-| W77 | Accepted Rule To RuntimeHSPacket Selection Proof | Done | Pure core evaluator/report in `maturation.rs` | MS selection proof only; requires accepted W76 candidate proposal, planning task, low-energy domain, metadata-safe guidance, lineage retained, privacy/model route policy not relaxed, zero side-effect counters | No; ordinary send/stream stay `legacy_stream` and do not call it | W78 run trace visibility |
+| W77 | Accepted Rule To RuntimeHSPacket Selection Proof | Done | Pure core evaluator/report in `maturation.rs` | MS selection proof only; requires accepted W76 candidate proposal, planning task, low-energy domain, metadata-safe guidance, lineage retained, privacy/model route policy not relaxed, zero side-effect counters | No; ordinary send/stream stay `legacy_stream` and do not call it | W78 run trace visibility proof |
+| W78 | LifeModel Maturation Run Trace Visibility Proof | Done | Pure core evaluator/report in `maturation.rs` | MS trace visibility proof only; W77 selected guidance and lineage visible as summary/hash/id/count/status/type metadata, privacy/local-only policy preserved, raw payload/policy relaxation/execution/cutover hints fail closed, zero side-effect counters | No; ordinary send/stream stay `legacy_stream` and do not call it | Future runtime trace integration only through separate reviewed task |
 
 ## Folded Boundary Summary
 
@@ -301,9 +320,10 @@ above. The boundary meaning is preserved:
   attach that adapter, emit a real stream, open an event channel, run
   runtime/model/tool, write business records, grant route cutover, grant
   migration permission, or change default Chat routing.
-- W73-W77 are LifeModel maturation slices only: readiness, explicit
+- W73-W78 are LifeModel maturation slices only: readiness, explicit
   non-default invocation, proposal outcome evidence link, and low-energy
-  collaboration rule candidate aggregation plus accepted-rule selection proof.
+  collaboration rule candidate aggregation plus accepted-rule selection proof
+  and trace visibility proof.
   They do not migrate maturation into runtime execution, do not add ordinary
   Chat auto-maturation, and do not authorize default Chat routing changes.
 
@@ -321,7 +341,7 @@ plans/lifemodel_maturation_goal_plan.md -> W73 LifeModel maturation readiness
 report complete -> W74 non-default maturation invocation complete -> W75
 proposal outcome evidence link complete -> W76 low-energy collaboration rule
 candidate complete -> W77 accepted rule selection proof complete -> W78 run
-trace visibility next. Future default Chat
+trace visibility proof complete. Future default Chat
 executor implementation discussion may build on the W65-W72 proofs only through
 a separately reviewed task; keep default Chat on legacy_stream unless that
 separate task explicitly implements, reviews, verifies, and authorizes a route

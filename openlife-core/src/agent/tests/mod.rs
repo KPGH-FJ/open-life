@@ -20,3 +20,4 @@ mod runtime_integration;
 mod runtime_migration_gate;
 mod selector;
 mod strategy;
+mod trace_visibility;

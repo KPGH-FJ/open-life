@@ -5974,6 +5974,10 @@ mod hs_runtime_tests {
             "AcceptedLowEnergyRuleSelectionHSPacketAuditProof",
             "evaluate_accepted_low_energy_rule_selection",
             "ensure_accepted_low_energy_rule_selection",
+            "LowEnergyRuleTraceVisibilityInput",
+            "LowEnergyRuleTraceVisibilityReport",
+            "evaluate_low_energy_rule_trace_visibility",
+            "ensure_low_energy_rule_trace_visibility",
         ];
 
         for forbidden in forbidden_command_surfaces {

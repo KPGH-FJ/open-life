@@ -58,8 +58,9 @@ pub use hs_selector::{
 };
 pub use maturation::{
     ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
-    ensure_lifemodel_maturation_readiness, evaluate_accepted_low_energy_rule_selection,
-    evaluate_lifemodel_maturation_readiness, evaluate_low_energy_collaboration_rule_candidate,
+    ensure_lifemodel_maturation_readiness, ensure_low_energy_rule_trace_visibility,
+    evaluate_accepted_low_energy_rule_selection, evaluate_lifemodel_maturation_readiness,
+    evaluate_low_energy_collaboration_rule_candidate, evaluate_low_energy_rule_trace_visibility,
     propose_low_energy_collaboration_rule_candidate,
     run_lifemodel_maturation_non_default_invocation,
     AcceptedLowEnergyRuleSelectionHSPacketAuditProof, AcceptedLowEnergyRuleSelectionInput,
@@ -67,9 +68,11 @@ pub use maturation::{
     LifeModelMaturationNonDefaultInvocationReport, LifeModelMaturationReadinessInput,
     LifeModelMaturationReadinessReport, LifeModelMaturationReadinessSideEffectBudget,
     LifeModelMaturationService, LowEnergyCollaborationRuleCandidateInput,
-    LowEnergyCollaborationRuleCandidateReport, MaturationDropReason, MaturationGovernanceAudit,
-    MaturationGovernanceSummary, MaturationInput, MaturationOutput, MaturationProposalCandidate,
-    MaturationReport, MaturationService,
+    LowEnergyCollaborationRuleCandidateReport, LowEnergyRuleTraceLineageItem,
+    LowEnergyRuleTraceLineageSummary, LowEnergyRuleTraceMetadata,
+    LowEnergyRuleTraceVisibilityInput, LowEnergyRuleTraceVisibilityReport, MaturationDropReason,
+    MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
+    MaturationProposalCandidate, MaturationReport, MaturationService,
 };
 pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};

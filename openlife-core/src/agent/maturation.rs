@@ -1098,6 +1098,397 @@ pub fn ensure_accepted_low_energy_rule_selection(
     }
 }
 
+#[derive(Clone)]
+pub struct LowEnergyRuleTraceVisibilityInput {
+    pub selection_report: AcceptedLowEnergyRuleSelectionReport,
+    pub trace_payload: Option<Value>,
+    pub default_chat_selected_adapter_path: String,
+    pub ordinary_chat_entrypoint_attached: bool,
+    pub runtime_executed: bool,
+    pub model_called: bool,
+    pub tool_called: bool,
+    pub life_model_written: bool,
+    pub memory_written: bool,
+    pub heuristic_activated: bool,
+    pub agent_run_written: bool,
+}
+
+impl LowEnergyRuleTraceVisibilityInput {
+    pub fn for_selection_report(selection_report: AcceptedLowEnergyRuleSelectionReport) -> Self {
+        Self {
+            selection_report,
+            trace_payload: None,
+            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            ordinary_chat_entrypoint_attached: false,
+            runtime_executed: false,
+            model_called: false,
+            tool_called: false,
+            life_model_written: false,
+            memory_written: false,
+            heuristic_activated: false,
+            agent_run_written: false,
+        }
+    }
+
+    pub fn with_trace_payload(mut self, trace_payload: Value) -> Self {
+        self.trace_payload = Some(trace_payload);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LowEnergyRuleTraceLineageItem {
+    pub id: String,
+    pub id_hash: String,
+    pub record_type: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LowEnergyRuleTraceLineageSummary {
+    pub items: Vec<LowEnergyRuleTraceLineageItem>,
+    pub count: usize,
+    pub ids_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LowEnergyRuleTraceMetadata {
+    pub schema: String,
+    pub trace_kind: String,
+    pub trace_metadata_fields: Vec<String>,
+    pub trace_metadata_field_count: usize,
+    pub selection_report_hash: String,
+    pub trace_payload_hash: Option<String>,
+    pub selected_guidance_summary: Option<String>,
+    pub selected_guidance_hash: Option<String>,
+    pub runtime_hs_packet_guidance_hash: Option<String>,
+    pub selected_candidate_proposal_id: Option<String>,
+    pub selected_candidate_proposal_hash: Option<String>,
+    pub selected_candidate_rule_digest: Option<String>,
+    pub target_task_kind: AgentTaskKind,
+    pub target_domain: String,
+    pub privacy_topic: PolicyTopic,
+    pub enforced_route_policy: ModelRoutePolicy,
+    pub selected_policy_ids: Vec<String>,
+    pub selected_policy_count: usize,
+    pub evidence_lineage: LowEnergyRuleTraceLineageSummary,
+    pub proposal_lineage: LowEnergyRuleTraceLineageSummary,
+    pub agent_run_lineage: LowEnergyRuleTraceLineageSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LowEnergyRuleTraceVisibilityReport {
+    pub trace_visibility_ready: bool,
+    pub selected_rule_visible: bool,
+    pub runtime_hs_packet_guidance_visible: bool,
+    pub evidence_lineage_visible: bool,
+    pub proposal_lineage_visible: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub default_chat_unchanged: bool,
+    pub ordinary_chat_entrypoint_attached: bool,
+    pub runtime_executed: bool,
+    pub model_called: bool,
+    pub tool_called: bool,
+    pub life_model_written: bool,
+    pub memory_written: bool,
+    pub heuristic_activated: bool,
+    pub agent_run_written: bool,
+    pub privacy_policy_preserved: bool,
+    pub local_only_policy_preserved: bool,
+    pub target_task_kind: AgentTaskKind,
+    pub target_domain: String,
+    pub privacy_topic: PolicyTopic,
+    pub enforced_route_policy: ModelRoutePolicy,
+    pub trace_metadata: LowEnergyRuleTraceMetadata,
+    pub blocking_reasons: Vec<String>,
+    pub wrote_evidence_count: u32,
+    pub wrote_proposal_count: u32,
+    pub wrote_life_model_count: u32,
+    pub wrote_memory_count: u32,
+    pub wrote_heuristic_count: u32,
+    pub wrote_chat_message_count: u32,
+    pub wrote_agent_run_count: u32,
+    pub wrote_mcp_audit_count: u32,
+    pub wrote_external_count: u32,
+    pub ran_runtime: bool,
+    pub ran_model: bool,
+    pub ran_tool: bool,
+}
+
+pub fn evaluate_low_energy_rule_trace_visibility(
+    input: LowEnergyRuleTraceVisibilityInput,
+) -> LowEnergyRuleTraceVisibilityReport {
+    let selection_report = input.selection_report;
+    let mut blocking_reasons = Vec::new();
+    let mut metadata_safe = selection_report.metadata_safe
+        && selection_report.hs_packet_audit_proof.metadata_safe
+        && !selection_report.contains_raw_content;
+    let mut contains_raw_content = selection_report.contains_raw_content;
+    let default_chat_unchanged =
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+
+    if !selection_report.selected {
+        push_unique_reason(&mut blocking_reasons, "w77_selection_not_selected");
+    }
+    if !selection_report.blocking_reasons.is_empty() {
+        push_unique_reason(&mut blocking_reasons, "w77_selection_blocked");
+        for reason in &selection_report.blocking_reasons {
+            push_unique_reason(&mut blocking_reasons, reason);
+        }
+    }
+    if !selection_report.metadata_safe || !selection_report.hs_packet_audit_proof.metadata_safe {
+        metadata_safe = false;
+        push_unique_reason(&mut blocking_reasons, "w77_selection_metadata_not_safe");
+    }
+    if selection_report.contains_raw_content {
+        contains_raw_content = true;
+        metadata_safe = false;
+        push_unique_reason(&mut blocking_reasons, "w77_selection_contains_raw_content");
+    }
+    if !selection_report.planning_task_only
+        || !selection_report.hs_packet_audit_proof.planning_task_only
+        || !matches!(selection_report.target_task_kind, AgentTaskKind::Planning)
+    {
+        push_unique_reason(&mut blocking_reasons, "non_planning_task");
+    }
+    if !selection_report.low_energy_domain_only
+        || !selection_report
+            .hs_packet_audit_proof
+            .low_energy_domain_only
+        || !is_low_energy_rule_candidate_domain(&selection_report.target_domain)
+    {
+        push_unique_reason(&mut blocking_reasons, "non_low_energy_planning_domain");
+    }
+    if selection_report.privacy_policy_relaxed
+        || selection_report
+            .hs_packet_audit_proof
+            .privacy_policy_relaxed
+    {
+        push_unique_reason(&mut blocking_reasons, "privacy_policy_relaxed");
+    }
+    if !default_chat_unchanged {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "default_chat_route_migration_assumed",
+        );
+    }
+    if input.ordinary_chat_entrypoint_attached {
+        push_unique_reason(&mut blocking_reasons, "ordinary_chat_entrypoint_attached");
+    }
+    if input.runtime_executed {
+        push_unique_reason(&mut blocking_reasons, "runtime_execution_implied");
+    }
+    if input.model_called {
+        push_unique_reason(&mut blocking_reasons, "model_call_implied");
+    }
+    if input.tool_called {
+        push_unique_reason(&mut blocking_reasons, "tool_call_implied");
+    }
+    if input.life_model_written {
+        push_unique_reason(&mut blocking_reasons, "lifemodel_write_implied");
+    }
+    if input.memory_written {
+        push_unique_reason(&mut blocking_reasons, "memory_write_implied");
+    }
+    if input.heuristic_activated {
+        push_unique_reason(&mut blocking_reasons, "heuristic_activation_implied");
+    }
+    if input.agent_run_written {
+        push_unique_reason(&mut blocking_reasons, "agent_run_write_implied");
+    }
+
+    let mut trace_payload_hash = None;
+    let mut trace_payload_relaxes_policy = false;
+    if let Some(trace_payload) = input.trace_payload.as_ref() {
+        trace_payload_hash = Some(sha256_hex(trace_payload.to_string().as_bytes()));
+        if trace_payload_metadata_not_safe(trace_payload) {
+            metadata_safe = false;
+            push_unique_reason(&mut blocking_reasons, "trace_payload_metadata_not_safe");
+        }
+        if trace_payload_contains_raw_content(trace_payload) {
+            metadata_safe = false;
+            contains_raw_content = true;
+            push_unique_reason(&mut blocking_reasons, "trace_payload_contains_raw_content");
+        }
+        if trace_payload_relaxes_privacy_or_route_policy(trace_payload) {
+            trace_payload_relaxes_policy = true;
+            push_unique_reason(
+                &mut blocking_reasons,
+                "trace_payload_relaxes_privacy_or_route_policy",
+            );
+        }
+        if trace_payload_implies_default_chat_route_cutover(trace_payload) {
+            push_unique_reason(
+                &mut blocking_reasons,
+                "trace_payload_implies_default_chat_route_cutover",
+            );
+        }
+        if trace_payload_implies_runtime_execution(trace_payload) {
+            push_unique_reason(
+                &mut blocking_reasons,
+                "trace_payload_implies_runtime_execution",
+            );
+        }
+        if trace_payload_implies_model_call(trace_payload) {
+            push_unique_reason(&mut blocking_reasons, "trace_payload_implies_model_call");
+        }
+        if trace_payload_implies_tool_call(trace_payload) {
+            push_unique_reason(&mut blocking_reasons, "trace_payload_implies_tool_call");
+        }
+        if trace_payload_implies_heuristic_activation(trace_payload) {
+            push_unique_reason(
+                &mut blocking_reasons,
+                "trace_payload_implies_heuristic_activation",
+            );
+        }
+    }
+
+    let selected_rule_visible = selection_report.selected
+        && selection_report.selected_guidance_summary.is_some()
+        && selection_report.selected_candidate_proposal_id.is_some()
+        && selection_report.selected_candidate_rule_digest.is_some();
+    let runtime_hs_packet_guidance_visible = selected_rule_visible
+        && selection_report
+            .hs_packet_audit_proof
+            .selected_guidance_summary
+            == selection_report.selected_guidance_summary
+        && selection_report
+            .hs_packet_audit_proof
+            .selected_candidate_proposal_id
+            == selection_report.selected_candidate_proposal_id
+        && selection_report
+            .hs_packet_audit_proof
+            .selected_candidate_rule_digest
+            == selection_report.selected_candidate_rule_digest;
+    let evidence_lineage_visible = !selection_report.source_outcome_evidence_ids.is_empty()
+        && selection_report.source_outcome_evidence_ids
+            == selection_report
+                .hs_packet_audit_proof
+                .source_outcome_evidence_ids;
+    let proposal_lineage_visible = !selection_report.source_proposal_ids.is_empty()
+        && selection_report.source_proposal_ids
+            == selection_report.hs_packet_audit_proof.source_proposal_ids;
+
+    if !selected_rule_visible {
+        push_unique_reason(&mut blocking_reasons, "selected_rule_not_visible");
+    }
+    if !runtime_hs_packet_guidance_visible {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "runtime_hs_packet_guidance_not_visible",
+        );
+    }
+    if !evidence_lineage_visible {
+        push_unique_reason(&mut blocking_reasons, "evidence_lineage_not_visible");
+    }
+    if !proposal_lineage_visible {
+        push_unique_reason(&mut blocking_reasons, "proposal_lineage_not_visible");
+    }
+
+    let privacy_policy_preserved = !selection_report.privacy_policy_relaxed
+        && !selection_report
+            .hs_packet_audit_proof
+            .privacy_policy_relaxed
+        && !trace_payload_relaxes_policy;
+    let local_only_required = selection_report.current_route_policy == ModelRoutePolicy::LocalOnly
+        || selection_report.enforced_route_policy == ModelRoutePolicy::LocalOnly
+        || selection_report.hs_packet_audit_proof.enforced_route_policy
+            == ModelRoutePolicy::LocalOnly
+        || selection_report
+            .hs_packet_audit_proof
+            .selected_policy_ids
+            .iter()
+            .any(|policy_id| policy_id == BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY)
+        || topic_requires_local_only(selection_report.privacy_topic);
+    let local_only_policy_preserved = !trace_payload_relaxes_policy
+        && (!local_only_required
+            || selection_report.enforced_route_policy == ModelRoutePolicy::LocalOnly);
+    if !privacy_policy_preserved {
+        push_unique_reason(&mut blocking_reasons, "privacy_policy_not_preserved");
+    }
+    if !local_only_policy_preserved {
+        push_unique_reason(&mut blocking_reasons, "local_only_policy_not_preserved");
+    }
+
+    let trace_metadata = low_energy_rule_trace_metadata(&selection_report, trace_payload_hash);
+    let trace_visibility_ready = blocking_reasons.is_empty()
+        && selected_rule_visible
+        && runtime_hs_packet_guidance_visible
+        && evidence_lineage_visible
+        && proposal_lineage_visible
+        && metadata_safe
+        && !contains_raw_content
+        && default_chat_unchanged
+        && !input.ordinary_chat_entrypoint_attached
+        && !input.runtime_executed
+        && !input.model_called
+        && !input.tool_called
+        && !input.life_model_written
+        && !input.memory_written
+        && !input.heuristic_activated
+        && !input.agent_run_written
+        && privacy_policy_preserved
+        && local_only_policy_preserved;
+
+    LowEnergyRuleTraceVisibilityReport {
+        trace_visibility_ready,
+        selected_rule_visible,
+        runtime_hs_packet_guidance_visible,
+        evidence_lineage_visible,
+        proposal_lineage_visible,
+        metadata_safe,
+        contains_raw_content,
+        default_chat_unchanged,
+        ordinary_chat_entrypoint_attached: input.ordinary_chat_entrypoint_attached,
+        runtime_executed: input.runtime_executed,
+        model_called: input.model_called,
+        tool_called: input.tool_called,
+        life_model_written: input.life_model_written,
+        memory_written: input.memory_written,
+        heuristic_activated: input.heuristic_activated,
+        agent_run_written: input.agent_run_written,
+        privacy_policy_preserved,
+        local_only_policy_preserved,
+        target_task_kind: selection_report.target_task_kind,
+        target_domain: selection_report.target_domain.clone(),
+        privacy_topic: selection_report.privacy_topic,
+        enforced_route_policy: selection_report.enforced_route_policy,
+        trace_metadata,
+        blocking_reasons,
+        wrote_evidence_count: 0,
+        wrote_proposal_count: 0,
+        wrote_life_model_count: 0,
+        wrote_memory_count: 0,
+        wrote_heuristic_count: 0,
+        wrote_chat_message_count: 0,
+        wrote_agent_run_count: 0,
+        wrote_mcp_audit_count: 0,
+        wrote_external_count: 0,
+        ran_runtime: input.runtime_executed,
+        ran_model: input.model_called,
+        ran_tool: input.tool_called,
+    }
+}
+
+pub fn ensure_low_energy_rule_trace_visibility(
+    input: LowEnergyRuleTraceVisibilityInput,
+) -> Result<LowEnergyRuleTraceVisibilityReport> {
+    let report = evaluate_low_energy_rule_trace_visibility(input);
+    if report.trace_visibility_ready {
+        Ok(report)
+    } else {
+        Err(anyhow!(
+            "low-energy rule trace visibility blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaturationInput {
@@ -2199,6 +2590,369 @@ fn guidance_summary_relaxes_privacy_policy(summary: &str) -> bool {
             "disable local-only",
         ],
     )
+}
+
+fn low_energy_rule_trace_metadata(
+    selection_report: &AcceptedLowEnergyRuleSelectionReport,
+    trace_payload_hash: Option<String>,
+) -> LowEnergyRuleTraceMetadata {
+    let selected_guidance_hash = selection_report
+        .selected_guidance_summary
+        .as_deref()
+        .map(|summary| sha256_hex(summary.as_bytes()));
+    let selected_candidate_proposal_hash = selection_report
+        .selected_candidate_proposal_id
+        .as_deref()
+        .map(|id| sha256_hex(id.as_bytes()));
+    let runtime_hs_packet_guidance_hash =
+        selection_report
+            .selected_guidance_summary
+            .as_ref()
+            .map(|summary| {
+                sha256_hex(
+                    json!({
+                        "schema": "w78.runtimeHSPacketGuidanceTrace.v1",
+                        "selectedGuidanceSummary": summary,
+                        "selectedCandidateProposalId": selection_report.selected_candidate_proposal_id.as_deref(),
+                        "selectedCandidateRuleDigest": selection_report.selected_candidate_rule_digest.as_deref(),
+                        "sourceOutcomeEvidenceIds": &selection_report.source_outcome_evidence_ids,
+                        "sourceProposalIds": &selection_report.source_proposal_ids,
+                        "sourceAgentRunIds": &selection_report.source_agent_run_ids,
+                        "selectedPolicyIds": &selection_report.hs_packet_audit_proof.selected_policy_ids,
+                        "enforcedRoutePolicy": selection_report.enforced_route_policy,
+                    })
+                    .to_string()
+                    .as_bytes(),
+                )
+            });
+    let selection_report_json =
+        serde_json::to_string(selection_report).unwrap_or_else(|_| "unserializable".into());
+    let trace_metadata_fields = vec![
+        "selectedGuidanceSummary",
+        "selectedGuidanceHash",
+        "runtimeHSPacketGuidanceHash",
+        "selectedCandidateProposalId",
+        "selectedCandidateProposalHash",
+        "selectedCandidateRuleDigest",
+        "selectionReportHash",
+        "tracePayloadHash",
+        "targetTaskKind",
+        "targetDomain",
+        "privacyTopic",
+        "enforcedRoutePolicy",
+        "selectedPolicyIds",
+        "selectedPolicyCount",
+        "evidenceLineage.items",
+        "evidenceLineage.count",
+        "evidenceLineage.idsHash",
+        "proposalLineage.items",
+        "proposalLineage.count",
+        "proposalLineage.idsHash",
+        "agentRunLineage.items",
+        "agentRunLineage.count",
+        "agentRunLineage.idsHash",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    LowEnergyRuleTraceMetadata {
+        schema: "w78.lowEnergyRuleTraceVisibilityMetadata.v1".into(),
+        trace_kind: "future_runtime_trace_visibility_contract".into(),
+        trace_metadata_field_count: trace_metadata_fields.len(),
+        trace_metadata_fields,
+        selection_report_hash: sha256_hex(selection_report_json.as_bytes()),
+        trace_payload_hash,
+        selected_guidance_summary: selection_report.selected_guidance_summary.clone(),
+        selected_guidance_hash,
+        runtime_hs_packet_guidance_hash,
+        selected_candidate_proposal_id: selection_report.selected_candidate_proposal_id.clone(),
+        selected_candidate_proposal_hash,
+        selected_candidate_rule_digest: selection_report.selected_candidate_rule_digest.clone(),
+        target_task_kind: selection_report.target_task_kind,
+        target_domain: selection_report.target_domain.clone(),
+        privacy_topic: selection_report.privacy_topic,
+        enforced_route_policy: selection_report.enforced_route_policy,
+        selected_policy_count: selection_report
+            .hs_packet_audit_proof
+            .selected_policy_ids
+            .len(),
+        selected_policy_ids: selection_report
+            .hs_packet_audit_proof
+            .selected_policy_ids
+            .clone(),
+        evidence_lineage: low_energy_rule_trace_lineage_summary(
+            &selection_report.source_outcome_evidence_ids,
+            "proposal_outcome_evidence",
+            "selected",
+        ),
+        proposal_lineage: low_energy_rule_trace_lineage_summary(
+            &selection_report.source_proposal_ids,
+            "proposal",
+            "source_linked",
+        ),
+        agent_run_lineage: low_energy_rule_trace_lineage_summary(
+            &selection_report.source_agent_run_ids,
+            "agent_run",
+            "source_linked",
+        ),
+    }
+}
+
+fn low_energy_rule_trace_lineage_summary(
+    ids: &[String],
+    record_type: &str,
+    status: &str,
+) -> LowEnergyRuleTraceLineageSummary {
+    let items = ids
+        .iter()
+        .map(|id| LowEnergyRuleTraceLineageItem {
+            id: id.clone(),
+            id_hash: sha256_hex(id.as_bytes()),
+            record_type: record_type.into(),
+            status: status.into(),
+        })
+        .collect::<Vec<_>>();
+    LowEnergyRuleTraceLineageSummary {
+        count: items.len(),
+        ids_hash: sha256_hex(
+            json!({
+                "recordType": record_type,
+                "status": status,
+                "ids": ids,
+            })
+            .to_string()
+            .as_bytes(),
+        ),
+        items,
+    }
+}
+
+fn trace_payload_metadata_not_safe(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            matches!(normalized.as_str(), "metadatasafe" | "tracemetadatasafe")
+                && value.as_bool() == Some(false)
+                || matches!(
+                    normalized.as_str(),
+                    "containsrawcontent" | "tracecontainsrawcontent"
+                ) && value.as_bool() == Some(true)
+                || trace_payload_metadata_not_safe(value)
+        }),
+        Value::Array(values) => values.iter().any(trace_payload_metadata_not_safe),
+        _ => false,
+    }
+}
+
+fn trace_payload_contains_raw_content(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            if trace_raw_content_presence_key(&normalized) {
+                return value.as_bool().unwrap_or(true);
+            }
+            if trace_raw_content_payload_key(&normalized) {
+                return !matches!(value, Value::Bool(false) | Value::Null);
+            }
+            trace_payload_contains_raw_content(value)
+        }),
+        Value::Array(values) => values.iter().any(trace_payload_contains_raw_content),
+        Value::String(value) => string_looks_secret_like(value),
+        _ => false,
+    }
+}
+
+fn trace_raw_content_presence_key(normalized: &str) -> bool {
+    raw_presence_flag_key(normalized)
+        || matches!(
+            normalized,
+            "containsrawcontent" | "tracecontainsrawcontent" | "rawlifemodeltextincluded"
+        )
+}
+
+fn trace_raw_content_payload_key(normalized: &str) -> bool {
+    raw_outcome_payload_key(normalized)
+        || contains_any(
+            normalized,
+            &[
+                "rawtoolpayload",
+                "rawmemorytext",
+                "memoryrawtext",
+                "rawlifemodeltext",
+                "lifemodelrawtext",
+                "rawlifemodel",
+                "lifemodeltext",
+            ],
+        )
+}
+
+fn trace_payload_relaxes_privacy_or_route_policy(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            if matches!(
+                normalized.as_str(),
+                "privacypolicypreserved"
+                    | "localonlypolicypreserved"
+                    | "localonlypreserved"
+                    | "routepolicypreserved"
+            ) {
+                return trace_value_is_false(value);
+            }
+            if matches!(
+                normalized.as_str(),
+                "enforcedroutepolicy" | "modelroutepolicy" | "currentroutepolicy"
+            ) || privacy_route_override_key(&normalized)
+            {
+                return route_override_value_relaxes_privacy(value);
+            }
+            trace_payload_relaxes_privacy_or_route_policy(value)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(trace_payload_relaxes_privacy_or_route_policy),
+        _ => false,
+    }
+}
+
+fn trace_payload_implies_default_chat_route_cutover(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            match normalized.as_str() {
+                "defaultchatunchanged" => trace_value_is_false(value),
+                "ordinarychatentrypointattached"
+                | "routecutoverpermission"
+                | "migrationpermission"
+                | "defaultchatroutecutover" => trace_value_is_truthy(value),
+                "defaultchatroute" | "selectedadapterpath" | "defaultchatselectedadapterpath" => {
+                    trace_route_value_changes_default_chat(value)
+                }
+                _ => trace_payload_implies_default_chat_route_cutover(value),
+            }
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(trace_payload_implies_default_chat_route_cutover),
+        _ => false,
+    }
+}
+
+fn trace_payload_implies_runtime_execution(value: &Value) -> bool {
+    trace_payload_implies_bool_flag(
+        value,
+        &[
+            "runtimeexecuted",
+            "ranruntime",
+            "runtimeexecution",
+            "runtimeran",
+        ],
+    )
+}
+
+fn trace_payload_implies_model_call(value: &Value) -> bool {
+    trace_payload_implies_bool_flag(value, &["modelcalled", "ranmodel", "modelcall"])
+}
+
+fn trace_payload_implies_tool_call(value: &Value) -> bool {
+    trace_payload_implies_bool_flag(value, &["toolcalled", "rantool", "toolcall"])
+}
+
+fn trace_payload_implies_heuristic_activation(value: &Value) -> bool {
+    trace_payload_implies_bool_flag(
+        value,
+        &[
+            "heuristicactivated",
+            "activatesheuristic",
+            "heuristicactivation",
+        ],
+    )
+}
+
+fn trace_payload_implies_bool_flag(value: &Value, keys: &[&str]) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            if keys.iter().any(|candidate| normalized == *candidate) {
+                return trace_value_is_truthy(value);
+            }
+            trace_payload_implies_bool_flag(value, keys)
+        }),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| trace_payload_implies_bool_flag(value, keys)),
+        _ => false,
+    }
+}
+
+fn trace_route_value_changes_default_chat(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            !normalized.is_empty()
+                && !matches!(
+                    normalized.as_str(),
+                    DEFAULT_CHAT_LEGACY_PATH
+                        | "legacy"
+                        | "false"
+                        | "none"
+                        | "unchanged"
+                        | "default_chat_unchanged"
+                )
+        }
+        Value::Object(_) | Value::Array(_) => {
+            trace_payload_implies_default_chat_route_cutover(value)
+        }
+        _ => false,
+    }
+}
+
+fn trace_value_is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_i64().is_some_and(|value| value > 0),
+        Value::String(value) => {
+            let lower = value.trim().to_ascii_lowercase();
+            matches!(
+                lower.as_str(),
+                "true"
+                    | "yes"
+                    | "enabled"
+                    | "executed"
+                    | "called"
+                    | "activated"
+                    | "written"
+                    | "attached"
+                    | "cutover"
+                    | "migrated"
+                    | "controlled_adapter"
+                    | "controlled adapter"
+            )
+        }
+        Value::Object(_) | Value::Array(_) => trace_payload_contains_truthy_leaf(value),
+        _ => false,
+    }
+}
+
+fn trace_value_is_false(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => !*value,
+        Value::String(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "no" | "disabled" | "not_preserved" | "relaxed"
+        ),
+        _ => false,
+    }
+}
+
+fn trace_payload_contains_truthy_leaf(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.values().any(trace_value_is_truthy),
+        Value::Array(values) => values.iter().any(trace_value_is_truthy),
+        _ => trace_value_is_truthy(value),
+    }
 }
 
 fn candidate_contains_raw_content(candidate: &LifeEventDraft) -> bool {
