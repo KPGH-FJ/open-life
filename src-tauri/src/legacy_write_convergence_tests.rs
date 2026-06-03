@@ -192,6 +192,58 @@ fn legacy_write_convergence_manual_editor_w80_audit_guard_remains_blocker_not_co
 }
 
 #[test]
+fn legacy_write_convergence_builder_w81_dev_gate_guard_present_but_still_blocker() {
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+    let builder_legacy = entry(&entries, "builder_legacy_direct_apply");
+    let builder_normal = entry(&entries, "builder_normal_proposal_flow");
+
+    assert_eq!(
+        builder_normal.current_status,
+        LegacyWriteConvergenceStatus::AlreadyProposalFirst
+    );
+    assert_eq!(
+        builder_normal.safe_mode_status,
+        LegacyWriteSafeModeStatus::ProposalFirstGuardPresent
+    );
+    assert!(builder_normal.normal_product_allowed);
+    assert!(!builder_normal.currently_direct_write);
+    assert!(builder_normal
+        .current_guard_summary
+        .contains("builder_create_proposals"));
+
+    assert_eq!(
+        builder_legacy.risk_class,
+        LegacyWriteRiskClass::HighRiskLegacyDirectWrite
+    );
+    assert_eq!(
+        builder_legacy.current_status,
+        LegacyWriteConvergenceStatus::LegacyDirectWriteBlocker
+    );
+    assert_eq!(
+        builder_legacy.safe_mode_status,
+        LegacyWriteSafeModeStatus::GuardPresent
+    );
+    assert!(!builder_legacy.normal_product_allowed);
+    assert!(builder_legacy.currently_direct_write);
+    assert!(builder_legacy.high_risk_durable_truth_write);
+    assert!(builder_legacy.current_guard_summary.contains("W81"));
+    assert!(builder_legacy
+        .current_guard_summary
+        .contains("dev/migration"));
+    assert!(builder_legacy
+        .current_guard_summary
+        .contains("no-signal completion"));
+    assert!(builder_legacy
+        .required_convergence_action
+        .contains("builder_create_proposals"));
+    assert!(report
+        .convergence_blockers
+        .iter()
+        .any(|blocker| blocker.contains("builder_legacy_direct_apply")));
+}
+
+#[test]
 fn legacy_write_convergence_identifies_proposal_first_targets_without_direct_unsafe_blocker() {
     let entries = legacy_write_convergence_inventory();
     let report = evaluate_legacy_write_convergence_inventory(&entries);
@@ -268,13 +320,18 @@ fn legacy_write_convergence_report_is_metadata_safe_and_raw_content_free() {
         "RAW_TOOL_PAYLOAD_SECRET",
         "RAW_MEMORY_TEXT_SECRET",
         "RAW_LIFEMODEL_CONTENT_SECRET",
+        "RAW_BUILDER_ANSWER_SECRET",
+        "RAW_BUILDER_PROPOSAL_PAYLOAD_SECRET",
         "prompt-token",
         "assistant-output",
         "memory-raw-content",
+        "raw builder answer",
+        "raw LifeModel content",
+        "raw proposal payload",
     ] {
         assert!(
             !debug_dump.contains(forbidden),
-            "W79 report leaked raw marker {forbidden}"
+            "legacy convergence report leaked raw marker {forbidden}"
         );
     }
 }
@@ -369,14 +426,18 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "ManualLifeModelOverrideAuditReport",
         "evaluate_manual_lifemodel_override_audit",
         "record_manual_lifemodel_override_audit_with_state",
+        "builder_apply_signals",
+        "builder_apply_signals_with_state",
+        "builder_apply_signals_with_state_for_dev_migration",
+        "BuilderLegacyDirectApplyOverride",
     ] {
         assert!(
             !send_body.contains(forbidden),
-            "send_message must not call W79 API {forbidden}"
+            "send_message must not call legacy convergence or W81 API {forbidden}"
         );
         assert!(
             !stream_body.contains(forbidden),
-            "start_stream_message must not call W79 API {forbidden}"
+            "start_stream_message must not call legacy convergence or W81 API {forbidden}"
         );
     }
 }

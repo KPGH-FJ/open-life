@@ -5993,6 +5993,10 @@ mod hs_runtime_tests {
             "ManualLifeModelOverrideAuditReport",
             "evaluate_manual_lifemodel_override_audit",
             "record_manual_lifemodel_override_audit_with_state",
+            "builder_apply_signals",
+            "builder_apply_signals_with_state",
+            "builder_apply_signals_with_state_for_dev_migration",
+            "BuilderLegacyDirectApplyOverride",
         ];
 
         for forbidden in forbidden_command_surfaces {

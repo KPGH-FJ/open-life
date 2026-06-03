@@ -62,6 +62,23 @@ default Chat integration. The W79 inventory marks the manual editor guard as
 present, but `manual_lifemodel_editor` remains a high-risk legacy direct-write
 blocker and must not be treated as proposal-first converged.
 
+## W81 Builder Legacy Direct Apply Dev-Gate / No-Signal Guard
+
+W81 adds a backend-only dev/migration gate to
+`src-tauri/src/commands/builder.rs::builder_apply_signals`. The command now
+fails closed by default and only enters the remaining legacy direct write path
+when an explicit `BuilderLegacyDirectApplyOverride` with dev/migration purpose
+is supplied. This preserves the normal product path through
+`builder_create_proposals` and Review Center.
+
+W81 also changes the no-signal completion branch in `builder_step_with_state`
+to perform session-only cleanup without persisting durable LifeModel truth. The
+legacy direct apply response is metadata-safe and no longer returns raw model
+payloads, snapshots, feedback audit details, or run ids. Because an override can
+still write durable LifeModel truth, Builder legacy direct apply remains a
+high-risk legacy direct-write blocker until removed or converted to
+proposal-first.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
@@ -72,7 +89,7 @@ blocker and must not be treated as proposal-first converged.
 | Low-risk batch proposal apply | `src-tauri/src/commands/proposal.rs::batch_accept_low_risk_proposals` | already proposal-first | Safe Mode guard; accepts only pending low-risk proposals. | Keep limited to low risk; do not extend to high-risk identity, values, mission, long-term goals, sensitive relationships, or privacy boundaries. |
 | Proposal storage | `openlife-core/src/agent/proposal_store.rs::{create_proposal,update_proposal}` | already proposal-first | Proposals are persisted with type, source, risk, status, run id, and before/after payloads; status transitions are explicit through Review Center commands. | Continue linking generated HS proposals to run/evidence ids. |
 | Builder normal flow | `src-tauri/src/commands/builder.rs::builder_create_proposals`; `frontend/src/pages/BuilderPage.test.tsx` | already proposal-first | Finished sessions with pending signals are sent to ProposalStore; frontend tests assert `builder_apply_signals` is not called in the normal review flow. | Keep this as the only product Builder write path. |
-| Builder legacy direct flow | `src-tauri/src/commands/builder.rs::builder_apply_signals`; no-signal completion branch in `builder_step_with_state` | legacy direct write requiring future convergence | Command is marked legacy in comments, logs, response warning, feedback event, and tests; direct apply snapshots memory and removes session. The no-signal branch writes only when a finished session has no pending signals. | Move behind explicit dev/migration gating or remove; verify no-signal completion is no-op or convert any durable update into a proposal. |
+| Builder legacy direct flow | `src-tauri/src/commands/builder.rs::builder_apply_signals`; no-signal completion branch in `builder_step_with_state` | legacy direct write requiring future convergence | W81 guard present: command fails closed by default and requires explicit dev/migration override for the remaining legacy direct apply path; response omits raw model/run/audit payloads; no-signal completion performs session-only cleanup and does not write durable LifeModel truth. | Remove `builder_apply_signals` or convert the remaining override path fully to proposal-first before treating Builder as converged. |
 | Builder session persistence | `openlife-core/src/builder/store.rs`; `src-tauri/src/commands/builder.rs::{builder_start,builder_step,builder_delete_session}` | low-risk transient state | Stores unfinished/review sessions separately from accepted LifeModel truth. | Keep as transient workflow state; delete or expire stale sessions. |
 | Calibration proposal flow | `src-tauri/src/commands/calibration.rs::calibration_create_proposals`; `apply_calibration(mode = "proposal")` | already proposal-first | Change risk is assessed before proposal creation; identity values, long-term goals, and similar paths are high risk; proposals link to AgentRun. | Make this the product default and route all calibration changes through Review Center. |
 | Calibration direct/evolution apply | `src-tauri/src/commands/calibration.rs::{run_micro_evolution,apply_calibration(mode = "direct")}`; `frontend/src/pages/CalibrationPage.tsx` currently calls direct mode | legacy direct write requiring future convergence | Direct apply creates snapshots and feedback analytics; `apply_calibration` is user-triggered, but it can persist high-risk dimensions if passed in. | Change UI default to proposal mode; gate direct mode as legacy/debug/migration only; remove automatic `result.applied` persistence from product evolution. |
@@ -116,13 +133,15 @@ apply/evolution, feedback evolution, restore/import, and several low-risk
 state/memory compatibility writes. These are known convergence items, not HS
 MVP additions. As of W79, they are represented by a machine-readable inventory
 guard; as of W80, manual LifeModel editor save also has a metadata-safe manual
-override audit guard. Neither guard is convergence completion.
+override audit guard; as of W81, Builder legacy direct apply defaults fail
+closed and no-signal completion is no-write/session-only. These guards are not
+convergence completion.
 
 ## Convergence Backlog
 
 1. Make Review Center application the only normal durable LifeModel write path.
-2. Remove or dev-gate `builder_apply_signals`; verify the Builder no-signal
-   completion branch cannot persist reviewable changes.
+2. Remove or fully proposal-first-convert `builder_apply_signals`; keep Builder
+   no-signal completion session-only with no durable LifeModel write.
 3. Change Calibration UI/defaults to proposal mode and gate direct calibration
    and micro-evolution persistence as legacy/debug/migration only.
 4. Convert feedback evolution and `evolution_rules` updates into EvidenceStore
