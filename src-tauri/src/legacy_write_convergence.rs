@@ -113,6 +113,97 @@ pub(crate) struct StateSourceDataBoundaryReport {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifeModelMaterializerCallerKind {
+    CompatibilityPrimitiveMaterializerRoot,
+    CompatibilityPrimitiveDefaultInitialization,
+    OrdinaryChatAutoCheckinSourceData,
+    ManualOverrideAudited,
+    SourceDataCompatibilityMaterialization,
+    AcceptedProposalApply,
+    LegacyDevMigrationOverride,
+    MigrationRestoreGated,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifeModelMaterializerCallerRisk {
+    CompatibilityMaterializerRoot,
+    SourceDataCompatibilityWrite,
+    AcceptedProposalApply,
+    HighRiskLegacyBlocker,
+    HighRiskManualOverrideBlocker,
+    HighRiskRestoreImportBlocker,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifeModelMaterializerCallerGovernanceState {
+    CompatibilityPrimitiveInternal,
+    SourceDataCompatibilityNotAcceptedTruth,
+    AuditedManualOverrideStillLegacyBlocker,
+    AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+    DevMigrationOverrideGuardedLegacyBlocker,
+    RestoreImportGatedLegacyBlocker,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LifeModelMaterializerCallerMatrixEntry {
+    pub(crate) stable_id: String,
+    pub(crate) display_name: String,
+    pub(crate) source_file_path: String,
+    pub(crate) caller_function_name: String,
+    pub(crate) write_entrypoint: String,
+    pub(crate) kind: LifeModelMaterializerCallerKind,
+    pub(crate) risk: LifeModelMaterializerCallerRisk,
+    pub(crate) governance_state: LifeModelMaterializerCallerGovernanceState,
+    pub(crate) normal_product_allowed: bool,
+    pub(crate) proposal_first: bool,
+    pub(crate) source_data_compatibility: bool,
+    pub(crate) manual_override: bool,
+    pub(crate) restore_import_override: bool,
+    pub(crate) high_risk_legacy_blocker: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_lifemodel_payload: bool,
+    pub(crate) contains_raw_memory_text: bool,
+    pub(crate) contains_raw_chat_text: bool,
+    pub(crate) contains_raw_daily_goal_text: bool,
+    pub(crate) default_chat_route_changed: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) runtime_authority_granted: bool,
+    pub(crate) accepted_durable_lifemodel_hs_truth: bool,
+    pub(crate) proposal_first_convergence_complete: bool,
+    pub(crate) required_follow_up: String,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LifeModelMaterializerCallerMatrixReport {
+    pub(crate) matrix_ready: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_lifemodel_payload: bool,
+    pub(crate) contains_raw_memory_text: bool,
+    pub(crate) contains_raw_chat_text: bool,
+    pub(crate) contains_raw_daily_goal_text: bool,
+    pub(crate) materializer_root_identified: bool,
+    pub(crate) all_known_callers_classified: bool,
+    pub(crate) unclassified_callers: Vec<String>,
+    pub(crate) caller_count: usize,
+    pub(crate) high_risk_legacy_blocker_count: usize,
+    pub(crate) proposal_first_count: usize,
+    pub(crate) source_data_compatibility_count: usize,
+    pub(crate) manual_override_count: usize,
+    pub(crate) restore_import_override_count: usize,
+    pub(crate) ordinary_chat_auto_checkin_present: bool,
+    pub(crate) ordinary_chat_auto_checkin_classification: String,
+    pub(crate) default_chat_route_unchanged: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) runtime_authority_granted: bool,
+    pub(crate) proposal_first_convergence_complete: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEntry> {
     vec![
         entry(
@@ -1004,6 +1095,674 @@ pub(crate) fn ensure_state_source_data_boundary() -> Result<StateSourceDataBound
     }
 }
 
+pub(crate) fn lifemodel_materializer_caller_matrix() -> Vec<LifeModelMaterializerCallerMatrixEntry>
+{
+    vec![
+        caller_matrix_entry(
+            "lifemodel_materializer_root",
+            "LifeModel compatibility materializer root",
+            "src-tauri/src/lib.rs",
+            "persist_life_model",
+            "LifeModelManager::save",
+            LifeModelMaterializerCallerKind::CompatibilityPrimitiveMaterializerRoot,
+            LifeModelMaterializerCallerRisk::CompatibilityMaterializerRoot,
+            LifeModelMaterializerCallerGovernanceState::CompatibilityPrimitiveInternal,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Restrict W87 callers to accepted proposal apply, source-data compatibility materialization, audited manual override, and gated restore/import/dev migration paths.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "lifemodel_manager_default_initialization",
+            "LifeModelManager default model initialization",
+            "openlife-core/src/life_model.rs",
+            "LifeModelManager::load(default_model_initialization)",
+            "LifeModelManager::save",
+            LifeModelMaterializerCallerKind::CompatibilityPrimitiveDefaultInitialization,
+            LifeModelMaterializerCallerRisk::CompatibilityMaterializerRoot,
+            LifeModelMaterializerCallerGovernanceState::CompatibilityPrimitiveInternal,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Internal first-load compatibility initialization only; not a migration permission, runtime authority grant, or proposal-first convergence completion signal.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "ordinary_chat_auto_checkin_source_data",
+            "Ordinary Chat daily-goal auto-checkin compatibility materialization",
+            "src-tauri/src/lib.rs",
+            "send_message",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "ordinary_stream_agent_loop_auto_checkin_source_data",
+            "Stream AgentLoop daily-goal auto-checkin compatibility materialization",
+            "src-tauri/src/lib.rs",
+            "start_stream_message_with_agent_loop",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Stream daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "ordinary_stream_legacy_auto_checkin_source_data",
+            "Legacy stream daily-goal auto-checkin compatibility materialization",
+            "src-tauri/src/lib.rs",
+            "start_stream_message",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Legacy stream daily goal auto-checkin writes the current compatibility view from source data; it is not accepted durable LifeModel-HS truth and grants no migration permission.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "manual_lifemodel_editor_save",
+            "Manual LifeModel editor save",
+            "src-tauri/src/commands/life_model.rs",
+            "save_life_model_with_state",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::ManualOverrideAudited,
+            LifeModelMaterializerCallerRisk::HighRiskManualOverrideBlocker,
+            LifeModelMaterializerCallerGovernanceState::AuditedManualOverrideStillLegacyBlocker,
+            false,
+            false,
+            false,
+            true,
+            false,
+            true,
+            false,
+            false,
+            "W80 audited manual override remains a high-risk legacy blocker until converted to proposal patch review or stronger governed override UX.",
+            &[
+                "manual_editor_can_write_durable_lifemodel_truth_directly",
+                "manual_editor_not_proposal_first_converged",
+            ],
+        ),
+        caller_matrix_entry(
+            "state_record_state_source_data",
+            "State record compatibility materialization",
+            "src-tauri/src/commands/state.rs",
+            "record_state_with_state",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "State samples are source data compatibility materialization only; proposal-first is required before durable LifeModel-HS truth promotion.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "state_add_daily_goal_source_data",
+            "Add daily goal compatibility materialization",
+            "src-tauri/src/commands/state.rs",
+            "add_daily_goal",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Daily goal source data writes the current compatibility view only; it is not accepted durable LifeModel-HS truth.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "state_update_daily_goal_source_data",
+            "Update daily goal compatibility materialization",
+            "src-tauri/src/commands/state.rs",
+            "update_daily_goal",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Daily goal source data writes the current compatibility view only; it is not accepted durable LifeModel-HS truth.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "state_delete_daily_goal_source_data",
+            "Delete daily goal compatibility materialization",
+            "src-tauri/src/commands/state.rs",
+            "delete_daily_goal",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Daily goal source data writes the current compatibility view only; it is not accepted durable LifeModel-HS truth.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "state_toggle_daily_goal_source_data",
+            "Toggle daily goal compatibility materialization",
+            "src-tauri/src/commands/state.rs",
+            "toggle_daily_goal_with_state",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            true,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "Daily goal source data writes the current compatibility view only; it is not accepted durable LifeModel-HS truth.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "proposal_apply_lifemodel_update",
+            "Accepted proposal LifeModel apply",
+            "src-tauri/src/commands/proposal.rs",
+            "apply_proposal_to_state",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::AcceptedProposalApply,
+            LifeModelMaterializerCallerRisk::AcceptedProposalApply,
+            LifeModelMaterializerCallerGovernanceState::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            "Accepted proposal apply is the convergence target, but W88-W89 still need source-specific patch mapping before proposal-first convergence can be marked complete.",
+            &[],
+        ),
+        caller_matrix_entry(
+            "builder_step_legacy_direct_apply",
+            "Builder step legacy direct apply compatibility write",
+            "src-tauri/src/commands/builder.rs",
+            "builder_step_with_state",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerRisk::HighRiskLegacyBlocker,
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            "W81 Builder legacy direct apply remains guarded for dev/migration only and must be removed or converted to proposal-first.",
+            &[
+                "builder_step_can_still_reach_legacy_direct_lifemodel_write",
+                "builder_legacy_direct_apply_not_fully_proposal_first",
+            ],
+        ),
+        caller_matrix_entry(
+            "builder_apply_signals_legacy_direct_apply",
+            "Builder apply signals legacy direct apply compatibility write",
+            "src-tauri/src/commands/builder.rs",
+            "builder_apply_signals_direct_apply_after_gate",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerRisk::HighRiskLegacyBlocker,
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            "W81 Builder legacy direct apply remains guarded for dev/migration only and must be removed or converted to proposal-first.",
+            &[
+                "builder_apply_signals_can_still_write_with_dev_migration_override",
+                "builder_legacy_direct_apply_not_fully_proposal_first",
+            ],
+        ),
+        caller_matrix_entry(
+            "calibration_micro_evolution_legacy_direct_apply",
+            "Calibration micro-evolution legacy direct apply compatibility write",
+            "src-tauri/src/commands/calibration.rs",
+            "run_micro_evolution_direct_apply_after_gate",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerRisk::HighRiskLegacyBlocker,
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            "W82 Calibration micro-evolution direct apply remains guarded for dev/migration only and must be converted to proposal-first.",
+            &[
+                "micro_evolution_can_still_apply_generated_changes_directly_with_dev_migration_override",
+                "calibration_legacy_direct_apply_not_fully_proposal_first",
+            ],
+        ),
+        caller_matrix_entry(
+            "calibration_direct_apply_legacy_direct_apply",
+            "Calibration direct apply compatibility write",
+            "src-tauri/src/commands/calibration.rs",
+            "apply_calibration_direct_apply_after_gate",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerRisk::HighRiskLegacyBlocker,
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            "W82 Calibration direct apply remains guarded for dev/migration only and must be converted to proposal-first.",
+            &[
+                "direct_calibration_mode_can_still_write_with_dev_migration_override",
+                "calibration_legacy_direct_apply_not_fully_proposal_first",
+            ],
+        ),
+        caller_matrix_entry(
+            "feedback_evolution_legacy_direct_apply",
+            "Feedback evolution legacy direct apply compatibility write",
+            "src-tauri/src/commands/feedback.rs",
+            "apply_feedback_evolution_direct_apply_after_gate",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerRisk::HighRiskLegacyBlocker,
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            "W83 Feedback evolution direct apply remains guarded for dev/migration only and must become reviewable Proposal/Evidence candidates.",
+            &[
+                "feedback_evolution_can_still_write_with_dev_migration_override",
+                "feedback_evolution_legacy_direct_apply_not_fully_proposal_first",
+            ],
+        ),
+        caller_matrix_entry(
+            "snapshot_restore_legacy_direct_apply",
+            "Snapshot restore direct LifeModel save",
+            "src-tauri/src/commands/version.rs",
+            "restore_snapshot_direct_apply_after_gate",
+            "LifeModelManager::save",
+            LifeModelMaterializerCallerKind::MigrationRestoreGated,
+            LifeModelMaterializerCallerRisk::HighRiskRestoreImportBlocker,
+            LifeModelMaterializerCallerGovernanceState::RestoreImportGatedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            "W84 snapshot restore remains a gated migration/manual restore override and must not be marked fully converged.",
+            &[
+                "restore_snapshot_can_replace_current_lifemodel_yaml_with_manual_restore_override",
+                "snapshot_restore_legacy_direct_apply_not_fully_governed",
+            ],
+        ),
+        caller_matrix_entry(
+            "data_import_legacy_direct_apply",
+            "Data import compatibility materializer write",
+            "src-tauri/src/commands/settings.rs",
+            "apply_import_payload",
+            "persist_life_model",
+            LifeModelMaterializerCallerKind::MigrationRestoreGated,
+            LifeModelMaterializerCallerRisk::HighRiskRestoreImportBlocker,
+            LifeModelMaterializerCallerGovernanceState::RestoreImportGatedLegacyBlocker,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+            false,
+            false,
+            "W84 data import remains a gated migration/manual restore override and imported content is not accepted LifeModel-HS truth without rematerialization.",
+            &[
+                "data_import_can_replace_lifemodel_messages_or_vectors_with_dev_migration_override",
+                "import_payload_not_equivalent_to_accepted_lifemodel_truth",
+            ],
+        ),
+    ]
+}
+
+pub(crate) fn evaluate_lifemodel_materializer_caller_matrix(
+    entries: &[LifeModelMaterializerCallerMatrixEntry],
+) -> LifeModelMaterializerCallerMatrixReport {
+    let mut blocking_reasons = Vec::new();
+    let mut unclassified_callers = Vec::new();
+    let mut missing_required_caller = false;
+
+    for required_id in REQUIRED_LIFEMODEL_MATERIALIZER_CALLER_IDS {
+        let count = entries
+            .iter()
+            .filter(|entry| entry.stable_id == *required_id)
+            .count();
+        if count == 0 {
+            missing_required_caller = true;
+            push_unique(
+                &mut blocking_reasons,
+                format!("materializer_caller_missing_required:{required_id}"),
+            );
+        }
+        if count > 1 {
+            push_unique(
+                &mut blocking_reasons,
+                format!("materializer_caller_duplicated:{required_id}"),
+            );
+        }
+    }
+
+    for entry in entries {
+        let unclassified = entry.kind == LifeModelMaterializerCallerKind::Unclassified
+            || entry.risk == LifeModelMaterializerCallerRisk::Unclassified
+            || entry.governance_state == LifeModelMaterializerCallerGovernanceState::Unclassified;
+        if unclassified {
+            push_unique(&mut unclassified_callers, entry.stable_id.clone());
+            push_unique(
+                &mut blocking_reasons,
+                format!("unclassified_materializer_caller:{}", entry.stable_id),
+            );
+        }
+
+        if entry.write_entrypoint != "persist_life_model"
+            && entry.write_entrypoint != "LifeModelManager::save"
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_unknown_write_entrypoint:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if !entry.metadata_safe {
+            push_unique(
+                &mut blocking_reasons,
+                format!("materializer_caller_metadata_not_safe:{}", entry.stable_id),
+            );
+        }
+
+        if entry.contains_raw_lifemodel_payload
+            || entry.contains_raw_memory_text
+            || entry.contains_raw_chat_text
+            || entry.contains_raw_daily_goal_text
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_contains_raw_content:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.default_chat_route_changed {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_changes_default_chat_route:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.migration_permission {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_matrix_grants_migration_permission:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.runtime_authority_granted {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_matrix_grants_runtime_authority:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.kind == LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData
+            && (!entry.source_data_compatibility
+                || entry.migration_permission
+                || entry.runtime_authority_granted
+                || entry.accepted_durable_lifemodel_hs_truth)
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "ordinary_chat_auto_checkin_misclassified_as_authority_or_truth:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.kind == LifeModelMaterializerCallerKind::ManualOverrideAudited
+            && (entry.proposal_first || entry.proposal_first_convergence_complete)
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "manual_editor_misclassified_as_proposal_first_or_converged:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.kind == LifeModelMaterializerCallerKind::MigrationRestoreGated
+            && entry.proposal_first_convergence_complete
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "restore_import_misclassified_as_converged:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+
+        if entry.source_data_compatibility && entry.accepted_durable_lifemodel_hs_truth {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "source_data_compatibility_marked_accepted_lifemodel_hs_truth:{}",
+                    entry.stable_id
+                ),
+            );
+        }
+    }
+
+    let metadata_safe = entries.iter().all(|entry| entry.metadata_safe);
+    let contains_raw_lifemodel_payload = entries
+        .iter()
+        .any(|entry| entry.contains_raw_lifemodel_payload);
+    let contains_raw_memory_text = entries.iter().any(|entry| entry.contains_raw_memory_text);
+    let contains_raw_chat_text = entries.iter().any(|entry| entry.contains_raw_chat_text);
+    let contains_raw_daily_goal_text = entries
+        .iter()
+        .any(|entry| entry.contains_raw_daily_goal_text);
+    let materializer_root_identified = entries.iter().any(|entry| {
+        entry.stable_id == LIFEMODEL_MATERIALIZER_ROOT_CALLER_ID
+            && entry.kind == LifeModelMaterializerCallerKind::CompatibilityPrimitiveMaterializerRoot
+            && entry.write_entrypoint == "LifeModelManager::save"
+    });
+    if !materializer_root_identified {
+        push_unique(
+            &mut blocking_reasons,
+            "lifemodel_materializer_root_not_identified".into(),
+        );
+    }
+
+    let high_risk_legacy_blocker_count = entries
+        .iter()
+        .filter(|entry| entry.high_risk_legacy_blocker)
+        .count();
+    let proposal_first_count = entries.iter().filter(|entry| entry.proposal_first).count();
+    let source_data_compatibility_count = entries
+        .iter()
+        .filter(|entry| entry.source_data_compatibility)
+        .count();
+    let manual_override_count = entries.iter().filter(|entry| entry.manual_override).count();
+    let restore_import_override_count = entries
+        .iter()
+        .filter(|entry| entry.restore_import_override)
+        .count();
+    let ordinary_chat_auto_checkin_present = entries.iter().any(|entry| {
+        entry.kind == LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData
+    });
+    let default_chat_route_unchanged = entries
+        .iter()
+        .all(|entry| !entry.default_chat_route_changed);
+    let migration_permission = entries.iter().any(|entry| entry.migration_permission);
+    let runtime_authority_granted = entries.iter().any(|entry| entry.runtime_authority_granted);
+    let proposal_first_convergence_complete = entries
+        .iter()
+        .all(|entry| entry.proposal_first_convergence_complete)
+        && !entries.is_empty();
+    let all_known_callers_classified = unclassified_callers.is_empty() && !missing_required_caller;
+    let ordinary_chat_auto_checkin_classification = if ordinary_chat_auto_checkin_present {
+        "source_data_compatibility_materialization_not_migration_permission".into()
+    } else {
+        "missing".into()
+    };
+
+    let matrix_ready = blocking_reasons.is_empty()
+        && metadata_safe
+        && !contains_raw_lifemodel_payload
+        && !contains_raw_memory_text
+        && !contains_raw_chat_text
+        && !contains_raw_daily_goal_text
+        && materializer_root_identified
+        && all_known_callers_classified
+        && default_chat_route_unchanged
+        && !migration_permission
+        && !runtime_authority_granted;
+
+    LifeModelMaterializerCallerMatrixReport {
+        matrix_ready,
+        metadata_safe,
+        contains_raw_lifemodel_payload,
+        contains_raw_memory_text,
+        contains_raw_chat_text,
+        contains_raw_daily_goal_text,
+        materializer_root_identified,
+        all_known_callers_classified,
+        unclassified_callers,
+        caller_count: entries.len(),
+        high_risk_legacy_blocker_count,
+        proposal_first_count,
+        source_data_compatibility_count,
+        manual_override_count,
+        restore_import_override_count,
+        ordinary_chat_auto_checkin_present,
+        ordinary_chat_auto_checkin_classification,
+        default_chat_route_unchanged,
+        migration_permission,
+        runtime_authority_granted,
+        proposal_first_convergence_complete,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_lifemodel_materializer_caller_matrix(
+) -> Result<LifeModelMaterializerCallerMatrixReport, String> {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+    if report.matrix_ready {
+        Ok(report)
+    } else {
+        Err(format!(
+            "LifeModel materializer caller matrix blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
 const REQUIRED_STABLE_IDS: &[&str] = &[
     "lifemodel_save_primitive",
     "manual_lifemodel_editor",
@@ -1051,6 +1810,30 @@ const ACCEPTED_HS_TRUTH_WRITE_MARKERS: &[&str] = &[
     "accepted durable hs truth write",
     "accepted durable lifemodel-hs truth write",
     "writes accepted durable lifemodel-hs truth",
+];
+
+const LIFEMODEL_MATERIALIZER_ROOT_CALLER_ID: &str = "lifemodel_materializer_root";
+
+const REQUIRED_LIFEMODEL_MATERIALIZER_CALLER_IDS: &[&str] = &[
+    "lifemodel_materializer_root",
+    "lifemodel_manager_default_initialization",
+    "ordinary_chat_auto_checkin_source_data",
+    "ordinary_stream_agent_loop_auto_checkin_source_data",
+    "ordinary_stream_legacy_auto_checkin_source_data",
+    "manual_lifemodel_editor_save",
+    "state_record_state_source_data",
+    "state_add_daily_goal_source_data",
+    "state_update_daily_goal_source_data",
+    "state_delete_daily_goal_source_data",
+    "state_toggle_daily_goal_source_data",
+    "proposal_apply_lifemodel_update",
+    "builder_step_legacy_direct_apply",
+    "builder_apply_signals_legacy_direct_apply",
+    "calibration_micro_evolution_legacy_direct_apply",
+    "calibration_direct_apply_legacy_direct_apply",
+    "feedback_evolution_legacy_direct_apply",
+    "snapshot_restore_legacy_direct_apply",
+    "data_import_legacy_direct_apply",
 ];
 
 const W73_W78_MATURATION_HELPERS: &[&str] = &[
@@ -1119,6 +1902,60 @@ fn entry(
             .collect(),
         metadata_safe: true,
         contains_raw_content: false,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn caller_matrix_entry(
+    stable_id: &str,
+    display_name: &str,
+    source_file_path: &str,
+    caller_function_name: &str,
+    write_entrypoint: &str,
+    kind: LifeModelMaterializerCallerKind,
+    risk: LifeModelMaterializerCallerRisk,
+    governance_state: LifeModelMaterializerCallerGovernanceState,
+    normal_product_allowed: bool,
+    proposal_first: bool,
+    source_data_compatibility: bool,
+    manual_override: bool,
+    restore_import_override: bool,
+    high_risk_legacy_blocker: bool,
+    proposal_first_convergence_complete: bool,
+    accepted_durable_lifemodel_hs_truth: bool,
+    required_follow_up: &str,
+    blocking_reasons: &[&str],
+) -> LifeModelMaterializerCallerMatrixEntry {
+    LifeModelMaterializerCallerMatrixEntry {
+        stable_id: stable_id.into(),
+        display_name: display_name.into(),
+        source_file_path: source_file_path.into(),
+        caller_function_name: caller_function_name.into(),
+        write_entrypoint: write_entrypoint.into(),
+        kind,
+        risk,
+        governance_state,
+        normal_product_allowed,
+        proposal_first,
+        source_data_compatibility,
+        manual_override,
+        restore_import_override,
+        high_risk_legacy_blocker,
+        metadata_safe: true,
+        contains_raw_lifemodel_payload: false,
+        contains_raw_memory_text: false,
+        contains_raw_chat_text: false,
+        contains_raw_daily_goal_text: false,
+        default_chat_route_changed: false,
+        migration_permission: false,
+        runtime_authority_granted: false,
+        accepted_durable_lifemodel_hs_truth,
+        proposal_first_convergence_complete,
+        required_follow_up: required_follow_up.into(),
+        blocking_reasons: blocking_reasons
+            .iter()
+            .map(|reason| (*reason).into())
+            .collect(),
     }
 }
 

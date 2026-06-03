@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W85 State / Daily Goal source-data boundary proof complete
+> Status: W86 LifeModel compatibility materializer caller matrix complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W85 State / Daily Goal source-data boundary proof complete**.
+Current latest status is **W86 LifeModel compatibility materializer caller matrix complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -232,6 +232,29 @@ ProposalStore/EvidenceStore/AgentRun writes, does not affect default Chat, and
 does not mark State/Daily Goal fully converged. Promotion from state source
 data into durable LifeModel-HS truth remains a separate future proposal-first
 slice.
+W86 adds a backend-only/internal LifeModel compatibility materializer caller
+matrix in `src-tauri/src/legacy_write_convergence.rs`. It defines
+`LifeModelMaterializerCallerKind`,
+`LifeModelMaterializerCallerRisk`,
+`LifeModelMaterializerCallerGovernanceState`,
+`LifeModelMaterializerCallerMatrixEntry`,
+`LifeModelMaterializerCallerMatrixReport`,
+`lifemodel_materializer_caller_matrix`,
+`evaluate_lifemodel_materializer_caller_matrix`, and
+`ensure_lifemodel_materializer_caller_matrix`. The matrix classifies every
+current production materializer/save entry in scope: 16 `persist_life_model`
+callsites plus 3 production `LifeModelManager::save` related entries. It
+distinguishes materializer root, ordinary Chat daily-goal auto-checkin
+source-data compatibility writes, State/Daily Goal source-data compatibility
+materialization, accepted proposal apply, audited manual override,
+Builder/Calibration/Feedback guarded legacy dev-migration override paths, and
+Snapshot restore/Data import gated override paths. W86 is metadata-safe and
+contains no raw LifeModel, memory, chat, or daily-goal payloads. It adds no
+command/frontend surface, changes no default Chat routing, does not change the
+`persist_life_model` signature, does not retire any legacy path, and fixes
+migration_permission=false, runtime_authority_granted=false, and
+proposal_first_convergence_complete=false. W86 is not convergence complete; it
+is the preparation layer for W87 caller restriction.
 
 Hard boundaries:
 
@@ -292,6 +315,8 @@ Hard boundaries:
   Snapshot restore / Data import legacy direct apply helper or override.
 - Ordinary `send_message` / `start_stream_message` must not call the W85 State
   / Daily Goal source-data boundary helper.
+- Ordinary `send_message` / `start_stream_message` must not call the W86
+  LifeModel materializer caller matrix helper.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -301,7 +326,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W85 progress index
+4. This W1-W86 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -320,7 +345,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W85 Structured Index
+## W1-W86 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -409,6 +434,7 @@ permission.
 | W83 | Feedback Evolution Legacy Direct Apply Gate / Proposal-First Candidate Path | Done | Backend Feedback command guard in `commands/feedback.rs`, settings read-only copy update, and W79 inventory update | MS guard/read-only report only; `apply_feedback_evolution` defaults fail closed and requires explicit Feedback evolution legacy direct apply dev/migration override, legacy output omits raw feedback/inference/LifeModel/evolution rule payloads, `generate_evolution_report` is read-only and writes no LifeModel/`evolution_rules`; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Feedback evolution legacy direct apply or convert fully to proposal/evidence-first |
 | W84 | Snapshot Restore / Data Import Legacy Direct Write Gate | Done | Backend Version/Settings command guards in `commands/version.rs` and `commands/settings.rs`, plus W79 inventory update | MS guard only; `restore_snapshot` and `import_all_data` default fail closed and require explicit dev/migration/manual restore override, legacy outputs omit raw LifeModel/memory/vector/import payload/snapshot YAML and return snapshot id/count/status only; export/read-only paths unchanged; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove restore/import legacy override capability or convert to governed rollback/migration audit flow |
 | W85 | State / Daily Goal Source Data Boundary Proof | Done | Internal Rust report/evaluator/ensure in `legacy_write_convergence.rs` | MS source-data boundary proof only; `state_daily_goal_direct_writes` remains LowRiskTransientSourceData and explicitly lists `persist_life_model`; compatibility_lifemodel_materialized_write=true, writes_current_lifemodel_compatibility_view=true, accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false, proposal_required_for_hs_truth_promotion=true; no command/frontend/runtime/model/tool/store behavior change, not proposal-first conversion, not fully converged | No; ordinary send/stream stay `legacy_stream` and do not call it | Future StateStore TTL/source/confidence split or separate proposal-first truth promotion bridge |
+| W86 | LifeModel Compatibility Materializer Caller Matrix | Done | Internal Rust matrix/report/evaluator/ensure in `legacy_write_convergence.rs` | MS caller matrix only; covers current production `persist_life_model` callsites and production `LifeModelManager::save` related entries; classifies materializer root, ordinary Chat auto-checkin source-data compatibility, State/Daily Goal source-data compatibility, accepted proposal apply, audited manual override, guarded legacy dev-migration overrides, and gated restore/import overrides; no command/frontend/runtime/model/tool/store behavior change, no `persist_life_model` signature change, no legacy path retirement, migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W87 LifeModel materializer caller restriction |
 
 ## Folded Boundary Summary
 
@@ -478,6 +504,13 @@ above. The boundary meaning is preserved:
   proposal_required_for_hs_truth_promotion=true for any future HS truth
   promotion. It is not proposal-first conversion and not a fully-converged
   marker.
+- W86 adds only a backend/internal LifeModel materializer caller matrix. It
+  classifies current production `persist_life_model` and
+  `LifeModelManager::save` related entries, keeps reports metadata-safe, keeps
+  default Chat unchanged, does not change the `persist_life_model` signature,
+  does not retire any legacy path, and grants no migration permission or
+  runtime authority. It is not convergence completion; W87 must perform the
+  actual caller restriction.
 
 ## Next Recommended Sequence
 
@@ -498,11 +531,13 @@ inventory guard complete -> W80 manual LifeModel override audit guard complete
 -> W81 Builder legacy direct apply dev-gate complete -> W82 Calibration direct
 apply legacy gate complete -> W83 Feedback evolution legacy direct apply gate
 complete -> W84 Snapshot restore / data import legacy direct write gate
-complete -> W85 State / Daily Goal source-data boundary proof complete.
+complete -> W85 State / Daily Goal source-data boundary proof complete -> W86
+LifeModel materializer caller matrix complete.
 Future direct-write convergence slices must start from the W79 inventory, the
 W80 manual editor audit state, W81 Builder guard state, W82 Calibration guard
 state, W83 Feedback evolution guard state, W84 restore/import guard state, W85
-State/Daily Goal source-data boundary state, and must not mark a blocker
+State/Daily Goal source-data boundary state, W86 materializer caller matrix,
+and must not mark a blocker
 converged until the actual path is changed and verified. Future default Chat executor implementation
 discussion may build on the W65-W72 proofs only through a separately reviewed
 task; keep default Chat on legacy_stream unless that separate task explicitly

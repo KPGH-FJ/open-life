@@ -1,8 +1,12 @@
 use crate::legacy_write_convergence::{
-    ensure_legacy_write_convergence_inventory_guard, ensure_state_source_data_boundary,
-    evaluate_legacy_write_convergence_inventory, evaluate_state_source_data_boundary,
-    legacy_write_convergence_inventory, LegacyWriteConvergenceStatus, LegacyWriteInventoryEntry,
-    LegacyWritePathKind, LegacyWriteRiskClass, LegacyWriteSafeModeStatus,
+    ensure_legacy_write_convergence_inventory_guard, ensure_lifemodel_materializer_caller_matrix,
+    ensure_state_source_data_boundary, evaluate_legacy_write_convergence_inventory,
+    evaluate_lifemodel_materializer_caller_matrix, evaluate_state_source_data_boundary,
+    legacy_write_convergence_inventory, lifemodel_materializer_caller_matrix,
+    LegacyWriteConvergenceStatus, LegacyWriteInventoryEntry, LegacyWritePathKind,
+    LegacyWriteRiskClass, LegacyWriteSafeModeStatus, LifeModelMaterializerCallerGovernanceState,
+    LifeModelMaterializerCallerKind, LifeModelMaterializerCallerMatrixEntry,
+    LifeModelMaterializerCallerRisk,
 };
 
 fn entry<'a>(
@@ -20,6 +24,16 @@ fn has_function(entry: &LegacyWriteInventoryEntry, function_name: &str) -> bool 
         .command_function_names
         .iter()
         .any(|name| name == function_name)
+}
+
+fn materializer_entry<'a>(
+    entries: &'a [LifeModelMaterializerCallerMatrixEntry],
+    stable_id: &str,
+) -> &'a LifeModelMaterializerCallerMatrixEntry {
+    entries
+        .iter()
+        .find(|entry| entry.stable_id == stable_id)
+        .unwrap_or_else(|| panic!("missing materializer caller matrix entry {stable_id}"))
 }
 
 #[test]
@@ -764,6 +778,372 @@ fn legacy_write_convergence_state_daily_goal_w85_boundary_fails_closed_for_bad_i
 }
 
 #[test]
+fn legacy_write_convergence_w86_materializer_caller_matrix_covers_known_callers() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+    let required = [
+        "lifemodel_materializer_root",
+        "lifemodel_manager_default_initialization",
+        "ordinary_chat_auto_checkin_source_data",
+        "ordinary_stream_agent_loop_auto_checkin_source_data",
+        "ordinary_stream_legacy_auto_checkin_source_data",
+        "manual_lifemodel_editor_save",
+        "state_record_state_source_data",
+        "state_add_daily_goal_source_data",
+        "state_update_daily_goal_source_data",
+        "state_delete_daily_goal_source_data",
+        "state_toggle_daily_goal_source_data",
+        "proposal_apply_lifemodel_update",
+        "builder_step_legacy_direct_apply",
+        "builder_apply_signals_legacy_direct_apply",
+        "calibration_micro_evolution_legacy_direct_apply",
+        "calibration_direct_apply_legacy_direct_apply",
+        "feedback_evolution_legacy_direct_apply",
+        "snapshot_restore_legacy_direct_apply",
+        "data_import_legacy_direct_apply",
+    ];
+
+    assert!(report.matrix_ready);
+    assert!(report.metadata_safe);
+    assert!(!report.contains_raw_lifemodel_payload);
+    assert!(!report.contains_raw_memory_text);
+    assert!(!report.contains_raw_chat_text);
+    assert!(!report.contains_raw_daily_goal_text);
+    assert!(report.materializer_root_identified);
+    assert!(report.all_known_callers_classified);
+    assert!(report.unclassified_callers.is_empty());
+    assert_eq!(report.caller_count, entries.len());
+    assert_eq!(report.caller_count, required.len());
+    assert!(report.high_risk_legacy_blocker_count >= 7);
+    assert_eq!(report.proposal_first_count, 1);
+    assert_eq!(report.source_data_compatibility_count, 8);
+    assert_eq!(report.manual_override_count, 1);
+    assert_eq!(report.restore_import_override_count, 2);
+    assert!(report.ordinary_chat_auto_checkin_present);
+    assert_eq!(
+        report.ordinary_chat_auto_checkin_classification,
+        "source_data_compatibility_materialization_not_migration_permission"
+    );
+    assert!(report.default_chat_route_unchanged);
+    assert!(!report.migration_permission);
+    assert!(!report.runtime_authority_granted);
+    assert!(!report.proposal_first_convergence_complete);
+    assert!(report.blocking_reasons.is_empty());
+
+    for stable_id in required {
+        assert!(
+            entries.iter().any(|entry| entry.stable_id == stable_id),
+            "missing W86 materializer caller matrix entry {stable_id}"
+        );
+    }
+
+    ensure_lifemodel_materializer_caller_matrix()
+        .expect("known W86 materializer caller matrix should pass");
+}
+
+#[test]
+fn legacy_write_convergence_w86_materializer_matrix_matches_current_production_callsite_count() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let persist_call_files = [
+        "src/lib.rs",
+        "src/commands/builder.rs",
+        "src/commands/settings.rs",
+        "src/commands/life_model.rs",
+        "src/commands/proposal.rs",
+        "src/commands/feedback.rs",
+        "src/commands/state.rs",
+        "src/commands/calibration.rs",
+    ];
+    let actual_persist_call_count = persist_call_files
+        .iter()
+        .map(|path| {
+            let source =
+                std::fs::read_to_string(format!("{manifest_dir}/{path}")).expect("read source");
+            source
+                .lines()
+                .filter(|line| line.contains("persist_life_model("))
+                .filter(|line| !line.contains("async fn persist_life_model("))
+                .count()
+        })
+        .sum::<usize>();
+    let matrix_persist_call_count = entries
+        .iter()
+        .filter(|entry| entry.write_entrypoint == "persist_life_model")
+        .count();
+    assert_eq!(
+        matrix_persist_call_count, actual_persist_call_count,
+        "W86 matrix must classify every current production persist_life_model caller"
+    );
+
+    let lib_rs = std::fs::read_to_string(format!("{manifest_dir}/src/lib.rs")).expect("read lib");
+    let version_rs = std::fs::read_to_string(format!("{manifest_dir}/src/commands/version.rs"))
+        .expect("read version");
+    let core_life_model_rs = std::fs::read_to_string(format!(
+        "{}/../openlife-core/src/life_model.rs",
+        manifest_dir
+    ))
+    .expect("read core life_model");
+    let actual_direct_save_count = count_occurrences(&lib_rs, "manager.save(&life_model)")
+        + count_occurrences(&version_rs, "manager.save(&restored_model)")
+        + count_occurrences(&core_life_model_rs, "self.save(&model)");
+    let matrix_direct_save_count = entries
+        .iter()
+        .filter(|entry| entry.write_entrypoint == "LifeModelManager::save")
+        .count();
+    assert_eq!(
+        matrix_direct_save_count, actual_direct_save_count,
+        "W86 matrix must classify every current production LifeModelManager::save caller"
+    );
+}
+
+#[test]
+fn legacy_write_convergence_w86_materializer_matrix_fails_closed_for_unclassified_caller() {
+    let mut entries = lifemodel_materializer_caller_matrix();
+    entries.push(LifeModelMaterializerCallerMatrixEntry {
+        stable_id: "synthetic_unclassified_materializer_caller".into(),
+        display_name: "Synthetic unclassified materializer caller".into(),
+        source_file_path: "src-tauri/src/synthetic.rs".into(),
+        caller_function_name: "synthetic_unclassified_caller".into(),
+        write_entrypoint: "persist_life_model".into(),
+        kind: LifeModelMaterializerCallerKind::Unclassified,
+        risk: LifeModelMaterializerCallerRisk::Unclassified,
+        governance_state: LifeModelMaterializerCallerGovernanceState::Unclassified,
+        normal_product_allowed: false,
+        proposal_first: false,
+        source_data_compatibility: false,
+        manual_override: false,
+        restore_import_override: false,
+        high_risk_legacy_blocker: false,
+        metadata_safe: true,
+        contains_raw_lifemodel_payload: false,
+        contains_raw_memory_text: false,
+        contains_raw_chat_text: false,
+        contains_raw_daily_goal_text: false,
+        default_chat_route_changed: false,
+        migration_permission: false,
+        runtime_authority_granted: false,
+        accepted_durable_lifemodel_hs_truth: false,
+        proposal_first_convergence_complete: false,
+        required_follow_up: "classify this caller before W87 restriction".into(),
+        blocking_reasons: vec![],
+    });
+
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+    assert!(!report.matrix_ready);
+    assert!(!report.all_known_callers_classified);
+    assert!(report
+        .unclassified_callers
+        .contains(&"synthetic_unclassified_materializer_caller".to_string()));
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("unclassified_materializer_caller")));
+}
+
+#[test]
+fn legacy_write_convergence_w86_ordinary_chat_auto_checkin_is_source_data_only() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+
+    for stable_id in [
+        "ordinary_chat_auto_checkin_source_data",
+        "ordinary_stream_agent_loop_auto_checkin_source_data",
+        "ordinary_stream_legacy_auto_checkin_source_data",
+    ] {
+        let entry = materializer_entry(&entries, stable_id);
+        assert_eq!(
+            entry.kind,
+            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData
+        );
+        assert_eq!(
+            entry.risk,
+            LifeModelMaterializerCallerRisk::SourceDataCompatibilityWrite
+        );
+        assert_eq!(
+            entry.governance_state,
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth
+        );
+        assert!(entry.source_data_compatibility);
+        assert!(entry.normal_product_allowed);
+        assert!(!entry.migration_permission);
+        assert!(!entry.runtime_authority_granted);
+        assert!(!entry.accepted_durable_lifemodel_hs_truth);
+        assert!(!entry.proposal_first_convergence_complete);
+        assert!(entry
+            .required_follow_up
+            .contains("not accepted durable LifeModel-HS truth"));
+    }
+
+    assert!(report.ordinary_chat_auto_checkin_present);
+    assert!(!report.migration_permission);
+    assert!(!report.runtime_authority_granted);
+}
+
+#[test]
+fn legacy_write_convergence_w86_proposal_apply_is_accepted_apply_but_mapping_not_complete() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let entry = materializer_entry(&entries, "proposal_apply_lifemodel_update");
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+
+    assert_eq!(
+        entry.kind,
+        LifeModelMaterializerCallerKind::AcceptedProposalApply
+    );
+    assert_eq!(
+        entry.risk,
+        LifeModelMaterializerCallerRisk::AcceptedProposalApply
+    );
+    assert_eq!(
+        entry.governance_state,
+        LifeModelMaterializerCallerGovernanceState::AcceptedProposalApplyNeedsSourceSpecificPatchMapping
+    );
+    assert!(entry.proposal_first);
+    assert!(!entry.high_risk_legacy_blocker);
+    assert!(!entry.proposal_first_convergence_complete);
+    assert!(entry
+        .required_follow_up
+        .contains("source-specific patch mapping"));
+    assert_eq!(report.proposal_first_count, 1);
+    assert!(!report.proposal_first_convergence_complete);
+}
+
+#[test]
+fn legacy_write_convergence_w86_manual_editor_is_audited_override_still_blocker() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let entry = materializer_entry(&entries, "manual_lifemodel_editor_save");
+
+    assert_eq!(
+        entry.kind,
+        LifeModelMaterializerCallerKind::ManualOverrideAudited
+    );
+    assert_eq!(
+        entry.risk,
+        LifeModelMaterializerCallerRisk::HighRiskManualOverrideBlocker
+    );
+    assert_eq!(
+        entry.governance_state,
+        LifeModelMaterializerCallerGovernanceState::AuditedManualOverrideStillLegacyBlocker
+    );
+    assert!(entry.manual_override);
+    assert!(entry.high_risk_legacy_blocker);
+    assert!(!entry.proposal_first);
+    assert!(!entry.proposal_first_convergence_complete);
+    assert!(entry.required_follow_up.contains("proposal"));
+}
+
+#[test]
+fn legacy_write_convergence_w86_restore_and_import_are_gated_overrides_still_blockers() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+
+    for stable_id in [
+        "snapshot_restore_legacy_direct_apply",
+        "data_import_legacy_direct_apply",
+    ] {
+        let entry = materializer_entry(&entries, stable_id);
+        assert_eq!(
+            entry.kind,
+            LifeModelMaterializerCallerKind::MigrationRestoreGated
+        );
+        assert_eq!(
+            entry.risk,
+            LifeModelMaterializerCallerRisk::HighRiskRestoreImportBlocker
+        );
+        assert_eq!(
+            entry.governance_state,
+            LifeModelMaterializerCallerGovernanceState::RestoreImportGatedLegacyBlocker
+        );
+        assert!(entry.restore_import_override);
+        assert!(entry.high_risk_legacy_blocker);
+        assert!(!entry.proposal_first_convergence_complete);
+        assert!(!entry.accepted_durable_lifemodel_hs_truth);
+        assert!(entry.required_follow_up.contains("migration"));
+    }
+
+    assert_eq!(report.restore_import_override_count, 2);
+    assert!(!report.proposal_first_convergence_complete);
+}
+
+#[test]
+fn legacy_write_convergence_w86_report_is_metadata_safe_and_raw_content_free() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+
+    assert!(report.metadata_safe);
+    assert!(!report.contains_raw_lifemodel_payload);
+    assert!(!report.contains_raw_memory_text);
+    assert!(!report.contains_raw_chat_text);
+    assert!(!report.contains_raw_daily_goal_text);
+    assert!(entries.iter().all(|entry| entry.metadata_safe));
+    assert!(entries
+        .iter()
+        .all(|entry| !entry.contains_raw_lifemodel_payload));
+    assert!(entries.iter().all(|entry| !entry.contains_raw_memory_text));
+    assert!(entries.iter().all(|entry| !entry.contains_raw_chat_text));
+    assert!(entries
+        .iter()
+        .all(|entry| !entry.contains_raw_daily_goal_text));
+
+    let debug_dump = format!("{report:?} {entries:?}");
+    for forbidden in [
+        "W86_RAW_PROMPT_SECRET",
+        "W86_RAW_ASSISTANT_OUTPUT_SECRET",
+        "W86_RAW_TOOL_PAYLOAD_SECRET",
+        "W86_RAW_LIFEMODEL_TEXT_SECRET",
+        "W86_RAW_MEMORY_TEXT_SECRET",
+        "W86_RAW_DAILY_GOAL_TEXT_SECRET",
+        "RAW_PROMPT_SECRET",
+        "RAW_ASSISTANT_OUTPUT_SECRET",
+        "RAW_TOOL_PAYLOAD_SECRET",
+        "RAW_LIFEMODEL_PAYLOAD_SECRET",
+        "RAW_MEMORY_PAYLOAD_SECRET",
+        "RAW_DAILY_GOAL_NAME_SECRET",
+        "private prompt text",
+        "assistant hidden answer",
+        "tool payload body",
+        "life model raw yaml",
+        "memory raw text",
+        "daily goal raw text",
+    ] {
+        assert!(
+            !debug_dump.contains(forbidden),
+            "W86 materializer caller matrix leaked raw marker {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w86_default_chat_route_unchanged_and_no_runtime_hook() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+
+    assert!(report.default_chat_route_unchanged);
+    assert!(!report.runtime_authority_granted);
+    assert!(!report.migration_permission);
+
+    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+    let send_body = extract_rust_function_body(&source, "async fn send_message(");
+    let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+    for forbidden in [
+        "lifemodel_materializer_caller_matrix",
+        "evaluate_lifemodel_materializer_caller_matrix",
+        "ensure_lifemodel_materializer_caller_matrix",
+        "LifeModelMaterializerCallerMatrixReport",
+    ] {
+        assert!(
+            !send_body.contains(forbidden),
+            "send_message must not call W86 materializer caller matrix API {forbidden}"
+        );
+        assert!(
+            !stream_body.contains(forbidden),
+            "start_stream_message must not call W86 materializer caller matrix API {forbidden}"
+        );
+    }
+}
+
+#[test]
 fn legacy_write_convergence_report_is_metadata_safe_and_raw_content_free() {
     let entries = legacy_write_convergence_inventory();
     let report = evaluate_legacy_write_convergence_inventory(&entries);
@@ -912,6 +1292,10 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "StateSourceDataBoundaryReport",
         "evaluate_state_source_data_boundary",
         "ensure_state_source_data_boundary",
+        "LifeModelMaterializerCallerMatrixReport",
+        "lifemodel_materializer_caller_matrix",
+        "evaluate_lifemodel_materializer_caller_matrix",
+        "ensure_lifemodel_materializer_caller_matrix",
     ] {
         assert!(
             !send_body.contains(forbidden),
@@ -975,4 +1359,8 @@ fn extract_rust_function_body(source: &str, signature: &str) -> String {
     }
 
     panic!("function body closes");
+}
+
+fn count_occurrences(source: &str, needle: &str) -> usize {
+    source.match_indices(needle).count()
 }

@@ -162,11 +162,42 @@ low-risk transient compatibility state, not accepted durable LifeModel-HS
 truth. Any future promotion from state source data into durable LifeModel-HS
 truth must be a separate proposal-first slice.
 
+## W86 LifeModel Compatibility Materializer Caller Matrix
+
+W86 adds a backend-only/internal caller matrix in
+`src-tauri/src/legacy_write_convergence.rs` for the current LifeModel
+compatibility materializer and direct save boundary. It defines
+`LifeModelMaterializerCallerKind`,
+`LifeModelMaterializerCallerRisk`,
+`LifeModelMaterializerCallerGovernanceState`,
+`LifeModelMaterializerCallerMatrixEntry`,
+`LifeModelMaterializerCallerMatrixReport`,
+`lifemodel_materializer_caller_matrix`,
+`evaluate_lifemodel_materializer_caller_matrix`, and
+`ensure_lifemodel_materializer_caller_matrix`.
+
+The matrix classifies all current production entries found for this slice: 16
+`persist_life_model` callsites plus 3 production `LifeModelManager::save`
+related entries. It explicitly distinguishes the materializer root, ordinary
+Chat daily-goal auto-checkin source-data compatibility writes, State/Daily Goal
+source-data compatibility materialization, accepted proposal apply, audited
+manual override, Builder/Calibration/Feedback guarded legacy dev-migration
+override paths, and Snapshot restore/Data import gated override paths.
+
+W86 is metadata-safe and reports no raw LifeModel, memory, chat, tool, prompt,
+assistant output, or daily-goal payload. It does not add a command/frontend
+surface, does not run runtime/model/tool, does not write Chat/AgentRun/Evidence
+or external records, does not change default Chat, does not change the
+`persist_life_model` signature, does not retire any legacy path, and does not
+grant migration permission or runtime authority. It is not convergence
+completion; `proposal_first_convergence_complete=false` remains explicit. W86
+is the preparation layer for W87 LifeModel materializer caller restriction.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
 | --- | --- | --- | --- | --- |
-| LifeModel save primitive | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model` | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot; callers decide governance. | Keep as the compatibility materializer writer only; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance. |
+| LifeModel save primitive / materializer caller matrix | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model`; W86 `lifemodel_materializer_caller_matrix` | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot; callers decide governance. W86 classifies every current production materializer/save entry and keeps migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false; no default Chat routing change and no `persist_life_model` signature change. | W87 should restrict callers to accepted proposal apply, source-data compatibility materialization, audited manual override, and gated restore/import/dev migration paths; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance. |
 | Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | legacy direct write requiring future convergence | W80 metadata-safe explicit manual override audit records source, before/after hashes, rough changed sections, risk class, timestamp, command/function name, and manualOverride/proposalFirst/stillLegacyDirectWrite flags after successful save. It does not record raw LifeModel content and does not make the path proposal-first. | Convert to patch/proposal review or stronger manual override UX with confirmation and richer governance. |
 | Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; preserve source-specific patch source instead of the current broad BuilderReview patch source. |
 | Low-risk batch proposal apply | `src-tauri/src/commands/proposal.rs::batch_accept_low_risk_proposals` | already proposal-first | Safe Mode guard; accepts only pending low-risk proposals. | Keep limited to low risk; do not extend to high-risk identity, values, mission, long-term goals, sensitive relationships, or privacy boundaries. |
@@ -228,8 +259,12 @@ returning metadata-safe responses only; as of W85, State/Daily Goal has a
 metadata-safe source-data boundary proof that keeps it classified as low-risk
 transient source-data compatibility materialized state, acknowledges the
 current `persist_life_model` compatibility view / YAML write, and keeps it
-separate from accepted durable LifeModel-HS truth. These guards and proofs are
-not convergence completion.
+separate from accepted durable LifeModel-HS truth; as of W86, the LifeModel
+compatibility materializer caller matrix classifies all current production
+`persist_life_model` callsites and production `LifeModelManager::save` related
+entries without changing behavior, routing, signatures, or legacy path
+availability. These guards, matrices, and proofs are not convergence
+completion.
 
 ## Convergence Backlog
 
@@ -247,7 +282,9 @@ not convergence completion.
 6. Keep raw chat/memory/vector writes as local source data with retention,
    deletion, and forgetting controls; route generated durable memory claims
    through proposals/evidence.
-7. Restrict `LifeModelManager::save` to compatibility materialization,
-   migration, explicit manual override, and accepted proposal application.
+7. W87: restrict `LifeModelManager::save` / `persist_life_model` callers using
+   the W86 matrix, allowing only compatibility materialization, gated
+   migration/restore/dev override, explicit audited manual override, and
+   accepted proposal application.
 8. Add source-specific PatchStore mapping for Builder, Calibration, Feedback,
    Chat, Manual, and HS proposal sources.
