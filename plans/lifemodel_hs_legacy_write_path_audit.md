@@ -134,6 +134,34 @@ paths are unchanged. Because the overrides can still replace durable LifeModel,
 Memory, and vector truth, restore/import remain high-risk legacy direct-write
 blockers until removed or converted to governed rollback/migration flows.
 
+## W85 State / Daily Goal Source Data Boundary Proof
+
+W85 adds a backend-only/internal source-data boundary proof in
+`src-tauri/src/legacy_write_convergence.rs` for
+`state_daily_goal_direct_writes`. The new
+`StateSourceDataBoundaryReport`, `evaluate_state_source_data_boundary`, and
+`ensure_state_source_data_boundary` return only metadata-safe path ids,
+source-data / low-risk transient classification, default/ordinary Chat
+unchanged booleans, compatibility_lifemodel_materialized_write=true,
+writes_current_lifemodel_compatibility_view=true,
+accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false,
+proposal_required_for_hs_truth_promotion=true, and blocking reason codes.
+
+The proof intentionally acknowledges the current compatibility materialization:
+State / Daily Goal writes the current LifeModel compatibility view / YAML
+through `persist_life_model`. W85 classifies that write as source-data
+compatibility materialized state, not accepted durable LifeModel-HS truth.
+
+This is not a proposal-first conversion and not a fully-converged marker. It
+does not change `record_state`, `add_daily_goal`, `update_daily_goal`,
+`delete_daily_goal`, `toggle_daily_goal`, or `try_auto_checkin_daily_goals`
+behavior; it does not add a Tauri command or frontend surface; it does not
+create ProposalStore, EvidenceStore, AgentRun, runtime/model/tool, or default
+Chat integration. State history and Daily Goal entries remain source data /
+low-risk transient compatibility state, not accepted durable LifeModel-HS
+truth. Any future promotion from state source data into durable LifeModel-HS
+truth must be a separate proposal-first slice.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
@@ -151,8 +179,8 @@ blockers until removed or converted to governed rollback/migration flows.
 | Feedback signals | `openlife-core/src/feedback.rs::{save_feedback,log_event,save_conversation_inference,fetch_evolution_signals}`; `src-tauri/src/commands/feedback.rs::{save_feedback,log_analytics_event}`; `src-tauri/src/lib.rs::capture_conversation_signals` | low-risk transient state | Append-only local feedback, analytics, and inference rows; they are source data signals, not accepted LifeModel truth. | Promote useful signals into EvidenceStore records and proposals; add retention/deletion policy per ADR 0013. |
 | Feedback evolution direct apply | `src-tauri/src/commands/feedback.rs::apply_feedback_evolution` | legacy direct write requiring future convergence | W83 guard present: command fails closed by default and requires explicit Feedback evolution legacy direct apply dev/migration override for the remaining legacy direct apply path; response is metadata-safe and omits raw feedback, conversation inference, LifeModel, and evolution rule payloads. | Remove the remaining override capability or convert feedback-driven model changes fully to proposal/evidence-first before treating Feedback evolution as converged. |
 | Feedback evolution report | `src-tauri/src/commands/feedback.rs::generate_evolution_report`; `openlife-core/src/feedback.rs::generate_evolution_report` | read-only low-risk report | W83 read-only report: command returns metadata-safe counts/status only and does not write LifeModel or `evolution_rules` truth. | Keep report read-only; future candidate creation may write only reviewable Proposal/Evidence records, not active rules or LifeModel truth. |
-| State history and current state | `openlife-core/src/memory.rs::record_state_entry`; `src-tauri/src/commands/state.rs::record_state` | low-risk transient state | User-initiated state samples append to `state_history`; current custom state dimension and `last_updated` are updated directly, not identity/values. | Move to StateStore with TTL, source, confidence, and privacy metadata; require proposals before promoting to durable identity/preference. |
-| Daily goals and chat check-in | `src-tauri/src/commands/state.rs::{add_daily_goal,update_daily_goal,delete_daily_goal,toggle_daily_goal}`; `src-tauri/src/lib.rs::try_auto_checkin_daily_goals` call sites | low-risk transient state | Directly mutates daily goals/task completion only; chat auto-check-in is keyword-triggered and does not edit long-term goal definitions. | Keep as short-lived task state or migrate to StateStore; any promotion to long-term goals remains proposal-first. |
+| State history and current state | `openlife-core/src/memory.rs::record_state_entry`; `src-tauri/src/commands/state.rs::record_state` | low-risk transient source data | W85 boundary proof present: user-initiated state samples append to `state_history` and currently materialize the LifeModel compatibility view / YAML through `persist_life_model`; current custom state dimension and `last_updated` are source data / low-risk transient compatibility state, not accepted durable LifeModel-HS truth, not an active HS LifeModel patch, and not automatically promoted. | Move to StateStore with TTL, source, confidence, and privacy metadata; any promotion to durable identity/preference/state truth must be a separate proposal-first slice. |
+| Daily goals and chat check-in | `src-tauri/src/commands/state.rs::{add_daily_goal,update_daily_goal,delete_daily_goal,toggle_daily_goal}`; `src-tauri/src/lib.rs::try_auto_checkin_daily_goals` call sites | low-risk transient source data | W85 boundary proof present: daily goals/task completion currently materialize the LifeModel compatibility view / YAML through `persist_life_model` and remain source data / low-risk transient compatibility state; chat auto-check-in is keyword-triggered and does not edit long-term goal definitions or accepted LifeModel-HS truth. | Keep as short-lived task state or migrate to StateStore; any promotion to long-term goals or durable LifeModel-HS truth remains proposal-first future work. |
 | Raw chat and memory records | `openlife-core/src/memory.rs::{save_message,save_memory_record}`; `src-tauri/src/lib.rs::persist_chat_message_if_needed`; `src-tauri/src/commands/memory.rs::index_memory_chunk` | low-risk transient state | Local raw/source records with privacy tags; user/manual indexing is explicit; raw memory is not accepted HS truth. | Preserve as raw life data with retention/deletion controls; generated durable memory claims should use MemoryWrite proposals or EvidenceStore. |
 | Memory proposals | `openlife-core/src/agent/proposal_generators/chat.rs`; `openlife-core/src/agent/proposal_engine.rs::MemoryProposalGenerator`; `src-tauri/src/commands/proposal.rs::MemoryWrite` | already proposal-first | Generated memory writes land in ProposalStore and only write memory after accepted proposal application. | Link accepted memory writes to EvidenceStore evidence when HS evidence becomes canonical. |
 | Vector memory maintenance | `openlife-core/src/vectors.rs::{run_tier_maintenance,archive_low_access_memories,restore_archived,set_importance}` | low-risk transient state | Changes retrieval tier/archive metadata, not LifeModel truth. | Keep automatic only for retrieval metadata; proposal-first if memory deletion/forgetting semantics affect accepted evidence. |
@@ -196,8 +224,12 @@ proposal-first; as of W83, Feedback evolution direct apply defaults fail
 closed and `generate_evolution_report` is read-only/no LifeModel or
 `evolution_rules` write; as of W84, Snapshot restore and Data import default
 fail closed and require explicit dev/migration/manual restore overrides while
-returning metadata-safe responses only. These guards are not convergence
-completion.
+returning metadata-safe responses only; as of W85, State/Daily Goal has a
+metadata-safe source-data boundary proof that keeps it classified as low-risk
+transient source-data compatibility materialized state, acknowledges the
+current `persist_life_model` compatibility view / YAML write, and keeps it
+separate from accepted durable LifeModel-HS truth. These guards and proofs are
+not convergence completion.
 
 ## Convergence Backlog
 

@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W84 Snapshot restore / data import legacy direct write gate complete
+> Status: authoritative document index for Agents, W85 State / Daily Goal source-data boundary proof complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,7 +16,7 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W84 completion/status index. This is not a second roadmap.
+   - Compact W1-W85 completion/status index. This is not a second roadmap.
 5. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
@@ -36,7 +36,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W84 Snapshot restore / data import legacy direct write gate complete**.
+Current latest status is **W85 State / Daily Goal source-data boundary proof complete**.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -231,6 +231,24 @@ ids/counts/status only and do not return raw LifeModel, raw memory/vector
 content, raw imported payloads, or snapshot YAML. Export and read-only snapshot
 inspection paths remain available; restore/import override capability means
 these paths are still not fully converged.
+W85 adds a backend-only/internal State / Daily Goal source-data boundary proof
+in `src-tauri/src/legacy_write_convergence.rs` with
+`StateSourceDataBoundaryReport`, `evaluate_state_source_data_boundary`, and
+`ensure_state_source_data_boundary`. It proves only that
+`state_daily_goal_direct_writes` is classified as low-risk transient/source-data
+compatibility materialized write rather than accepted durable LifeModel-HS
+truth. The inventory must explicitly list `persist_life_model`, because State /
+Daily Goal currently writes the current LifeModel compatibility view / YAML.
+The report is metadata-safe and contains only path ids, fixed classification
+flags, compatibility_lifemodel_materialized_write=true,
+writes_current_lifemodel_compatibility_view=true,
+accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false,
+proposal_required_for_hs_truth_promotion=true, ordinary/default Chat unchanged
+booleans, and blocker codes. W85 is not a proposal-first conversion, does not
+change default Chat, does not change `record_state` or daily-goal product
+behavior, and does not mark State/Daily Goal as fully converged. Future
+promotion into durable LifeModel-HS truth must be a separate proposal-first
+slice.
 
 Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
@@ -261,6 +279,13 @@ W84 reduces Snapshot restore and Data import risk with default fail-closed
 dev/migration/manual-restore gates and metadata-safe legacy responses, but the
 remaining override capability still means restore/import are not fully
 converged.
+W85 proves the State/Daily Goal source-data boundary only. State history and
+Daily Goal entries currently write the LifeModel compatibility view / YAML, but
+that materialized compatibility write is source data / low-risk transient
+state, not accepted durable LifeModel-HS truth, not an active HS LifeModel
+patch, and not automatically promoted. W85 does not convert the path to
+proposal-first and does not mark it fully converged; durable truth promotion
+remains proposal-first future work.
 
 Hard current constraints:
 
@@ -301,6 +326,12 @@ Hard current constraints:
   Builder legacy direct apply helper or override.
 - Ordinary `send_message` / `start_stream_message` must not call the W82
   Calibration legacy direct apply helper or override.
+- Ordinary `send_message` / `start_stream_message` must not call the W83
+  Feedback evolution legacy direct apply helper or override.
+- Ordinary `send_message` / `start_stream_message` must not call the W84
+  Snapshot restore / Data import legacy direct apply helper or override.
+- Ordinary `send_message` / `start_stream_message` must not call the W85 State
+  / Daily Goal source-data boundary helper.
 - Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
   preflight, and those guards may only fail closed while preserving
   `legacy_stream`.
@@ -315,7 +346,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W84 Compression Map
+## 3. W1-W85 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -354,6 +385,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W82 | Calibration direct apply legacy gate / proposal-first default | Backend Calibration guard plus Dashboard normal-flow update; `apply_calibration(mode="direct")` and `run_micro_evolution` default fail closed and require explicit Calibration legacy direct apply dev/migration override, legacy output is metadata-safe, normal `calibration_create_proposals` / proposal mode writes ProposalStore; Calibration direct/evolution remains a high-risk blocker |
 | W83 | Feedback evolution legacy direct apply gate / read-only report | Backend Feedback guard plus settings UI copy update; `apply_feedback_evolution` defaults fail closed and requires explicit Feedback evolution legacy direct apply dev/migration override, legacy output is metadata-safe, `generate_evolution_report` is read-only/no LifeModel or `evolution_rules` write; Feedback evolution direct apply remains a high-risk blocker |
 | W84 | Snapshot restore / data import legacy direct write gate | Backend Version/Settings guards plus inventory update; `restore_snapshot` and `import_all_data` default fail closed and require explicit dev/migration/manual restore override, legacy outputs are metadata-safe snapshot id/count/status only, export/read-only paths unchanged; restore/import remain high-risk blockers |
+| W85 | State / Daily Goal source-data boundary proof | Backend-only internal proof over `state_daily_goal_direct_writes`; inventory explicitly lists `persist_life_model`; report is metadata-safe, default Chat unchanged, ordinary Chat unchanged, compatibility_lifemodel_materialized_write=true, writes_current_lifemodel_compatibility_view=true, accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false, proposal_required_for_hs_truth_promotion=true; not proposal-first conversion and not fully converged |
 
 ## 4. Current Authoritative Entry Points
 
@@ -361,7 +393,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W84 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W85 structured status index and compressed guardrail map. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -462,13 +494,20 @@ W84 adds default fail-closed dev/migration/manual-restore gates to Snapshot
 restore and Data import, keeps legacy responses metadata-safe, and leaves
 export/read-only paths unchanged; restore/import remain high-risk blockers until
 removed or converted to governed rollback/migration flows.
+W85 adds only a backend/internal source-data boundary proof for State / Daily
+Goal. It explicitly acknowledges the current `persist_life_model` compatibility
+view / YAML write while classifying it as source-data compatibility materialized
+state, not accepted durable LifeModel-HS truth. It does not add a command,
+frontend surface, runtime/model/tool call, ProposalStore/EvidenceStore/AgentRun
+write, ordinary Chat integration, default Chat routing change, proposal-first
+conversion, or fully-converged marker.
 
 ## 7. Agent Rules
 
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W84 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W85 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -494,10 +533,12 @@ complete -> W79 legacy direct-write convergence inventory guard complete ->
 W80 manual LifeModel override audit guard complete -> W81 Builder legacy direct
 apply dev-gate complete -> W82 Calibration direct apply legacy gate complete
 -> W83 Feedback evolution legacy direct apply gate complete -> W84 Snapshot
-restore / data import legacy direct write gate complete.
+restore / data import legacy direct write gate complete -> W85 State / Daily
+Goal source-data boundary proof complete.
 Future direct-write convergence should start from the W79 inventory, W80 manual
 editor audit state, W81 Builder guard state, W82 Calibration guard state, W83
-Feedback evolution guard state, W84 restore/import guard state, and the legacy audit map, without
+Feedback evolution guard state, W84 restore/import guard state, W85 State/Daily
+Goal source-data boundary state, and the legacy audit map, without
 marking any blocker converged until code paths are actually changed and
 verified. Any future
 default Chat executor implementation

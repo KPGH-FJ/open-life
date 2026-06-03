@@ -6006,6 +6006,9 @@ mod hs_runtime_tests {
             "SnapshotRestoreLegacyDirectApplyOverride",
             "import_all_data_with_state_for_dev_migration",
             "DataImportLegacyDirectApplyOverride",
+            "StateSourceDataBoundaryReport",
+            "evaluate_state_source_data_boundary",
+            "ensure_state_source_data_boundary",
         ];
 
         for forbidden in forbidden_command_surfaces {

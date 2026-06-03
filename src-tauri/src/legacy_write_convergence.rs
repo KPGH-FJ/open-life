@@ -98,6 +98,21 @@ pub(crate) struct LegacyWriteConvergenceReport {
     pub(crate) guard_blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StateSourceDataBoundaryReport {
+    pub(crate) state_daily_goal_path_ids: Vec<String>,
+    pub(crate) source_data_classification: String,
+    pub(crate) low_risk_transient_classification: String,
+    pub(crate) compatibility_lifemodel_materialized_write: bool,
+    pub(crate) accepted_durable_hs_truth_write: bool,
+    pub(crate) active_hs_lifemodel_patch: bool,
+    pub(crate) writes_current_lifemodel_compatibility_view: bool,
+    pub(crate) proposal_required_for_hs_truth_promotion: bool,
+    pub(crate) ordinary_chat_unchanged: bool,
+    pub(crate) default_chat_unchanged: bool,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEntry> {
     vec![
         entry(
@@ -396,6 +411,7 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
                 "toggle_daily_goal",
                 "try_auto_checkin_daily_goals",
                 "record_state_entry",
+                "persist_life_model",
             ],
             LegacyWriteRiskClass::LowRiskTransientState,
             LegacyWriteConvergenceStatus::LowRiskTransientSourceData,
@@ -405,9 +421,9 @@ pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEn
             false,
             LegacyWriteSafeModeStatus::LowRiskSourceDataGuardNotRequired,
             false,
-            "Short-lived task/state samples may write local state, but they must not automatically promote to durable LifeModel truth.",
-            "Keep as StateStore/transient task data; require proposal-first before durable LifeModel truth promotion.",
-            "W85 StateStore TTL/source/confidence split.",
+            "W85 boundary proof: short-lived daily goals and state samples are source data / low-risk transient compatibility writes; State/Daily Goal writes the current LifeModel compatibility view through persist_life_model, but is not accepted durable LifeModel-HS truth and must not automatically promote to durable LifeModel-HS truth.",
+            "Keep State/Daily Goal as source data and compatibility materialized state; future StateStore TTL/source/confidence split or HS truth promotion bridge must require proposal-first before durable LifeModel-HS truth promotion in a separate slice.",
+            "Future StateStore TTL/source/confidence split and proposal bridge.",
             &[],
         ),
         entry(
@@ -739,6 +755,255 @@ pub(crate) fn ensure_legacy_write_convergence_inventory_guard(
     }
 }
 
+pub(crate) fn evaluate_state_source_data_boundary(
+    entries: &[LegacyWriteInventoryEntry],
+) -> StateSourceDataBoundaryReport {
+    let mut blocking_reasons = Vec::new();
+    let matching_entries = entries
+        .iter()
+        .filter(|entry| entry.stable_id == STATE_DAILY_GOAL_DIRECT_WRITES_STABLE_ID)
+        .collect::<Vec<_>>();
+    let state_daily_goal_path_ids = matching_entries
+        .iter()
+        .map(|entry| entry.stable_id.clone())
+        .collect::<Vec<_>>();
+    let mut compatibility_lifemodel_materialized_write = false;
+    let mut writes_current_lifemodel_compatibility_view = false;
+
+    if matching_entries.is_empty() {
+        push_unique(
+            &mut blocking_reasons,
+            "state_daily_goal_direct_writes_inventory_entry_missing".into(),
+        );
+    }
+    if matching_entries.len() > 1 {
+        push_unique(
+            &mut blocking_reasons,
+            "state_daily_goal_direct_writes_inventory_entry_duplicated".into(),
+        );
+    }
+
+    for entry in matching_entries {
+        if entry.path_kind != LegacyWritePathKind::StateDailyGoalDirectWrites {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_wrong_path_kind".into(),
+            );
+        }
+
+        if entry.risk_class == LegacyWriteRiskClass::HighRiskLegacyDirectWrite {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_marked_high_risk_legacy_direct_write".into(),
+            );
+        }
+
+        if entry.risk_class != LegacyWriteRiskClass::LowRiskTransientState {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_not_low_risk_transient_state".into(),
+            );
+        }
+
+        if matches!(
+            entry.current_status,
+            LegacyWriteConvergenceStatus::AlreadyProposalFirst
+                | LegacyWriteConvergenceStatus::ProposalFirstConvergenceTarget
+                | LegacyWriteConvergenceStatus::ProposalOnlyDeclarative
+        ) {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_marked_already_proposal_first_or_converged".into(),
+            );
+        }
+
+        if entry.current_status != LegacyWriteConvergenceStatus::LowRiskTransientSourceData {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_not_low_risk_transient_source_data".into(),
+            );
+        }
+
+        if entry.high_risk_durable_truth_write {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_marked_durable_lifemodel_truth_write".into(),
+            );
+        }
+
+        if !entry
+            .command_function_names
+            .iter()
+            .any(|name| name == STATE_DAILY_GOAL_COMPATIBILITY_WRITER)
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_missing_compatibility_materialized_writer".into(),
+            );
+        } else {
+            compatibility_lifemodel_materialized_write = true;
+        }
+
+        if entry.requires_proposal_first && !entry.normal_product_allowed {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_confuses_proposal_first_with_blocked_normal_product"
+                    .into(),
+            );
+        }
+
+        if !entry.normal_product_allowed {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_not_normal_product_source_data".into(),
+            );
+        }
+
+        if !entry.metadata_safe {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_metadata_not_safe".into(),
+            );
+        }
+
+        if entry.contains_raw_content {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_contains_raw_content".into(),
+            );
+        }
+
+        if entry.default_chat_affected {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_affects_default_chat".into(),
+            );
+        }
+
+        if entry.command_function_names.iter().any(|name| {
+            FORBIDDEN_STATE_DAILY_GOAL_HS_TRUTH_WRITERS
+                .iter()
+                .any(|writer| name.contains(writer))
+        }) {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_lists_durable_lifemodel_truth_writer".into(),
+            );
+        }
+
+        if entry
+            .command_function_names
+            .iter()
+            .any(|name| ORDINARY_CHAT_ENTRYPOINTS.contains(&name.as_str()))
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_lists_default_or_ordinary_chat_entrypoint".into(),
+            );
+        }
+
+        if !entry
+            .current_guard_summary
+            .contains("must not automatically promote to durable LifeModel-HS truth")
+            || !entry.current_guard_summary.contains("source data")
+            || !entry
+                .current_guard_summary
+                .contains("writes the current LifeModel compatibility view")
+            || !entry
+                .current_guard_summary
+                .contains("not accepted durable LifeModel-HS truth")
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_missing_source_data_no_auto_promotion_boundary"
+                    .into(),
+            );
+        } else {
+            writes_current_lifemodel_compatibility_view = true;
+        }
+
+        if !entry
+            .required_convergence_action
+            .contains("proposal-first before durable LifeModel-HS truth promotion")
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_missing_proposal_first_truth_promotion_boundary"
+                    .into(),
+            );
+        }
+
+        let boundary_text = [
+            entry.current_guard_summary.as_str(),
+            entry.required_convergence_action.as_str(),
+            entry.next_recommended_slice.as_str(),
+        ]
+        .join(" ")
+        .to_ascii_lowercase();
+        if AUTOMATIC_TRUTH_PROMOTION_ALLOWED_MARKERS
+            .iter()
+            .any(|marker| boundary_text.contains(marker))
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_implies_automatic_truth_promotion".into(),
+            );
+        }
+
+        if ACCEPTED_HS_TRUTH_WRITE_MARKERS
+            .iter()
+            .any(|marker| boundary_text.contains(marker))
+        {
+            push_unique(
+                &mut blocking_reasons,
+                "state_daily_goal_direct_writes_claims_accepted_hs_truth_write".into(),
+            );
+        }
+    }
+
+    let ordinary_chat_unchanged = entries
+        .iter()
+        .filter(|entry| entry.stable_id == STATE_DAILY_GOAL_DIRECT_WRITES_STABLE_ID)
+        .all(|entry| {
+            !entry
+                .command_function_names
+                .iter()
+                .any(|name| ORDINARY_CHAT_ENTRYPOINTS.contains(&name.as_str()))
+        });
+    let default_chat_unchanged = entries
+        .iter()
+        .filter(|entry| entry.stable_id == STATE_DAILY_GOAL_DIRECT_WRITES_STABLE_ID)
+        .all(|entry| !entry.default_chat_affected);
+
+    StateSourceDataBoundaryReport {
+        state_daily_goal_path_ids,
+        source_data_classification: "state_daily_goal_source_data_not_accepted_lifemodel_hs_truth"
+            .into(),
+        low_risk_transient_classification: "low_risk_transient_source_data".into(),
+        compatibility_lifemodel_materialized_write,
+        accepted_durable_hs_truth_write: false,
+        active_hs_lifemodel_patch: false,
+        writes_current_lifemodel_compatibility_view,
+        proposal_required_for_hs_truth_promotion: true,
+        ordinary_chat_unchanged,
+        default_chat_unchanged,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_state_source_data_boundary() -> Result<StateSourceDataBoundaryReport, String> {
+    let inventory = legacy_write_convergence_inventory();
+    let report = evaluate_state_source_data_boundary(&inventory);
+    if report.blocking_reasons.is_empty() {
+        Ok(report)
+    } else {
+        Err(format!(
+            "state source-data boundary blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
 const REQUIRED_STABLE_IDS: &[&str] = &[
     "lifemodel_save_primitive",
     "manual_lifemodel_editor",
@@ -755,6 +1020,37 @@ const REQUIRED_STABLE_IDS: &[&str] = &[
     "raw_chat_memory_vector_source_writes",
     "proposal_application_path",
     "external_write_proposal_path",
+];
+
+const STATE_DAILY_GOAL_DIRECT_WRITES_STABLE_ID: &str = "state_daily_goal_direct_writes";
+
+const STATE_DAILY_GOAL_COMPATIBILITY_WRITER: &str = "persist_life_model";
+
+const FORBIDDEN_STATE_DAILY_GOAL_HS_TRUTH_WRITERS: &[&str] =
+    &["LifeModelManager::save", "save_life_model"];
+
+const ORDINARY_CHAT_ENTRYPOINTS: &[&str] = &[
+    "send_message",
+    "start_stream_message",
+    "default_chat",
+    "default Chat",
+];
+
+const AUTOMATIC_TRUTH_PROMOTION_ALLOWED_MARKERS: &[&str] = &[
+    "auto_promotion_allowed",
+    "automatic_promotion_allowed",
+    "automatically_promote_to_lifemodel_truth",
+    "can automatically promote",
+    "may automatically promote",
+    "promote_without_proposal",
+    "proposal not required",
+];
+
+const ACCEPTED_HS_TRUTH_WRITE_MARKERS: &[&str] = &[
+    "accepted_hs_truth_write=true",
+    "accepted durable hs truth write",
+    "accepted durable lifemodel-hs truth write",
+    "writes accepted durable lifemodel-hs truth",
 ];
 
 const W73_W78_MATURATION_HELPERS: &[&str] = &[
