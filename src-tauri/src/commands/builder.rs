@@ -1,4 +1,8 @@
 use crate::errors::AppError;
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::{persist_life_model, AppState};
 use openlife_core::agent::{
     AgentProposal, ProposalSource, ProposalType, RiskLevel as ProposalRiskLevel,
@@ -294,7 +298,17 @@ async fn builder_step_with_state(
     } else {
         if !no_signal_completion {
             if let Some(new_model) = updated_model {
-                persist_life_model(state, new_model.clone(), true).await?;
+                persist_life_model(
+                    state,
+                    new_model.clone(),
+                    true,
+                    LifeModelMaterializerCallerContext::new(
+                        "builder_step_legacy_direct_apply",
+                        LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+                        LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+                    ),
+                )
+                .await?;
             }
         }
         let store = state.builder_session_store.lock().await;
@@ -555,7 +569,17 @@ async fn builder_apply_signals_direct_apply_after_gate(
         .collect();
 
     // Save the updated model
-    persist_life_model(state, model.clone(), true).await?;
+    persist_life_model(
+        state,
+        model.clone(),
+        true,
+        LifeModelMaterializerCallerContext::new(
+            "builder_apply_signals_legacy_direct_apply",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+        ),
+    )
+    .await?;
 
     // Clean up session
     let mut warnings = Vec::new();

@@ -1,12 +1,15 @@
 use crate::legacy_write_convergence::{
-    ensure_legacy_write_convergence_inventory_guard, ensure_lifemodel_materializer_caller_matrix,
+    ensure_legacy_write_convergence_inventory_guard, ensure_lifemodel_materializer_caller_allowed,
+    ensure_lifemodel_materializer_caller_matrix, ensure_lifemodel_materializer_caller_restriction,
     ensure_state_source_data_boundary, evaluate_legacy_write_convergence_inventory,
-    evaluate_lifemodel_materializer_caller_matrix, evaluate_state_source_data_boundary,
+    evaluate_lifemodel_materializer_caller_matrix,
+    evaluate_lifemodel_materializer_caller_restriction, evaluate_state_source_data_boundary,
     legacy_write_convergence_inventory, lifemodel_materializer_caller_matrix,
     LegacyWriteConvergenceStatus, LegacyWriteInventoryEntry, LegacyWritePathKind,
-    LegacyWriteRiskClass, LegacyWriteSafeModeStatus, LifeModelMaterializerCallerGovernanceState,
-    LifeModelMaterializerCallerKind, LifeModelMaterializerCallerMatrixEntry,
-    LifeModelMaterializerCallerRisk,
+    LegacyWriteRiskClass, LegacyWriteSafeModeStatus, LifeModelMaterializerCallerContext,
+    LifeModelMaterializerCallerGovernanceState, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerMatrixEntry, LifeModelMaterializerCallerPurpose,
+    LifeModelMaterializerCallerRestrictionReport, LifeModelMaterializerCallerRisk,
 };
 
 fn entry<'a>(
@@ -34,6 +37,17 @@ fn materializer_entry<'a>(
         .iter()
         .find(|entry| entry.stable_id == stable_id)
         .unwrap_or_else(|| panic!("missing materializer caller matrix entry {stable_id}"))
+}
+
+fn w87_context_for_entry(
+    entry: &LifeModelMaterializerCallerMatrixEntry,
+) -> LifeModelMaterializerCallerContext {
+    LifeModelMaterializerCallerContext::new(
+        &entry.stable_id,
+        entry.kind,
+        LifeModelMaterializerCallerPurpose::from_governance_state(entry.governance_state)
+            .expect("W86 governance state maps to W87 caller purpose"),
+    )
 }
 
 #[test]
@@ -895,6 +909,442 @@ fn legacy_write_convergence_w86_materializer_matrix_matches_current_production_c
         matrix_direct_save_count, actual_direct_save_count,
         "W86 matrix must classify every current production LifeModelManager::save caller"
     );
+}
+
+#[test]
+fn legacy_write_convergence_w87_production_materializer_callers_pass_typed_contexts() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let expected_contexts = [
+        (
+            "src/lib.rs",
+            "async fn send_message(",
+            "ordinary_chat_auto_checkin_source_data",
+        ),
+        (
+            "src/lib.rs",
+            "async fn start_stream_message_with_agent_loop(",
+            "ordinary_stream_agent_loop_auto_checkin_source_data",
+        ),
+        (
+            "src/lib.rs",
+            "async fn start_stream_message(",
+            "ordinary_stream_legacy_auto_checkin_source_data",
+        ),
+        (
+            "src/commands/life_model.rs",
+            "pub(crate) async fn save_life_model_with_state(",
+            "manual_lifemodel_editor_save",
+        ),
+        (
+            "src/commands/state.rs",
+            "pub(crate) async fn record_state_with_state(",
+            "state_record_state_source_data",
+        ),
+        (
+            "src/commands/state.rs",
+            "pub async fn add_daily_goal(",
+            "state_add_daily_goal_source_data",
+        ),
+        (
+            "src/commands/state.rs",
+            "pub async fn update_daily_goal(",
+            "state_update_daily_goal_source_data",
+        ),
+        (
+            "src/commands/state.rs",
+            "pub async fn delete_daily_goal(",
+            "state_delete_daily_goal_source_data",
+        ),
+        (
+            "src/commands/state.rs",
+            "pub(crate) async fn toggle_daily_goal_with_state(",
+            "state_toggle_daily_goal_source_data",
+        ),
+        (
+            "src/commands/proposal.rs",
+            "async fn apply_proposal_to_state(",
+            "proposal_apply_lifemodel_update",
+        ),
+        (
+            "src/commands/builder.rs",
+            "async fn builder_step_with_state(",
+            "builder_step_legacy_direct_apply",
+        ),
+        (
+            "src/commands/builder.rs",
+            "async fn builder_apply_signals_direct_apply_after_gate(",
+            "builder_apply_signals_legacy_direct_apply",
+        ),
+        (
+            "src/commands/calibration.rs",
+            "async fn run_micro_evolution_direct_apply_after_gate(",
+            "calibration_micro_evolution_legacy_direct_apply",
+        ),
+        (
+            "src/commands/calibration.rs",
+            "async fn apply_calibration_direct_apply_after_gate(",
+            "calibration_direct_apply_legacy_direct_apply",
+        ),
+        (
+            "src/commands/feedback.rs",
+            "async fn apply_feedback_evolution_direct_apply_after_gate(",
+            "feedback_evolution_legacy_direct_apply",
+        ),
+        (
+            "src/commands/settings.rs",
+            "async fn apply_import_payload(",
+            "data_import_legacy_direct_apply",
+        ),
+    ];
+
+    for (path, signature, stable_id) in expected_contexts {
+        let source =
+            std::fs::read_to_string(format!("{manifest_dir}/{path}")).expect("read source file");
+        let body = extract_rust_function_body(&source, signature);
+        assert!(
+            body.contains("LifeModelMaterializerCallerContext::new("),
+            "{path}:{signature} must pass a typed W87 LifeModel materializer caller context"
+        );
+        assert!(
+            body.contains(stable_id),
+            "{path}:{signature} must pass W86 stable_id {stable_id}"
+        );
+    }
+
+    let version_source = std::fs::read_to_string(format!("{manifest_dir}/src/commands/version.rs"))
+        .expect("read version source");
+    let restore_body = extract_rust_function_body(
+        &version_source,
+        "async fn restore_snapshot_direct_apply_after_gate(",
+    );
+    assert!(
+        restore_body.contains("ensure_lifemodel_materializer_caller_restriction("),
+        "snapshot restore direct manager.save must have a W87 restriction guard"
+    );
+    assert!(
+        restore_body.contains("snapshot_restore_legacy_direct_apply"),
+        "snapshot restore direct manager.save must pass its W86 stable_id"
+    );
+}
+
+#[test]
+fn legacy_write_convergence_w87_all_production_persist_callers_are_allowed_by_restriction() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let production_persist_callers = [
+        "ordinary_chat_auto_checkin_source_data",
+        "ordinary_stream_agent_loop_auto_checkin_source_data",
+        "ordinary_stream_legacy_auto_checkin_source_data",
+        "manual_lifemodel_editor_save",
+        "state_record_state_source_data",
+        "state_add_daily_goal_source_data",
+        "state_update_daily_goal_source_data",
+        "state_delete_daily_goal_source_data",
+        "state_toggle_daily_goal_source_data",
+        "proposal_apply_lifemodel_update",
+        "builder_step_legacy_direct_apply",
+        "builder_apply_signals_legacy_direct_apply",
+        "calibration_micro_evolution_legacy_direct_apply",
+        "calibration_direct_apply_legacy_direct_apply",
+        "feedback_evolution_legacy_direct_apply",
+        "data_import_legacy_direct_apply",
+    ];
+
+    for stable_id in production_persist_callers {
+        let matrix_entry = materializer_entry(&entries, stable_id);
+        assert_eq!(matrix_entry.write_entrypoint, "persist_life_model");
+        let context = w87_context_for_entry(matrix_entry);
+        let report =
+            ensure_lifemodel_materializer_caller_restriction(&context, "persist_life_model")
+                .unwrap_or_else(|message| panic!("W87 restriction blocked {stable_id}: {message}"));
+        assert!(
+            report.allowed,
+            "{stable_id} should be allowed by its typed context"
+        );
+        assert_eq!(report.stable_id, stable_id);
+        assert!(report.matrix_entry_found);
+        assert!(report.kind_matches_matrix);
+        assert!(report.purpose_matches_matrix);
+        assert!(report.metadata_safe);
+        assert!(!report.migration_permission);
+        assert!(!report.runtime_authority_granted);
+        assert!(report.blocking_reasons.is_empty());
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w87_synthetic_unclassified_context_fails_closed() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "synthetic_unclassified_materializer_caller",
+        LifeModelMaterializerCallerKind::Unclassified,
+        LifeModelMaterializerCallerPurpose::Unclassified,
+    );
+
+    let report: LifeModelMaterializerCallerRestrictionReport =
+        evaluate_lifemodel_materializer_caller_restriction(&context, "persist_life_model");
+    assert!(!report.allowed);
+    assert!(!report.matrix_entry_found);
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("materializer_caller_context_unclassified")));
+
+    let error = ensure_lifemodel_materializer_caller_allowed(&context, "persist_life_model")
+        .expect_err("synthetic unclassified caller must fail closed");
+    assert!(error.contains("synthetic_unclassified_materializer_caller"));
+}
+
+#[test]
+fn legacy_write_convergence_w87_stable_id_kind_or_purpose_mismatch_fails_closed() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "proposal_apply_lifemodel_update",
+        LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
+        LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+    );
+
+    let report = evaluate_lifemodel_materializer_caller_restriction(&context, "persist_life_model");
+    assert!(!report.allowed);
+    assert!(report.matrix_entry_found);
+    assert!(!report.kind_matches_matrix);
+    assert!(!report.purpose_matches_matrix);
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("materializer_caller_kind_mismatch")));
+    assert!(report
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("materializer_caller_purpose_mismatch")));
+}
+
+#[test]
+fn legacy_write_convergence_w87_ordinary_chat_context_is_source_data_only() {
+    for stable_id in [
+        "ordinary_chat_auto_checkin_source_data",
+        "ordinary_stream_agent_loop_auto_checkin_source_data",
+        "ordinary_stream_legacy_auto_checkin_source_data",
+    ] {
+        let context = LifeModelMaterializerCallerContext::new(
+            stable_id,
+            LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+            LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+        );
+        let report =
+            ensure_lifemodel_materializer_caller_restriction(&context, "persist_life_model")
+                .unwrap_or_else(|message| panic!("ordinary chat W87 context blocked: {message}"));
+
+        assert!(report.allowed);
+        assert!(report.source_data_compatibility);
+        assert!(report.normal_product_allowed);
+        assert!(!report.migration_permission);
+        assert!(!report.runtime_authority_granted);
+        assert!(!report.accepted_durable_lifemodel_hs_truth);
+        assert!(!report.proposal_first_convergence_complete);
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w87_proposal_apply_allowed_but_patch_mapping_not_complete() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "proposal_apply_lifemodel_update",
+        LifeModelMaterializerCallerKind::AcceptedProposalApply,
+        LifeModelMaterializerCallerPurpose::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+    );
+    let report = ensure_lifemodel_materializer_caller_restriction(&context, "persist_life_model")
+        .expect("accepted proposal apply context should be allowed");
+
+    assert!(report.allowed);
+    assert!(report.proposal_first);
+    assert!(!report.source_data_compatibility);
+    assert!(!report.high_risk_legacy_blocker);
+    assert!(!report.proposal_first_convergence_complete);
+    assert!(report
+        .required_follow_up
+        .contains("source-specific patch mapping"));
+}
+
+#[test]
+fn legacy_write_convergence_w87_manual_editor_context_remains_audited_override_blocker() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "manual_lifemodel_editor_save",
+        LifeModelMaterializerCallerKind::ManualOverrideAudited,
+        LifeModelMaterializerCallerPurpose::AuditedManualOverrideStillLegacyBlocker,
+    );
+    let report = ensure_lifemodel_materializer_caller_restriction(&context, "persist_life_model")
+        .expect("manual editor audited override context should be allowed");
+
+    assert!(report.allowed);
+    assert!(report.manual_override);
+    assert!(report.high_risk_legacy_blocker);
+    assert!(!report.normal_product_allowed);
+    assert!(!report.proposal_first);
+    assert!(!report.proposal_first_convergence_complete);
+    assert!(report
+        .blocking_reasons_from_matrix
+        .iter()
+        .any(|reason| reason.contains("manual_editor_not_proposal_first_converged")));
+}
+
+#[test]
+fn legacy_write_convergence_w87_dev_migration_contexts_remain_guarded_legacy_blockers() {
+    for stable_id in [
+        "builder_step_legacy_direct_apply",
+        "builder_apply_signals_legacy_direct_apply",
+        "calibration_micro_evolution_legacy_direct_apply",
+        "calibration_direct_apply_legacy_direct_apply",
+        "feedback_evolution_legacy_direct_apply",
+    ] {
+        let context = LifeModelMaterializerCallerContext::new(
+            stable_id,
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+        );
+        let report =
+            ensure_lifemodel_materializer_caller_restriction(&context, "persist_life_model")
+                .unwrap_or_else(|message| panic!("dev migration W87 context blocked: {message}"));
+
+        assert!(report.allowed);
+        assert!(report.high_risk_legacy_blocker);
+        assert!(!report.normal_product_allowed);
+        assert!(!report.proposal_first);
+        assert!(!report.proposal_first_convergence_complete);
+        assert!(!report.accepted_durable_lifemodel_hs_truth);
+        assert!(
+            report
+                .blocking_reasons_from_matrix
+                .iter()
+                .any(|reason| reason.contains("dev_migration")
+                    || reason.contains("legacy_direct")
+                    || reason.contains("not_fully_proposal_first")),
+            "{stable_id} must still carry its existing W81-W83 blocker reason"
+        );
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w87_restore_and_import_contexts_remain_gated_blockers() {
+    for (stable_id, write_entrypoint) in [
+        (
+            "snapshot_restore_legacy_direct_apply",
+            "LifeModelManager::save",
+        ),
+        ("data_import_legacy_direct_apply", "persist_life_model"),
+    ] {
+        let context = LifeModelMaterializerCallerContext::new(
+            stable_id,
+            LifeModelMaterializerCallerKind::MigrationRestoreGated,
+            LifeModelMaterializerCallerPurpose::RestoreImportGatedLegacyBlocker,
+        );
+        let report = ensure_lifemodel_materializer_caller_restriction(&context, write_entrypoint)
+            .unwrap_or_else(|message| panic!("restore/import W87 context blocked: {message}"));
+
+        assert!(report.allowed);
+        assert!(report.restore_import_override);
+        assert!(report.high_risk_legacy_blocker);
+        assert!(!report.normal_product_allowed);
+        assert!(!report.proposal_first_convergence_complete);
+        assert!(!report.accepted_durable_lifemodel_hs_truth);
+        assert!(
+            report
+                .blocking_reasons_from_matrix
+                .iter()
+                .any(|reason| reason.contains("restore")
+                    || reason.contains("import")
+                    || reason.contains("not_fully_governed")),
+            "{stable_id} must still carry restore/import blocker reason"
+        );
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w87_default_initialization_remains_internal_primitive() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "lifemodel_manager_default_initialization",
+        LifeModelMaterializerCallerKind::CompatibilityPrimitiveDefaultInitialization,
+        LifeModelMaterializerCallerPurpose::CompatibilityPrimitiveInternal,
+    );
+    let report =
+        ensure_lifemodel_materializer_caller_restriction(&context, "LifeModelManager::save")
+            .expect("default LifeModelManager initialization should remain classified internal");
+
+    assert!(report.allowed);
+    assert_eq!(
+        report.kind,
+        LifeModelMaterializerCallerKind::CompatibilityPrimitiveDefaultInitialization
+    );
+    assert_eq!(
+        report.purpose,
+        LifeModelMaterializerCallerPurpose::CompatibilityPrimitiveInternal
+    );
+    assert!(!report.migration_permission);
+    assert!(!report.runtime_authority_granted);
+    assert!(!report.proposal_first_convergence_complete);
+}
+
+#[test]
+fn legacy_write_convergence_w87_report_is_metadata_safe_and_raw_content_free() {
+    let context = LifeModelMaterializerCallerContext::new(
+        "proposal_apply_lifemodel_update",
+        LifeModelMaterializerCallerKind::AcceptedProposalApply,
+        LifeModelMaterializerCallerPurpose::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+    );
+    let report = evaluate_lifemodel_materializer_caller_restriction(&context, "persist_life_model");
+    assert!(report.allowed);
+    assert!(report.metadata_safe);
+    assert!(!report.contains_raw_lifemodel_payload);
+    assert!(!report.contains_raw_memory_text);
+    assert!(!report.contains_raw_chat_text);
+    assert!(!report.contains_raw_daily_goal_text);
+    assert!(!report.contains_raw_tool_payload);
+
+    let debug_dump = format!("{report:?} {context:?}");
+    for forbidden in [
+        "W87_RAW_PROMPT_SECRET",
+        "W87_RAW_ASSISTANT_OUTPUT_SECRET",
+        "W87_RAW_TOOL_PAYLOAD_SECRET",
+        "W87_RAW_LIFEMODEL_TEXT_SECRET",
+        "W87_RAW_MEMORY_TEXT_SECRET",
+        "W87_RAW_DAILY_GOAL_TEXT_SECRET",
+        "private prompt text",
+        "assistant hidden answer",
+        "tool payload body",
+        "life model raw yaml",
+        "memory raw text",
+        "daily goal raw text",
+    ] {
+        assert!(
+            !debug_dump.contains(forbidden),
+            "W87 materializer caller restriction leaked raw marker {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn legacy_write_convergence_w87_default_chat_route_unchanged() {
+    let entries = lifemodel_materializer_caller_matrix();
+    let matrix_report = evaluate_lifemodel_materializer_caller_matrix(&entries);
+    assert!(matrix_report.default_chat_route_unchanged);
+    assert!(!matrix_report.runtime_authority_granted);
+    assert!(!matrix_report.migration_permission);
+
+    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+    let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+    let send_body = extract_rust_function_body(&source, "async fn send_message(");
+    let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+    for forbidden in [
+        "evaluate_lifemodel_materializer_caller_restriction",
+        "ensure_lifemodel_materializer_caller_allowed",
+        "ensure_lifemodel_materializer_caller_restriction",
+        "LifeModelMaterializerCallerRestrictionReport",
+    ] {
+        assert!(
+            !send_body.contains(forbidden),
+            "send_message must not route through W87 restriction evaluator {forbidden}"
+        );
+        assert!(
+            !stream_body.contains(forbidden),
+            "start_stream_message must not route through W87 restriction evaluator {forbidden}"
+        );
+    }
 }
 
 #[test]

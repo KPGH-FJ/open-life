@@ -14,6 +14,11 @@ use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 use tokio::time::{timeout, Duration};
 
+use crate::legacy_write_convergence::{
+    ensure_lifemodel_materializer_caller_restriction, LifeModelMaterializerCallerContext,
+    LifeModelMaterializerCallerKind, LifeModelMaterializerCallerPurpose,
+};
+
 pub mod a2a_server;
 pub mod a2a_sidecar;
 pub mod bootstrap;
@@ -285,7 +290,9 @@ pub(crate) async fn persist_life_model(
     state: &Arc<AppState>,
     mut life_model: LifeModel,
     create_daily_snapshot: bool,
+    caller_context: LifeModelMaterializerCallerContext,
 ) -> Result<LifeModel, String> {
+    ensure_lifemodel_materializer_caller_restriction(&caller_context, "persist_life_model")?;
     let previous_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().ok()
@@ -1196,7 +1203,17 @@ async fn send_message(
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
         capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
         if msg.is_some() {
-            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await?;
+            let _ = persist_life_model(
+                &state.inner().clone(),
+                life_model.clone(),
+                false,
+                LifeModelMaterializerCallerContext::new(
+                    "ordinary_chat_auto_checkin_source_data",
+                    LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+                    LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+                ),
+            )
+            .await?;
         }
         msg
     } else {
@@ -1982,7 +1999,17 @@ async fn start_stream_message_with_agent_loop(
     let auto_checkin_msg = if let Some(ref m) = user_msg {
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
         if msg.is_some() {
-            let _ = persist_life_model(&state.inner().clone(), life_model.clone(), false).await;
+            let _ = persist_life_model(
+                &state.inner().clone(),
+                life_model.clone(),
+                false,
+                LifeModelMaterializerCallerContext::new(
+                    "ordinary_stream_agent_loop_auto_checkin_source_data",
+                    LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+                    LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+                ),
+            )
+            .await;
         }
         msg
     } else {
@@ -2425,8 +2452,17 @@ async fn start_stream_message(
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
         capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
         if msg.is_some() {
-            if let Err(message) =
-                persist_life_model(&state.inner().clone(), life_model.clone(), false).await
+            if let Err(message) = persist_life_model(
+                &state.inner().clone(),
+                life_model.clone(),
+                false,
+                LifeModelMaterializerCallerContext::new(
+                    "ordinary_stream_legacy_auto_checkin_source_data",
+                    LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData,
+                    LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
+                ),
+            )
+            .await
             {
                 let error = openlife_core::agent::AgentRunError {
                     message: message.clone(),

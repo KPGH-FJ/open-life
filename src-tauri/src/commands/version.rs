@@ -1,4 +1,8 @@
 use crate::errors::AppError;
+use crate::legacy_write_convergence::{
+    ensure_lifemodel_materializer_caller_restriction, LifeModelMaterializerCallerContext,
+    LifeModelMaterializerCallerKind, LifeModelMaterializerCallerPurpose,
+};
 use crate::AppState;
 use openlife_core::versioning::LifeModelVersion;
 use serde::{Deserialize, Serialize};
@@ -123,6 +127,15 @@ async fn restore_snapshot_direct_apply_after_gate(
     let durable_lifemodel_write = serde_json::to_value(&current_model).map_err(AppError::from)?
         != serde_json::to_value(&restored_model).map_err(AppError::from)?;
     let restored_model_version = restored_model.metadata.version.clone();
+    ensure_lifemodel_materializer_caller_restriction(
+        &LifeModelMaterializerCallerContext::new(
+            "snapshot_restore_legacy_direct_apply",
+            LifeModelMaterializerCallerKind::MigrationRestoreGated,
+            LifeModelMaterializerCallerPurpose::RestoreImportGatedLegacyBlocker,
+        ),
+        "LifeModelManager::save",
+    )
+    .map_err(AppError::from)?;
     {
         let manager = state.life_model_manager.lock().await;
         manager.save(&restored_model).map_err(AppError::from)?;

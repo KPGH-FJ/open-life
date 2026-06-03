@@ -1,3 +1,7 @@
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{
     AgentProposal, MaturationProposalOutcome, ProposalStatus, ProposalType, RiskLevel,
@@ -564,7 +568,17 @@ async fn apply_proposal_to_state(
             }
 
             // 4. Persist updated model
-            persist_life_model(state, model.clone(), true).await?;
+            persist_life_model(
+                state,
+                model.clone(),
+                true,
+                LifeModelMaterializerCallerContext::new(
+                    "proposal_apply_lifemodel_update",
+                    LifeModelMaterializerCallerKind::AcceptedProposalApply,
+                    LifeModelMaterializerCallerPurpose::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+                ),
+            )
+            .await?;
 
             // 5. Create After Snapshot
             let _after_snapshot = {

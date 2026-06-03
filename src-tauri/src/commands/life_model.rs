@@ -1,4 +1,8 @@
 use crate::errors::AppError;
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::{persist_life_model, AppState};
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
@@ -50,9 +54,18 @@ pub(crate) async fn save_life_model_with_state(
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
-    let after = persist_life_model(&state.clone(), life_model, true)
-        .await
-        .map_err(AppError::from)?;
+    let after = persist_life_model(
+        &state.clone(),
+        life_model,
+        true,
+        LifeModelMaterializerCallerContext::new(
+            "manual_lifemodel_editor_save",
+            LifeModelMaterializerCallerKind::ManualOverrideAudited,
+            LifeModelMaterializerCallerPurpose::AuditedManualOverrideStillLegacyBlocker,
+        ),
+    )
+    .await
+    .map_err(AppError::from)?;
     record_manual_lifemodel_override_audit_with_state(state, &before, &after).await?;
     Ok(())
 }

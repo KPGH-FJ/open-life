@@ -1,4 +1,8 @@
 use crate::errors::AppError;
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::{persist_life_model, AppState};
 use openlife_core::feedback::{AnalyticsSummary, FeedbackEntry, FeedbackType};
 use serde::{Deserialize, Serialize};
@@ -137,9 +141,18 @@ async fn apply_feedback_evolution_direct_apply_after_gate(
         0
     };
     if durable_lifemodel_write {
-        let _ = persist_life_model(state, model, true)
-            .await
-            .map_err(AppError::from)?;
+        let _ = persist_life_model(
+            state,
+            model,
+            true,
+            LifeModelMaterializerCallerContext::new(
+                "feedback_evolution_legacy_direct_apply",
+                LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+                LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+            ),
+        )
+        .await
+        .map_err(AppError::from)?;
     }
 
     Ok(serde_json::json!({

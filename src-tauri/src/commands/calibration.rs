@@ -1,4 +1,8 @@
 use crate::errors::AppError;
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::{persist_life_model, AppState};
 use chrono::Datelike;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
@@ -181,7 +185,17 @@ async fn run_micro_evolution_direct_apply_after_gate(
         MicroEvolutionEngine::apply_changes(&mut new_model, &result.changes)
             .map_err(AppError::from)?;
         drop(manager);
-        let new_model = persist_life_model(state, new_model, false).await?;
+        let new_model = persist_life_model(
+            state,
+            new_model,
+            false,
+            LifeModelMaterializerCallerContext::new(
+                "calibration_micro_evolution_legacy_direct_apply",
+                LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+                LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+            ),
+        )
+        .await?;
         // auto snapshot after evolution
         let vm = state.version_manager.lock().await;
         if let Ok(snap) = vm.snapshot(&new_model, "auto:evolution", &result.message) {
@@ -329,7 +343,17 @@ async fn apply_calibration_direct_apply_after_gate(
     let mut model = manager.load().map_err(AppError::from)?;
     MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
     drop(manager);
-    let model = persist_life_model(state, model, false).await?;
+    let model = persist_life_model(
+        state,
+        model,
+        false,
+        LifeModelMaterializerCallerContext::new(
+            "calibration_direct_apply_legacy_direct_apply",
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
+            LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
+        ),
+    )
+    .await?;
     let vm = state.version_manager.lock().await;
     let snap = vm
         .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")

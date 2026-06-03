@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
 
+use crate::legacy_write_convergence::{
+    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
+    LifeModelMaterializerCallerPurpose,
+};
 use crate::persist_life_model;
 use crate::storage::{
     app_data_dir, load_onboarding_status_from_path, mcp_audit_keyring_path, onboarding_status_path,
@@ -294,7 +298,17 @@ async fn apply_import_payload(
     messages: Vec<openlife_core::memory::ExportedMessage>,
     vectors: Vec<openlife_core::vectors::ExportedVectorChunk>,
 ) -> Result<(), AppError> {
-    persist_life_model(&state, life_model, false).await?;
+    persist_life_model(
+        &state,
+        life_model,
+        false,
+        LifeModelMaterializerCallerContext::new(
+            "data_import_legacy_direct_apply",
+            LifeModelMaterializerCallerKind::MigrationRestoreGated,
+            LifeModelMaterializerCallerPurpose::RestoreImportGatedLegacyBlocker,
+        ),
+    )
+    .await?;
     {
         let store = state.memory_store.lock().await;
         store

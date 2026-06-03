@@ -204,6 +204,122 @@ pub(crate) struct LifeModelMaterializerCallerMatrixReport {
     pub(crate) blocking_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifeModelMaterializerCallerPurpose {
+    CompatibilityPrimitiveInternal,
+    SourceDataCompatibilityNotAcceptedTruth,
+    AuditedManualOverrideStillLegacyBlocker,
+    AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+    DevMigrationOverrideGuardedLegacyBlocker,
+    RestoreImportGatedLegacyBlocker,
+    Unclassified,
+}
+
+impl LifeModelMaterializerCallerPurpose {
+    pub(crate) fn from_governance_state(
+        governance_state: LifeModelMaterializerCallerGovernanceState,
+    ) -> Option<Self> {
+        match governance_state {
+            LifeModelMaterializerCallerGovernanceState::CompatibilityPrimitiveInternal => {
+                Some(Self::CompatibilityPrimitiveInternal)
+            }
+            LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth => {
+                Some(Self::SourceDataCompatibilityNotAcceptedTruth)
+            }
+            LifeModelMaterializerCallerGovernanceState::AuditedManualOverrideStillLegacyBlocker => {
+                Some(Self::AuditedManualOverrideStillLegacyBlocker)
+            }
+            LifeModelMaterializerCallerGovernanceState::AcceptedProposalApplyNeedsSourceSpecificPatchMapping => {
+                Some(Self::AcceptedProposalApplyNeedsSourceSpecificPatchMapping)
+            }
+            LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker => {
+                Some(Self::DevMigrationOverrideGuardedLegacyBlocker)
+            }
+            LifeModelMaterializerCallerGovernanceState::RestoreImportGatedLegacyBlocker => {
+                Some(Self::RestoreImportGatedLegacyBlocker)
+            }
+            LifeModelMaterializerCallerGovernanceState::Unclassified => Some(Self::Unclassified),
+        }
+    }
+
+    fn governance_state(self) -> Option<LifeModelMaterializerCallerGovernanceState> {
+        match self {
+            Self::CompatibilityPrimitiveInternal => {
+                Some(LifeModelMaterializerCallerGovernanceState::CompatibilityPrimitiveInternal)
+            }
+            Self::SourceDataCompatibilityNotAcceptedTruth => Some(
+                LifeModelMaterializerCallerGovernanceState::SourceDataCompatibilityNotAcceptedTruth,
+            ),
+            Self::AuditedManualOverrideStillLegacyBlocker => Some(
+                LifeModelMaterializerCallerGovernanceState::AuditedManualOverrideStillLegacyBlocker,
+            ),
+            Self::AcceptedProposalApplyNeedsSourceSpecificPatchMapping => Some(
+                LifeModelMaterializerCallerGovernanceState::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+            ),
+            Self::DevMigrationOverrideGuardedLegacyBlocker => Some(
+                LifeModelMaterializerCallerGovernanceState::DevMigrationOverrideGuardedLegacyBlocker,
+            ),
+            Self::RestoreImportGatedLegacyBlocker => Some(
+                LifeModelMaterializerCallerGovernanceState::RestoreImportGatedLegacyBlocker,
+            ),
+            Self::Unclassified => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LifeModelMaterializerCallerContext {
+    pub(crate) stable_id: String,
+    pub(crate) kind: LifeModelMaterializerCallerKind,
+    pub(crate) purpose: LifeModelMaterializerCallerPurpose,
+}
+
+impl LifeModelMaterializerCallerContext {
+    pub(crate) fn new(
+        stable_id: impl Into<String>,
+        kind: LifeModelMaterializerCallerKind,
+        purpose: LifeModelMaterializerCallerPurpose,
+    ) -> Self {
+        Self {
+            stable_id: stable_id.into(),
+            kind,
+            purpose,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LifeModelMaterializerCallerRestrictionReport {
+    pub(crate) stable_id: String,
+    pub(crate) write_entrypoint: String,
+    pub(crate) allowed: bool,
+    pub(crate) matrix_entry_found: bool,
+    pub(crate) kind: LifeModelMaterializerCallerKind,
+    pub(crate) purpose: LifeModelMaterializerCallerPurpose,
+    pub(crate) kind_matches_matrix: bool,
+    pub(crate) purpose_matches_matrix: bool,
+    pub(crate) normal_product_allowed: bool,
+    pub(crate) proposal_first: bool,
+    pub(crate) source_data_compatibility: bool,
+    pub(crate) manual_override: bool,
+    pub(crate) restore_import_override: bool,
+    pub(crate) high_risk_legacy_blocker: bool,
+    pub(crate) metadata_safe: bool,
+    pub(crate) contains_raw_lifemodel_payload: bool,
+    pub(crate) contains_raw_memory_text: bool,
+    pub(crate) contains_raw_chat_text: bool,
+    pub(crate) contains_raw_daily_goal_text: bool,
+    pub(crate) contains_raw_tool_payload: bool,
+    pub(crate) default_chat_route_unchanged: bool,
+    pub(crate) migration_permission: bool,
+    pub(crate) runtime_authority_granted: bool,
+    pub(crate) accepted_durable_lifemodel_hs_truth: bool,
+    pub(crate) proposal_first_convergence_complete: bool,
+    pub(crate) required_follow_up: String,
+    pub(crate) blocking_reasons_from_matrix: Vec<String>,
+    pub(crate) blocking_reasons: Vec<String>,
+}
+
 pub(crate) fn legacy_write_convergence_inventory() -> Vec<LegacyWriteInventoryEntry> {
     vec![
         entry(
@@ -1761,6 +1877,295 @@ pub(crate) fn ensure_lifemodel_materializer_caller_matrix(
             report.blocking_reasons.join(",")
         ))
     }
+}
+
+pub(crate) fn evaluate_lifemodel_materializer_caller_restriction(
+    context: &LifeModelMaterializerCallerContext,
+    write_entrypoint: &str,
+) -> LifeModelMaterializerCallerRestrictionReport {
+    let entries = lifemodel_materializer_caller_matrix();
+    let matching_entries = entries
+        .iter()
+        .filter(|entry| entry.stable_id == context.stable_id)
+        .collect::<Vec<_>>();
+    let matrix_entry = matching_entries.first().copied();
+    let matrix_entry_found = matrix_entry.is_some();
+    let mut blocking_reasons = Vec::new();
+
+    if context.stable_id.trim().is_empty()
+        || context.kind == LifeModelMaterializerCallerKind::Unclassified
+        || context.purpose == LifeModelMaterializerCallerPurpose::Unclassified
+        || !matrix_entry_found
+    {
+        push_unique(
+            &mut blocking_reasons,
+            format!(
+                "materializer_caller_context_unclassified:{}",
+                context.stable_id
+            ),
+        );
+    }
+
+    if matching_entries.len() > 1 {
+        push_unique(
+            &mut blocking_reasons,
+            format!(
+                "materializer_caller_context_duplicated_in_matrix:{}",
+                context.stable_id
+            ),
+        );
+    }
+
+    let mut kind_matches_matrix = false;
+    let mut purpose_matches_matrix = false;
+    let mut normal_product_allowed = false;
+    let mut proposal_first = false;
+    let mut source_data_compatibility = false;
+    let mut manual_override = false;
+    let mut restore_import_override = false;
+    let mut high_risk_legacy_blocker = false;
+    let mut metadata_safe = false;
+    let mut contains_raw_lifemodel_payload = false;
+    let mut contains_raw_memory_text = false;
+    let mut contains_raw_chat_text = false;
+    let mut contains_raw_daily_goal_text = false;
+    let contains_raw_tool_payload = false;
+    let mut default_chat_route_unchanged = true;
+    let mut migration_permission = false;
+    let mut runtime_authority_granted = false;
+    let mut accepted_durable_lifemodel_hs_truth = false;
+    let mut proposal_first_convergence_complete = false;
+    let mut required_follow_up = String::new();
+    let mut blocking_reasons_from_matrix = Vec::new();
+
+    if let Some(entry) = matrix_entry {
+        kind_matches_matrix = context.kind == entry.kind;
+        purpose_matches_matrix = context.purpose.governance_state() == Some(entry.governance_state);
+        normal_product_allowed = entry.normal_product_allowed;
+        proposal_first = entry.proposal_first;
+        source_data_compatibility = entry.source_data_compatibility;
+        manual_override = entry.manual_override;
+        restore_import_override = entry.restore_import_override;
+        high_risk_legacy_blocker = entry.high_risk_legacy_blocker;
+        metadata_safe = entry.metadata_safe;
+        contains_raw_lifemodel_payload = entry.contains_raw_lifemodel_payload;
+        contains_raw_memory_text = entry.contains_raw_memory_text;
+        contains_raw_chat_text = entry.contains_raw_chat_text;
+        contains_raw_daily_goal_text = entry.contains_raw_daily_goal_text;
+        default_chat_route_unchanged = !entry.default_chat_route_changed;
+        migration_permission = entry.migration_permission;
+        runtime_authority_granted = entry.runtime_authority_granted;
+        accepted_durable_lifemodel_hs_truth = entry.accepted_durable_lifemodel_hs_truth;
+        proposal_first_convergence_complete = entry.proposal_first_convergence_complete;
+        required_follow_up = entry.required_follow_up.clone();
+        blocking_reasons_from_matrix = entry.blocking_reasons.clone();
+
+        if entry.write_entrypoint != write_entrypoint {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_write_entrypoint_mismatch:{}:{}:{}",
+                    context.stable_id, write_entrypoint, entry.write_entrypoint
+                ),
+            );
+        }
+
+        if !kind_matches_matrix {
+            push_unique(
+                &mut blocking_reasons,
+                format!("materializer_caller_kind_mismatch:{}", context.stable_id),
+            );
+        }
+
+        if !purpose_matches_matrix {
+            push_unique(
+                &mut blocking_reasons,
+                format!("materializer_caller_purpose_mismatch:{}", context.stable_id),
+            );
+        }
+
+        if !entry.metadata_safe {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_restriction_metadata_not_safe:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.contains_raw_lifemodel_payload
+            || entry.contains_raw_memory_text
+            || entry.contains_raw_chat_text
+            || entry.contains_raw_daily_goal_text
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_restriction_contains_raw_content:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.default_chat_route_changed {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_restriction_changes_default_chat_route:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.migration_permission {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_restriction_grants_migration_permission:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.runtime_authority_granted {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "materializer_caller_restriction_grants_runtime_authority:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.source_data_compatibility && entry.accepted_durable_lifemodel_hs_truth {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "source_data_materializer_marked_accepted_lifemodel_hs_truth:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if context.kind == LifeModelMaterializerCallerKind::OrdinaryChatAutoCheckinSourceData
+            && (!entry.source_data_compatibility
+                || entry.migration_permission
+                || entry.runtime_authority_granted
+                || entry.accepted_durable_lifemodel_hs_truth)
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "ordinary_chat_auto_checkin_restriction_not_source_data_only:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if context.kind == LifeModelMaterializerCallerKind::ManualOverrideAudited
+            && (entry.proposal_first || entry.proposal_first_convergence_complete)
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "manual_editor_restriction_misclassified_as_proposal_first_or_converged:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if matches!(
+            context.kind,
+            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride
+                | LifeModelMaterializerCallerKind::MigrationRestoreGated
+        ) && entry.proposal_first_convergence_complete
+        {
+            push_unique(
+                &mut blocking_reasons,
+                format!(
+                    "legacy_override_restriction_misclassified_as_fully_converged:{}",
+                    context.stable_id
+                ),
+            );
+        }
+
+        if entry.high_risk_legacy_blocker {
+            if entry.normal_product_allowed {
+                push_unique(
+                    &mut blocking_reasons,
+                    format!(
+                        "high_risk_legacy_restriction_marked_normal_product_allowed:{}",
+                        context.stable_id
+                    ),
+                );
+            }
+            if entry.blocking_reasons.is_empty() {
+                push_unique(
+                    &mut blocking_reasons,
+                    format!(
+                        "high_risk_legacy_restriction_missing_existing_gate_blocker:{}",
+                        context.stable_id
+                    ),
+                );
+            }
+        }
+    }
+
+    LifeModelMaterializerCallerRestrictionReport {
+        stable_id: context.stable_id.clone(),
+        write_entrypoint: write_entrypoint.into(),
+        allowed: blocking_reasons.is_empty(),
+        matrix_entry_found,
+        kind: context.kind,
+        purpose: context.purpose,
+        kind_matches_matrix,
+        purpose_matches_matrix,
+        normal_product_allowed,
+        proposal_first,
+        source_data_compatibility,
+        manual_override,
+        restore_import_override,
+        high_risk_legacy_blocker,
+        metadata_safe,
+        contains_raw_lifemodel_payload,
+        contains_raw_memory_text,
+        contains_raw_chat_text,
+        contains_raw_daily_goal_text,
+        contains_raw_tool_payload,
+        default_chat_route_unchanged,
+        migration_permission,
+        runtime_authority_granted,
+        accepted_durable_lifemodel_hs_truth,
+        proposal_first_convergence_complete,
+        required_follow_up,
+        blocking_reasons_from_matrix,
+        blocking_reasons,
+    }
+}
+
+pub(crate) fn ensure_lifemodel_materializer_caller_restriction(
+    context: &LifeModelMaterializerCallerContext,
+    write_entrypoint: &str,
+) -> Result<LifeModelMaterializerCallerRestrictionReport, String> {
+    let report = evaluate_lifemodel_materializer_caller_restriction(context, write_entrypoint);
+    if report.allowed {
+        Ok(report)
+    } else {
+        Err(format!(
+            "LifeModel materializer caller restriction blocked for {} via {}: {}",
+            context.stable_id,
+            write_entrypoint,
+            report.blocking_reasons.join(",")
+        ))
+    }
+}
+
+pub(crate) fn ensure_lifemodel_materializer_caller_allowed(
+    context: &LifeModelMaterializerCallerContext,
+    write_entrypoint: &str,
+) -> Result<LifeModelMaterializerCallerRestrictionReport, String> {
+    ensure_lifemodel_materializer_caller_restriction(context, write_entrypoint)
 }
 
 const REQUIRED_STABLE_IDS: &[&str] = &[
