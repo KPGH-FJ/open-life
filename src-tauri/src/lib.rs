@@ -5969,6 +5969,11 @@ mod hs_runtime_tests {
             "LowEnergyCollaborationRuleCandidateReport",
             "evaluate_low_energy_collaboration_rule_candidate",
             "propose_low_energy_collaboration_rule_candidate",
+            "AcceptedLowEnergyRuleSelectionInput",
+            "AcceptedLowEnergyRuleSelectionReport",
+            "AcceptedLowEnergyRuleSelectionHSPacketAuditProof",
+            "evaluate_accepted_low_energy_rule_selection",
+            "ensure_accepted_low_energy_rule_selection",
         ];
 
         for forbidden in forbidden_command_surfaces {

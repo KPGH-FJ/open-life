@@ -3,10 +3,16 @@ use crate::agent::evidence_store::{
     EvidenceStore, EvidenceType,
 };
 use crate::agent::governor::{GovernanceDecision, GovernanceDecisionKind, LifeModelGovernor};
-use crate::agent::policy_store::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING;
+use crate::agent::hs_selector::RuntimeHSPacket;
+use crate::agent::policy_store::{
+    ModelRoutePolicy, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
+    BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
+};
 use crate::agent::proposal_store::ProposalStore;
 use crate::agent::runtime_contract::{LifeEventDraft, RuntimeOutput};
-use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::types::{
+    AgentProposal, AgentTaskKind, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
+};
 use anyhow::{anyhow, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -748,6 +754,348 @@ pub fn propose_low_energy_collaboration_rule_candidate(
     report.candidate_proposal_id = Some(proposal.id);
     report.wrote_proposal_count = 1;
     Ok(report)
+}
+
+#[derive(Clone)]
+pub struct AcceptedLowEnergyRuleSelectionInput {
+    pub candidate_proposal: Option<AgentProposal>,
+    pub target_task_kind: AgentTaskKind,
+    pub target_domain: String,
+    pub planning_intent_present: bool,
+    pub privacy_topic: PolicyTopic,
+    pub current_route_policy: ModelRoutePolicy,
+    pub existing_hs_packet: Option<RuntimeHSPacket>,
+}
+
+impl Default for AcceptedLowEnergyRuleSelectionInput {
+    fn default() -> Self {
+        Self {
+            candidate_proposal: None,
+            target_task_kind: AgentTaskKind::Planning,
+            target_domain: "low_energy_planning".into(),
+            planning_intent_present: true,
+            privacy_topic: PolicyTopic::General,
+            current_route_policy: ModelRoutePolicy::CloudAllowed,
+            existing_hs_packet: None,
+        }
+    }
+}
+
+impl AcceptedLowEnergyRuleSelectionInput {
+    pub fn for_candidate(candidate_proposal: AgentProposal) -> Self {
+        Self {
+            candidate_proposal: Some(candidate_proposal),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedLowEnergyRuleSelectionHSPacketAuditProof {
+    pub metadata_safe: bool,
+    pub planning_task_only: bool,
+    pub low_energy_domain_only: bool,
+    pub privacy_policy_relaxed: bool,
+    pub enforced_route_policy: ModelRoutePolicy,
+    pub selected_policy_ids: Vec<String>,
+    pub selected_guidance_summary: Option<String>,
+    pub selected_candidate_proposal_id: Option<String>,
+    pub selected_candidate_rule_digest: Option<String>,
+    pub source_outcome_evidence_ids: Vec<String>,
+    pub source_proposal_ids: Vec<String>,
+    pub source_agent_run_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptedLowEnergyRuleSelectionReport {
+    pub selected: bool,
+    pub planning_task_only: bool,
+    pub low_energy_domain_only: bool,
+    pub privacy_policy_relaxed: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub target_task_kind: AgentTaskKind,
+    pub target_domain: String,
+    pub privacy_topic: PolicyTopic,
+    pub current_route_policy: ModelRoutePolicy,
+    pub enforced_route_policy: ModelRoutePolicy,
+    pub selected_guidance_summary: Option<String>,
+    pub selected_candidate_proposal_id: Option<String>,
+    pub selected_candidate_rule_digest: Option<String>,
+    pub source_outcome_evidence_ids: Vec<String>,
+    pub source_proposal_ids: Vec<String>,
+    pub source_agent_run_ids: Vec<String>,
+    pub blocking_reasons: Vec<String>,
+    pub hs_packet_audit_proof: AcceptedLowEnergyRuleSelectionHSPacketAuditProof,
+    pub wrote_evidence_count: u32,
+    pub wrote_proposal_count: u32,
+    pub wrote_life_model_count: u32,
+    pub wrote_memory_count: u32,
+    pub wrote_heuristic_count: u32,
+    pub wrote_chat_message_count: u32,
+    pub wrote_agent_run_count: u32,
+    pub wrote_mcp_audit_count: u32,
+    pub wrote_external_count: u32,
+    pub ran_runtime: bool,
+    pub ran_model: bool,
+    pub ran_tool: bool,
+}
+
+pub fn evaluate_accepted_low_energy_rule_selection(
+    input: AcceptedLowEnergyRuleSelectionInput,
+) -> AcceptedLowEnergyRuleSelectionReport {
+    let mut blocking_reasons = Vec::new();
+    let mut metadata_safe = true;
+    let mut contains_raw_content = false;
+    let mut selected_guidance_summary = None;
+    let mut selected_candidate_proposal_id = None;
+    let mut selected_candidate_rule_digest = None;
+    let mut source_outcome_evidence_ids = Vec::new();
+    let mut source_proposal_ids = Vec::new();
+    let mut source_agent_run_ids = Vec::new();
+
+    if !matches!(input.target_task_kind, AgentTaskKind::Planning) || !input.planning_intent_present
+    {
+        push_unique_reason(&mut blocking_reasons, "non_planning_task");
+    }
+    if !is_low_energy_rule_candidate_domain(&input.target_domain) {
+        push_unique_reason(&mut blocking_reasons, "non_low_energy_planning_domain");
+    }
+
+    match input.candidate_proposal.as_ref() {
+        Some(candidate) => {
+            if candidate.status != ProposalStatus::Accepted {
+                push_unique_reason(&mut blocking_reasons, "candidate_proposal_not_accepted");
+            }
+            if !is_w76_low_energy_rule_candidate_proposal(candidate) {
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_proposal_not_w76_low_energy_rule_candidate",
+                );
+            }
+
+            let candidate_contains_raw = outcome_metadata_contains_raw_content(&candidate.after);
+            if candidate_contains_raw {
+                contains_raw_content = true;
+                metadata_safe = false;
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_proposal_contains_raw_content",
+                );
+            }
+            let candidate_metadata_safe = candidate
+                .after
+                .get("metadataSafe")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && !candidate
+                    .after
+                    .get("containsRawContent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true)
+                && !candidate_contains_raw;
+            if !candidate_metadata_safe {
+                metadata_safe = false;
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_proposal_metadata_not_safe",
+                );
+            }
+
+            if !candidate
+                .after
+                .get("candidateOnly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                push_unique_reason(&mut blocking_reasons, "candidate_only_false");
+            }
+            if candidate
+                .after
+                .get("activatesHeuristic")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                push_unique_reason(&mut blocking_reasons, "heuristic_activation_attempted");
+            }
+            if candidate
+                .after
+                .get("writesActiveRule")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                push_unique_reason(&mut blocking_reasons, "active_rule_write_attempted");
+            }
+            if candidate
+                .after
+                .get("heuristicActivationAllowed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                push_unique_reason(&mut blocking_reasons, "heuristic_activation_allowed");
+            }
+
+            if let Some(candidate_domain) = candidate
+                .after
+                .get("targetDomain")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+            {
+                if !is_low_energy_rule_candidate_domain(candidate_domain) {
+                    push_unique_reason(
+                        &mut blocking_reasons,
+                        "candidate_rule_non_low_energy_domain",
+                    );
+                }
+            } else {
+                push_unique_reason(&mut blocking_reasons, "candidate_rule_domain_missing");
+            }
+
+            let guidance_summary = candidate
+                .after
+                .get("ruleSummary")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            if guidance_summary.is_none() {
+                push_unique_reason(&mut blocking_reasons, "candidate_rule_summary_missing");
+            }
+            if guidance_summary
+                .as_deref()
+                .is_some_and(string_looks_secret_like)
+            {
+                metadata_safe = false;
+                contains_raw_content = true;
+                push_unique_reason(&mut blocking_reasons, "selected_guidance_not_metadata_safe");
+            }
+            if guidance_summary
+                .as_deref()
+                .is_some_and(guidance_summary_relaxes_privacy_policy)
+                || candidate_attempts_privacy_route_override(&candidate.after)
+            {
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "candidate_attempts_privacy_route_override",
+                );
+            }
+
+            if let Some(digest) = candidate
+                .after
+                .get("candidateRuleDigest")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                selected_candidate_rule_digest = Some(digest.to_string());
+            } else {
+                push_unique_reason(&mut blocking_reasons, "candidate_rule_digest_missing");
+            }
+
+            selected_guidance_summary = guidance_summary;
+            selected_candidate_proposal_id = Some(candidate.id.clone());
+            source_outcome_evidence_ids = candidate_source_outcome_evidence_ids(&candidate.after);
+            source_proposal_ids =
+                candidate_source_lineage_string_array(&candidate.after, "linkedProposalIds");
+            source_agent_run_ids =
+                candidate_source_lineage_string_array(&candidate.after, "linkedAgentRunIds");
+            if source_outcome_evidence_ids.is_empty() {
+                push_unique_reason(
+                    &mut blocking_reasons,
+                    "source_outcome_evidence_lineage_missing",
+                );
+            }
+            if source_proposal_ids.is_empty() {
+                push_unique_reason(&mut blocking_reasons, "source_proposal_lineage_missing");
+            }
+            if source_agent_run_ids.is_empty() {
+                push_unique_reason(&mut blocking_reasons, "source_agent_run_lineage_missing");
+            }
+        }
+        None => push_unique_reason(&mut blocking_reasons, "candidate_proposal_missing"),
+    }
+
+    let selected_policy_ids = selected_policy_ids_for_selection(
+        input.existing_hs_packet.as_ref(),
+        input.privacy_topic,
+        input.current_route_policy,
+    );
+    let enforced_route_policy = enforced_selection_route_policy(
+        input.existing_hs_packet.as_ref(),
+        input.privacy_topic,
+        input.current_route_policy,
+    );
+    let selected = blocking_reasons.is_empty();
+    if !selected {
+        selected_guidance_summary = None;
+        selected_candidate_proposal_id = None;
+        selected_candidate_rule_digest = None;
+    }
+
+    let hs_packet_audit_proof = AcceptedLowEnergyRuleSelectionHSPacketAuditProof {
+        metadata_safe,
+        planning_task_only: true,
+        low_energy_domain_only: true,
+        privacy_policy_relaxed: false,
+        enforced_route_policy,
+        selected_policy_ids,
+        selected_guidance_summary: selected_guidance_summary.clone(),
+        selected_candidate_proposal_id: selected_candidate_proposal_id.clone(),
+        selected_candidate_rule_digest: selected_candidate_rule_digest.clone(),
+        source_outcome_evidence_ids: source_outcome_evidence_ids.clone(),
+        source_proposal_ids: source_proposal_ids.clone(),
+        source_agent_run_ids: source_agent_run_ids.clone(),
+    };
+
+    AcceptedLowEnergyRuleSelectionReport {
+        selected,
+        planning_task_only: true,
+        low_energy_domain_only: true,
+        privacy_policy_relaxed: false,
+        metadata_safe,
+        contains_raw_content,
+        target_task_kind: input.target_task_kind,
+        target_domain: input.target_domain,
+        privacy_topic: input.privacy_topic,
+        current_route_policy: input.current_route_policy,
+        enforced_route_policy,
+        selected_guidance_summary,
+        selected_candidate_proposal_id,
+        selected_candidate_rule_digest,
+        source_outcome_evidence_ids,
+        source_proposal_ids,
+        source_agent_run_ids,
+        blocking_reasons,
+        hs_packet_audit_proof,
+        wrote_evidence_count: 0,
+        wrote_proposal_count: 0,
+        wrote_life_model_count: 0,
+        wrote_memory_count: 0,
+        wrote_heuristic_count: 0,
+        wrote_chat_message_count: 0,
+        wrote_agent_run_count: 0,
+        wrote_mcp_audit_count: 0,
+        wrote_external_count: 0,
+        ran_runtime: false,
+        ran_model: false,
+        ran_tool: false,
+    }
+}
+
+pub fn ensure_accepted_low_energy_rule_selection(
+    input: AcceptedLowEnergyRuleSelectionInput,
+) -> Result<AcceptedLowEnergyRuleSelectionReport> {
+    let report = evaluate_accepted_low_energy_rule_selection(input);
+    if report.selected {
+        Ok(report)
+    } else {
+        Err(anyhow!(
+            "accepted low-energy rule selection blocked: {}",
+            report.blocking_reasons.join(",")
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1666,6 +2014,191 @@ fn low_energy_candidate_proposal_payload(
             "linkedAgentRunIds": report.linked_agent_run_ids,
         },
     })
+}
+
+fn is_w76_low_energy_rule_candidate_proposal(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::Unsupported
+        && proposal.source == ProposalSource::FeedbackEvolution
+        && proposal.source_detail.as_deref() == Some(LOW_ENERGY_RULE_CANDIDATE_SOURCE_DETAIL)
+        && proposal.affected_path == LOW_ENERGY_RULE_CANDIDATE_PATH
+        && proposal
+            .after
+            .get("schema")
+            .and_then(Value::as_str)
+            .is_some_and(|schema| schema == "w76.lowEnergyCollaborationRuleCandidate.v1")
+        && proposal
+            .after
+            .get("w76")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        && proposal
+            .after
+            .get("kind")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| kind == "collaboration_rule_candidate")
+        && proposal
+            .after
+            .get("candidateRuleId")
+            .and_then(Value::as_str)
+            .is_some_and(|rule_id| rule_id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING)
+}
+
+fn candidate_source_outcome_evidence_ids(candidate_after: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in [
+        "acceptedOutcomeEvidenceIds",
+        "editedOutcomeEvidenceIds",
+        "rejectedOutcomeEvidenceIds",
+        "opposingOutcomeEvidenceIds",
+    ] {
+        for id in candidate_source_lineage_string_array(candidate_after, key) {
+            push_unique_string(&mut ids, &id);
+        }
+    }
+    ids
+}
+
+fn candidate_source_lineage_string_array(candidate_after: &Value, key: &str) -> Vec<String> {
+    candidate_after
+        .get("sourceLineage")
+        .map(|lineage| metadata_string_array(lineage, key))
+        .unwrap_or_default()
+}
+
+fn selected_policy_ids_for_selection(
+    packet: Option<&RuntimeHSPacket>,
+    privacy_topic: PolicyTopic,
+    current_route_policy: ModelRoutePolicy,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(packet) = packet {
+        for policy in &packet.selected_policies {
+            push_unique_string(&mut ids, &policy.policy_id);
+        }
+        for policy_id in &packet.audit.selected_policy_ids {
+            push_unique_string(&mut ids, policy_id);
+        }
+    }
+    if selection_requires_local_only(packet, privacy_topic, current_route_policy)
+        && topic_requires_local_only(privacy_topic)
+    {
+        push_unique_string(&mut ids, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY);
+    }
+    ids
+}
+
+fn enforced_selection_route_policy(
+    packet: Option<&RuntimeHSPacket>,
+    privacy_topic: PolicyTopic,
+    current_route_policy: ModelRoutePolicy,
+) -> ModelRoutePolicy {
+    if selection_requires_local_only(packet, privacy_topic, current_route_policy) {
+        ModelRoutePolicy::LocalOnly
+    } else {
+        current_route_policy
+    }
+}
+
+fn selection_requires_local_only(
+    packet: Option<&RuntimeHSPacket>,
+    privacy_topic: PolicyTopic,
+    current_route_policy: ModelRoutePolicy,
+) -> bool {
+    topic_requires_local_only(privacy_topic)
+        || current_route_policy == ModelRoutePolicy::LocalOnly
+        || packet_requires_local_only_route(packet)
+}
+
+fn topic_requires_local_only(topic: PolicyTopic) -> bool {
+    matches!(
+        topic,
+        PolicyTopic::Health
+            | PolicyTopic::Relationship
+            | PolicyTopic::Identity
+            | PolicyTopic::Finance
+            | PolicyTopic::PrivateFile
+    )
+}
+
+fn packet_requires_local_only_route(packet: Option<&RuntimeHSPacket>) -> bool {
+    packet.is_some_and(|packet| {
+        packet.selected_policies.iter().any(|policy| {
+            policy.policy_id == BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY
+                || policy.route == Some(ModelRoutePolicy::LocalOnly)
+        }) || packet
+            .audit
+            .selected_policy_ids
+            .iter()
+            .any(|policy_id| policy_id == BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY)
+    })
+}
+
+fn candidate_attempts_privacy_route_override(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            let normalized = normalized_metadata_key(key);
+            if privacy_route_override_key(&normalized) {
+                return route_override_value_relaxes_privacy(value);
+            }
+            candidate_attempts_privacy_route_override(value)
+        }),
+        Value::Array(values) => values.iter().any(candidate_attempts_privacy_route_override),
+        _ => false,
+    }
+}
+
+fn privacy_route_override_key(normalized: &str) -> bool {
+    contains_any(
+        normalized,
+        &[
+            "routepolicy",
+            "modelroute",
+            "requestedroute",
+            "privacypolicy",
+            "privacyroute",
+            "privacypolicyrelaxed",
+        ],
+    )
+}
+
+fn route_override_value_relaxes_privacy(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => {
+            let lower = value.to_ascii_lowercase();
+            contains_any(
+                &lower,
+                &[
+                    "cloud",
+                    "cloud_allowed",
+                    "cloudallowed",
+                    "remote",
+                    "relax",
+                    "override",
+                    "bypass",
+                ],
+            )
+        }
+        Value::Object(_) | Value::Array(_) => candidate_attempts_privacy_route_override(value),
+        _ => false,
+    }
+}
+
+fn guidance_summary_relaxes_privacy_policy(summary: &str) -> bool {
+    let lower = summary.to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "cloud allowed",
+            "use cloud",
+            "remote model",
+            "ignore privacy",
+            "override privacy",
+            "relax privacy",
+            "bypass local",
+            "disable local-only",
+        ],
+    )
 }
 
 fn candidate_contains_raw_content(candidate: &LifeEventDraft) -> bool {

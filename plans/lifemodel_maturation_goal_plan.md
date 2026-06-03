@@ -1,7 +1,7 @@
 # LifeModel Maturation Loop End-to-End Goal Plan
 
 > Last updated: 2026-06-02
-> Status: W76 low-energy collaboration rule candidate complete; W77 accepted rule to RuntimeHSPacket selection proof next
+> Status: W77 accepted rule to RuntimeHSPacket selection proof complete; W78 run trace visibility next
 
 This document is the entry point for the next Goal-mode development block after
 W72. It does not authorize default Chat route migration, controlled adapter
@@ -45,7 +45,7 @@ Current completed default Chat adapter state:
 - Default Chat remains `legacy_stream`.
 - Ordinary `send_message` / `start_stream_message` may only use the W49-W55
   pure ordinary-entry guard/preflight and must not call W67-W72 proof/skeleton
-  code or W73-W76 LifeModel maturation helper code.
+  code or W73-W77 LifeModel maturation helper code.
 
 Current LifeModel maturation baseline:
 
@@ -75,6 +75,13 @@ Current LifeModel maturation baseline:
   - `propose_low_energy_collaboration_rule_candidate` writes only a pending
     ProposalStore candidate proposal when evidence is sufficient and not
     blocked by opposing outcome evidence.
+  - `AcceptedLowEnergyRuleSelectionInput`,
+    `AcceptedLowEnergyRuleSelectionReport`, and
+    `AcceptedLowEnergyRuleSelectionHSPacketAuditProof` model W77 accepted rule
+    selection proof.
+  - `evaluate_accepted_low_energy_rule_selection` is pure/report-only.
+  - `ensure_accepted_low_energy_rule_selection` returns the same proof when
+    selected and fails closed otherwise.
 - `src-tauri/src/commands/proposal.rs`
   - `accept_proposal_with_state`, `reject_proposal_with_state`, and
     `edit_proposal_with_state` call the W75 helper after successful proposal
@@ -232,6 +239,8 @@ Acceptance:
 
 ### W77: Accepted Rule To RuntimeHSPacket Selection Proof
 
+Status: Done.
+
 Goal:
 
 After user acceptance, prove a narrow collaboration rule can be selected into a
@@ -239,10 +248,19 @@ future RuntimeHSPacket for planning tasks.
 
 Acceptance:
 
-- Only the low-energy planning domain is affected.
-- Privacy policy cannot be relaxed by the rule.
-- The selected guidance appears in metadata-safe HS packet audit fields.
-- Non-planning tasks remain unaffected.
+- Implemented as pure core evaluator/report/ensure in
+  `openlife-core/src/agent/maturation.rs`.
+- Only accepted W76 candidate proposals can be selected.
+- Pending/rejected/non-W76 proposals fail closed.
+- Only planning tasks and the low-energy / low-pressure planning domain are
+  affected; non-planning and non-low-energy targets fail closed.
+- Privacy policy cannot be relaxed by the rule; LocalOnly policy is preserved
+  or strengthened.
+- The selected guidance appears in metadata-safe HS packet audit/proof fields.
+- Outcome evidence, source proposal, and AgentRun lineage are retained by ids.
+- No Tauri command, frontend surface, runtime/model/tool call, ordinary Chat
+  integration, direct LifeModel/Memory/Heuristic write, or Heuristic activation
+  was added.
 
 ### W78: Run Trace Visibility
 
@@ -260,33 +278,35 @@ Acceptance:
 ## 6. Next Agent Development Prompt
 
 ```text
-W76 Low-Energy Collaboration Rule Candidate is complete. The next slice is W77:
-Accepted Rule To RuntimeHSPacket Selection Proof.
+W77 Accepted Rule To RuntimeHSPacket Selection Proof is complete. The next
+slice is W78: Run Trace Visibility.
 
 当前基线：
 - W73 LifeModel maturation readiness report 已完成。
 - W74 non-default maturation invocation 已完成。
 - W75 proposal outcome evidence link 已完成：maturation proposal accept/reject/edit 会写 metadata-safe ProposalOutcome evidence。
 - W76 low-energy collaboration rule candidate 已完成：accepted/edited/rejected outcome evidence 可聚合为 pending reviewable candidate proposal，但不激活 Heuristic、不写 active rule。
+- W77 accepted rule selection proof 已完成：只有 accepted W76 candidate proposal 可被 proof-only 选入 future RuntimeHSPacket metadata-safe planning guidance；pending/rejected/non-W76、非 planning task、非 low-energy domain fail closed；privacy/model route policy 不被放宽。
 - default Chat 仍是 legacy_stream。
-- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W73-W76 maturation helper。
-- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore、proposal outcome evidence helper 和 W76 candidate evaluator/proposer。
+- 普通 send_message / start_stream_message 只能调用 W49-W55 ordinary-entry guard/preflight，不得调用 W73-W77 maturation helper。
+- openlife-core 已有 RuntimeOutput.life_event_candidates、LifeEventDraft、MaturationService、LifeModelMaturationService、EvidenceStore、LifeModelGovernor、ProposalStore、proposal outcome evidence helper、W76 candidate evaluator/proposer 和 W77 selection proof evaluator/ensure。
 
-W77 开发目标：
-- 在用户接受候选规则之后，证明低能量规划协作规则可以以 metadata-safe 方式进入 future RuntimeHSPacket selection。
-- 只证明 selection packet/audit shape，不迁移 default Chat、不运行 runtime/model/tool。
-- 只影响 low-energy / low-pressure planning domain。
-- 必须保留 W76 candidate proposal / outcome evidence / source evidence / agent run lineage。
+W78 开发目标：
+- 在 run trace 或 read-only diagnostics 中暴露 W77 selected guidance 与 lineage ids/digests。
+- 只显示 metadata-safe proof summary、candidate proposal id、candidate rule digest、outcome evidence ids、source proposal ids、agent run ids 和 privacy route proof。
+- 不运行 runtime/model/tool，不新增普通 Chat 自动使用，不激活 Heuristic，不写 active rule。
+- 不泄露 raw prompt、assistant output、memory raw text、tool payload、secret、raw edited payload。
 
 测试要求：
 - 新增 focused core tests。
-- 覆盖 accepted W76 candidate proposal outcome 可推动 selection proof。
-- 覆盖 rejected/negative/opposing candidate outcome 会阻止 selection proof。
-- 覆盖 selection proof 不写 LifeModel/Memory/Heuristic，不调用 runtime/model/tool。
-- 覆盖 ordinary send_message / start_stream_message 不调用 W77 helper。
+- 覆盖 W77 proof metadata 可转成 run trace/diagnostics metadata-safe summary。
+- 覆盖 lineage ids 保留且 raw payload 不泄露。
+- 覆盖 privacy local-only proof 在 visibility 输出中保持。
+- 覆盖 visibility 不写 LifeModel/Memory/Heuristic，不调用 runtime/model/tool。
+- 覆盖 ordinary send_message / start_stream_message 不调用 W78 visibility helper。
 
 至少运行：
-- cargo test -p openlife-core low_energy_collaboration -- --nocapture
+- cargo test -p openlife-core accepted_low_energy_rule_selection -- --nocapture
 - cargo test -p openlife-tauri default_chat_entrypoints_do_not_call_w19_w60_command_surfaces -- --nocapture
 - git diff --check
 

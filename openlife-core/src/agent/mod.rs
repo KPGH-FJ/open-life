@@ -57,10 +57,13 @@ pub use hs_selector::{
     RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use maturation::{
-    ensure_lifemodel_maturation_non_default_invocation, ensure_lifemodel_maturation_readiness,
+    ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
+    ensure_lifemodel_maturation_readiness, evaluate_accepted_low_energy_rule_selection,
     evaluate_lifemodel_maturation_readiness, evaluate_low_energy_collaboration_rule_candidate,
     propose_low_energy_collaboration_rule_candidate,
-    run_lifemodel_maturation_non_default_invocation, LifeModelMaturationNonDefaultInvocationInput,
+    run_lifemodel_maturation_non_default_invocation,
+    AcceptedLowEnergyRuleSelectionHSPacketAuditProof, AcceptedLowEnergyRuleSelectionInput,
+    AcceptedLowEnergyRuleSelectionReport, LifeModelMaturationNonDefaultInvocationInput,
     LifeModelMaturationNonDefaultInvocationReport, LifeModelMaturationReadinessInput,
     LifeModelMaturationReadinessReport, LifeModelMaturationReadinessSideEffectBudget,
     LifeModelMaturationService, LowEnergyCollaborationRuleCandidateInput,
