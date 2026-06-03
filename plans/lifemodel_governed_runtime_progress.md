@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W97 Legacy Direct-Write Convergence complete
+> Status: W105 Plan-Execute Product Vertical complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W97 Legacy Direct-Write Convergence complete**.
+Current latest status is **W105 Plan-Execute Product Vertical complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -25,6 +25,16 @@ source-data compatibility materialization only. W97 marks the inventory and
 materializer matrix converged with no high-risk legacy direct-write blockers,
 `proposal_first_convergence_complete=true`, metadata-safe reports, no runtime /
 model / tool execution, and default Chat still on `legacy_stream`.
+W98-W105 add the first Plan-Execute product vertical on top of that governed
+write baseline: a non-default weekly planning scenario with a typed product
+contract, durable `PlanExecuteSession` lifecycle, explicit non-default Tauri
+commands, review/edit/finalize gating, proposal-first write-like step
+execution, metadata-safe AgentRun/proposal linkage, Workspace weekly planning
+UI, Runs/trace visibility, and regression hardening. Write-like steps create
+Review Center proposals only; they do not directly write durable LifeModel-HS
+truth, Memory, external provider state, calendar, email, files, or plugin
+state. Ordinary `send_message` / `start_stream_message` still remain on
+`legacy_stream` and must not call W98-W105 product commands or helpers.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -388,7 +398,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W97 progress index
+4. This W1-W105 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -407,7 +417,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W97 Structured Index
+## W1-W105 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -507,7 +517,15 @@ permission.
 | W94 | Governed Manual LifeModel Editor Override | Done | Backend LifeModel editor governed request flow and frontend wrapper | `save_life_model` requires explicit user intent, risk acknowledgement, pre-change snapshot, typed materializer context, and metadata-safe audit | No; ordinary send/stream stay `legacy_stream` and do not call it | W95 |
 | W95 | Proposal PatchSource Mapping Closure | Done | Core PatchSource variants plus proposal mapper/readiness update | Every ProposalSource maps to a dedicated PatchSource; accepted proposal apply has no Manual fallback blocker and `proposal_first_convergence_complete=true` | No; ordinary send/stream stay `legacy_stream` and do not call it | W96 |
 | W96 | State / Daily Goal Boundary Reconciliation | Done | Legacy convergence boundary report/evaluator | State/Daily Goal remains source-data compatibility materialization only, not accepted durable LifeModel-HS truth | No; ordinary send/stream stay `legacy_stream`; existing auto-checkin remains source-data compatibility context only | W97 |
-| W97 | Final Legacy Direct-Write Convergence Inventory | Done | Final inventory/materializer matrix/report tests in `legacy_write_convergence.rs` | `overall_converged=true`, `all_direct_writes_converged=true`, `high_risk_legacy_direct_write_count=0`, `proposal_first_convergence_complete=true`, metadata-safe reports, no raw payloads, no runtime/model/tool execution | No; ordinary send/stream stay `legacy_stream` and do not call W79-W97 helpers | Next architecture work |
+| W97 | Final Legacy Direct-Write Convergence Inventory | Done | Final inventory/materializer matrix/report tests in `legacy_write_convergence.rs` | `overall_converged=true`, `all_direct_writes_converged=true`, `high_risk_legacy_direct_write_count=0`, `proposal_first_convergence_complete=true`, metadata-safe reports, no raw payloads, no runtime/model/tool execution | No; ordinary send/stream stay `legacy_stream` and do not call W79-W97 helpers | W98 |
+| W98 | Plan-Execute Product Contract / Weekly Scenario | Done | Core product contract in `plan_execute.rs` | Weekly-only scenario, max-step/risk/action bounds, metadata-safe authority/contract reports, direct writes/external side effects disallowed | No; ordinary send/stream stay `legacy_stream` and do not call it | W99 |
+| W99 | Plan-Execute Session Store / Non-Default Commands | Done | Durable session store plus explicit Tauri commands | `PlanExecuteSession` persisted; create/get/list/update/finalize/cancel/execute commands are non-default product surface only | No; ordinary send/stream stay `legacy_stream` and do not call commands | W100 |
+| W100 | Plan-Execute Review/Edit/Finalize Lifecycle | Done | Draft lifecycle and validation | Draft edits are bounded by contract; execution requires finalized/in-progress session; cancel/fail-closed paths covered | No; product session only | W101 |
+| W101 | Proposal-First Step Execution | Done | Step execution helper plus ProposalStore integration | Read-only steps produce metadata-safe observations; write-like steps create idempotent Review Center proposals, no direct durable truth/external writes | No; product session only | W102 |
+| W102 | Plan-Execute AgentRun Trace / Proposal Linkage | Done | `plan_execute_product` AgentRun trace | Metadata-safe session/status/governance/proposal counts; source run/session linkage; raw prompt/plan/LifeModel/memory/tool/proposal payloads not stored | No; product traces only | W103 |
+| W103 | Frontend Weekly Planning Surface | Done | Workspace panel plus Tauri wrappers and tests | Create, edit, save draft, finalize, execute, observation/proposal/source-run links; explicit product commands only | No; ordinary Chat unchanged | W104 |
+| W104 | Safety / Isolation / Regression Hardening | Done | Regression tests and command guard updates | Default Chat entrypoint forbidden list includes product commands; `PlanningSession` proposal/patch source mapping; metadata-safe UI trace tests | No; guard only for ordinary Chat | W105 |
+| W105 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | W105 authority docs and UI trace status synced; default Chat remains `legacy_stream`; RuntimeStrategy maturity still future work | No; docs/status only | Next architecture work |
 
 ## Folded Boundary Summary
 
@@ -629,7 +647,12 @@ retirement complete -> W93 governed Snapshot restore / Data import complete ->
 W94 governed manual LifeModel editor override complete -> W95 Proposal
 PatchSource mapping closure complete -> W96 State / Daily Goal boundary
 reconciliation complete -> W97 final Legacy Direct-Write Convergence inventory
-complete.
+complete -> W98 Plan-Execute product contract complete -> W99 durable session
+store and non-default command surface complete -> W100 review/edit/finalize
+lifecycle complete -> W101 proposal-first step execution complete -> W102
+AgentRun trace/proposal linkage complete -> W103 frontend weekly planning
+surface complete -> W104 safety/isolation regression hardening complete -> W105
+docs/progress/verification sync complete.
 Future default Chat executor implementation discussion may build on the
 W65-W72 proofs only through a separately reviewed task; keep default Chat on
 legacy_stream unless that separate task explicitly implements, reviews,

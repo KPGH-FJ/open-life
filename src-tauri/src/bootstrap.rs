@@ -7,7 +7,7 @@ use crate::storage::{
     load_mcp_audit_keyring_from_path, load_privacy_policy_from_path, mcp_audit_keyring_path,
     privacy_policy_path,
 };
-use openlife_core::agent::{ProposalEngine, ProposalStore};
+use openlife_core::agent::{PlanExecuteSessionStore, ProposalEngine, ProposalStore};
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -293,6 +293,37 @@ fn init_proposal_store(
     }
 }
 
+fn init_plan_execute_session_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<PlanExecuteSessionStore, String> {
+    match PlanExecuteSessionStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("plan_execute_sessions.db");
+            startup_warnings.borrow_mut().push(format!(
+                "plan_execute_sessions.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match PlanExecuteSessionStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 plan_execute_sessions.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    PlanExecuteSessionStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 Plan-Execute session store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
@@ -414,6 +445,18 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
+    let plan_execute_sessions_db_path = data_dir.join("plan_execute_sessions.db");
+    let plan_execute_session_store = init_store(
+        || init_plan_execute_session_store(&plan_execute_sessions_db_path, &startup_warnings),
+        || PlanExecuteSessionStore::new_in_memory().map_err(|e| e.to_string()),
+        "PlanExecuteSessionStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let patches_db_path = data_dir.join("patches.db");
     let patch_store = init_store(
         || {
@@ -525,6 +568,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         heuristic_store: Arc::new(Mutex::new(heuristic_store)),
         policy_store: Arc::new(policy_store),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
+        plan_execute_session_store: Some(Arc::new(Mutex::new(plan_execute_session_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),

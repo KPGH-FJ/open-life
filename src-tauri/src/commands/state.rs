@@ -387,6 +387,9 @@ mod tests {
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
+            plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
+            ))),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),

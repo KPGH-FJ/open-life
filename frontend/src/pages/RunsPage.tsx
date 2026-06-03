@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { listAgentRuns, deleteAgentRun, type AgentRun } from "../tauri";
+import {
+  getPlanExecuteProductTrace,
+  planExecuteProductSearchText,
+  planExecuteProductSubtitle,
+} from "../utils/planExecuteProduct";
 import { getMultiStrategyPreviewAudit, previewWarningLabel } from "../utils/previewAudit";
 import {
   Activity,
@@ -49,10 +54,15 @@ function kindLabel(kind: string): string {
 }
 
 function runKindLabel(run: AgentRun): string {
+  if (getPlanExecuteProductTrace(run)) return "Plan-Execute Weekly Plan";
   return getMultiStrategyPreviewAudit(run) ? "Multi-Strategy Preview" : kindLabel(run.kind);
 }
 
 function runSubtitle(run: AgentRun): string {
+  const productTrace = getPlanExecuteProductTrace(run);
+  if (productTrace) {
+    return planExecuteProductSubtitle(productTrace);
+  }
   const audit = getMultiStrategyPreviewAudit(run);
   if (audit) {
     return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
@@ -109,11 +119,14 @@ export default function RunsPage() {
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       const audit = getMultiStrategyPreviewAudit(run);
+      const productTrace = getPlanExecuteProductTrace(run);
       const auditText = audit
         ? `${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.reasonCode ?? ""}`
         : "";
+      const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
+      const outputText = productTrace ? "" : (run.outputPreview ?? "");
       const text =
-        `${run.userInput ?? ""} ${run.outputPreview ?? ""} ${run.kind} ${auditText}`.toLowerCase();
+        `${run.userInput ?? ""} ${outputText} ${run.kind} ${auditText} ${productText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -167,6 +180,7 @@ export default function RunsPage() {
     { value: "conversation", label: "Chat" },
     { value: "builder", label: "Builder" },
     { value: "calibration", label: "Calibration" },
+    { value: "planning", label: "Planning" },
   ];
 
   if (loading) {
@@ -336,6 +350,7 @@ export default function RunsPage() {
 
               {paginatedRuns.map(run => {
                 const previewAudit = getMultiStrategyPreviewAudit(run);
+                const productTrace = getPlanExecuteProductTrace(run);
                 const warningCount = previewAudit?.warnings?.length ?? 0;
                 return (
                   <div
@@ -372,7 +387,7 @@ export default function RunsPage() {
                               <Clock size={12} />
                               {new Date(run.startedAt).toLocaleString()}
                             </div>
-                            {run.outputPreview && (
+                            {!productTrace && run.outputPreview && (
                               <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
                                 {run.outputPreview}
                               </div>
@@ -406,12 +421,45 @@ export default function RunsPage() {
                             )}
                           </div>
                         )}
+                        {productTrace && (
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <span className="rounded bg-stone-100 px-2 py-1 text-stone-700">
+                              Plan-Execute
+                            </span>
+                            {productTrace.status && (
+                              <span className="rounded bg-teal-50 px-2 py-1 text-teal-700">
+                                Status: {productTrace.status}
+                              </span>
+                            )}
+                            {productTrace.stepCount !== undefined && (
+                              <span className="rounded bg-blue-50 px-2 py-1 text-blue-700">
+                                Steps: {productTrace.stepCount}
+                              </span>
+                            )}
+                            {productTrace.generatedProposalCount !== undefined && (
+                              <span className="rounded bg-amber-50 px-2 py-1 text-amber-700">
+                                Proposals: {productTrace.generatedProposalCount}
+                              </span>
+                            )}
+                            {productTrace.metadataSafe && (
+                              <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">
+                                metadata-safe
+                              </span>
+                            )}
+                            {productTrace.warningCount !== undefined &&
+                              productTrace.warningCount > 0 && (
+                                <span className="rounded bg-red-50 px-2 py-1 text-red-700">
+                                  {previewWarningLabel(productTrace.warningCount)}
+                                </span>
+                              )}
+                          </div>
+                        )}
                         {run.error && (
                           <div className="mt-2 text-xs text-red-500 bg-red-50 rounded px-2 py-1">
                             {run.error.message}
                           </div>
                         )}
-                        {run.generatedProposals.length > 0 && (
+                        {!productTrace && run.generatedProposals.length > 0 && (
                           <div className="mt-2 text-xs text-blue-600 bg-blue-50 rounded px-2 py-1">
                             {run.generatedProposals.length} 个提案
                           </div>

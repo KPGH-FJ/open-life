@@ -89,6 +89,7 @@ fn lifemodel_patch_source_mapping_for_proposal_source(
         ProposalSource::SkillRuntime => (PatchSource::SkillRuntime, true, None),
         ProposalSource::Plugin => (PatchSource::Plugin, true, None),
         ProposalSource::MemoryGovernance => (PatchSource::MemoryGovernance, true, None),
+        ProposalSource::PlanningSession => (PatchSource::PlanningSession, true, None),
     }
 }
 
@@ -222,7 +223,7 @@ fn w89_push_unique(blocking_reasons: &mut Vec<String>, reason: impl Into<String>
 }
 
 #[allow(dead_code)]
-fn lifemodel_proposal_patch_source_readiness_sources() -> [ProposalSource; 9] {
+fn lifemodel_proposal_patch_source_readiness_sources() -> [ProposalSource; 10] {
     [
         ProposalSource::BuilderReview,
         ProposalSource::CalibrationRun,
@@ -233,6 +234,7 @@ fn lifemodel_proposal_patch_source_readiness_sources() -> [ProposalSource; 9] {
         ProposalSource::SkillRuntime,
         ProposalSource::Plugin,
         ProposalSource::MemoryGovernance,
+        ProposalSource::PlanningSession,
     ]
 }
 
@@ -1894,6 +1896,9 @@ mod tests {
             proposal_store: Some(Arc::new(Mutex::new(
                 ProposalStore::new_in_memory().unwrap(),
             ))),
+            plan_execute_session_store: Some(Arc::new(Mutex::new(
+                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
+            ))),
             patch_store: Some(Arc::new(Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
@@ -2088,6 +2093,10 @@ mod tests {
                 ProposalSource::MemoryGovernance,
                 PatchSource::MemoryGovernance,
             ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
+            ),
         ] {
             let proposal = test_lifemodel_source_proposal(source);
             let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
@@ -2138,6 +2147,10 @@ mod tests {
             (
                 ProposalSource::MemoryGovernance,
                 PatchSource::MemoryGovernance,
+            ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
             ),
         ] {
             let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
@@ -2253,7 +2266,7 @@ mod tests {
 
         assert!(report.readiness_ready);
         assert!(report.metadata_safe);
-        assert_eq!(report.exact_mapping_count, 9);
+        assert_eq!(report.exact_mapping_count, 10);
         assert_eq!(report.metadata_safe_fallback_count, 0);
         assert_eq!(report.unsupported_or_unclassified_count, 0);
         assert!(report.builder_review_only_for_builder_review);
@@ -2262,7 +2275,7 @@ mod tests {
         assert!(report.apply_path_uses_source_resolver);
         assert!(report.default_chat_route_unchanged);
         assert!(report.proposal_first_convergence_complete);
-        assert_eq!(report.entries.len(), 9);
+        assert_eq!(report.entries.len(), 10);
         assert!(report.blocking_reasons.is_empty());
 
         for (source, patch_source) in [
@@ -2280,6 +2293,10 @@ mod tests {
             (
                 ProposalSource::MemoryGovernance,
                 PatchSource::MemoryGovernance,
+            ),
+            (
+                ProposalSource::PlanningSession,
+                PatchSource::PlanningSession,
             ),
         ] {
             let entry = w89_entry(&report.entries, source);

@@ -64,6 +64,46 @@ describe("RunsPage contract", () => {
             outputPreview: "Multi-strategy preview: planExecute / warn",
             startedAt: new Date().toISOString(),
           },
+          {
+            id: "run-plan-1",
+            taskId: "task-plan-1",
+            sessionId: "workspace_weekly_planning",
+            status: "completed",
+            kind: "planning",
+            generatedProposals: ["proposal-plan-1"],
+            actions: [],
+            observations: [],
+            reasoningStrategy: "plan_execute_product",
+            reasoningTrace: {
+              strategy_result: {
+                planExecuteProductVertical: true,
+                scenarioId: "weekly_planning",
+                planSessionId: "plan-session-1",
+                strategyKind: "plan_execute",
+                status: "finalized",
+                stepCount: 3,
+                stepStatusCounts: {
+                  planned: 1,
+                  executed: 1,
+                  requiresProposal: 1,
+                  blocked: 0,
+                },
+                generatedProposalIds: ["proposal-plan-1"],
+                generatedProposalCount: 1,
+                governanceDecisionCounts: {
+                  allow: 1,
+                  requireProposal: 1,
+                  block: 0,
+                },
+                warningCount: 0,
+                metadataSafe: true,
+                directLifeModelWrites: false,
+                externalWritesExecuted: false,
+              },
+            },
+            outputPreview: "raw-sensitive-weekly-plan-should-not-render",
+            startedAt: new Date().toISOString(),
+          },
         ]);
       }
       return mockInvoke(cmd, args);
@@ -82,12 +122,25 @@ describe("RunsPage contract", () => {
     );
 
     expect(await screen.findByText("camel case output preview")).toBeInTheDocument();
-    expect(screen.getByText("1 个提案")).toBeInTheDocument();
+    expect(screen.getAllByText("1 个提案").length).toBeGreaterThan(0);
     expect(screen.getByText("Multi-Strategy Preview")).toBeInTheDocument();
     expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
     expect(screen.getByText("Governance: warn")).toBeInTheDocument();
     expect(screen.getByText("1 warning")).toBeInTheDocument();
+    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
+    expect(screen.getByText("weekly_planning · 3 steps · 1 proposal")).toBeInTheDocument();
+    expect(screen.getByText("Status: finalized")).toBeInTheDocument();
+    expect(screen.getByText("Steps: 3")).toBeInTheDocument();
+    expect(screen.getByText("Proposals: 1")).toBeInTheDocument();
+    expect(
+      screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
+      target: { value: "plan-session-1" },
+    });
+    expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
       target: { value: "camel case user" },

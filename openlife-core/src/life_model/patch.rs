@@ -66,6 +66,7 @@ pub enum PatchSource {
     SkillRuntime,
     Plugin,
     MemoryGovernance,
+    PlanningSession,
 }
 
 impl std::fmt::Display for PatchSource {
@@ -81,6 +82,7 @@ impl std::fmt::Display for PatchSource {
             PatchSource::SkillRuntime => write!(f, "skill_runtime"),
             PatchSource::Plugin => write!(f, "plugin"),
             PatchSource::MemoryGovernance => write!(f, "memory_governance"),
+            PatchSource::PlanningSession => write!(f, "planning_session"),
         }
     }
 }

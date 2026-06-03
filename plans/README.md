@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-03
-> Status: authoritative document index for Agents, W97 Legacy Direct-Write Convergence complete
+> Status: authoritative document index for Agents, W105 Plan-Execute Product Vertical complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,30 +16,33 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W97 completion/status index. This is not a second roadmap.
-5. `plans/legacy_direct_write_convergence_goal_spec.md`
+   - Compact W1-W105 completion/status index. This is not a second roadmap.
+5. `plans/plan_execute_product_vertical_goal_spec.md`
+   - Completed CLI Goal-mode spec and audit trail for the Plan-Execute Product
+     Vertical W98-W105.
+6. `plans/legacy_direct_write_convergence_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
-6. `plans/lifemodel_maturation_goal_plan.md`
+7. `plans/lifemodel_maturation_goal_plan.md`
    - Current Goal-mode preparation plan for LifeModel Maturation Loop
      End-to-End after W72.
-7. Hard governance baselines:
+8. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-8. Scoped architecture/product baselines:
+9. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-9. Current execution helpers:
+10. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-10. Historical/reference documents.
+11. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
 
-Current latest status is **W97 Legacy Direct-Write Convergence complete**.
+Current latest status is **W105 Plan-Execute Product Vertical complete**.
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -55,6 +58,16 @@ and materializer matrix so `overall_converged=true`,
 and `proposal_first_convergence_complete=true`, while default Chat remains
 `legacy_stream` and ordinary `send_message` / `start_stream_message` do not call
 W79-W97 helpers.
+
+`plans/plan_execute_product_vertical_goal_spec.md` is retained as the completed
+W98-W105 Goal-mode spec and audit trail. W98-W105 implement a narrow
+Plan-Execute Product Vertical: a non-default weekly planning workflow with a
+typed product contract, durable plan sessions, review/edit/finalize lifecycle,
+step-by-step execution, proposal-first write-like steps, AgentRun/trace
+linkage, and Workspace/Runs frontend surfaces. It is not default Chat migration,
+not full RuntimeStrategy maturity, and not external provider write execution.
+Ordinary `send_message` / `start_stream_message` do not call the W98-W105
+Plan-Execute product commands or helpers.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -449,7 +462,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W97 Compression Map
+## 3. W1-W105 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -501,6 +514,14 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W95 | Proposal PatchSource mapping closure | `PatchSource` has dedicated variants for all ProposalSource values; accepted proposal apply uses exact source-specific mapping, no Manual fallback blocker |
 | W96 | State / Daily Goal source-data boundary preserved | State and daily-goal compatibility materialization remains source-data / low-risk transient compatibility view, not accepted durable LifeModel-HS truth |
 | W97 | Final legacy direct-write convergence inventory | `overall_converged=true`, `all_direct_writes_converged=true`, `high_risk_legacy_direct_write_count=0`, `proposal_first_convergence_complete=true`, metadata-safe reports, default Chat unchanged |
+| W98 | Plan-Execute product contract and weekly scenario | Typed weekly planning contract, max step/risk/action bounds, metadata-safe authority report, no direct writes |
+| W99 | Plan-Execute session store and non-default commands | Durable `PlanExecuteSession` store plus explicit create/get/list/update/finalize/cancel/execute command surface; ordinary Chat does not call it |
+| W100 | Review/edit/finalize lifecycle | Draft plans can be edited and finalized; execution fails closed before finalize and after cancel |
+| W101 | Proposal-first step execution | Read-only steps produce metadata-safe observations; write-like steps create Review Center proposals only and are idempotently linked |
+| W102 | AgentRun trace/proposal linkage | Product sessions create/update metadata-safe `plan_execute_product` AgentRun traces with session/proposal/status counts and no raw content |
+| W103 | Frontend weekly planning surface | Workspace weekly planning panel supports create, edit, finalize, execute, observation display, proposal links, and source run link |
+| W104 | Safety/isolation hardening | Default Chat entrypoint guard list includes product commands; proposal mapping has `PlanningSession`; regression tests cover metadata and isolation |
+| W105 | Docs and verification sync | Authority docs, progress index, trace/Runs UI, and verification matrix synced; default Chat remains `legacy_stream` |
 
 ## 4. Current Authoritative Entry Points
 
@@ -508,7 +529,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W97 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W105 structured status index and compressed guardrail map. |
+| `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
 | `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
@@ -635,7 +657,7 @@ resolve the fallback source policy blocker.
 - Always read `AGENTS.md`, this file, and
   `plans/openlife_lifemodel_governed_agent_runtime.md` before starting a new
   architecture/runtime/LifeModel/tool task.
-- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W97 status, not as
+- Use `plans/lifemodel_governed_runtime_progress.md` for W1-W105 status, not as
   an implementation roadmap.
 - Do not use historical plans to override current ordering, current Tool
   Taxonomy, or the default Chat `legacy_stream` boundary.
@@ -671,8 +693,13 @@ direct/evolution retirement complete -> W92 Feedback evolution retirement
 complete -> W93 governed Snapshot restore / Data import complete -> W94
 governed manual LifeModel editor override complete -> W95 Proposal PatchSource
 mapping closure complete -> W96 State / Daily Goal boundary reconciliation
-complete -> W97 final Legacy Direct-Write Convergence inventory complete.
-The next architecture block can start from the W97 governed write baseline.
+complete -> W97 final Legacy Direct-Write Convergence inventory complete ->
+W98 product contract complete -> W99 durable session store and commands complete
+-> W100 review/edit/finalize lifecycle complete -> W101 proposal-first step
+execution complete -> W102 AgentRun trace/proposal linkage complete -> W103
+frontend weekly planning surface complete -> W104 safety/isolation hardening
+complete -> W105 docs/progress/verification sync complete.
+The next architecture block can start from the W105 governed product baseline.
 Any future default Chat executor implementation or route cutover remains a
 separate reviewed task that preserves default Chat legacy_stream until a route
 change is explicitly implemented, reviewed, verified, and authorized.

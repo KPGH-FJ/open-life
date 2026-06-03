@@ -267,6 +267,98 @@ export interface MultiStrategyAgentPreviewOutput {
   governanceDecisionKind?: MultiStrategyAgentPreviewGovernanceDecisionKind;
 }
 
+export type PlanExecuteScenario = "weekly_planning";
+export type PlanExecuteSessionStatus =
+  | "draft"
+  | "finalized"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+export type PlanExecuteStepStatus =
+  | "planned"
+  | "skipped"
+  | "blocked"
+  | "requires_proposal"
+  | "requires_confirmation"
+  | "executed";
+export type PlanExecuteRiskLevel = "low" | "medium" | "high" | "critical";
+
+export interface PlanExecuteStepRecord {
+  stepId: string;
+  order: number;
+  title: string;
+  intent: string;
+  toolName?: string | null;
+  actionKind: string;
+  riskLevel: PlanExecuteRiskLevel;
+  declaredWrite: boolean;
+  status: PlanExecuteStepStatus;
+  linkedProposalId?: string | null;
+  observationSummary?: string | null;
+  policyReasonCode?: string | null;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface PlanExecuteSession {
+  sessionId: string;
+  sourceAgentRunId?: string | null;
+  sourceChatSessionId?: string | null;
+  scenario: PlanExecuteScenario;
+  status: PlanExecuteSessionStatus;
+  createdAt: string;
+  updatedAt: string;
+  finalizedAt?: string | null;
+  metadataSafeObjective: string;
+  stepCount: number;
+  completedStepCount: number;
+  proposalRequiredStepCount: number;
+  linkedProposalIds: string[];
+  warnings: string[];
+  steps: PlanExecuteStepRecord[];
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface CreatePlanExecuteSessionInput {
+  scenarioId?: PlanExecuteScenario;
+  sourceChatSessionId?: string;
+  maxSteps?: number;
+}
+
+export interface PlanExecuteStepEditInput {
+  stepId: string;
+  title?: string;
+  intent?: string;
+  actionKind?: string;
+  toolName?: string;
+  declaredWrite?: boolean;
+  riskLevel?: PlanExecuteRiskLevel;
+}
+
+export interface UpdatePlanExecuteSessionDraftInput {
+  sessionId: string;
+  steps: PlanExecuteStepEditInput[];
+}
+
+export interface ExecutePlanExecuteStepInput {
+  sessionId: string;
+  stepId?: string;
+}
+
+export interface PlanExecuteStepExecutionResult {
+  sessionId: string;
+  stepId: string;
+  stepStatus: PlanExecuteStepStatus;
+  linkedProposalId?: string | null;
+  observationSummary?: string | null;
+  metadataSafeSummary?: Record<string, any>;
+}
+
+export interface ExecutePlanExecuteStepOutput {
+  session: PlanExecuteSession;
+  executedStep: PlanExecuteStepExecutionResult;
+  metadataSafeSummary?: Record<string, any>;
+}
+
 export interface RuntimeMigrationGateCheckInput {
   previewRunId?: string;
   sessionId?: string;

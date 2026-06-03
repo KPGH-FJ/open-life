@@ -129,7 +129,7 @@ As of this preparation document, the project already has meaningful primitives:
 | EvidenceStore | `openlife-core/src/agent/evidence_store.rs` | Persisted candidate evidence layer with source refs and digests. No full LifeEvent/Signal pipeline yet. |
 | HeuristicStore | `openlife-core/src/agent/heuristic_store.rs` | Persisted collaboration guidance store with lifecycle and seeded MVP heuristics. |
 | RegressionSuite | `openlife-core/src/agent/regression_suite.rs` | Deterministic MVP behavior checks. Not yet a durable user scenario store. |
-| PlanExecute | `openlife-core/src/agent/plan_execute.rs` | Core MVP for governed plan payloads. Not a productized weekly planning flow. |
+| PlanExecute | `openlife-core/src/agent/plan_execute.rs` | Governed plan payloads plus the W98-W105 non-default weekly planning product vertical with durable sessions and proposal-first execution. |
 | StrategySelector | `openlife-core/src/agent/strategy.rs` | Selects ReAct, PlanExecute, or Blocked with metadata-safe summaries. Not a formal strategy trait. |
 | MultiStrategyRuntime | `openlife-core/src/agent/multi_strategy_runtime.rs` | Preview/core orchestrator for selected payloads. Not the default Chat runtime. |
 | Preview command | `src-tauri/src/commands/agent_runtime.rs::run_multi_strategy_agent_preview` | Non-default preview/beta command. W10 persists a metadata-safe outer AgentRun audit. |
@@ -253,7 +253,9 @@ These early pieces do not change the boundary:
 - The default `send_message` / Chat path must not be directly replaced by
   MultiStrategy Runtime.
 - The LifeEvent / Signal / Evidence / Governor loop is not end-to-end.
-- PlanExecute is only a core MVP, not a product weekly-planning vertical slice.
+- PlanExecute now has one narrow product vertical: non-default weekly planning
+  with durable sessions, review/edit/finalize, proposal-first write-like steps,
+  and metadata-safe AgentRun trace linkage.
 - `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
   boundary; it remains fixed to those adapters and is not plugin loading.
 - The next step is still not direct default Chat replacement. W20-W60 evidence,
@@ -343,9 +345,9 @@ Current implementation note:
   preview/beta command and persists metadata-safe outer AgentRun audit.
 - A lightweight first-class `RuntimeStrategy` trait now exists for fixed
   ReAct/PlanExecute adapters.
-- PlanExecute exists as a governed V1 runtime payload/report path, but the
-  product weekly-plan flow still requires explicit review/edit UX and migration
-  gates.
+- PlanExecute exists as a governed V1 runtime payload/report path and, as of
+  W105, one explicit weekly-planning product vertical. This is not default Chat
+  migration and not full RuntimeStrategy maturity.
 
 ## 8. Development Order
 
@@ -722,6 +724,7 @@ make ci
 | W14 Maturation Loop V1 | Done | RuntimeOutput candidates mature into governed evidence/proposals without direct LifeModel/Memory writes. |
 | W15 PlanExecute Governed Vertical Slice | Done | PlanExecuteReport records metadata-safe plan/governance/read-only observation summaries. |
 | W16 RuntimeStrategy Trait | Done | ReAct and PlanExecute execute through lightweight fixed adapters and registry. |
+| W98-W105 Plan-Execute Product Vertical | Done | Non-default weekly planning surface with durable PlanExecute sessions, review/edit/finalize lifecycle, proposal-first step execution, metadata-safe AgentRun trace/proposal linkage, and default Chat unchanged. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | Read-only gate reports default Chat unchanged, preview health, metadata-safe trace, fallback, no external writes, proposal-first, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings exposes the gate report as a read-only pass/block evidence panel with visible blocking reasons; normal Chat Send still does not call gate or preview. |
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | Read-only eligibility checks the latest 3 preview gate reports, clean run count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation. |
@@ -801,7 +804,8 @@ Status: Done for runtime V1 slice.
   counts, governance summaries, read-only observations, and warnings.
 - Read-only internal steps can execute; write-like steps require proposal and
   are not executed.
-- Product weekly planning remains future work.
+- Product weekly planning now exists as the W98-W105 non-default product
+  vertical; broader Plan-Execute strategy maturity remains future work.
 
 ### W16: RuntimeStrategy Trait
 

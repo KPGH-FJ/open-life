@@ -566,6 +566,7 @@ pub enum ProposalSource {
     ChatConversation,
     /// Agent 主动发起的提案（如定期检查、触发式建议）
     ProactiveAgent,
+    PlanningSession,
 }
 
 impl std::fmt::Display for ProposalSource {
@@ -580,6 +581,7 @@ impl std::fmt::Display for ProposalSource {
             ProposalSource::Manual => write!(f, "manual"),
             ProposalSource::ChatConversation => write!(f, "chat_conversation"),
             ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
+            ProposalSource::PlanningSession => write!(f, "planning_session"),
         }
     }
 }
@@ -602,6 +604,7 @@ impl rusqlite::types::FromSql for ProposalSource {
             "manual" => Ok(ProposalSource::Manual),
             "chat_conversation" => Ok(ProposalSource::ChatConversation),
             "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
+            "planning_session" => Ok(ProposalSource::PlanningSession),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         })
     }
@@ -689,6 +692,7 @@ impl AgentProposal {
             ProposalSource::Manual => chrono::Duration::days(365),
             ProposalSource::ChatConversation => chrono::Duration::days(3),
             ProposalSource::ProactiveAgent => chrono::Duration::days(7),
+            ProposalSource::PlanningSession => chrono::Duration::days(14),
         };
         Some(Utc::now() + duration)
     }

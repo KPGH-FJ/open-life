@@ -23,6 +23,7 @@ mod migration_ladder;
 mod default_chat_activation;
 mod default_chat_narrow;
 mod default_chat_preview;
+mod plan_execute_product;
 
 pub(crate) use default_chat_activation::check_default_chat_adapter_implementation_readiness_with_state;
 pub use default_chat_activation::*;
@@ -84,6 +85,7 @@ pub(crate) use migration_ladder::{
     run_controlled_chat_cutover_candidate_with_state,
     run_controlled_chat_migration_shadow_run_with_state,
 };
+pub use plan_execute_product::*;
 
 const CONTROLLED_PILOT_PROMOTION_EVIDENCE_PATH: &str = "runtime.controlled_pilot.promotion";
 const CONTROLLED_PILOT_PROMOTION_BLOCK_PATH: &str = "runtime.controlled_pilot.promotion_block";

@@ -1,6 +1,8 @@
 use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, GovernanceDecisionKind, HSSelectionAudit,
-    LifeModelGovernor, PlanExecuteInput, PlanExecuteService, PlanStepStatus, ProposalStore,
+    LifeModelGovernor, PlanDraft, PlanExecuteInput, PlanExecuteProductContract,
+    PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
+    PlanExecuteSessionStore, PlanExecuteStepEdit, PlanStep, PlanStepStatus, ProposalStore,
     RiskLevel, RuntimeHSPacket, RuntimeInput,
 };
 use crate::layer_router::Layer;
@@ -271,4 +273,271 @@ fn write_intents_for_sensitive_surfaces_are_proposal_required_without_direct_app
         .list_pending_proposals(10)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn weekly_planning_product_contract_is_ready_for_clean_plan_draft() {
+    let service = PlanExecuteService::default();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+
+    let report = contract.evaluate_draft(&draft).unwrap();
+
+    assert_eq!(
+        contract.scenario,
+        PlanExecuteProductScenario::WeeklyPlanning
+    );
+    assert!(draft.steps.len() >= 2);
+    assert!(draft.steps.len() <= contract.max_step_count);
+    assert!(report.ready);
+    assert_eq!(report.scenario_id, "weekly_planning");
+    assert_eq!(
+        report.metadata_safe_summary["proposalFirstWriteBoundary"],
+        true
+    );
+}
+
+#[test]
+fn weekly_planning_contract_rejects_unsupported_scenario_ids() {
+    let err = PlanExecuteProductScenario::try_from_id("quarterly_planning").unwrap_err();
+
+    assert_eq!(err.reason_code, "unsupported_scenario");
+}
+
+#[test]
+fn weekly_planning_contract_rejects_excessive_step_count() {
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let mut draft = PlanDraft {
+        objective: "metadata-safe objective".into(),
+        steps: Vec::new(),
+    };
+    for index in 0..=contract.max_step_count {
+        draft.steps.push(PlanStep {
+            id: format!("step-{}", index + 1),
+            title: "Bounded weekly planning step".into(),
+            intent: "read_only_reasoning".into(),
+            tool_name: None,
+            action_kind: "reason".into(),
+            risk_level: RiskLevel::Low,
+            declared_write: false,
+        });
+    }
+
+    let report = contract.evaluate_draft(&draft).unwrap_err();
+
+    assert_eq!(report.reason_code, "step_count_exceeds_contract");
+}
+
+#[test]
+fn weekly_planning_contract_rejects_high_or_critical_direct_write_steps() {
+    let contract = PlanExecuteProductContract::weekly_planning();
+    for risk_level in [RiskLevel::High, RiskLevel::Critical] {
+        let draft = PlanDraft {
+            objective: "metadata-safe objective".into(),
+            steps: vec![PlanStep {
+                id: "step-unsafe".into(),
+                title: "Unsafe write".into(),
+                intent: "write_like_external_action".into(),
+                tool_name: Some("external.write_proposal".into()),
+                action_kind: "update".into(),
+                risk_level,
+                declared_write: true,
+            }],
+        };
+
+        let report = contract.evaluate_draft(&draft).unwrap_err();
+
+        assert_eq!(report.reason_code, "direct_write_risk_exceeds_contract");
+    }
+}
+
+#[test]
+fn broad_tools_prompt_does_not_grant_write_or_external_side_effect_authority() {
+    let input = runtime_input_with_source_run(
+        "Use my LifeModel to plan this week with Alice and alice@example.com.",
+        Some("run-weekly-raw"),
+    );
+    let contract = PlanExecuteProductContract::weekly_planning();
+
+    let report = contract.tools_authority_report(&input);
+    let serialized = serde_json::to_string(&report).unwrap();
+
+    assert_eq!(
+        report.metadata_safe_summary["externalSideEffectsAllowed"],
+        false
+    );
+    assert_eq!(report.metadata_safe_summary["directWritesAllowed"], false);
+    assert!(!serialized.contains("Alice"));
+    assert!(!serialized.contains("alice@example.com"));
+    assert!(!serialized.contains("Available tools"));
+    assert!(!serialized.contains("memory context should not be copied"));
+}
+
+#[test]
+fn plan_execute_product_contract_debug_output_excludes_raw_content() {
+    let input = runtime_input_with_source_run(
+        "Plan my week around Alice's private note alice@example.com and raw draft text.",
+        Some("run-weekly-raw"),
+    );
+    let contract = PlanExecuteProductContract::weekly_planning();
+
+    let report = contract.metadata_safe_report(&input);
+    let serialized = serde_json::to_string(&report).unwrap();
+
+    assert!(serialized.contains("weekly_planning"));
+    assert!(!serialized.contains("Alice"));
+    assert!(!serialized.contains("alice@example.com"));
+    assert!(!serialized.contains("raw draft"));
+    assert!(!serialized.contains("memory context should not be copied"));
+}
+
+#[test]
+fn plan_execute_session_store_creates_gets_and_lists_draft_sessions() {
+    let store = PlanExecuteSessionStore::new_in_memory().unwrap();
+    let service = PlanExecuteService::default();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let session = PlanExecuteSession::new_draft(
+        Some("chat-weekly".into()),
+        Some("run-weekly".into()),
+        contract,
+        draft,
+    )
+    .unwrap();
+    let session_id = session.session_id.clone();
+
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session_id).unwrap().unwrap();
+    let sessions = store.list_sessions(10).unwrap();
+    assert_eq!(fetched.status, PlanExecuteSessionStatus::Draft);
+    assert_eq!(fetched.scenario, PlanExecuteProductScenario::WeeklyPlanning);
+    assert_eq!(fetched.source_agent_run_id.as_deref(), Some("run-weekly"));
+    assert_eq!(
+        fetched.source_chat_session_id.as_deref(),
+        Some("chat-weekly")
+    );
+    assert_eq!(sessions.len(), 1);
+}
+
+#[test]
+fn draft_session_can_be_edited_and_finalized_but_not_after_finalization() {
+    let service = PlanExecuteService::default();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    let first_step_id = session.steps[0].step_id.clone();
+
+    session
+        .apply_draft_edits(vec![PlanExecuteStepEdit {
+            step_id: first_step_id.clone(),
+            title: Some("Review the week before choosing focus".into()),
+            intent: Some("read_only_reasoning".into()),
+            action_kind: Some("reason".into()),
+            tool_name: None,
+            declared_write: Some(false),
+            risk_level: Some(RiskLevel::Low),
+        }])
+        .unwrap();
+    session.finalize().unwrap();
+
+    assert_eq!(session.status, PlanExecuteSessionStatus::Finalized);
+    assert_eq!(
+        session.steps[0].title,
+        "Review the week before choosing focus"
+    );
+    assert!(session
+        .apply_draft_edits(vec![PlanExecuteStepEdit {
+            step_id: first_step_id,
+            title: Some("Too late".into()),
+            intent: None,
+            action_kind: None,
+            tool_name: None,
+            declared_write: None,
+            risk_level: None,
+        }])
+        .is_err());
+}
+
+#[test]
+fn finalized_session_executes_read_only_steps_and_creates_proposals_for_write_like_steps() {
+    let service = PlanExecuteService::default();
+    let proposal_store = ProposalStore::new_in_memory().unwrap();
+    let contract = PlanExecuteProductContract::weekly_planning();
+    let draft = service.draft_product_plan(
+        &plan_input(
+            "Use my LifeModel to plan this week.",
+            contract.max_step_count,
+        ),
+        PlanExecuteProductScenario::WeeklyPlanning,
+    );
+    let mut session =
+        PlanExecuteSession::new_draft(None, Some("run-weekly".into()), contract, draft).unwrap();
+    session.finalize().unwrap();
+    let read_step_id = session
+        .steps
+        .iter()
+        .find(|step| !step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+    let write_step_id = session
+        .steps
+        .iter()
+        .find(|step| step.declared_write)
+        .unwrap()
+        .step_id
+        .clone();
+
+    let read_result = session
+        .execute_step(
+            &read_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let write_result = session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+    let duplicate_write_result = session
+        .execute_step(
+            &write_step_id,
+            &LifeModelGovernor::default(),
+            &proposal_store,
+        )
+        .unwrap();
+
+    assert_eq!(read_result.step_status, PlanStepStatus::Executed);
+    assert!(read_result.linked_proposal_id.is_none());
+    assert_eq!(write_result.step_status, PlanStepStatus::RequiresProposal);
+    assert!(write_result.linked_proposal_id.is_some());
+    assert_eq!(
+        duplicate_write_result.linked_proposal_id,
+        write_result.linked_proposal_id
+    );
+    assert_eq!(proposal_store.list_pending_proposals(10).unwrap().len(), 1);
+    assert_eq!(session.linked_proposal_ids.len(), 1);
 }

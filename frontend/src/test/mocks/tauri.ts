@@ -263,6 +263,71 @@ export const mockPreviewAgentRun = {
   startedAt: new Date().toISOString(),
 };
 
+const mockPlanExecuteSession = {
+  sessionId: "plan-session-1",
+  sourceAgentRunId: "run-plan-1",
+  sourceChatSessionId: "workspace_weekly_planning",
+  scenario: "weekly_planning",
+  status: "draft",
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+  finalizedAt: null,
+  metadataSafeObjective: "scenario=weekly_planning",
+  stepCount: 3,
+  completedStepCount: 0,
+  proposalRequiredStepCount: 1,
+  linkedProposalIds: [],
+  warnings: [],
+  steps: [
+    {
+      stepId: "step-1",
+      order: 1,
+      title: "Review current priorities",
+      intent: "read_only_reasoning",
+      toolName: null,
+      actionKind: "reason",
+      riskLevel: "low",
+      declaredWrite: false,
+      status: "planned",
+      linkedProposalId: null,
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+    {
+      stepId: "step-2",
+      order: 2,
+      title: "Shape this week's focus",
+      intent: "read_only_planning",
+      toolName: null,
+      actionKind: "plan",
+      riskLevel: "low",
+      declaredWrite: false,
+      status: "planned",
+      linkedProposalId: null,
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+    {
+      stepId: "step-3",
+      order: 3,
+      title: "Prepare weekly check-in proposal",
+      intent: "write_like_schedule_task",
+      toolName: "review_center.propose_scheduled_task",
+      actionKind: "schedule",
+      riskLevel: "medium",
+      declaredWrite: true,
+      status: "planned",
+      linkedProposalId: null,
+      observationSummary: null,
+      policyReasonCode: null,
+      metadataSafeSummary: {},
+    },
+  ],
+  metadataSafeSummary: {},
+};
+
 export const mockLifeModelVersions: LifeModelVersion[] = [
   {
     version: "0.1.0",
@@ -413,6 +478,45 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           reasonCode: "default_react",
         },
         governanceDecisionKind: "allow",
+      } as T);
+    case "list_plan_execute_sessions":
+      return Promise.resolve([] as T);
+    case "create_plan_execute_session":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "get_plan_execute_session":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "update_plan_execute_session_draft":
+      return Promise.resolve(mockPlanExecuteSession as T);
+    case "finalize_plan_execute_session":
+      return Promise.resolve({ ...mockPlanExecuteSession, status: "finalized" } as T);
+    case "execute_plan_execute_step":
+      return Promise.resolve({
+        session: {
+          ...mockPlanExecuteSession,
+          status: "in_progress",
+          completedStepCount: 1,
+          steps: mockPlanExecuteSession.steps.map(step =>
+            step.stepId === _args?.input?.stepId
+              ? {
+                  ...step,
+                  status: step.declaredWrite ? "requires_proposal" : "executed",
+                  linkedProposalId: step.declaredWrite ? "proposal-plan-1" : null,
+                  observationSummary: step.declaredWrite
+                    ? null
+                    : "read-only internal reasoning completed; raw prompt omitted",
+                }
+              : step
+          ),
+        },
+        executedStep: {
+          sessionId: "plan-session-1",
+          stepId: _args?.input?.stepId ?? "step-1",
+          stepStatus: "executed",
+          linkedProposalId: null,
+          observationSummary: "read-only internal reasoning completed; raw prompt omitted",
+          metadataSafeSummary: {},
+        },
+        metadataSafeSummary: {},
       } as T);
     case "check_runtime_migration_gate":
       return Promise.resolve({

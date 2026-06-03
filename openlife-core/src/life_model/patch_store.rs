@@ -245,6 +245,7 @@ impl PatchStore {
             "skill_runtime" => PatchSource::SkillRuntime,
             "plugin" => PatchSource::Plugin,
             "memory_governance" => PatchSource::MemoryGovernance,
+            "planning_session" => PatchSource::PlanningSession,
             _ => PatchSource::Manual,
         };
 
