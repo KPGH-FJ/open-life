@@ -78,4 +78,28 @@ describe("VersionControl", () => {
     expect(screen.getAllByRole("button", { name: "回滚" })[0]).toBeDisabled();
     expect(screen.getByText(/去恢复控制台/)).toBeInTheDocument();
   });
+
+  it("surfaces W84 backend restore gate for default restore calls", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    try {
+      render(
+        <BrowserRouter>
+          <VersionControl />
+        </BrowserRouter>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("历史版本")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getAllByRole("button", { name: "回滚" })[0]);
+
+      await waitFor(() => {
+        expect(screen.getByText(/restore_snapshot is a W84/)).toBeInTheDocument();
+      });
+      expect(invoke).toHaveBeenCalledWith("restore_snapshot", { version: "0.1.0" });
+    } finally {
+      confirmSpy.mockRestore();
+    }
+  });
 });

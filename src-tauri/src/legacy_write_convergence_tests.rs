@@ -63,8 +63,13 @@ fn legacy_write_convergence_inventory_covers_required_paths() {
             "generate_evolution_report",
         ),
         ("snapshot_restore", "restore_snapshot"),
+        (
+            "snapshot_restore",
+            "SnapshotRestoreLegacyDirectApplyOverride",
+        ),
         ("data_import", "import_all_data"),
         ("data_import", "apply_import_payload"),
+        ("data_import", "DataImportLegacyDirectApplyOverride"),
         ("state_daily_goal_direct_writes", "add_daily_goal"),
         (
             "state_daily_goal_direct_writes",
@@ -234,6 +239,55 @@ fn legacy_write_convergence_feedback_w83_guard_present_but_still_blocker() {
 
     assert!(!report.overall_converged);
     assert!(!report.all_direct_writes_converged);
+}
+
+#[test]
+fn legacy_write_convergence_snapshot_restore_and_data_import_w84_guards_present_but_still_blockers()
+{
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+
+    for (stable_id, override_name) in [
+        (
+            "snapshot_restore",
+            "SnapshotRestoreLegacyDirectApplyOverride",
+        ),
+        ("data_import", "DataImportLegacyDirectApplyOverride"),
+    ] {
+        let entry = entry(&entries, stable_id);
+        assert_eq!(
+            entry.risk_class,
+            LegacyWriteRiskClass::HighRiskLegacyDirectWrite
+        );
+        assert_eq!(
+            entry.current_status,
+            LegacyWriteConvergenceStatus::LegacyDirectWriteBlocker
+        );
+        assert_eq!(
+            entry.safe_mode_status,
+            LegacyWriteSafeModeStatus::GuardPresent
+        );
+        assert!(!entry.normal_product_allowed);
+        assert!(entry.requires_proposal_first);
+        assert!(entry.currently_direct_write);
+        assert!(entry.high_risk_durable_truth_write);
+        assert!(entry.current_guard_summary.contains("W84"));
+        assert!(entry.current_guard_summary.contains("dev/migration/manual"));
+        assert!(entry.current_guard_summary.contains("metadata-safe"));
+        assert!(has_function(entry, override_name));
+        assert!(entry
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason.contains("manual_restore_override")
+                || reason.contains("dev_migration_override")));
+        assert!(
+            report
+                .convergence_blockers
+                .iter()
+                .any(|blocker| blocker.contains(stable_id)),
+            "{stable_id} should remain a convergence blocker"
+        );
+    }
 }
 
 #[test]
@@ -627,6 +681,10 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "CalibrationLegacyDirectApplyDevMigrationOverride",
         "apply_feedback_evolution_with_state_for_dev_migration",
         "FeedbackEvolutionLegacyDirectApplyOverride",
+        "restore_snapshot_with_state_for_manual_restore",
+        "SnapshotRestoreLegacyDirectApplyOverride",
+        "import_all_data_with_state_for_dev_migration",
+        "DataImportLegacyDirectApplyOverride",
     ] {
         assert!(
             !send_body.contains(forbidden),

@@ -1465,7 +1465,11 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "create_snapshot":
       return Promise.resolve(mockLifeModelVersions[0] as T);
     case "restore_snapshot":
-      return Promise.resolve(mockLifeModel as T);
+      return Promise.reject(
+        new Error(
+          "restore_snapshot is a W84 snapshot restore legacy direct write path and requires an explicit dev/migration/manual restore override."
+        )
+      );
     case "goal_capability_gap_analysis":
       return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
     case "goal_capability_gap_report":
@@ -1837,6 +1841,12 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         messages: [],
         vectors: [],
       } as T);
+    case "import_all_data":
+      return Promise.reject(
+        new Error(
+          "import_all_data is a W84 data import legacy direct write path and requires an explicit dev/migration/manual restore override."
+        )
+      );
     case "generate_evolution_report":
       return Promise.resolve({
         success: true,

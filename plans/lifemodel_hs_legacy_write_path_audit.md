@@ -115,6 +115,25 @@ still write durable LifeModel truth, Feedback evolution direct apply remains a
 high-risk legacy direct-write blocker until removed or converted to
 proposal/evidence-first.
 
+## W84 Snapshot Restore / Data Import Legacy Direct Write Gate
+
+W84 adds backend dev/migration/manual-restore gates to
+`src-tauri/src/commands/version.rs::restore_snapshot` and
+`src-tauri/src/commands/settings.rs::import_all_data`. Both commands now fail
+closed by default and only enter legacy direct persistence when an explicit
+`SnapshotRestoreLegacyDirectApplyOverride` or
+`DataImportLegacyDirectApplyOverride` with a narrow migration/manual restore
+purpose is supplied.
+
+The legacy responses are metadata-safe. Snapshot restore returns snapshot ids,
+status, and whether a pre-restore snapshot was created; it does not return the
+restored LifeModel or snapshot YAML. Data import returns imported
+message/vector counts and status; it does not return raw LifeModel, messages,
+vectors, or the imported payload. Export and read-only snapshot inspection
+paths are unchanged. Because the overrides can still replace durable LifeModel,
+Memory, and vector truth, restore/import remain high-risk legacy direct-write
+blockers until removed or converted to governed rollback/migration flows.
+
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
@@ -137,8 +156,8 @@ proposal/evidence-first.
 | Raw chat and memory records | `openlife-core/src/memory.rs::{save_message,save_memory_record}`; `src-tauri/src/lib.rs::persist_chat_message_if_needed`; `src-tauri/src/commands/memory.rs::index_memory_chunk` | low-risk transient state | Local raw/source records with privacy tags; user/manual indexing is explicit; raw memory is not accepted HS truth. | Preserve as raw life data with retention/deletion controls; generated durable memory claims should use MemoryWrite proposals or EvidenceStore. |
 | Memory proposals | `openlife-core/src/agent/proposal_generators/chat.rs`; `openlife-core/src/agent/proposal_engine.rs::MemoryProposalGenerator`; `src-tauri/src/commands/proposal.rs::MemoryWrite` | already proposal-first | Generated memory writes land in ProposalStore and only write memory after accepted proposal application. | Link accepted memory writes to EvidenceStore evidence when HS evidence becomes canonical. |
 | Vector memory maintenance | `openlife-core/src/vectors.rs::{run_tier_maintenance,archive_low_access_memories,restore_archived,set_importance}` | low-risk transient state | Changes retrieval tier/archive metadata, not LifeModel truth. | Keep automatic only for retrieval metadata; proposal-first if memory deletion/forgetting semantics affect accepted evidence. |
-| Snapshots and restore | `openlife-core/src/versioning.rs::{snapshot,snapshot_for_patch}`; `src-tauri/src/commands/version.rs::{create_snapshot,restore_snapshot}` | read-only/materialized for snapshot creation; legacy direct write requiring future convergence for restore | Snapshot creation writes materialized YAML history; restore creates a pre-restore snapshot before replacing current YAML. | Keep snapshot writes as materialized/audit outputs; make restore an explicit rollback/governor operation with clear user confirmation. |
-| Data import/export | `src-tauri/src/commands/settings.rs::{export_all_data,import_all_data,apply_import_payload}` | legacy direct write requiring future convergence | Import parses payload, captures prior model/messages/vectors, and attempts rollback on failure; settings UI disables import in Safe Mode. | Keep as explicit migration/restore path with stronger audit; do not treat imports as HS learning or accepted truth without re-materialization. |
+| Snapshots and restore | `openlife-core/src/versioning.rs::{snapshot,snapshot_for_patch}`; `src-tauri/src/commands/version.rs::{create_snapshot,restore_snapshot}` | read-only/materialized for snapshot creation; legacy direct write requiring future convergence for restore | W84 guard present: snapshot creation/list/diff remain materialized/read-only paths; `restore_snapshot` fails closed by default and requires explicit dev/migration/manual restore override; legacy response omits raw LifeModel and snapshot YAML. | Keep snapshot writes as materialized/audit outputs; convert restore to a governed rollback/audit flow or remove the legacy override capability. |
+| Data import/export | `src-tauri/src/commands/settings.rs::{export_all_data,import_all_data,apply_import_payload}` | legacy direct write requiring future convergence | W84 guard present: export remains available; `import_all_data` fails closed by default and requires explicit dev/migration/manual restore override; legacy response omits raw LifeModel, messages, vectors, and imported payload while returning counts/status only. | Keep as explicit migration/restore path with stronger audit; do not treat imports as HS learning or accepted truth without re-materialization. |
 | External writes and declarative tool stubs | `openlife-core/src/agent/action_executor/tool_executor.rs`; `openlife-core/src/agent/action_executor/execution_tools.rs`; `src-tauri/src/commands/proposal.rs::{ExternalWriteAction,ScheduledTask,DataExport}` | already proposal-first; disabled/declarative-only for propose-only tools | HS/tool policy creates ExternalWriteAction proposals instead of direct writes; calendar/email propose tools create declarative proposals; accepted proposals re-check safe paths and payload limits before side effects. | Keep direct external writes blocked until accepted; ensure future tool manifests cannot bypass proposal-first policy. |
 | Compatibility YAML materializer | `openlife-core/src/life_model.rs::materialize_yaml_compatibility_view` | read-only/materialized | Produces a YAML string with source asset refs/digests and compact summaries; does not persist raw HS internals. | When stores become canonical, materializer should be the only YAML writer for HS-derived compatibility state. |
 
@@ -175,7 +194,10 @@ closed and no-signal completion is no-write/session-only; as of W82,
 Calibration direct/evolution defaults fail closed and normal flow is
 proposal-first; as of W83, Feedback evolution direct apply defaults fail
 closed and `generate_evolution_report` is read-only/no LifeModel or
-`evolution_rules` write. These guards are not convergence completion.
+`evolution_rules` write; as of W84, Snapshot restore and Data import default
+fail closed and require explicit dev/migration/manual restore overrides while
+returning metadata-safe responses only. These guards are not convergence
+completion.
 
 ## Convergence Backlog
 

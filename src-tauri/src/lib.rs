@@ -6002,6 +6002,10 @@ mod hs_runtime_tests {
             "CalibrationLegacyDirectApplyDevMigrationOverride",
             "apply_feedback_evolution_with_state_for_dev_migration",
             "FeedbackEvolutionLegacyDirectApplyOverride",
+            "restore_snapshot_with_state_for_manual_restore",
+            "SnapshotRestoreLegacyDirectApplyOverride",
+            "import_all_data_with_state_for_dev_migration",
+            "DataImportLegacyDirectApplyOverride",
         ];
 
         for forbidden in forbidden_command_surfaces {

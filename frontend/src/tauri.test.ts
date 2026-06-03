@@ -50,8 +50,10 @@ import {
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
   restoreArchivedChunks,
+  restoreSnapshot,
   saveChatMessage,
   startStreamMessage,
+  importAllData,
 } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -137,6 +139,50 @@ describe("tauri command argument aliases", () => {
       })
     );
     expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
+  });
+
+  it("keeps W84 restore and import wrappers on default no-override calls", async () => {
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockResolvedValue({
+      success: true,
+      legacy: true,
+      warning: "metadata-safe",
+      metadata_safe: true,
+      durable_lifemodel_write: false,
+      restored_snapshot_version: "0.1.0",
+      pre_restore_snapshot_created: true,
+    });
+    await restoreSnapshot("0.1.0");
+
+    expect(invoke).toHaveBeenCalledWith("restore_snapshot", {
+      version: "0.1.0",
+    });
+
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockResolvedValue({
+      success: true,
+      legacy: true,
+      warning: "metadata-safe",
+      metadata_safe: true,
+      durable_lifemodel_write: false,
+      imported_message_count: 0,
+      imported_vector_count: 0,
+    });
+    await importAllData({
+      version: "1.0",
+      exported_at: "2026-06-03T00:00:00Z",
+      life_model: {} as any,
+      messages: [],
+      vectors: [],
+    });
+
+    expect(invoke).toHaveBeenCalledWith("import_all_data", {
+      payload: expect.objectContaining({
+        version: "1.0",
+        messages: [],
+        vectors: [],
+      }),
+    });
   });
 
   it("normalizes proposal command arguments", async () => {

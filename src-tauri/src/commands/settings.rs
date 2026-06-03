@@ -7,6 +7,7 @@ use openlife_core::llm::{
 use openlife_core::mcp_audit::{AuditExport, AuditKeyConfig, KeyMode};
 use openlife_core::privacy::PrivacyPolicy;
 use openlife_core::scheduler::InferenceScheduler;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
 
@@ -17,6 +18,42 @@ use crate::storage::{
     save_privacy_policy_to_path, OnboardingStatus,
 };
 use crate::AppState;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DataImportLegacyDirectApplyOverride {
+    pub allow_legacy_direct_apply: bool,
+    pub purpose: String,
+}
+
+impl DataImportLegacyDirectApplyOverride {
+    #[cfg(test)]
+    fn allow_for_dev_migration() -> Self {
+        Self {
+            allow_legacy_direct_apply: true,
+            purpose: "dev_migration".into(),
+        }
+    }
+
+    fn is_valid_import_override(&self) -> bool {
+        self.allow_legacy_direct_apply
+            && matches!(
+                self.purpose.as_str(),
+                "dev_migration" | "migration" | "manual_restore" | "test_migration"
+            )
+    }
+}
+
+fn require_data_import_legacy_direct_apply_override(
+    import_override: Option<&DataImportLegacyDirectApplyOverride>,
+) -> Result<(), AppError> {
+    if import_override.is_some_and(DataImportLegacyDirectApplyOverride::is_valid_import_override) {
+        Ok(())
+    } else {
+        Err(AppError::permission(
+            "import_all_data is a W84 data import legacy direct write path and requires an explicit dev/migration/manual restore override with purpose dev_migration, migration, manual_restore, or test_migration.",
+        ))
+    }
+}
 
 #[derive(serde::Serialize)]
 pub struct LastModelError {
@@ -114,6 +151,10 @@ pub async fn save_config(
 pub async fn export_all_data(
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
+    export_all_data_with_state(state.inner()).await
+}
+
+async fn export_all_data_with_state(state: &Arc<AppState>) -> Result<serde_json::Value, AppError> {
     let life_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
@@ -139,8 +180,42 @@ pub async fn export_all_data(
 #[tauri::command]
 pub async fn import_all_data(
     payload: serde_json::Value,
+    import_override: Option<DataImportLegacyDirectApplyOverride>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state.inner(), import_override).await
+}
+
+#[cfg(test)]
+async fn import_all_data_with_state(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state, None).await
+}
+
+#[cfg(test)]
+async fn import_all_data_with_state_for_dev_migration(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    import_override: DataImportLegacyDirectApplyOverride,
+) -> Result<serde_json::Value, AppError> {
+    import_all_data_with_state_gated(payload, state, Some(import_override)).await
+}
+
+async fn import_all_data_with_state_gated(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+    import_override: Option<DataImportLegacyDirectApplyOverride>,
+) -> Result<serde_json::Value, AppError> {
+    require_data_import_legacy_direct_apply_override(import_override.as_ref())?;
+    import_all_data_direct_apply_after_gate(payload, state).await
+}
+
+async fn import_all_data_direct_apply_after_gate(
+    payload: serde_json::Value,
+    state: &Arc<AppState>,
+) -> Result<serde_json::Value, AppError> {
     let life_model: LifeModel = serde_json::from_value(
         payload
             .get("life_model")
@@ -163,6 +238,8 @@ pub async fn import_all_data(
     )
     .map_err(|e| AppError::external(format!("解析 vectors 失败: {}", e)))?;
 
+    let imported_message_count = messages.len();
+    let imported_vector_count = vectors.len();
     let previous_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
@@ -175,12 +252,14 @@ pub async fn import_all_data(
         let store = state.vector_store.lock().await;
         store.export_all_chunks().map_err(AppError::from)?
     };
+    let durable_lifemodel_write = serde_json::to_value(&previous_model).map_err(AppError::from)?
+        != serde_json::to_value(&life_model).map_err(AppError::from)?;
 
     if let Err(import_error) =
-        apply_import_payload(state.inner().clone(), life_model, messages, vectors).await
+        apply_import_payload(state.clone(), life_model, messages, vectors).await
     {
         let rollback_error = apply_import_payload(
-            state.inner().clone(),
+            state.clone(),
             previous_model,
             previous_messages,
             previous_vectors,
@@ -198,7 +277,15 @@ pub async fn import_all_data(
             import_error
         )));
     }
-    Ok(())
+    Ok(serde_json::json!({
+        "success": true,
+        "legacy": true,
+        "warning": "data import legacy direct write path is restricted to explicit migration/restore operations.",
+        "metadata_safe": true,
+        "durable_lifemodel_write": durable_lifemodel_write,
+        "imported_message_count": imported_message_count,
+        "imported_vector_count": imported_vector_count,
+    }))
 }
 
 async fn apply_import_payload(
@@ -404,7 +491,15 @@ pub async fn mark_onboarding_completed() -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_masked_api_key, KEY_MASK};
+    use super::*;
+    use openlife_core::llm::ChatMessage;
+
+    const W84_IMPORT_CURRENT_NAME_SECRET: &str = "W84_IMPORT_CURRENT_LIFEMODEL_SECRET";
+    const W84_IMPORT_PAYLOAD_NAME_SECRET: &str = "W84_IMPORT_PAYLOAD_LIFEMODEL_SECRET";
+    const W84_IMPORT_CURRENT_MESSAGE_SECRET: &str = "W84_IMPORT_CURRENT_MESSAGE_SECRET";
+    const W84_IMPORT_PAYLOAD_MESSAGE_SECRET: &str = "W84_IMPORT_PAYLOAD_MESSAGE_SECRET";
+    const W84_IMPORT_CURRENT_VECTOR_SECRET: &str = "W84_IMPORT_CURRENT_VECTOR_SECRET";
+    const W84_IMPORT_PAYLOAD_VECTOR_SECRET: &str = "W84_IMPORT_PAYLOAD_VECTOR_SECRET";
 
     #[test]
     fn resolve_masked_api_key_uses_current_key_for_mask_or_empty() {
@@ -416,5 +511,239 @@ mod tests {
     #[test]
     fn resolve_masked_api_key_uses_submitted_new_key() {
         assert_eq!(resolve_masked_api_key("sk-new", "sk-current"), "sk-new");
+    }
+
+    async fn seed_current_data(state: &Arc<AppState>) {
+        {
+            let manager = state.life_model_manager.lock().await;
+            let mut model = manager.load().unwrap();
+            model.identity.name = W84_IMPORT_CURRENT_NAME_SECRET.into();
+            manager.save(&model).unwrap();
+        }
+        {
+            let store = state.memory_store.lock().await;
+            store
+                .save_message(
+                    "w84-current-session",
+                    &ChatMessage {
+                        role: "user".into(),
+                        content: W84_IMPORT_CURRENT_MESSAGE_SECRET.into(),
+                    },
+                )
+                .unwrap();
+        }
+        {
+            let store = state.vector_store.lock().await;
+            store
+                .insert(
+                    "w84-current-session",
+                    W84_IMPORT_CURRENT_VECTOR_SECRET,
+                    &[0.1, 0.2, 0.3, 0.4],
+                    "w84-current",
+                )
+                .unwrap();
+        }
+    }
+
+    fn import_payload() -> serde_json::Value {
+        let mut model = LifeModel::default_model();
+        model.identity.name = W84_IMPORT_PAYLOAD_NAME_SECRET.into();
+        serde_json::json!({
+            "version": "1.0",
+            "life_model": model,
+            "messages": [{
+                "session_id": "w84-import-session",
+                "role": "assistant",
+                "content": W84_IMPORT_PAYLOAD_MESSAGE_SECRET,
+                "created_at": "2026-06-03T00:00:00Z"
+            }],
+            "vectors": [{
+                "session_id": "w84-import-session",
+                "content": W84_IMPORT_PAYLOAD_VECTOR_SECRET,
+                "embedding": [0.4, 0.3, 0.2, 0.1],
+                "source": "w84-import",
+                "created_at": "2026-06-03T00:00:00Z",
+                "tier": 2,
+                "access_count": 0,
+                "last_accessed_at": "",
+                "importance_score": 0.5,
+                "archived": false,
+                "archived_at": null,
+                "summary": null
+            }]
+        })
+    }
+
+    async fn exported_message_contents(state: &Arc<AppState>) -> Vec<String> {
+        state
+            .memory_store
+            .lock()
+            .await
+            .export_all_messages()
+            .unwrap()
+            .into_iter()
+            .map(|message| message.content)
+            .collect()
+    }
+
+    async fn exported_vector_contents(state: &Arc<AppState>) -> Vec<String> {
+        state
+            .vector_store
+            .lock()
+            .await
+            .export_all_chunks()
+            .unwrap()
+            .into_iter()
+            .map(|chunk| chunk.content)
+            .collect()
+    }
+
+    async fn current_model_name(state: &Arc<AppState>) -> String {
+        state
+            .life_model_manager
+            .lock()
+            .await
+            .load()
+            .unwrap()
+            .identity
+            .name
+    }
+
+    #[tokio::test]
+    async fn w84_import_all_data_default_fails_closed_without_migration_override() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let err = import_all_data_with_state(import_payload(), &state)
+            .await
+            .expect_err("data import must fail closed by default");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("import_all_data"));
+        assert!(err.message().contains("W84"));
+        assert!(err.message().contains("dev/migration/manual"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn w84_import_all_data_dev_migration_override_allows_metadata_safe_import() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let result = import_all_data_with_state_for_dev_migration(
+            import_payload(),
+            &state,
+            DataImportLegacyDirectApplyOverride::allow_for_dev_migration(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(result["legacy"], true);
+        assert_eq!(result["metadata_safe"], true);
+        assert_eq!(result["durable_lifemodel_write"], true);
+        assert_eq!(result["imported_message_count"], 1);
+        assert_eq!(result["imported_vector_count"], 1);
+        assert!(result["warning"]
+            .as_str()
+            .is_some_and(|warning| warning.contains("migration/restore")));
+        assert!(result.get("life_model").is_none());
+        assert!(result.get("messages").is_none());
+        assert!(result.get("vectors").is_none());
+        assert!(result.get("payload").is_none());
+        assert!(result.get("import_payload").is_none());
+
+        let response_dump = result.to_string();
+        for forbidden in [
+            W84_IMPORT_CURRENT_NAME_SECRET,
+            W84_IMPORT_PAYLOAD_NAME_SECRET,
+            W84_IMPORT_CURRENT_MESSAGE_SECRET,
+            W84_IMPORT_PAYLOAD_MESSAGE_SECRET,
+            W84_IMPORT_CURRENT_VECTOR_SECRET,
+            W84_IMPORT_PAYLOAD_VECTOR_SECRET,
+        ] {
+            assert!(
+                !response_dump.contains(forbidden),
+                "data import response leaked raw marker {forbidden}"
+            );
+        }
+
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_PAYLOAD_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_PAYLOAD_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_PAYLOAD_VECTOR_SECRET.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn w84_import_all_data_invalid_override_fails_closed() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let err = import_all_data_with_state_gated(
+            import_payload(),
+            &state,
+            Some(DataImportLegacyDirectApplyOverride {
+                allow_legacy_direct_apply: true,
+                purpose: "normal_product".into(),
+            }),
+        )
+        .await
+        .expect_err("invalid import override purpose must fail closed");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("dev_migration"));
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+    }
+
+    #[tokio::test]
+    async fn w84_export_all_data_remains_read_only_and_ungated() {
+        let state = crate::test_utils::test_app_state();
+        seed_current_data(&state).await;
+
+        let exported = export_all_data_with_state(&state).await.unwrap();
+
+        assert_eq!(
+            current_model_name(&state).await,
+            W84_IMPORT_CURRENT_NAME_SECRET
+        );
+        assert_eq!(
+            exported_message_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_MESSAGE_SECRET.to_string()]
+        );
+        assert_eq!(
+            exported_vector_contents(&state).await,
+            vec![W84_IMPORT_CURRENT_VECTOR_SECRET.to_string()]
+        );
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_NAME_SECRET));
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_MESSAGE_SECRET));
+        assert!(exported
+            .to_string()
+            .contains(W84_IMPORT_CURRENT_VECTOR_SECRET));
     }
 }

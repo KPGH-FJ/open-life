@@ -896,8 +896,20 @@ export async function listSnapshots(): Promise<import("./types").LifeModelVersio
   return safeInvoke<import("./types").LifeModelVersion[]>("list_snapshots");
 }
 
-export async function restoreSnapshot(version: string): Promise<import("./types").LifeModel> {
-  return safeInvoke<import("./types").LifeModel>("restore_snapshot", { version });
+export interface SnapshotRestoreResult {
+  success: boolean;
+  legacy: boolean;
+  warning: string;
+  metadata_safe: boolean;
+  durable_lifemodel_write: boolean;
+  restored_snapshot_version: string;
+  restored_model_version?: string;
+  pre_restore_snapshot_created: boolean;
+  pre_restore_snapshot_version?: string | null;
+}
+
+export async function restoreSnapshot(version: string): Promise<SnapshotRestoreResult> {
+  return safeInvoke<SnapshotRestoreResult>("restore_snapshot", { version });
 }
 
 export async function diffSnapshots(v1: string, v2: string): Promise<string> {
@@ -1409,8 +1421,18 @@ export async function exportAllData(): Promise<ExportPayload> {
   return safeInvoke<ExportPayload>("export_all_data");
 }
 
-export async function importAllData(payload: ExportPayload): Promise<void> {
-  return safeInvoke("import_all_data", { payload });
+export interface DataImportResult {
+  success: boolean;
+  legacy: boolean;
+  warning: string;
+  metadata_safe: boolean;
+  durable_lifemodel_write: boolean;
+  imported_message_count: number;
+  imported_vector_count: number;
+}
+
+export async function importAllData(payload: ExportPayload): Promise<DataImportResult> {
+  return safeInvoke<DataImportResult>("import_all_data", { payload });
 }
 
 export async function testApiKey(): Promise<boolean> {
