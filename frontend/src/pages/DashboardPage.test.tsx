@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { BrowserRouter, MemoryRouter } from "react-router-dom";
 import DashboardPage from "./DashboardPage";
 import { invoke } from "@tauri-apps/api/core";
@@ -15,6 +15,7 @@ describe("DashboardPage", () => {
   });
 
   afterEach(() => {
+    cleanup();
     vi.clearAllMocks();
   });
 
@@ -88,6 +89,37 @@ describe("DashboardPage", () => {
     await waitFor(() => {
       expect(screen.getAllByText(content => content.includes("0.1.0")).length).toBeGreaterThan(0);
     });
+  });
+
+  it("creates calibration proposals instead of running legacy direct micro-evolution", async () => {
+    render(
+      <BrowserRouter>
+        <DashboardPage />
+      </BrowserRouter>
+    );
+
+    const runButton = await screen.findByRole("button", { name: /运行微进化/ });
+    const pendingProposalCallsBefore = vi
+      .mocked(invoke)
+      .mock.calls.filter(([cmd]) => cmd === "get_pending_proposals").length;
+    fireEvent.click(runButton);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("generate_micro_evolution_changes", undefined);
+      expect(invoke).toHaveBeenCalledWith(
+        "calibration_create_proposals",
+        expect.objectContaining({
+          changes: expect.any(Array),
+        })
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/已创建 2 个 Proposal/)).toBeInTheDocument();
+      expect(
+        vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "get_pending_proposals").length
+      ).toBeGreaterThan(pendingProposalCallsBefore);
+    });
+    expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_micro_evolution")).toBe(false);
   });
 
   it("displays skill stats from life model", async () => {
@@ -372,8 +404,10 @@ describe("DashboardPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText("为什么今天先做这个")).toBeInTheDocument();
-    expect(screen.getByText(/这些不是随机建议/)).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText("为什么今天先做这个")).toBeInTheDocument();
+      expect(screen.getByText(/这些不是随机建议/)).toBeInTheDocument();
+    });
   });
 
   it("refreshes diagnostics when the window regains focus", async () => {

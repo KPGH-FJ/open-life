@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W81 Builder legacy direct apply dev-gate complete
+> Status: W82 Calibration direct apply legacy gate complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W81 Builder legacy direct apply dev-gate complete**.
+Current latest status is **W82 Calibration direct apply legacy gate complete**.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -180,6 +180,16 @@ cleanup and returns `durable_lifemodel_write=false`, without persisting durable
 LifeModel truth. The normal Builder product path remains
 `builder_create_proposals`; Builder legacy direct apply remains a high-risk
 legacy direct-write blocker and convergence remains false.
+W82 adds a backend Calibration legacy direct apply dev/migration gate in
+`src-tauri/src/commands/calibration.rs`. `apply_calibration(mode="direct")`
+and `run_micro_evolution` now fail closed by default and only enter legacy
+direct persistence when an explicit `CalibrationLegacyDirectApplyDevMigrationOverride`
+is supplied. The direct/evolution legacy response is metadata-safe and does not
+return raw LifeModel, raw calibration change/reason, or raw evolution payloads.
+Normal Calibration and Dashboard product flow uses `calibration_create_proposals`
+/ proposal mode and writes ProposalStore entries. Calibration proposal flow is
+the normal proposal-first target; Calibration direct/evolution remains a
+high-risk legacy direct-write blocker and convergence remains false.
 
 Hard boundaries:
 
@@ -232,6 +242,8 @@ Hard boundaries:
   manual LifeModel override audit helper.
 - Ordinary `send_message` / `start_stream_message` must not call the W81
   Builder legacy direct apply helper or override.
+- Ordinary `send_message` / `start_stream_message` must not call the W82
+  Calibration legacy direct apply helper or override.
 - W61-W63 are docs/index整理 only and cannot affect default Chat.
 
 ## Authority And Conflict Rule
@@ -241,7 +253,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W81 progress index
+4. This W1-W82 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -260,7 +272,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W81 Structured Index
+## W1-W82 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -345,6 +357,7 @@ permission.
 | W79 | Legacy Direct-Write Convergence Inventory Guard | Done | Internal Rust inventory/report/ensure in `legacy_write_convergence.rs` | MS inventory guard only; reports high-risk direct-write blockers, proposal-first targets, low-risk source-data paths, and external proposal-only paths; overallConverged=false/allDirectWritesConverged=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W80 manual editor override audit guard |
 | W80 | Manual LifeModel Editor Explicit Override Audit Guard | Done | Internal backend save-path audit helper in `commands/life_model.rs` | MS audit guard only; successful manual editor save records source, before/after hashes, rough changed sections, risk class, timestamp, command, and manualOverride/proposalFirst/stillLegacyDirectWrite flags; no raw payloads, Proposal, AgentRun, Heuristic, Patch, runtime/model/tool | No; ordinary send/stream stay `legacy_stream` and do not call it | W81 Builder legacy direct apply dev-gate |
 | W81 | Builder Legacy Direct Apply Dev-Gate / No-Signal Completion Guard | Done | Backend Builder command guard in `commands/builder.rs` plus W79 inventory update | MS guard only; `builder_apply_signals` defaults fail closed and requires explicit dev/migration override for remaining legacy direct apply, direct response omits raw model/run/audit payloads, no-signal completion is session-only/no durable LifeModel write, normal `builder_create_proposals` remains proposal-first; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Builder legacy direct apply or convert fully to proposal-first |
+| W82 | Calibration Direct Apply Legacy Gate / Proposal-First Default | Done | Backend Calibration command guard in `commands/calibration.rs`, Dashboard normal-flow proposal update, and W79 inventory update | MS guard only; `apply_calibration(mode="direct")` and `run_micro_evolution` default fail closed and require explicit Calibration legacy direct apply dev/migration override, legacy output omits raw LifeModel/calibration/evolution payloads, normal `calibration_create_proposals` / proposal mode writes ProposalStore; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Calibration direct/evolution legacy persistence or convert fully to proposal-first |
 
 ## Folded Boundary Summary
 
@@ -390,6 +403,11 @@ above. The boundary meaning is preserved:
   apply and proves no-signal completion does not write durable LifeModel truth,
   but the remaining override capability means the path remains a high-risk
   blocker until removed or converted to proposal-first.
+- W82 adds a default fail-closed dev/migration gate to Calibration direct apply
+  and micro-evolution persistence, keeps legacy responses metadata-safe, and
+  keeps normal Calibration/Dashboard flow on `calibration_create_proposals`;
+  the remaining override capability means Calibration direct/evolution remains
+  a high-risk blocker until removed or converted to proposal-first.
 
 ## Next Recommended Sequence
 
@@ -407,10 +425,12 @@ proposal outcome evidence link complete -> W76 low-energy collaboration rule
 candidate complete -> W77 accepted rule selection proof complete -> W78 run
 trace visibility proof complete -> W79 legacy direct-write convergence
 inventory guard complete -> W80 manual LifeModel override audit guard complete
--> W81 Builder legacy direct apply dev-gate complete.
+-> W81 Builder legacy direct apply dev-gate complete -> W82 Calibration direct
+apply legacy gate complete.
 Future direct-write convergence slices must start from the W79 inventory, the
-W80 manual editor audit state, W81 Builder guard state, and must not mark a
-blocker converged until the actual path is changed and verified. Future default Chat executor implementation
+W80 manual editor audit state, W81 Builder guard state, W82 Calibration guard
+state, and must not mark a blocker converged until the actual path is changed
+and verified. Future default Chat executor implementation
 discussion may build on the W65-W72 proofs only through a separately reviewed
 task; keep default Chat on legacy_stream unless that separate task explicitly
 implements, reviews, verifies, and authorizes a route change.

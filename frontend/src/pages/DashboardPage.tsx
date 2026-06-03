@@ -33,7 +33,8 @@ import {
   searchMemory,
   getFeedbackSummary,
   countMemoryChunks,
-  runMicroEvolution,
+  generateMicroEvolutionChanges,
+  calibrationCreateProposals,
   generateCalibrationReport,
   goalCapabilityGapReport,
   identityGoalAlignmentReport,
@@ -472,13 +473,22 @@ export default function DashboardPage() {
   const handleRunMicroEvolution = async () => {
     setEvolutionMsg(null);
     try {
-      const result = await runMicroEvolution();
-      const suffix = result.snapshot_version ? ` 已创建快照 ${result.snapshot_version}` : "";
-      setEvolutionMsg(`${result.message}${suffix}`);
-      const m = await getLifeModel();
-      setModel(m);
-      const snaps = await listSnapshots();
-      if (snaps.length > 0) setLatestVersion(snaps[0]);
+      const evolution = await generateMicroEvolutionChanges();
+      if (evolution.changes.length === 0) {
+        setEvolutionMsg(evolution.message);
+        return;
+      }
+      const result = await calibrationCreateProposals(evolution.changes);
+      const runInfo = result.run_id ? `（Run #${result.run_id.slice(0, 8)}）` : "";
+      if ((result.error_count ?? 0) > 0) {
+        setEvolutionMsg(
+          `${result.message}${runInfo}（${result.error_count} 个失败：${(result.errors ?? []).join("；")}）`
+        );
+      } else {
+        setEvolutionMsg(`${result.message}${runInfo}`);
+      }
+      const proposals = await getPendingProposals(10);
+      setPendingProposals(proposals);
     } catch (e: any) {
       setEvolutionMsg("微进化执行失败: " + (e?.message || String(e)));
     }

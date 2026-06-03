@@ -244,6 +244,66 @@ fn legacy_write_convergence_builder_w81_dev_gate_guard_present_but_still_blocker
 }
 
 #[test]
+fn legacy_write_convergence_calibration_w82_dev_gate_guard_present_but_still_blocker() {
+    let entries = legacy_write_convergence_inventory();
+    let report = evaluate_legacy_write_convergence_inventory(&entries);
+    let calibration_normal = entry(&entries, "calibration_proposal_flow");
+    let calibration_legacy = entry(&entries, "calibration_direct_micro_evolution");
+
+    assert_eq!(
+        calibration_normal.current_status,
+        LegacyWriteConvergenceStatus::AlreadyProposalFirst
+    );
+    assert_eq!(
+        calibration_normal.safe_mode_status,
+        LegacyWriteSafeModeStatus::ProposalFirstGuardPresent
+    );
+    assert!(calibration_normal.normal_product_allowed);
+    assert!(calibration_normal.requires_proposal_first);
+    assert!(!calibration_normal.currently_direct_write);
+    assert!(calibration_normal
+        .current_guard_summary
+        .contains("calibration_create_proposals"));
+
+    assert_eq!(
+        calibration_legacy.risk_class,
+        LegacyWriteRiskClass::HighRiskLegacyDirectWrite
+    );
+    assert_eq!(
+        calibration_legacy.current_status,
+        LegacyWriteConvergenceStatus::LegacyDirectWriteBlocker
+    );
+    assert_eq!(
+        calibration_legacy.safe_mode_status,
+        LegacyWriteSafeModeStatus::GuardPresent
+    );
+    assert!(!calibration_legacy.normal_product_allowed);
+    assert!(calibration_legacy.requires_proposal_first);
+    assert!(calibration_legacy.currently_direct_write);
+    assert!(calibration_legacy.high_risk_durable_truth_write);
+    assert!(calibration_legacy.current_guard_summary.contains("W82"));
+    assert!(calibration_legacy
+        .current_guard_summary
+        .contains("dev/migration"));
+    assert!(calibration_legacy
+        .current_guard_summary
+        .contains("metadata-safe"));
+    assert!(calibration_legacy
+        .required_convergence_action
+        .contains("calibration_create_proposals"));
+    assert!(calibration_legacy
+        .blocking_reasons
+        .iter()
+        .any(|reason| reason.contains("dev_migration_override")));
+    assert!(report
+        .convergence_blockers
+        .iter()
+        .any(|blocker| blocker.contains("calibration_direct_micro_evolution")));
+    assert!(!report.overall_converged);
+    assert!(!report.all_direct_writes_converged);
+}
+
+#[test]
 fn legacy_write_convergence_identifies_proposal_first_targets_without_direct_unsafe_blocker() {
     let entries = legacy_write_convergence_inventory();
     let report = evaluate_legacy_write_convergence_inventory(&entries);
@@ -326,8 +386,15 @@ fn legacy_write_convergence_report_is_metadata_safe_and_raw_content_free() {
         "assistant-output",
         "memory-raw-content",
         "raw builder answer",
+        "raw calibration answer",
+        "raw calibration payload",
+        "raw evolution payload",
         "raw LifeModel content",
         "raw proposal payload",
+        "W82_RAW_CALIBRATION_TARGET_SECRET",
+        "W82_RAW_CALIBRATION_REASON_SECRET",
+        "W82_RAW_EVOLUTION_TARGET_SECRET",
+        "W82_RAW_EVOLUTION_REASON_SECRET",
     ] {
         assert!(
             !debug_dump.contains(forbidden),
@@ -430,6 +497,9 @@ fn legacy_write_convergence_default_chat_and_ordinary_entrypoints_remain_unchang
         "builder_apply_signals_with_state",
         "builder_apply_signals_with_state_for_dev_migration",
         "BuilderLegacyDirectApplyOverride",
+        "apply_calibration_with_state_for_dev_migration",
+        "run_micro_evolution_with_state_for_dev_migration",
+        "CalibrationLegacyDirectApplyDevMigrationOverride",
     ] {
         assert!(
             !send_body.contains(forbidden),

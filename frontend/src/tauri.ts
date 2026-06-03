@@ -944,10 +944,19 @@ export async function generateEvolutionReport(): Promise<{
 }
 
 export async function runMicroEvolution(): Promise<{
-  changes: EvolutionChange[];
+  success?: boolean;
+  legacy?: boolean;
   applied: boolean;
   message: string;
+  warning?: string;
+  change_count?: number;
   snapshot_version?: string | null;
+  signal_counts?: {
+    feedback_terms: number;
+    behavior_events: number;
+    inference_items: number;
+  };
+  metadata_safe?: boolean;
 }> {
   return safeInvoke("run_micro_evolution");
 }
@@ -1016,8 +1025,11 @@ export async function applyCalibration(
   mode: "direct" | "proposal" = "proposal"
 ): Promise<{
   success: boolean;
+  legacy?: boolean;
+  warning?: string;
   snapshot_version?: string;
   applied_count?: number;
+  metadata_safe?: boolean;
   created_count?: number;
   created_ids?: string[];
   run_id?: string;

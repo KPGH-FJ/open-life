@@ -5997,6 +5997,9 @@ mod hs_runtime_tests {
             "builder_apply_signals_with_state",
             "builder_apply_signals_with_state_for_dev_migration",
             "BuilderLegacyDirectApplyOverride",
+            "apply_calibration_with_state_for_dev_migration",
+            "run_micro_evolution_with_state_for_dev_migration",
+            "CalibrationLegacyDirectApplyDevMigrationOverride",
         ];
 
         for forbidden in forbidden_command_surfaces {
