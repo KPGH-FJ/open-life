@@ -1,52 +1,8 @@
 use crate::errors::AppError;
-use crate::legacy_write_convergence::{
-    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
-    LifeModelMaterializerCallerPurpose,
-};
-use crate::{persist_life_model, AppState};
+use crate::AppState;
 use openlife_core::feedback::{AnalyticsSummary, FeedbackEntry, FeedbackType};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FeedbackEvolutionLegacyDirectApplyOverride {
-    pub allow_feedback_evolution_legacy_direct_apply: bool,
-    pub purpose: String,
-}
-
-impl FeedbackEvolutionLegacyDirectApplyOverride {
-    #[cfg(test)]
-    fn allow_for_dev_migration() -> Self {
-        Self {
-            allow_feedback_evolution_legacy_direct_apply: true,
-            purpose: "dev_migration".into(),
-        }
-    }
-
-    fn is_valid_dev_migration_override(&self) -> bool {
-        self.allow_feedback_evolution_legacy_direct_apply
-            && matches!(
-                self.purpose.as_str(),
-                "dev_migration" | "migration" | "legacy_migration"
-            )
-    }
-}
-
-fn require_feedback_evolution_legacy_direct_apply_override(
-    dev_migration_override: Option<&FeedbackEvolutionLegacyDirectApplyOverride>,
-    command_name: &str,
-) -> Result<(), AppError> {
-    if dev_migration_override
-        .is_some_and(FeedbackEvolutionLegacyDirectApplyOverride::is_valid_dev_migration_override)
-    {
-        Ok(())
-    } else {
-        Err(AppError::permission(format!(
-            "{command_name} is a W83 Feedback evolution legacy direct apply path and requires an explicit dev/migration override; use reviewable Proposal/Evidence candidates for normal product flow."
-        )))
-    }
-}
 
 #[tauri::command]
 pub async fn save_feedback(
@@ -84,91 +40,29 @@ pub async fn get_feedback_summary(
 
 #[tauri::command]
 pub async fn apply_feedback_evolution(
-    dev_migration_override: Option<FeedbackEvolutionLegacyDirectApplyOverride>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    apply_feedback_evolution_with_state_gated(state.inner(), dev_migration_override).await
+    apply_feedback_evolution_with_state_gated(state.inner()).await
 }
 
 #[cfg(test)]
 async fn apply_feedback_evolution_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    apply_feedback_evolution_with_state_gated(state, None).await
-}
-
-#[cfg(test)]
-async fn apply_feedback_evolution_with_state_for_dev_migration(
-    state: &Arc<AppState>,
-    dev_migration_override: FeedbackEvolutionLegacyDirectApplyOverride,
-) -> Result<serde_json::Value, AppError> {
-    apply_feedback_evolution_with_state_gated(state, Some(dev_migration_override)).await
+    apply_feedback_evolution_with_state_gated(state).await
 }
 
 async fn apply_feedback_evolution_with_state_gated(
     state: &Arc<AppState>,
-    dev_migration_override: Option<FeedbackEvolutionLegacyDirectApplyOverride>,
 ) -> Result<serde_json::Value, AppError> {
-    require_feedback_evolution_legacy_direct_apply_override(
-        dev_migration_override.as_ref(),
-        "apply_feedback_evolution",
-    )?;
-    apply_feedback_evolution_direct_apply_after_gate(state).await
-}
-
-async fn apply_feedback_evolution_direct_apply_after_gate(
-    state: &Arc<AppState>,
-) -> Result<serde_json::Value, AppError> {
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    let before_model = serde_json::to_value(&model).map_err(AppError::from)?;
-    drop(manager);
-
     let store = state.feedback_store.lock().await;
-    let result = store
-        .apply_feedback_to_model(&mut model)
-        .map_err(AppError::from)?;
-    drop(store);
-
-    let after_model = serde_json::to_value(&model).map_err(AppError::from)?;
-    let durable_lifemodel_write = before_model != after_model;
-    let applied_change_count = if durable_lifemodel_write {
-        result
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count()
-    } else {
-        0
-    };
-    if durable_lifemodel_write {
-        let _ = persist_life_model(
-            state,
-            model,
-            true,
-            LifeModelMaterializerCallerContext::new(
-                "feedback_evolution_legacy_direct_apply",
-                LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
-                LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
-            ),
-        )
-        .await
-        .map_err(AppError::from)?;
-    }
-
-    Ok(serde_json::json!({
-        "success": true,
-        "legacy": true,
-        "warning": "legacy direct apply path bypasses Review Center; use reviewable Proposal/Evidence candidates for product flow",
-        "applied": durable_lifemodel_write,
-        "applied_change_count": applied_change_count,
-        "durable_lifemodel_write": durable_lifemodel_write,
-        "message": if durable_lifemodel_write {
-            format!("Legacy feedback evolution direct apply completed for {applied_change_count} change(s)")
-        } else {
-            "Legacy feedback evolution direct apply completed with no durable LifeModel change".to_string()
-        },
-        "metadata_safe": true,
-    }))
+    let report = store.generate_evolution_report().map_err(AppError::from)?;
+    Err(AppError::permission(format!(
+        "apply_feedback_evolution has been retired as a Feedback evolution legacy direct-write compatibility surface; create reviewable Proposal/Evidence candidates instead. Metadata-safe candidate counts: liked_patterns={}, disliked_patterns={}, suggested_rules={}.",
+        report.liked_patterns.len(),
+        report.disliked_patterns.len(),
+        report.suggested_rules.len()
+    )))
 }
 
 #[tauri::command]
@@ -281,7 +175,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w83_apply_feedback_evolution_default_fails_closed_without_dev_migration_override() {
+    async fn w92_apply_feedback_evolution_fails_closed_as_retired_surface() {
         let state = crate::test_utils::test_app_state();
         seed_feedback_evolution_fixture(&state).await;
 
@@ -291,38 +185,27 @@ mod tests {
 
         assert!(matches!(err, AppError::PermissionDenied { .. }));
         assert!(err.message().contains("apply_feedback_evolution"));
-        assert!(err.message().contains("Feedback evolution"));
-        assert!(err.message().contains("dev/migration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("Proposal/Evidence"));
         assert_eq!(feedback_target_weight(&state).await, 5);
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.evolution_rules, vec![RAW_EXISTING_RULE.to_string()]);
     }
 
     #[tokio::test]
-    async fn w83_apply_feedback_evolution_dev_migration_override_allows_metadata_safe_legacy_direct_apply(
-    ) {
+    async fn w92_apply_feedback_evolution_retirement_response_is_metadata_safe_and_writes_nothing()
+    {
         let state = crate::test_utils::test_app_state();
         seed_feedback_evolution_fixture(&state).await;
 
-        let result = apply_feedback_evolution_with_state_for_dev_migration(
-            &state,
-            FeedbackEvolutionLegacyDirectApplyOverride::allow_for_dev_migration(),
-        )
-        .await
-        .unwrap();
+        let err = apply_feedback_evolution_with_state(&state)
+            .await
+            .expect_err("W92 retires Feedback evolution direct apply");
 
-        assert_eq!(result["success"], true);
-        assert_eq!(result["legacy"], true);
-        assert_eq!(result["metadata_safe"], true);
-        assert_eq!(result["durable_lifemodel_write"], true);
-        assert_eq!(result["applied_change_count"], 1);
-        assert!(result["warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("Review Center")));
-        assert!(result.get("raw_feedback").is_none());
-        assert!(result.get("raw_evolution_payload").is_none());
-        assert!(result.get("life_model").is_none());
-        assert!(result.get("model").is_none());
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("suggested_rules"));
 
-        let response_dump = result.to_string();
+        let response_dump = err.message().to_string();
         for forbidden in [
             RAW_FEEDBACK_MARKER,
             RAW_LIFEMODEL_VALUE,
@@ -338,7 +221,9 @@ mod tests {
             );
         }
 
-        assert_eq!(feedback_target_weight(&state).await, 6);
+        assert_eq!(feedback_target_weight(&state).await, 5);
+        let model = state.life_model_manager.lock().await.load().unwrap();
+        assert_eq!(model.evolution_rules, vec![RAW_EXISTING_RULE.to_string()]);
     }
 
     #[tokio::test]

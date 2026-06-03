@@ -280,7 +280,8 @@ export const mockLifeModelVersions: LifeModelVersion[] = [
   },
 ];
 
-export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): Promise<T> => {
+export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Promise<T> => {
+  const _args = args;
   switch (cmd) {
     case "get_config":
       return Promise.resolve({
@@ -1465,11 +1466,16 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
     case "create_snapshot":
       return Promise.resolve(mockLifeModelVersions[0] as T);
     case "restore_snapshot":
-      return Promise.reject(
-        new Error(
-          "restore_snapshot is a W84 snapshot restore legacy direct write path and requires an explicit dev/migration/manual restore override."
-        )
-      );
+      return Promise.resolve({
+        success: true,
+        legacy: false,
+        governed_operation: true,
+        warning: "metadata-safe",
+        metadata_safe: true,
+        durable_lifemodel_write: true,
+        restored_snapshot_version: args?.version ?? "0.1.0",
+        pre_restore_snapshot_created: true,
+      } as T);
     case "goal_capability_gap_analysis":
       return Promise.resolve(["需要提升编程技能", "需要更多学习时间"] as T);
     case "goal_capability_gap_report":
@@ -1842,11 +1848,16 @@ export const mockInvoke = vi.fn(<T>(cmd: string, _args?: Record<string, any>): P
         vectors: [],
       } as T);
     case "import_all_data":
-      return Promise.reject(
-        new Error(
-          "import_all_data is a W84 data import legacy direct write path and requires an explicit dev/migration/manual restore override."
-        )
-      );
+      return Promise.resolve({
+        success: true,
+        legacy: false,
+        governed_operation: true,
+        warning: "metadata-safe",
+        metadata_safe: true,
+        durable_lifemodel_write: true,
+        imported_message_count: args?.payload?.messages?.length ?? 0,
+        imported_vector_count: args?.payload?.vectors?.length ?? 0,
+      } as T);
     case "generate_evolution_report":
       return Promise.resolve({
         success: true,

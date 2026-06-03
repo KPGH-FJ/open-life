@@ -65,6 +65,18 @@ describe("LifeModelEditor", () => {
             },
           },
         },
+        manualOverrideRequest: {
+          purpose: "manual_lifemodel_editor_save",
+          explicitUserIntent: true,
+          riskAcknowledged: true,
+          createPreChangeSnapshot: true,
+        },
+        manual_override_request: {
+          purpose: "manual_lifemodel_editor_save",
+          explicitUserIntent: true,
+          riskAcknowledged: true,
+          createPreChangeSnapshot: true,
+        },
       });
     });
   });

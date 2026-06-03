@@ -6,43 +6,74 @@ use crate::legacy_write_convergence::{
 use crate::AppState;
 use openlife_core::versioning::LifeModelVersion;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tauri::State;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotRestoreLegacyDirectApplyOverride {
-    pub allow_legacy_direct_apply: bool,
+#[serde(rename_all = "camelCase")]
+pub struct GovernedSnapshotRestoreRequest {
     pub purpose: String,
+    pub explicit_user_intent: bool,
+    pub create_pre_change_snapshot: bool,
 }
 
-impl SnapshotRestoreLegacyDirectApplyOverride {
+impl GovernedSnapshotRestoreRequest {
     #[cfg(test)]
-    fn allow_for_manual_restore() -> Self {
+    fn manual_restore() -> Self {
         Self {
-            allow_legacy_direct_apply: true,
             purpose: "manual_restore".into(),
+            explicit_user_intent: true,
+            create_pre_change_snapshot: true,
         }
     }
 
-    fn is_valid_restore_override(&self) -> bool {
-        self.allow_legacy_direct_apply
-            && matches!(
-                self.purpose.as_str(),
-                "dev_migration" | "migration" | "manual_restore" | "test_migration"
-            )
+    fn is_valid(&self) -> bool {
+        self.explicit_user_intent
+            && self.create_pre_change_snapshot
+            && matches!(self.purpose.as_str(), "manual_restore" | "migration")
     }
 }
 
-fn require_snapshot_restore_legacy_direct_apply_override(
-    restore_override: Option<&SnapshotRestoreLegacyDirectApplyOverride>,
-) -> Result<(), AppError> {
-    if restore_override
-        .is_some_and(SnapshotRestoreLegacyDirectApplyOverride::is_valid_restore_override)
-    {
-        Ok(())
+fn require_governed_snapshot_restore_request(
+    governed_request: Option<&GovernedSnapshotRestoreRequest>,
+) -> Result<&GovernedSnapshotRestoreRequest, AppError> {
+    if let Some(request) = governed_request.filter(|request| request.is_valid()) {
+        Ok(request)
     } else {
         Err(AppError::permission(
-            "restore_snapshot is a W84 snapshot restore legacy direct write path and requires an explicit dev/migration/manual restore override with purpose dev_migration, migration, manual_restore, or test_migration.",
+            "restore_snapshot requires an explicit governed restore request with purpose manual_restore or migration, explicitUserIntent=true, and createPreChangeSnapshot=true.",
+        ))
+    }
+}
+
+fn hash_json_value(value: &serde_json::Value) -> Result<String, AppError> {
+    let bytes = serde_json::to_vec(value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(format!("sha256:{:x}", hasher.finalize()))
+}
+
+fn hash_life_model(model: &openlife_core::life_model::LifeModel) -> Result<String, AppError> {
+    hash_json_value(&serde_json::to_value(model)?)
+}
+
+fn validate_snapshot_restore_response_is_metadata_safe(value: &serde_json::Value) -> bool {
+    value.get("life_model").is_none()
+        && value.get("model").is_none()
+        && value.get("yaml_content").is_none()
+        && value.get("snapshot").is_none()
+        && value.get("raw_snapshot").is_none()
+}
+
+fn ensure_snapshot_restore_response_metadata_safe(
+    value: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
+    if validate_snapshot_restore_response_is_metadata_safe(&value) {
+        Ok(value)
+    } else {
+        Err(AppError::internal(
+            "governed snapshot restore response contained raw payload fields",
         ))
     }
 }
@@ -70,10 +101,10 @@ pub async fn list_snapshots(
 #[tauri::command]
 pub async fn restore_snapshot(
     version: String,
-    restore_override: Option<SnapshotRestoreLegacyDirectApplyOverride>,
+    governed_request: Option<GovernedSnapshotRestoreRequest>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    restore_snapshot_with_state_gated(version, state.inner(), restore_override).await
+    restore_snapshot_with_state_gated(version, state.inner(), governed_request).await
 }
 
 #[cfg(test)]
@@ -85,31 +116,33 @@ async fn restore_snapshot_with_state(
 }
 
 #[cfg(test)]
-async fn restore_snapshot_with_state_for_manual_restore(
+async fn restore_snapshot_with_state_for_governed_manual_restore(
     version: String,
     state: &Arc<AppState>,
-    restore_override: SnapshotRestoreLegacyDirectApplyOverride,
+    governed_request: GovernedSnapshotRestoreRequest,
 ) -> Result<serde_json::Value, AppError> {
-    restore_snapshot_with_state_gated(version, state, Some(restore_override)).await
+    restore_snapshot_with_state_gated(version, state, Some(governed_request)).await
 }
 
 async fn restore_snapshot_with_state_gated(
     version: String,
     state: &Arc<AppState>,
-    restore_override: Option<SnapshotRestoreLegacyDirectApplyOverride>,
+    governed_request: Option<GovernedSnapshotRestoreRequest>,
 ) -> Result<serde_json::Value, AppError> {
-    require_snapshot_restore_legacy_direct_apply_override(restore_override.as_ref())?;
-    restore_snapshot_direct_apply_after_gate(version, state).await
+    let request = require_governed_snapshot_restore_request(governed_request.as_ref())?;
+    restore_snapshot_governed_operation(version, state, request).await
 }
 
-async fn restore_snapshot_direct_apply_after_gate(
+async fn restore_snapshot_governed_operation(
     version: String,
     state: &Arc<AppState>,
+    request: &GovernedSnapshotRestoreRequest,
 ) -> Result<serde_json::Value, AppError> {
     let current_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
     };
+    let current_model_hash = hash_life_model(&current_model)?;
     let pre_restore_snapshot_version = {
         let vm = state.version_manager.lock().await;
         vm.snapshot(
@@ -127,11 +160,12 @@ async fn restore_snapshot_direct_apply_after_gate(
     let durable_lifemodel_write = serde_json::to_value(&current_model).map_err(AppError::from)?
         != serde_json::to_value(&restored_model).map_err(AppError::from)?;
     let restored_model_version = restored_model.metadata.version.clone();
+    let restored_model_hash = hash_life_model(&restored_model)?;
     ensure_lifemodel_materializer_caller_restriction(
         &LifeModelMaterializerCallerContext::new(
-            "snapshot_restore_legacy_direct_apply",
-            LifeModelMaterializerCallerKind::MigrationRestoreGated,
-            LifeModelMaterializerCallerPurpose::RestoreImportGatedLegacyBlocker,
+            "snapshot_restore_governed_operation",
+            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
+            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
         ),
         "LifeModelManager::save",
     )
@@ -141,16 +175,31 @@ async fn restore_snapshot_direct_apply_after_gate(
         manager.save(&restored_model).map_err(AppError::from)?;
     }
 
-    Ok(serde_json::json!({
+    ensure_snapshot_restore_response_metadata_safe(serde_json::json!({
         "success": true,
-        "legacy": true,
-        "warning": "snapshot restore legacy direct write path bypasses Review Center; use only for explicit migration/manual restore.",
+        "legacy": false,
+        "governed_operation": true,
+        "operation_kind": "snapshot_restore",
+        "operation_purpose": request.purpose,
+        "warning": "snapshot restore ran as an explicit governed restore operation.",
         "metadata_safe": true,
+        "contains_raw_content": false,
         "durable_lifemodel_write": durable_lifemodel_write,
         "restored_snapshot_version": version,
         "restored_model_version": restored_model_version,
+        "current_model_hash": current_model_hash,
+        "restored_model_hash": restored_model_hash,
         "pre_restore_snapshot_created": pre_restore_snapshot_version.is_some(),
         "pre_restore_snapshot_version": pre_restore_snapshot_version,
+        "audit": {
+            "source_kind": "snapshot_restore",
+            "operation_purpose": request.purpose,
+            "current_model_hash": current_model_hash,
+            "restored_model_hash": restored_model_hash,
+            "pre_change_snapshot_version": pre_restore_snapshot_version,
+            "metadata_safe": true,
+            "contains_raw_content": false,
+        },
     }))
 }
 
@@ -209,7 +258,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w84_restore_snapshot_default_fails_closed_without_manual_restore_override() {
+    async fn w93_restore_snapshot_without_governed_request_fails_closed() {
         let state = crate::test_utils::test_app_state();
         save_model_name(&state, W84_CURRENT_NAME_SECRET).await;
         let snapshot_version = snapshot_named_model(&state, W84_SNAPSHOT_NAME_SECRET).await;
@@ -221,32 +270,45 @@ mod tests {
 
         assert!(matches!(err, AppError::PermissionDenied { .. }));
         assert!(err.message().contains("restore_snapshot"));
-        assert!(err.message().contains("W84"));
-        assert!(err.message().contains("dev/migration/manual"));
+        assert!(err.message().contains("governed restore request"));
+        assert!(err.message().contains("explicitUserIntent=true"));
         assert_eq!(current_model_name(&state).await, W84_CURRENT_NAME_SECRET);
         assert_eq!(snapshot_count(&state).await, before_snapshot_count);
     }
 
     #[tokio::test]
-    async fn w84_restore_snapshot_manual_restore_override_allows_metadata_safe_restore() {
+    async fn w93_restore_snapshot_governed_request_allows_metadata_safe_restore() {
         let state = crate::test_utils::test_app_state();
         save_model_name(&state, W84_CURRENT_NAME_SECRET).await;
         let snapshot_version = snapshot_named_model(&state, W84_SNAPSHOT_NAME_SECRET).await;
 
-        let result = restore_snapshot_with_state_for_manual_restore(
+        let result = restore_snapshot_with_state_for_governed_manual_restore(
             snapshot_version.clone(),
             &state,
-            SnapshotRestoreLegacyDirectApplyOverride::allow_for_manual_restore(),
+            GovernedSnapshotRestoreRequest::manual_restore(),
         )
         .await
         .unwrap();
 
         assert_eq!(result["success"], true);
-        assert_eq!(result["legacy"], true);
+        assert_eq!(result["legacy"], false);
+        assert_eq!(result["governed_operation"], true);
+        assert_eq!(result["operation_kind"], "snapshot_restore");
+        assert_eq!(result["operation_purpose"], "manual_restore");
         assert_eq!(result["metadata_safe"], true);
+        assert_eq!(result["contains_raw_content"], false);
         assert_eq!(result["durable_lifemodel_write"], true);
         assert_eq!(result["restored_snapshot_version"], snapshot_version);
         assert_eq!(result["pre_restore_snapshot_created"], true);
+        assert!(result["pre_restore_snapshot_version"].is_string());
+        assert!(result["current_model_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert!(result["restored_model_hash"]
+            .as_str()
+            .is_some_and(|hash| hash.starts_with("sha256:")));
+        assert_eq!(result["audit"]["metadata_safe"], true);
+        assert_eq!(result["audit"]["contains_raw_content"], false);
         assert!(result.get("life_model").is_none());
         assert!(result.get("model").is_none());
         assert!(result.get("yaml_content").is_none());
@@ -269,7 +331,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w84_restore_snapshot_invalid_override_fails_closed() {
+    async fn w93_restore_snapshot_invalid_governed_request_fails_closed() {
         let state = crate::test_utils::test_app_state();
         save_model_name(&state, W84_CURRENT_NAME_SECRET).await;
         let snapshot_version = snapshot_named_model(&state, W84_SNAPSHOT_NAME_SECRET).await;
@@ -277,13 +339,14 @@ mod tests {
         let err = restore_snapshot_with_state_gated(
             snapshot_version,
             &state,
-            Some(SnapshotRestoreLegacyDirectApplyOverride {
-                allow_legacy_direct_apply: true,
+            Some(GovernedSnapshotRestoreRequest {
                 purpose: "normal_product".into(),
+                explicit_user_intent: true,
+                create_pre_change_snapshot: true,
             }),
         )
         .await
-        .expect_err("invalid snapshot restore override purpose must fail closed");
+        .expect_err("invalid governed snapshot restore purpose must fail closed");
 
         assert!(matches!(err, AppError::PermissionDenied { .. }));
         assert!(err.message().contains("manual_restore"));

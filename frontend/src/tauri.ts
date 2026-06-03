@@ -132,8 +132,32 @@ export async function getLifeModel(): Promise<LifeModel> {
   return safeInvoke<LifeModel>("get_life_model");
 }
 
+const MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST = {
+  purpose: "manual_lifemodel_editor_save",
+  explicitUserIntent: true,
+  riskAcknowledged: true,
+  createPreChangeSnapshot: true,
+} as const;
+
+const MANUAL_SNAPSHOT_RESTORE_REQUEST = {
+  purpose: "manual_restore",
+  explicitUserIntent: true,
+  createPreChangeSnapshot: true,
+} as const;
+
+const MANUAL_DATA_IMPORT_REQUEST = {
+  purpose: "manual_restore",
+  explicitUserIntent: true,
+  createPreChangeSnapshot: true,
+  importTargets: ["life_model", "messages", "vectors"],
+} as const;
+
 export async function saveLifeModel(model: LifeModel): Promise<void> {
-  return safeInvoke("save_life_model", { lifeModel: model });
+  return safeInvoke("save_life_model", {
+    lifeModel: model,
+    manualOverrideRequest: MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST,
+    manual_override_request: MANUAL_LIFEMODEL_EDITOR_SAVE_REQUEST,
+  });
 }
 
 export interface ChatProposalConfig {
@@ -909,7 +933,11 @@ export interface SnapshotRestoreResult {
 }
 
 export async function restoreSnapshot(version: string): Promise<SnapshotRestoreResult> {
-  return safeInvoke<SnapshotRestoreResult>("restore_snapshot", { version });
+  return safeInvoke<SnapshotRestoreResult>("restore_snapshot", {
+    version,
+    governedRequest: MANUAL_SNAPSHOT_RESTORE_REQUEST,
+    governed_request: MANUAL_SNAPSHOT_RESTORE_REQUEST,
+  });
 }
 
 export async function diffSnapshots(v1: string, v2: string): Promise<string> {
@@ -1432,7 +1460,11 @@ export interface DataImportResult {
 }
 
 export async function importAllData(payload: ExportPayload): Promise<DataImportResult> {
-  return safeInvoke<DataImportResult>("import_all_data", { payload });
+  return safeInvoke<DataImportResult>("import_all_data", {
+    payload,
+    importRequest: MANUAL_DATA_IMPORT_REQUEST,
+    import_request: MANUAL_DATA_IMPORT_REQUEST,
+  });
 }
 
 export async function testApiKey(): Promise<boolean> {

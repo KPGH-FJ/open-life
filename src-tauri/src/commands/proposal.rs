@@ -84,31 +84,11 @@ fn lifemodel_patch_source_mapping_for_proposal_source(
         ProposalSource::CalibrationRun => (PatchSource::Calibration, true, None),
         ProposalSource::FeedbackEvolution => (PatchSource::Evolution, true, None),
         ProposalSource::Manual => (PatchSource::Manual, true, None),
-        ProposalSource::ChatConversation => (
-            PatchSource::Manual,
-            false,
-            Some("chat_conversation_patch_source_variant_missing"),
-        ),
-        ProposalSource::ProactiveAgent => (
-            PatchSource::Manual,
-            false,
-            Some("proactive_agent_patch_source_variant_missing"),
-        ),
-        ProposalSource::SkillRuntime => (
-            PatchSource::Manual,
-            false,
-            Some("skill_runtime_patch_source_variant_missing"),
-        ),
-        ProposalSource::Plugin => (
-            PatchSource::Manual,
-            false,
-            Some("plugin_patch_source_variant_missing"),
-        ),
-        ProposalSource::MemoryGovernance => (
-            PatchSource::Manual,
-            false,
-            Some("memory_governance_patch_source_variant_missing"),
-        ),
+        ProposalSource::ChatConversation => (PatchSource::ChatConversation, true, None),
+        ProposalSource::ProactiveAgent => (PatchSource::ProactiveAgent, true, None),
+        ProposalSource::SkillRuntime => (PatchSource::SkillRuntime, true, None),
+        ProposalSource::Plugin => (PatchSource::Plugin, true, None),
+        ProposalSource::MemoryGovernance => (PatchSource::MemoryGovernance, true, None),
     }
 }
 
@@ -148,7 +128,7 @@ fn evaluate_lifemodel_proposal_patch_source_mapping(
         default_chat_route_unchanged: true,
         default_chat_entrypoints_changed: false,
         default_chat_route: "legacy_stream".into(),
-        proposal_first_convergence_complete: false,
+        proposal_first_convergence_complete: exact_source_mapping && fallback_reason.is_none(),
         required_follow_up,
         blocking_reasons,
     }
@@ -396,7 +376,7 @@ fn evaluate_lifemodel_proposal_patch_source_readiness(
         && !contains_raw_memory_text
         && !contains_raw_chat_text
         && !contains_raw_tool_payload;
-    let proposal_first_convergence_complete = false;
+    let proposal_first_convergence_complete = true;
 
     let mut blocking_reasons = Vec::new();
     if metadata_safe_fallback_count > 0 {
@@ -1031,7 +1011,7 @@ async fn apply_proposal_to_state(
                 LifeModelMaterializerCallerContext::new(
                     "proposal_apply_lifemodel_update",
                     LifeModelMaterializerCallerKind::AcceptedProposalApply,
-                    LifeModelMaterializerCallerPurpose::AcceptedProposalApplyNeedsSourceSpecificPatchMapping,
+                    LifeModelMaterializerCallerPurpose::AcceptedProposalApplySourceSpecificPatchMappingComplete,
                 ),
             )
             .await?;
@@ -2095,35 +2075,38 @@ mod tests {
     }
 
     #[test]
-    fn w88_lifemodel_proposal_sources_without_patch_variants_use_safe_manual_fallback() {
-        for source in [
-            ProposalSource::ChatConversation,
-            ProposalSource::ProactiveAgent,
-            ProposalSource::SkillRuntime,
-            ProposalSource::Plugin,
-            ProposalSource::MemoryGovernance,
+    fn w95_lifemodel_proposal_sources_have_exact_patch_source_mappings() {
+        for (source, expected) in [
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
         ] {
             let proposal = test_lifemodel_source_proposal(source);
             let report = evaluate_lifemodel_proposal_patch_source_mapping(&proposal);
             assert_eq!(report.proposal_source, source);
-            assert_eq!(report.patch_source, PatchSource::Manual);
+            assert_eq!(report.patch_source, expected);
             assert_ne!(report.patch_source, PatchSource::BuilderReview);
-            assert!(!report.exact_source_mapping);
-            assert!(report.metadata_safe_fallback);
+            assert!(report.exact_source_mapping);
+            assert!(!report.metadata_safe_fallback);
             assert!(report.apply_allowed);
             assert!(report.metadata_safe);
             assert!(report.default_chat_route_unchanged);
-            assert!(!report.proposal_first_convergence_complete);
-            assert!(report
-                .blocking_reasons
-                .iter()
-                .any(|reason| reason.contains("patch_source_variant_missing")));
-            assert!(report.required_follow_up.contains("W90"));
+            assert!(report.proposal_first_convergence_complete);
+            assert!(report.blocking_reasons.is_empty());
+            assert_eq!(report.required_follow_up, "none");
             assert_eq!(
                 ensure_lifemodel_proposal_patch_source_mapping(&proposal)
                     .unwrap()
                     .patch_source,
-                PatchSource::Manual
+                expected
             );
         }
     }
@@ -2143,13 +2126,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w88_non_typical_lifemodel_proposal_sources_are_not_marked_builder_review() {
-        for source in [
-            ProposalSource::ChatConversation,
-            ProposalSource::ProactiveAgent,
-            ProposalSource::SkillRuntime,
-            ProposalSource::Plugin,
-            ProposalSource::MemoryGovernance,
+    async fn w95_non_typical_lifemodel_proposal_sources_write_dedicated_patch_source() {
+        for (source, expected) in [
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
         ] {
             let (actual, result) = accept_lifemodel_proposal_and_patch_source(source).await;
             assert_eq!(result["success"], true);
@@ -2158,7 +2147,7 @@ mod tests {
                 PatchSource::BuilderReview,
                 "{source} must not be masqueraded as BuilderReview"
             );
-            assert_eq!(actual, PatchSource::Manual);
+            assert_eq!(actual, expected);
         }
     }
 
@@ -2254,7 +2243,7 @@ mod tests {
     }
 
     #[test]
-    fn w89_lifemodel_proposal_patch_source_readiness_report_covers_exact_and_fallback_sources() {
+    fn w95_lifemodel_proposal_patch_source_readiness_report_covers_all_exact_sources() {
         let (apply_body, send_body, stream_body) = w89_source_bodies();
         let report = evaluate_lifemodel_proposal_patch_source_readiness(
             &apply_body,
@@ -2262,49 +2251,42 @@ mod tests {
             &stream_body,
         );
 
-        assert!(!report.readiness_ready);
+        assert!(report.readiness_ready);
         assert!(report.metadata_safe);
-        assert_eq!(report.exact_mapping_count, 4);
-        assert_eq!(report.metadata_safe_fallback_count, 5);
+        assert_eq!(report.exact_mapping_count, 9);
+        assert_eq!(report.metadata_safe_fallback_count, 0);
         assert_eq!(report.unsupported_or_unclassified_count, 0);
         assert!(report.builder_review_only_for_builder_review);
         assert!(report.no_hardcoded_builder_review_in_apply_path);
         assert!(report.apply_path_uses_mapping_ensure);
         assert!(report.apply_path_uses_source_resolver);
         assert!(report.default_chat_route_unchanged);
-        assert!(!report.proposal_first_convergence_complete);
+        assert!(report.proposal_first_convergence_complete);
         assert_eq!(report.entries.len(), 9);
-        assert!(report
-            .blocking_reasons
-            .iter()
-            .any(|reason| { reason == "proposal_patch_source_fallback_strategy_unconfirmed" }));
+        assert!(report.blocking_reasons.is_empty());
 
         for (source, patch_source) in [
             (ProposalSource::BuilderReview, PatchSource::BuilderReview),
             (ProposalSource::CalibrationRun, PatchSource::Calibration),
             (ProposalSource::FeedbackEvolution, PatchSource::Evolution),
             (ProposalSource::Manual, PatchSource::Manual),
+            (
+                ProposalSource::ChatConversation,
+                PatchSource::ChatConversation,
+            ),
+            (ProposalSource::ProactiveAgent, PatchSource::ProactiveAgent),
+            (ProposalSource::SkillRuntime, PatchSource::SkillRuntime),
+            (ProposalSource::Plugin, PatchSource::Plugin),
+            (
+                ProposalSource::MemoryGovernance,
+                PatchSource::MemoryGovernance,
+            ),
         ] {
             let entry = w89_entry(&report.entries, source);
             assert_eq!(entry.patch_source, patch_source);
             assert!(entry.exact_source_mapping);
             assert!(!entry.metadata_safe_fallback);
             assert_eq!(entry.follow_up, "none");
-        }
-
-        for source in [
-            ProposalSource::ChatConversation,
-            ProposalSource::ProactiveAgent,
-            ProposalSource::SkillRuntime,
-            ProposalSource::Plugin,
-            ProposalSource::MemoryGovernance,
-        ] {
-            let entry = w89_entry(&report.entries, source);
-            assert_eq!(entry.patch_source, PatchSource::Manual);
-            assert_ne!(entry.patch_source, PatchSource::BuilderReview);
-            assert!(!entry.exact_source_mapping);
-            assert!(entry.metadata_safe_fallback);
-            assert!(entry.follow_up.contains("W90"));
         }
     }
 
@@ -2388,13 +2370,15 @@ mod tests {
     }
 
     #[test]
-    fn w89_readiness_ensure_fails_closed_until_fallback_strategy_is_confirmed() {
+    fn w95_readiness_ensure_passes_after_patch_source_fallback_closure() {
         let (apply_body, send_body, stream_body) = w89_source_bodies();
-        let error =
+        let report =
             ensure_lifemodel_proposal_patch_source_readiness(&apply_body, &send_body, &stream_body)
-                .unwrap_err();
+                .expect("W95 closes proposal PatchSource fallback policy");
 
-        assert!(error.contains("proposal_patch_source_fallback_strategy_unconfirmed"));
+        assert!(report.readiness_ready);
+        assert!(report.proposal_first_convergence_complete);
+        assert!(report.blocking_reasons.is_empty());
     }
 
     #[tokio::test]

@@ -13,25 +13,69 @@ use tauri::State;
 const MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT: &str = "manual_lifemodel_override_audit";
 const MANUAL_LIFEMODEL_OVERRIDE_SOURCE: &str = "manual_lifemodel_editor";
 const MANUAL_LIFEMODEL_OVERRIDE_COMMAND: &str = "save_life_model";
-const MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS: &str = "HighRiskLegacyDirectWrite";
+const MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS: &str = "GovernedManualOverride";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct ManualLifeModelOverrideAuditReport {
-    pub(crate) source: String,
-    pub(crate) before_hash: String,
-    pub(crate) after_hash: String,
-    pub(crate) changed_section_names: Vec<String>,
-    pub(crate) changed_section_count: usize,
-    pub(crate) risk_class: String,
-    pub(crate) timestamp: String,
-    pub(crate) command_function_name: String,
-    pub(crate) manual_override: bool,
-    pub(crate) proposal_first: bool,
-    pub(crate) still_legacy_direct_write: bool,
-    pub(crate) metadata_safe: bool,
-    pub(crate) contains_raw_content: bool,
-    pub(crate) audit_event_name: String,
-    pub(crate) audit_detail_json: String,
+#[serde(rename_all = "camelCase")]
+pub struct GovernedManualLifeModelOverrideRequest {
+    pub purpose: String,
+    pub explicit_user_intent: bool,
+    pub risk_acknowledged: bool,
+    pub create_pre_change_snapshot: bool,
+}
+
+impl GovernedManualLifeModelOverrideRequest {
+    #[cfg(test)]
+    fn editor_save() -> Self {
+        Self {
+            purpose: "manual_lifemodel_editor_save".into(),
+            explicit_user_intent: true,
+            risk_acknowledged: true,
+            create_pre_change_snapshot: true,
+        }
+    }
+
+    fn is_valid(&self) -> bool {
+        self.purpose == "manual_lifemodel_editor_save"
+            && self.explicit_user_intent
+            && self.risk_acknowledged
+            && self.create_pre_change_snapshot
+    }
+}
+
+fn require_governed_manual_lifemodel_override_request(
+    request: Option<&GovernedManualLifeModelOverrideRequest>,
+) -> Result<&GovernedManualLifeModelOverrideRequest, AppError> {
+    if let Some(request) = request.filter(|request| request.is_valid()) {
+        Ok(request)
+    } else {
+        Err(AppError::permission(
+            "save_life_model requires an explicit governed manual override request with purpose manual_lifemodel_editor_save, explicitUserIntent=true, riskAcknowledged=true, and createPreChangeSnapshot=true.",
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManualLifeModelOverrideAuditReport {
+    pub source: String,
+    pub before_hash: String,
+    pub after_hash: String,
+    pub changed_section_names: Vec<String>,
+    pub changed_section_count: usize,
+    pub risk_class: String,
+    pub timestamp: String,
+    pub command_function_name: String,
+    pub operation_purpose: String,
+    pub governed_operation: bool,
+    pub pre_change_snapshot_created: bool,
+    pub pre_change_snapshot_version: Option<String>,
+    pub manual_override: bool,
+    pub proposal_first: bool,
+    pub still_legacy_direct_write: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub audit_event_name: String,
+    pub audit_detail_json: String,
 }
 
 pub(crate) async fn get_life_model_with_state(
@@ -49,10 +93,22 @@ pub async fn get_life_model(state: State<'_, Arc<AppState>>) -> Result<LifeModel
 pub(crate) async fn save_life_model_with_state(
     life_model: LifeModel,
     state: &Arc<AppState>,
-) -> Result<(), AppError> {
+    request: Option<GovernedManualLifeModelOverrideRequest>,
+) -> Result<ManualLifeModelOverrideAuditReport, AppError> {
+    let request = require_governed_manual_lifemodel_override_request(request.as_ref())?;
     let before = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(AppError::from)?
+    };
+    let pre_change_snapshot_version = {
+        let vm = state.version_manager.lock().await;
+        vm.snapshot(
+            &before,
+            "auto:pre-manual-lifemodel-override",
+            "Manual LifeModel editor save pre-change snapshot",
+        )
+        .ok()
+        .map(|snapshot| snapshot.version)
     };
     let after = persist_life_model(
         &state.clone(),
@@ -60,30 +116,44 @@ pub(crate) async fn save_life_model_with_state(
         true,
         LifeModelMaterializerCallerContext::new(
             "manual_lifemodel_editor_save",
-            LifeModelMaterializerCallerKind::ManualOverrideAudited,
-            LifeModelMaterializerCallerPurpose::AuditedManualOverrideStillLegacyBlocker,
+            LifeModelMaterializerCallerKind::GovernedManualOverride,
+            LifeModelMaterializerCallerPurpose::GovernedManualOverride,
         ),
     )
     .await
     .map_err(AppError::from)?;
-    record_manual_lifemodel_override_audit_with_state(state, &before, &after).await?;
-    Ok(())
+    record_manual_lifemodel_override_audit_with_state(
+        state,
+        &before,
+        &after,
+        request,
+        pre_change_snapshot_version,
+    )
+    .await
 }
 
 #[tauri::command]
 pub async fn save_life_model(
     life_model: LifeModel,
+    manual_override_request: Option<GovernedManualLifeModelOverrideRequest>,
     state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    save_life_model_with_state(life_model, &state.inner().clone()).await
+) -> Result<ManualLifeModelOverrideAuditReport, AppError> {
+    save_life_model_with_state(life_model, &state.inner().clone(), manual_override_request).await
 }
 
 pub(crate) async fn record_manual_lifemodel_override_audit_with_state(
     state: &Arc<AppState>,
     before: &LifeModel,
     after: &LifeModel,
+    request: &GovernedManualLifeModelOverrideRequest,
+    pre_change_snapshot_version: Option<String>,
 ) -> Result<ManualLifeModelOverrideAuditReport, AppError> {
-    let report = evaluate_manual_lifemodel_override_audit(before, after)?;
+    let report = evaluate_manual_lifemodel_override_audit(
+        before,
+        after,
+        request,
+        pre_change_snapshot_version,
+    )?;
     let feedback = state.feedback_store.lock().await;
     feedback
         .log_event(
@@ -98,6 +168,8 @@ pub(crate) async fn record_manual_lifemodel_override_audit_with_state(
 pub(crate) fn evaluate_manual_lifemodel_override_audit(
     before: &LifeModel,
     after: &LifeModel,
+    request: &GovernedManualLifeModelOverrideRequest,
+    pre_change_snapshot_version: Option<String>,
 ) -> Result<ManualLifeModelOverrideAuditReport, AppError> {
     let before_hash = hash_life_model(before)?;
     let after_hash = hash_life_model(after)?;
@@ -112,9 +184,13 @@ pub(crate) fn evaluate_manual_lifemodel_override_audit(
         "riskClass": MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS,
         "timestamp": timestamp,
         "commandFunctionName": MANUAL_LIFEMODEL_OVERRIDE_COMMAND,
+        "operationPurpose": request.purpose,
+        "governedOperation": true,
+        "preChangeSnapshotCreated": pre_change_snapshot_version.is_some(),
+        "preChangeSnapshotVersion": pre_change_snapshot_version.clone(),
         "manualOverride": true,
         "proposalFirst": false,
-        "stillLegacyDirectWrite": true,
+        "stillLegacyDirectWrite": false,
         "metadataSafe": true,
         "containsRawContent": false,
     });
@@ -129,9 +205,13 @@ pub(crate) fn evaluate_manual_lifemodel_override_audit(
         risk_class: MANUAL_LIFEMODEL_OVERRIDE_RISK_CLASS.into(),
         timestamp,
         command_function_name: MANUAL_LIFEMODEL_OVERRIDE_COMMAND.into(),
+        operation_purpose: request.purpose.clone(),
+        governed_operation: true,
+        pre_change_snapshot_created: pre_change_snapshot_version.is_some(),
+        pre_change_snapshot_version,
         manual_override: true,
         proposal_first: false,
-        still_legacy_direct_write: true,
+        still_legacy_direct_write: false,
         metadata_safe: true,
         contains_raw_content: false,
         audit_event_name: MANUAL_LIFEMODEL_OVERRIDE_AUDIT_EVENT.into(),
@@ -306,7 +386,12 @@ mod tests {
             });
 
         // Save
-        let save_result = save_life_model_with_state(model.clone(), &state).await;
+        let save_result = save_life_model_with_state(
+            model.clone(),
+            &state,
+            Some(GovernedManualLifeModelOverrideRequest::editor_save()),
+        )
+        .await;
         assert!(save_result.is_ok());
 
         // Get back
@@ -319,6 +404,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_lifemodel_save_without_governed_request_fails_closed_and_writes_nothing() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut model = LifeModel::default();
+        model.identity.name = "RAW_IDENTITY_SECRET".to_string();
+
+        let err = save_life_model_with_state(model, &state, None)
+            .await
+            .expect_err("manual LifeModel save requires governed request");
+
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("save_life_model"));
+        assert!(err.message().contains("governed manual override request"));
+        assert!(err.message().contains("riskAcknowledged=true"));
+        assert!(get_life_model_with_state(&state)
+            .await
+            .unwrap()
+            .is_effectively_empty());
+    }
+
+    #[tokio::test]
     async fn manual_lifemodel_override_audit_records_after_successful_save_and_hashes_persisted_model(
     ) {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -328,7 +434,13 @@ mod tests {
         let heuristic_count_before = heuristic_record_count(&state).await;
 
         let model = raw_marker_life_model();
-        save_life_model_with_state(model, &state).await.unwrap();
+        let save_report = save_life_model_with_state(
+            model,
+            &state,
+            Some(GovernedManualLifeModelOverrideRequest::editor_save()),
+        )
+        .await
+        .unwrap();
 
         let after = get_life_model_with_state(&state).await.unwrap();
         assert_eq!(after.identity.name, "RAW_IDENTITY_SECRET");
@@ -337,13 +449,26 @@ mod tests {
             before_audit_count + 1
         );
 
-        let report = evaluate_manual_lifemodel_override_audit(&before, &after).unwrap();
+        let report = evaluate_manual_lifemodel_override_audit(
+            &before,
+            &after,
+            &GovernedManualLifeModelOverrideRequest::editor_save(),
+            save_report.pre_change_snapshot_version.clone(),
+        )
+        .unwrap();
         assert_eq!(report.source, "manual_lifemodel_editor");
         assert_eq!(report.command_function_name, "save_life_model");
-        assert_eq!(report.risk_class, "HighRiskLegacyDirectWrite");
+        assert_eq!(report.risk_class, "GovernedManualOverride");
+        assert_eq!(report.operation_purpose, "manual_lifemodel_editor_save");
+        assert!(report.governed_operation);
+        assert!(report.pre_change_snapshot_created);
+        assert!(report
+            .pre_change_snapshot_version
+            .as_ref()
+            .is_some_and(|version| !version.is_empty()));
         assert!(report.manual_override);
         assert!(!report.proposal_first);
-        assert!(report.still_legacy_direct_write);
+        assert!(!report.still_legacy_direct_write);
         assert!(report.before_hash.starts_with("sha256:"));
         assert!(report.after_hash.starts_with("sha256:"));
         assert_ne!(report.before_hash, report.after_hash);
@@ -370,9 +495,15 @@ mod tests {
         let mut after = raw_marker_life_model();
         after.state.health_status.physical = "RAW_HEALTH_PRIVACY_SECRET".to_string();
 
-        let report = record_manual_lifemodel_override_audit_with_state(&state, &before, &after)
-            .await
-            .unwrap();
+        let report = record_manual_lifemodel_override_audit_with_state(
+            &state,
+            &before,
+            &after,
+            &GovernedManualLifeModelOverrideRequest::editor_save(),
+            Some("snapshot-v1".into()),
+        )
+        .await
+        .unwrap();
         assert!(report.metadata_safe);
         assert!(!report.contains_raw_content);
         assert_eq!(manual_override_audit_count_today(&state).await, 1);
@@ -380,10 +511,14 @@ mod tests {
         let detail: serde_json::Value =
             serde_json::from_str(&report.audit_detail_json).expect("audit detail is json");
         assert_eq!(detail["source"], "manual_lifemodel_editor");
+        assert_eq!(detail["governedOperation"], true);
+        assert_eq!(detail["operationPurpose"], "manual_lifemodel_editor_save");
+        assert_eq!(detail["preChangeSnapshotCreated"], true);
+        assert_eq!(detail["preChangeSnapshotVersion"], "snapshot-v1");
         assert_eq!(detail["manualOverride"], true);
         assert_eq!(detail["proposalFirst"], false);
-        assert_eq!(detail["stillLegacyDirectWrite"], true);
-        assert_eq!(detail["riskClass"], "HighRiskLegacyDirectWrite");
+        assert_eq!(detail["stillLegacyDirectWrite"], false);
+        assert_eq!(detail["riskClass"], "GovernedManualOverride");
         assert!(detail["beforeHash"]
             .as_str()
             .unwrap()

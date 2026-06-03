@@ -1,54 +1,10 @@
 use crate::errors::AppError;
-use crate::legacy_write_convergence::{
-    LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
-    LifeModelMaterializerCallerPurpose,
-};
-use crate::{persist_life_model, AppState};
+use crate::AppState;
 use chrono::Datelike;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::evolution::{EvolutionChange, MicroEvolutionEngine};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CalibrationLegacyDirectApplyDevMigrationOverride {
-    pub allow_calibration_legacy_direct_apply: bool,
-    pub purpose: String,
-}
-
-impl CalibrationLegacyDirectApplyDevMigrationOverride {
-    #[cfg(test)]
-    fn allow_for_dev_migration() -> Self {
-        Self {
-            allow_calibration_legacy_direct_apply: true,
-            purpose: "dev_migration".into(),
-        }
-    }
-
-    fn is_valid_dev_migration_override(&self) -> bool {
-        self.allow_calibration_legacy_direct_apply
-            && matches!(
-                self.purpose.as_str(),
-                "dev_migration" | "migration" | "legacy_migration"
-            )
-    }
-}
-
-fn require_calibration_legacy_direct_apply_override(
-    dev_migration_override: Option<&CalibrationLegacyDirectApplyDevMigrationOverride>,
-    command_name: &str,
-) -> Result<(), AppError> {
-    if dev_migration_override.is_some_and(
-        CalibrationLegacyDirectApplyDevMigrationOverride::is_valid_dev_migration_override,
-    ) {
-        Ok(())
-    } else {
-        Err(AppError::permission(format!(
-            "{command_name} is a W82 Calibration legacy direct apply path and requires an explicit dev/migration override; use calibration_create_proposals or apply_calibration(mode=\"proposal\") for normal product flow."
-        )))
-    }
-}
 
 /// 评估 calibration change 的风险级别
 fn assess_change_risk(change: &EvolutionChange) -> RiskLevel {
@@ -138,93 +94,33 @@ fn change_to_proposal(
 
 #[tauri::command]
 pub async fn run_micro_evolution(
-    dev_migration_override: Option<CalibrationLegacyDirectApplyDevMigrationOverride>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    run_micro_evolution_with_state_gated(state.inner(), dev_migration_override).await
+    run_micro_evolution_with_state_gated(state.inner()).await
 }
 
 #[cfg(test)]
 async fn run_micro_evolution_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    run_micro_evolution_with_state_gated(state, None).await
-}
-
-#[cfg(test)]
-async fn run_micro_evolution_with_state_for_dev_migration(
-    state: &Arc<AppState>,
-    dev_migration_override: CalibrationLegacyDirectApplyDevMigrationOverride,
-) -> Result<serde_json::Value, AppError> {
-    run_micro_evolution_with_state_gated(state, Some(dev_migration_override)).await
+    run_micro_evolution_with_state_gated(state).await
 }
 
 async fn run_micro_evolution_with_state_gated(
-    state: &Arc<AppState>,
-    dev_migration_override: Option<CalibrationLegacyDirectApplyDevMigrationOverride>,
-) -> Result<serde_json::Value, AppError> {
-    require_calibration_legacy_direct_apply_override(
-        dev_migration_override.as_ref(),
-        "run_micro_evolution",
-    )?;
-    run_micro_evolution_direct_apply_after_gate(state).await
-}
-
-async fn run_micro_evolution_direct_apply_after_gate(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
     let manager = state.life_model_manager.lock().await;
     let model = manager.load().map_err(AppError::from)?;
     let store = state.feedback_store.lock().await;
     let engine = MicroEvolutionEngine::new(&store);
-    let (result, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
+    let (_, signals) = engine.run_with_signals(&model).map_err(AppError::from)?;
     let signal_summary = signals.summary();
-    let mut snapshot_version = None;
-    if result.applied {
-        let mut new_model = model.clone();
-        MicroEvolutionEngine::apply_changes(&mut new_model, &result.changes)
-            .map_err(AppError::from)?;
-        drop(manager);
-        let new_model = persist_life_model(
-            state,
-            new_model,
-            false,
-            LifeModelMaterializerCallerContext::new(
-                "calibration_micro_evolution_legacy_direct_apply",
-                LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
-                LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
-            ),
-        )
-        .await?;
-        // auto snapshot after evolution
-        let vm = state.version_manager.lock().await;
-        if let Ok(snap) = vm.snapshot(&new_model, "auto:evolution", &result.message) {
-            snapshot_version = Some(snap.version);
-        }
-    }
-    let message = if result.applied {
-        format!(
-            "Legacy micro-evolution direct apply completed for {} change(s)",
-            result.changes.len()
-        )
-    } else {
-        "Legacy micro-evolution direct apply completed with no durable changes".into()
-    };
-    Ok(serde_json::json!({
-        "success": true,
-        "legacy": true,
-        "warning": "legacy direct apply path bypasses Review Center; use calibration_create_proposals for product flow",
-        "applied": result.applied,
-        "change_count": result.changes.len(),
-        "message": message,
-        "snapshot_version": snapshot_version,
-        "signal_counts": {
-            "feedback_terms": signal_summary.feedback_terms,
-            "behavior_events": signal_summary.behavior_events,
-            "inference_items": signal_summary.inference_items,
-        },
-        "metadata_safe": true,
-    }))
+    drop(store);
+    drop(manager);
+    Err(AppError::permission(format!(
+        "run_micro_evolution has been retired as a Calibration legacy direct-write compatibility surface; create reviewable calibration proposals instead. Metadata-safe signal counts: feedback_terms={}, behavior_events={}, inference_items={}.",
+        signal_summary.feedback_terms, signal_summary.behavior_events, signal_summary.inference_items
+    )))
 }
 
 #[tauri::command]
@@ -289,10 +185,9 @@ pub async fn generate_micro_evolution_changes(
 pub async fn apply_calibration(
     changes: Vec<EvolutionChange>,
     mode: Option<String>,
-    dev_migration_override: Option<CalibrationLegacyDirectApplyDevMigrationOverride>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, AppError> {
-    apply_calibration_with_state_gated(changes, mode, state.inner(), dev_migration_override).await
+    apply_calibration_with_state_gated(changes, mode, state.inner()).await
 }
 
 #[cfg(test)]
@@ -301,24 +196,13 @@ async fn apply_calibration_with_state(
     mode: Option<String>,
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
-    apply_calibration_with_state_gated(changes, mode, state, None).await
-}
-
-#[cfg(test)]
-async fn apply_calibration_with_state_for_dev_migration(
-    changes: Vec<EvolutionChange>,
-    mode: Option<String>,
-    state: &Arc<AppState>,
-    dev_migration_override: CalibrationLegacyDirectApplyDevMigrationOverride,
-) -> Result<serde_json::Value, AppError> {
-    apply_calibration_with_state_gated(changes, mode, state, Some(dev_migration_override)).await
+    apply_calibration_with_state_gated(changes, mode, state).await
 }
 
 async fn apply_calibration_with_state_gated(
     changes: Vec<EvolutionChange>,
     mode: Option<String>,
     state: &Arc<AppState>,
-    dev_migration_override: Option<CalibrationLegacyDirectApplyDevMigrationOverride>,
 ) -> Result<serde_json::Value, AppError> {
     let mode = mode.as_deref().unwrap_or("proposal");
 
@@ -326,65 +210,10 @@ async fn apply_calibration_with_state_gated(
         return calibration_create_proposals_with_state(changes, state).await;
     }
 
-    require_calibration_legacy_direct_apply_override(
-        dev_migration_override.as_ref(),
-        "apply_calibration(mode=\"direct\")",
-    )?;
-    apply_calibration_direct_apply_after_gate(changes, state).await
-}
-
-async fn apply_calibration_direct_apply_after_gate(
-    changes: Vec<EvolutionChange>,
-    state: &Arc<AppState>,
-) -> Result<serde_json::Value, AppError> {
-    let mut agent_run = openlife_core::agent::AgentRun::new_calibration_run();
-
-    let manager = state.life_model_manager.lock().await;
-    let mut model = manager.load().map_err(AppError::from)?;
-    MicroEvolutionEngine::apply_changes(&mut model, &changes).map_err(AppError::from)?;
-    drop(manager);
-    let model = persist_life_model(
-        state,
-        model,
-        false,
-        LifeModelMaterializerCallerContext::new(
-            "calibration_direct_apply_legacy_direct_apply",
-            LifeModelMaterializerCallerKind::LegacyDevMigrationOverride,
-            LifeModelMaterializerCallerPurpose::DevMigrationOverrideGuardedLegacyBlocker,
-        ),
-    )
-    .await?;
-    let vm = state.version_manager.lock().await;
-    let snap = vm
-        .snapshot(&model, "auto:calibration", "用户确认并应用校准确认变更")
-        .map_err(AppError::from)?;
-    let store = state.feedback_store.lock().await;
-    let _ = store.log_event(
-        "calibration_applied",
-        None,
-        Some(&format!("applied_changes={}", changes.len())),
-    );
-
-    // Complete AgentRun
-    agent_run.output_preview = Some(format!("Applied {} calibration changes", changes.len()));
-    agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    agent_run.finished_at = Some(chrono::Utc::now());
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        let _ = store.create_run(&agent_run);
-    }
-
-    let legacy_warning =
-        "legacy direct apply path bypasses Review Center; use calibration_create_proposals for product flow";
-    Ok(serde_json::json!({
-        "success": true,
-        "legacy": true,
-        "warning": legacy_warning,
-        "snapshot_version": snap.version,
-        "applied_count": changes.len(),
-        "message": format!("已应用 {} 项校准变更，并创建快照 {}", changes.len(), snap.version),
-        "metadata_safe": true,
-    }))
+    Err(AppError::permission(format!(
+        "apply_calibration(mode=\"direct\") has been retired as a Calibration legacy direct-write compatibility surface; use calibration_create_proposals or apply_calibration(mode=\"proposal\") for {} change(s).",
+        changes.len()
+    )))
 }
 
 #[tauri::command]
@@ -566,8 +395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w82_apply_calibration_direct_mode_default_fails_closed_without_dev_migration_override()
-    {
+    async fn w91_apply_calibration_direct_mode_fails_closed_as_retired_surface() {
         let state = crate::test_utils::test_app_state();
         seed_calibration_target(&state).await;
 
@@ -581,8 +409,8 @@ mod tests {
 
         assert!(matches!(err, AppError::PermissionDenied { .. }));
         assert!(err.message().contains("apply_calibration"));
-        assert!(err.message().contains("Calibration"));
-        assert!(err.message().contains("dev/migration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("calibration_create_proposals"));
 
         assert_eq!(calibration_target_weight(&state).await, 5);
         let proposals = state
@@ -597,31 +425,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w82_apply_calibration_direct_mode_only_updates_model_with_dev_migration_override() {
+    async fn w91_apply_calibration_direct_mode_is_retired_and_writes_no_lifemodel() {
         let state = crate::test_utils::test_app_state();
         seed_calibration_target(&state).await;
 
-        let result = apply_calibration_with_state_for_dev_migration(
+        let err = apply_calibration_with_state(
             vec![calibration_test_change()],
             Some("direct".to_string()),
             &state,
-            CalibrationLegacyDirectApplyDevMigrationOverride::allow_for_dev_migration(),
         )
         .await
-        .unwrap();
+        .expect_err("W91 retires Calibration direct mode persistence");
 
-        assert_eq!(result["success"], true);
-        assert_eq!(result["legacy"], true);
-        assert_eq!(result["applied_count"], 1);
-        assert_eq!(result["metadata_safe"], true);
-        assert!(result["warning"]
-            .as_str()
-            .is_some_and(|warning| warning.contains("Review Center")));
-        assert!(result.get("model").is_none());
-        assert!(result.get("changes").is_none());
-        assert!(result.get("raw_change").is_none());
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("apply_calibration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("calibration_create_proposals"));
 
-        let response_dump = result.to_string();
+        let response_dump = err.message().to_string();
         for forbidden in [
             "W82_RAW_CALIBRATION_TARGET_SECRET",
             "W82_RAW_CALIBRATION_REASON_SECRET",
@@ -633,7 +454,7 @@ mod tests {
             );
         }
 
-        assert_eq!(calibration_target_weight(&state).await, 7);
+        assert_eq!(calibration_target_weight(&state).await, 5);
         let proposals = state
             .proposal_store
             .as_ref()
@@ -646,7 +467,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn w82_run_micro_evolution_default_fails_closed_without_dev_migration_override() {
+    async fn w91_run_micro_evolution_default_fails_closed_after_retirement() {
         let state = crate::test_utils::test_app_state();
 
         let err = run_micro_evolution_with_state(&state)
@@ -655,12 +476,12 @@ mod tests {
 
         assert!(matches!(err, AppError::PermissionDenied { .. }));
         assert!(err.message().contains("run_micro_evolution"));
-        assert!(err.message().contains("Calibration"));
-        assert!(err.message().contains("dev/migration"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("proposals"));
     }
 
     #[tokio::test]
-    async fn w82_run_micro_evolution_dev_migration_response_is_metadata_safe() {
+    async fn w91_run_micro_evolution_is_retired_metadata_safe_and_writes_no_lifemodel() {
         let state = crate::test_utils::test_app_state();
 
         {
@@ -690,23 +511,16 @@ mod tests {
                 .unwrap();
         }
 
-        let result = run_micro_evolution_with_state_for_dev_migration(
-            &state,
-            CalibrationLegacyDirectApplyDevMigrationOverride::allow_for_dev_migration(),
-        )
-        .await
-        .unwrap();
+        let err = run_micro_evolution_with_state(&state)
+            .await
+            .expect_err("W91 retires micro-evolution direct persistence");
 
-        assert_eq!(result["success"], true);
-        assert_eq!(result["legacy"], true);
-        assert_eq!(result["metadata_safe"], true);
-        assert_eq!(result["applied"], true);
-        assert_eq!(result["change_count"], 1);
-        assert!(result.get("changes").is_none());
-        assert!(result.get("raw_evolution_payload").is_none());
-        assert!(result.get("model").is_none());
+        assert!(matches!(err, AppError::PermissionDenied { .. }));
+        assert!(err.message().contains("run_micro_evolution"));
+        assert!(err.message().contains("retired"));
+        assert!(err.message().contains("feedback_terms"));
 
-        let response_dump = result.to_string();
+        let response_dump = err.message().to_string();
         for forbidden in [
             "W82_RAW_EVOLUTION_TARGET_SECRET",
             "W82_RAW_EVOLUTION_REASON_SECRET",

@@ -79,7 +79,7 @@ describe("VersionControl", () => {
     expect(screen.getByText(/去恢复控制台/)).toBeInTheDocument();
   });
 
-  it("surfaces W84 backend restore gate for default restore calls", async () => {
+  it("sends a governed restore request and reports success", async () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     try {
       render(
@@ -95,9 +95,21 @@ describe("VersionControl", () => {
       fireEvent.click(screen.getAllByRole("button", { name: "回滚" })[0]);
 
       await waitFor(() => {
-        expect(screen.getByText(/restore_snapshot is a W84/)).toBeInTheDocument();
+        expect(screen.getByText(/回滚成功/)).toBeInTheDocument();
       });
-      expect(invoke).toHaveBeenCalledWith("restore_snapshot", { version: "0.1.0" });
+      expect(invoke).toHaveBeenCalledWith("restore_snapshot", {
+        version: "0.1.0",
+        governedRequest: {
+          purpose: "manual_restore",
+          explicitUserIntent: true,
+          createPreChangeSnapshot: true,
+        },
+        governed_request: {
+          purpose: "manual_restore",
+          explicitUserIntent: true,
+          createPreChangeSnapshot: true,
+        },
+      });
     } finally {
       confirmSpy.mockRestore();
     }

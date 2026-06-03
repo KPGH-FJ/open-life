@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-03
-> Status: W89 Proposal Application Source-Specific Patch Audit / Readiness complete
+> Status: W97 Legacy Direct-Write Convergence complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,20 @@ route text.
 
 ## Current Position
 
-Current latest status is **W89 Proposal Application Source-Specific Patch Audit / Readiness complete**.
+Current latest status is **W97 Legacy Direct-Write Convergence complete**.
+W90 retires Builder legacy direct apply. W91 retires Calibration direct and
+micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
+LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
+import into explicit governed operations with validation, pre-change snapshots,
+and metadata-safe audit/count/hash results. W94 converts manual LifeModel editor
+save into a governed manual override with explicit user intent, risk
+acknowledgement, pre-change snapshot, typed materializer context, and
+metadata-safe audit. W95 closes ProposalSource -> PatchSource mapping with exact
+source variants and no Manual fallback blocker. W96 keeps State/Daily Goal as
+source-data compatibility materialization only. W97 marks the inventory and
+materializer matrix converged with no high-risk legacy direct-write blockers,
+`proposal_first_convergence_complete=true`, metadata-safe reports, no runtime /
+model / tool execution, and default Chat still on `legacy_stream`.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -375,7 +388,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W89 progress index
+4. This W1-W97 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -394,7 +407,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W89 Structured Index
+## W1-W97 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -478,15 +491,23 @@ permission.
 | W78 | LifeModel Maturation Run Trace Visibility Proof | Done | Pure core evaluator/report in `maturation.rs` | MS trace visibility proof only; W77 selected guidance and lineage visible as summary/hash/id/count/status/type metadata, privacy/local-only policy preserved, raw payload/policy relaxation/execution/cutover hints fail closed, zero side-effect counters | No; ordinary send/stream stay `legacy_stream` and do not call it | W79 legacy direct-write inventory guard |
 | W79 | Legacy Direct-Write Convergence Inventory Guard | Done | Internal Rust inventory/report/ensure in `legacy_write_convergence.rs` | MS inventory guard only; reports high-risk direct-write blockers, proposal-first targets, low-risk source-data paths, and external proposal-only paths; overallConverged=false/allDirectWritesConverged=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W80 manual editor override audit guard |
 | W80 | Manual LifeModel Editor Explicit Override Audit Guard | Done | Internal backend save-path audit helper in `commands/life_model.rs` | MS audit guard only; successful manual editor save records source, before/after hashes, rough changed sections, risk class, timestamp, command, and manualOverride/proposalFirst/stillLegacyDirectWrite flags; no raw payloads, Proposal, AgentRun, Heuristic, Patch, runtime/model/tool | No; ordinary send/stream stay `legacy_stream` and do not call it | W81 Builder legacy direct apply dev-gate |
-| W81 | Builder Legacy Direct Apply Dev-Gate / No-Signal Completion Guard | Done | Backend Builder command guard in `commands/builder.rs` plus W79 inventory update | MS guard only; `builder_apply_signals` defaults fail closed and requires explicit dev/migration override for remaining legacy direct apply, direct response omits raw model/run/audit payloads, no-signal completion is session-only/no durable LifeModel write, normal `builder_create_proposals` remains proposal-first; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Builder legacy direct apply or convert fully to proposal-first |
-| W82 | Calibration Direct Apply Legacy Gate / Proposal-First Default | Done | Backend Calibration command guard in `commands/calibration.rs`, Dashboard normal-flow proposal update, and W79 inventory update | MS guard only; `apply_calibration(mode="direct")` and `run_micro_evolution` default fail closed and require explicit Calibration legacy direct apply dev/migration override, legacy output omits raw LifeModel/calibration/evolution payloads, normal `calibration_create_proposals` / proposal mode writes ProposalStore; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Calibration direct/evolution legacy persistence or convert fully to proposal-first |
-| W83 | Feedback Evolution Legacy Direct Apply Gate / Proposal-First Candidate Path | Done | Backend Feedback command guard in `commands/feedback.rs`, settings read-only copy update, and W79 inventory update | MS guard/read-only report only; `apply_feedback_evolution` defaults fail closed and requires explicit Feedback evolution legacy direct apply dev/migration override, legacy output omits raw feedback/inference/LifeModel/evolution rule payloads, `generate_evolution_report` is read-only and writes no LifeModel/`evolution_rules`; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove Feedback evolution legacy direct apply or convert fully to proposal/evidence-first |
-| W84 | Snapshot Restore / Data Import Legacy Direct Write Gate | Done | Backend Version/Settings command guards in `commands/version.rs` and `commands/settings.rs`, plus W79 inventory update | MS guard only; `restore_snapshot` and `import_all_data` default fail closed and require explicit dev/migration/manual restore override, legacy outputs omit raw LifeModel/memory/vector/import payload/snapshot YAML and return snapshot id/count/status only; export/read-only paths unchanged; convergence false | No; ordinary send/stream stay `legacy_stream` and do not call it | Remove restore/import legacy override capability or convert to governed rollback/migration audit flow |
+| W81 | Builder Legacy Direct Apply Dev-Gate / No-Signal Completion Guard | Done | Backend Builder command guard in `commands/builder.rs` plus W79 inventory update | Historical guard slice; superseded by W90 retirement | No; ordinary send/stream stay `legacy_stream` and do not call it | W90 retirement |
+| W82 | Calibration Direct Apply Legacy Gate / Proposal-First Default | Done | Backend Calibration command guard in `commands/calibration.rs`, Dashboard normal-flow proposal update, and W79 inventory update | Historical guard slice; superseded by W91 retirement | No; ordinary send/stream stay `legacy_stream` and do not call it | W91 retirement |
+| W83 | Feedback Evolution Legacy Direct Apply Gate / Proposal-First Candidate Path | Done | Backend Feedback command guard in `commands/feedback.rs`, settings read-only copy update, and W79 inventory update | Historical guard/read-only report slice; superseded by W92 retirement | No; ordinary send/stream stay `legacy_stream` and do not call it | W92 retirement |
+| W84 | Snapshot Restore / Data Import Legacy Direct Write Gate | Done | Backend Version/Settings command guards in `commands/version.rs` and `commands/settings.rs`, plus W79 inventory update | Historical guard slice; superseded by W93 governed restore/import operations | No; ordinary send/stream stay `legacy_stream` and do not call it | W93 governed restore/import |
 | W85 | State / Daily Goal Source Data Boundary Proof | Done | Internal Rust report/evaluator/ensure in `legacy_write_convergence.rs` | MS source-data boundary proof only; `state_daily_goal_direct_writes` remains LowRiskTransientSourceData and explicitly lists `persist_life_model`; compatibility_lifemodel_materialized_write=true, writes_current_lifemodel_compatibility_view=true, accepted_durable_hs_truth_write=false, active_hs_lifemodel_patch=false, proposal_required_for_hs_truth_promotion=true; no command/frontend/runtime/model/tool/store behavior change, not proposal-first conversion, not fully converged | No; ordinary send/stream stay `legacy_stream` and do not call it | Future StateStore TTL/source/confidence split or separate proposal-first truth promotion bridge |
-| W86 | LifeModel Compatibility Materializer Caller Matrix | Done | Internal Rust matrix/report/evaluator/ensure in `legacy_write_convergence.rs` | MS caller matrix only; covers current production `persist_life_model` callsites and production `LifeModelManager::save` related entries; classifies materializer root, ordinary Chat auto-checkin source-data compatibility, State/Daily Goal source-data compatibility, accepted proposal apply, audited manual override, guarded legacy dev-migration overrides, and gated restore/import overrides; no command/frontend/runtime/model/tool/store behavior change, no `persist_life_model` signature change, no legacy path retirement, migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call it | W87 LifeModel materializer caller restriction |
-| W87 | LifeModel Materializer Caller Restriction | Done | Internal typed caller context/restriction evaluator in `legacy_write_convergence.rs`, `persist_life_model` signature update, and snapshot restore direct-save guard | MS caller restriction only; all 16 production `persist_life_model` callsites pass explicit W86 stable id + kind + purpose context; snapshot restore direct `LifeModelManager::save` has a W87 guard after the W84 override; unknown/mismatched callers fail closed; metadata-safe and raw-content-free; keeps migration_permission=false/runtime_authority_granted=false/proposal_first_convergence_complete=false; not full convergence, no legacy path retirement | No; ordinary send/stream stay `legacy_stream` and only pass source-data compatibility context for existing daily-goal auto-checkin | W88 mapping, then W89 audit/readiness |
-| W88 | Proposal Application Source-Specific Patch Mapping | Done | Backend-only private mapper/report/ensure in `commands/proposal.rs` | MS mapping only; accepted LifeModel proposal apply no longer hardcodes BuilderReview; BuilderReview->BuilderReview, CalibrationRun->Calibration, FeedbackEvolution->Evolution, Manual->Manual; ChatConversation/ProactiveAgent/SkillRuntime/Plugin/MemoryGovernance use metadata-safe Manual fallback with W89 follow-up/blocking metadata; no command/frontend/runtime/model/tool/store behavior change, no legacy path retirement, proposal_first_convergence_complete=false pending W89 audit/readiness and fallback policy | No; ordinary send/stream stay `legacy_stream` and do not call it | W89 Proposal Application Source-Specific Patch Audit / Readiness |
-| W89 | Proposal Application Source-Specific Patch Audit / Readiness | Done | Backend-only private readiness entry/report/evaluator/ensure in `commands/proposal.rs` | MS readiness proof only; exact_mapping_count=4, metadata_safe_fallback_count=5, unsupported_or_unclassified_count=0; BuilderReview only maps from BuilderReview; apply path uses the W88 mapping ensure and resolver before `LifeModelPatch::from_proposal`; no hardcoded BuilderReview in apply path; metadata-safe/raw-payload-free; fallback source strategy remains a blocker and proposal_first_convergence_complete=false | No; ordinary send/stream stay `legacy_stream` and do not call W88/W89 helpers | W90 Legacy Override Retirement: Builder Direct Apply |
+| W86 | LifeModel Compatibility Materializer Caller Matrix | Done | Internal Rust matrix/report/evaluator/ensure in `legacy_write_convergence.rs` | Historical matrix slice; superseded by W97 final matrix | No; ordinary send/stream stay `legacy_stream` and do not call it | W87 restriction, then W97 final matrix |
+| W87 | LifeModel Materializer Caller Restriction | Done | Internal typed caller context/restriction evaluator in `legacy_write_convergence.rs`, `persist_life_model` signature update, and snapshot restore direct-save guard | Typed restriction remains active; W97 matrix admits only classified source-data compatibility, governed manual override, governed restore/import, accepted proposal apply, and materializer root callers | No; ordinary send/stream stay `legacy_stream` and only pass source-data compatibility context for existing daily-goal auto-checkin | W97 final matrix |
+| W88 | Proposal Application Source-Specific Patch Mapping | Done | Backend-only private mapper/report/ensure in `commands/proposal.rs` | Historical mapping slice; superseded by W95 exact ProposalSource -> PatchSource variants | No; ordinary send/stream stay `legacy_stream` and do not call it | W95 mapping closure |
+| W89 | Proposal Application Source-Specific Patch Audit / Readiness | Done | Backend-only private readiness entry/report/evaluator/ensure in `commands/proposal.rs` | Historical readiness slice; superseded by W95 exact mapping and W97 proposal-first convergence completion | No; ordinary send/stream stay `legacy_stream` and do not call W88/W89 helpers | W90-W97 convergence |
+| W90 | Legacy Override Retirement: Builder Direct Apply | Done | Backend Builder command retirement in `commands/builder.rs` | `builder_apply_signals` is retired/fail-closed and writes no LifeModel; normal product flow remains `builder_create_proposals`; no dev/migration direct-apply override remains | No; ordinary send/stream stay `legacy_stream` and do not call it | W91 |
+| W91 | Legacy Override Retirement: Calibration Direct/Evolution | Done | Backend Calibration command retirement in `commands/calibration.rs` | `apply_calibration(mode="direct")` and `run_micro_evolution` are retired/fail-closed for durable LifeModel writes; normal flow remains `calibration_create_proposals` / proposal mode | No; ordinary send/stream stay `legacy_stream` and do not call it | W92 |
+| W92 | Legacy Override Retirement: Feedback Evolution | Done | Backend Feedback command retirement/read-only report in `commands/feedback.rs` | `apply_feedback_evolution` is retired/fail-closed for LifeModel and `evolution_rules` writes; reports are metadata-safe/read-only | No; ordinary send/stream stay `legacy_stream` and do not call it | W93 |
+| W93 | Governed Snapshot Restore / Data Import | Done | Backend Version/Settings governed request flows and frontend request wrappers | `restore_snapshot` and `import_all_data` require explicit governed requests, pre-change snapshots, validation, and metadata-safe audit/count/hash results; no legacy override remains | No; ordinary send/stream stay `legacy_stream` and do not call it | W94 |
+| W94 | Governed Manual LifeModel Editor Override | Done | Backend LifeModel editor governed request flow and frontend wrapper | `save_life_model` requires explicit user intent, risk acknowledgement, pre-change snapshot, typed materializer context, and metadata-safe audit | No; ordinary send/stream stay `legacy_stream` and do not call it | W95 |
+| W95 | Proposal PatchSource Mapping Closure | Done | Core PatchSource variants plus proposal mapper/readiness update | Every ProposalSource maps to a dedicated PatchSource; accepted proposal apply has no Manual fallback blocker and `proposal_first_convergence_complete=true` | No; ordinary send/stream stay `legacy_stream` and do not call it | W96 |
+| W96 | State / Daily Goal Boundary Reconciliation | Done | Legacy convergence boundary report/evaluator | State/Daily Goal remains source-data compatibility materialization only, not accepted durable LifeModel-HS truth | No; ordinary send/stream stay `legacy_stream`; existing auto-checkin remains source-data compatibility context only | W97 |
+| W97 | Final Legacy Direct-Write Convergence Inventory | Done | Final inventory/materializer matrix/report tests in `legacy_write_convergence.rs` | `overall_converged=true`, `all_direct_writes_converged=true`, `high_risk_legacy_direct_write_count=0`, `proposal_first_convergence_complete=true`, metadata-safe reports, no raw payloads, no runtime/model/tool execution | No; ordinary send/stream stay `legacy_stream` and do not call W79-W97 helpers | Next architecture work |
 
 ## Folded Boundary Summary
 
@@ -602,17 +623,17 @@ complete -> W85 State / Daily Goal source-data boundary proof complete -> W86
 LifeModel materializer caller matrix complete -> W87 LifeModel materializer
 caller restriction complete -> W88 Proposal Application Source-Specific Patch
 Mapping complete -> W89 Proposal Application Source-Specific Patch Audit /
-Readiness complete -> W90 Legacy Override Retirement: Builder Direct Apply.
-Future direct-write convergence slices must start from the W79 inventory, the
-W80 manual editor audit state, W81 Builder guard state, W82 Calibration guard
-state, W83 Feedback evolution guard state, W84 restore/import guard state, W85
-State/Daily Goal source-data boundary state, W86 materializer caller matrix,
-W87 caller restriction state, W88 proposal PatchSource mapping state, and W89
-proposal PatchSource readiness state, and must not mark a blocker
-converged until the actual path is changed and verified. Future default Chat executor implementation
-discussion may build on the W65-W72 proofs only through a separately reviewed
-task; keep default Chat on legacy_stream unless that separate task explicitly
-implements, reviews, verifies, and authorizes a route change.
+Readiness complete -> W90 Builder legacy direct apply retirement complete ->
+W91 Calibration direct/evolution retirement complete -> W92 Feedback evolution
+retirement complete -> W93 governed Snapshot restore / Data import complete ->
+W94 governed manual LifeModel editor override complete -> W95 Proposal
+PatchSource mapping closure complete -> W96 State / Daily Goal boundary
+reconciliation complete -> W97 final Legacy Direct-Write Convergence inventory
+complete.
+Future default Chat executor implementation discussion may build on the
+W65-W72 proofs only through a separately reviewed task; keep default Chat on
+legacy_stream unless that separate task explicitly implements, reviews,
+verifies, and authorizes a route change.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

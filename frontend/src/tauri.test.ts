@@ -141,14 +141,15 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith("add_daily_goal", { name: "阅读30分钟" });
   });
 
-  it("keeps W84 restore and import wrappers on default no-override calls", async () => {
+  it("sends governed restore and import request envelopes", async () => {
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockResolvedValue({
       success: true,
-      legacy: true,
+      legacy: false,
+      governed_operation: true,
       warning: "metadata-safe",
       metadata_safe: true,
-      durable_lifemodel_write: false,
+      durable_lifemodel_write: true,
       restored_snapshot_version: "0.1.0",
       pre_restore_snapshot_created: true,
     });
@@ -156,15 +157,26 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("restore_snapshot", {
       version: "0.1.0",
+      governedRequest: {
+        purpose: "manual_restore",
+        explicitUserIntent: true,
+        createPreChangeSnapshot: true,
+      },
+      governed_request: {
+        purpose: "manual_restore",
+        explicitUserIntent: true,
+        createPreChangeSnapshot: true,
+      },
     });
 
     vi.mocked(invoke).mockClear();
     vi.mocked(invoke).mockResolvedValue({
       success: true,
-      legacy: true,
+      legacy: false,
+      governed_operation: true,
       warning: "metadata-safe",
       metadata_safe: true,
-      durable_lifemodel_write: false,
+      durable_lifemodel_write: true,
       imported_message_count: 0,
       imported_vector_count: 0,
     });
@@ -182,6 +194,18 @@ describe("tauri command argument aliases", () => {
         messages: [],
         vectors: [],
       }),
+      importRequest: {
+        purpose: "manual_restore",
+        explicitUserIntent: true,
+        createPreChangeSnapshot: true,
+        importTargets: ["life_model", "messages", "vectors"],
+      },
+      import_request: {
+        purpose: "manual_restore",
+        explicitUserIntent: true,
+        createPreChangeSnapshot: true,
+        importTargets: ["life_model", "messages", "vectors"],
+      },
     });
   });
 

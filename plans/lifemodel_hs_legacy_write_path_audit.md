@@ -1,6 +1,8 @@
 # LifeModel-HS Legacy Write Path Audit
 
 Date: May 28, 2026
+Last updated: June 3, 2026
+Status: W97 Legacy Direct-Write Convergence complete
 
 Scope: LMHS-10 audit for the Post-Beta LifeModel-HS MVP. This document uses
 ADR 0013 as the governance baseline and treats YAML LifeModel as a compatibility
@@ -235,22 +237,19 @@ W88 adds a backend-only/internal PatchSource mapping report/ensure/resolver in
 `apply_proposal_to_state` no longer hardcodes `PatchSource::BuilderReview`
 when creating the `LifeModelPatch` for PatchStore/audit persistence.
 
-The explicit mapping is BuilderReview -> BuilderReview, CalibrationRun ->
-Calibration, FeedbackEvolution -> Evolution, and Manual -> Manual. Because the
-current PatchSource enum has no dedicated ChatConversation, ProactiveAgent,
-SkillRuntime, Plugin, or MemoryGovernance variants, those proposal sources use
-an explicit metadata-safe Manual fallback with W89 follow-up/blocking metadata
-instead of being mislabeled as BuilderReview.
+The W88-era explicit mapping was BuilderReview -> BuilderReview, CalibrationRun
+-> Calibration, FeedbackEvolution -> Evolution, and Manual -> Manual, with
+temporary metadata-safe Manual fallback for ChatConversation, ProactiveAgent,
+SkillRuntime, Plugin, and MemoryGovernance. W95 supersedes that temporary state
+by adding dedicated PatchSource variants for every ProposalSource.
 
 The W88 mapping report contains only source enum names, mapped PatchSource,
 fixed booleans, blocker codes, and follow-up text; it must not contain raw
 proposal payloads, raw LifeModel patch values, memory text, chat text, or tool
 payloads. W88 adds no Tauri command, frontend/Settings surface,
 runtime/model/tool execution, default Chat routing change, or legacy path
-retirement. Accepted proposal apply remains
-`proposal_first_convergence_complete=false`; W89 source-specific patch
-audit/readiness is now complete, but fallback source policy must be confirmed
-before convergence can be marked complete.
+retirement. W95 later closes the fallback source policy and marks
+`proposal_first_convergence_complete=true`.
 
 ## W89 Proposal Application Source-Specific Patch Audit / Readiness
 
@@ -268,40 +267,79 @@ The W89 readiness report proves `apply_proposal_to_state` still calls
 `send_message` / `start_stream_message` do not call the W88/W89 proposal
 PatchSource mapping or readiness helpers.
 
-The exact mappings remain BuilderReview -> BuilderReview, CalibrationRun ->
-Calibration, FeedbackEvolution -> Evolution, and Manual -> Manual. The
-metadata-safe fallback mappings remain ChatConversation, ProactiveAgent,
-SkillRuntime, Plugin, and MemoryGovernance -> Manual, with W90+ follow-up to
-confirm dedicated PatchSource variants or an accepted Manual fallback policy.
-The report is metadata-safe and contains no raw proposal payload, raw
-LifeModel patch value, memory text, chat text, or tool payload. Because fallback
-strategy is still unconfirmed, `readiness_ready=false` and
-`proposal_first_convergence_complete=false` remain explicit.
+W89's exact mappings were BuilderReview -> BuilderReview, CalibrationRun ->
+Calibration, FeedbackEvolution -> Evolution, and Manual -> Manual. Its
+temporary metadata-safe fallback mappings were ChatConversation, ProactiveAgent,
+SkillRuntime, Plugin, and MemoryGovernance -> Manual. W95 closes that follow-up:
+PatchSource now has dedicated variants for every ProposalSource, fallback count
+is zero, and `proposal_first_convergence_complete=true`. The report remains
+metadata-safe and contains no raw proposal payload, raw LifeModel patch value,
+memory text, chat text, or tool payload.
+
+## W90-W97 Final Legacy Direct-Write Convergence
+
+W90 retires Builder legacy direct apply. `builder_apply_signals` fails closed
+with a retired-path error and writes no LifeModel; the normal product path is
+`builder_create_proposals`.
+
+W91 retires Calibration direct/evolution durable LifeModel writes.
+`apply_calibration(mode="direct")` and `run_micro_evolution` fail closed for
+durable writes; normal Calibration flow remains `calibration_create_proposals`
+or proposal mode.
+
+W92 retires Feedback evolution durable LifeModel and `evolution_rules` writes.
+`apply_feedback_evolution` fails closed for writes and report paths remain
+metadata-safe/read-only.
+
+W93 converts Snapshot restore and Data import to governed operations. They
+require explicit governed requests, pre-change snapshots, request/payload
+validation, materializer caller restriction, and metadata-safe audit/count/hash
+results. Legacy restore/import override types are removed.
+
+W94 converts manual LifeModel editor save to a governed manual override. It
+requires explicit user intent, risk acknowledgement, a pre-change snapshot,
+typed materializer context, and metadata-safe audit; the frontend wrapper sends
+the required governed request.
+
+W95 adds dedicated PatchSource variants for ChatConversation, ProactiveAgent,
+SkillRuntime, Plugin, and MemoryGovernance, so every ProposalSource maps exactly
+and no Manual fallback blocker remains.
+
+W96 keeps State/Daily Goal writes classified as source-data compatibility
+materialization only. They are not accepted durable LifeModel-HS truth and any
+truth promotion still requires a future proposal-first path.
+
+W97 updates the machine-readable inventory and materializer matrix. The final
+report is metadata-safe/raw-payload-free with `overall_converged=true`,
+`all_direct_writes_converged=true`, `high_risk_legacy_direct_write_count=0`,
+and `proposal_first_convergence_complete=true`. Default Chat remains
+`legacy_stream`, and ordinary `send_message` / `start_stream_message` do not
+call W79-W97 helpers.
 
 ## Current Write Paths
 
 | Area | Path / entry points | Risk class | Current guard | Future action |
 | --- | --- | --- | --- | --- |
-| LifeModel save primitive / materializer caller restriction | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model`; W86 `lifemodel_materializer_caller_matrix`; W87 `LifeModelMaterializerCallerContext` / restriction report | legacy direct write requiring future convergence | Central save prepares model metadata and can create a daily snapshot. W86 classifies every current production materializer/save entry; W87 requires every production `persist_life_model` caller to pass typed context and guards snapshot restore's direct `LifeModelManager::save`. W88 maps accepted LifeModel proposal PatchSource by proposal source; W89 audits that mapping and apply-path usage. W87-W89 keep migration_permission=false, runtime_authority_granted=false, proposal_first_convergence_complete=false; no default Chat routing change and no legacy path retirement. | Confirm fallback source policy separately; route durable HS and risky LifeModel mutations through Proposal/Governor acceptance before marking convergence. |
-| Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | legacy direct write requiring future convergence | W80 metadata-safe explicit manual override audit records source, before/after hashes, rough changed sections, risk class, timestamp, command/function name, and manualOverride/proposalFirst/stillLegacyDirectWrite flags after successful save. It does not record raw LifeModel content and does not make the path proposal-first. | Convert to patch/proposal review or stronger manual override UX with confirmation and richer governance. |
-| Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; W88 maps PatchStore source by ProposalSource instead of hardcoding BuilderReview; W89 proves the apply path still uses the mapping ensure and resolver, and that fallback sources are not mislabeled as BuilderReview; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Make this the convergence target for legacy LifeModel, memory, tool, and HS mutations; confirm fallback source policy before marking proposal-first convergence complete. |
+| LifeModel save primitive / materializer caller restriction | `openlife-core/src/life_model.rs::LifeModelManager::save`; `src-tauri/src/lib.rs::persist_life_model`; `lifemodel_materializer_caller_matrix`; `LifeModelMaterializerCallerContext` / restriction report | read-only/materialized compatibility primitive with governed caller restriction | W97 classifies the materializer root, source-data compatibility callers, governed manual override, governed restore/import, and accepted proposal apply. Unknown/mismatched callers fail closed; reports are metadata-safe; no migration/runtime authority is granted. | Keep the typed restriction in force for every new materializer caller. |
+| Manual LifeModel editor | `src-tauri/src/commands/life_model.rs::save_life_model`; `frontend/src/pages/LifeModelEditor.tsx` | governed manual override | W94 requires a governed request with explicit user intent, risk acknowledgement, and pre-change snapshot. Save uses typed materializer context and returns metadata-safe audit without raw model content. | Consider future patch/proposal UX for higher assurance, but the legacy direct-write blocker is closed. |
+| Review Center apply/edit | `src-tauri/src/commands/proposal.rs::accept_proposal_with_state`, `edit_proposal_with_state`, `apply_proposal_to_state`; `openlife-core/src/life_model/patch_store.rs` | already proposal-first | Safe Mode blocks apply/edit; proposal must be pending/postponed; payload validation runs before apply; LifeModel proposals create before/after snapshots and PatchStore records; W95 maps every ProposalSource to a dedicated PatchSource with no fallback blocker; MemoryWrite checks duplicate content; ExternalWriteAction re-validates safe paths, hash, UTF-8, and size. | Keep this as the convergence target for durable HS and risky LifeModel mutations. |
 | Low-risk batch proposal apply | `src-tauri/src/commands/proposal.rs::batch_accept_low_risk_proposals` | already proposal-first | Safe Mode guard; accepts only pending low-risk proposals. | Keep limited to low risk; do not extend to high-risk identity, values, mission, long-term goals, sensitive relationships, or privacy boundaries. |
 | Proposal storage | `openlife-core/src/agent/proposal_store.rs::{create_proposal,update_proposal}` | already proposal-first | Proposals are persisted with type, source, risk, status, run id, and before/after payloads; status transitions are explicit through Review Center commands. | Continue linking generated HS proposals to run/evidence ids. |
 | Builder normal flow | `src-tauri/src/commands/builder.rs::builder_create_proposals`; `frontend/src/pages/BuilderPage.test.tsx` | already proposal-first | Finished sessions with pending signals are sent to ProposalStore; frontend tests assert `builder_apply_signals` is not called in the normal review flow. | Keep this as the only product Builder write path. |
-| Builder legacy direct flow | `src-tauri/src/commands/builder.rs::builder_apply_signals`; no-signal completion branch in `builder_step_with_state` | legacy direct write requiring future convergence | W81 guard present: command fails closed by default and requires explicit dev/migration override for the remaining legacy direct apply path; response omits raw model/run/audit payloads; no-signal completion performs session-only cleanup and does not write durable LifeModel truth. | Remove `builder_apply_signals` or convert the remaining override path fully to proposal-first before treating Builder as converged. |
+| Builder legacy direct flow | `src-tauri/src/commands/builder.rs::builder_apply_signals`; no-signal completion branch in `builder_step_with_state` | retired no-write compatibility path | W90 retires direct apply. `builder_apply_signals` fails closed and writes no LifeModel; no-signal completion remains session-only/no durable LifeModel write. | Keep normal writes on `builder_create_proposals`. |
 | Builder session persistence | `openlife-core/src/builder/store.rs`; `src-tauri/src/commands/builder.rs::{builder_start,builder_step,builder_delete_session}` | low-risk transient state | Stores unfinished/review sessions separately from accepted LifeModel truth. | Keep as transient workflow state; delete or expire stale sessions. |
 | Calibration proposal flow | `src-tauri/src/commands/calibration.rs::calibration_create_proposals`; `apply_calibration(mode = "proposal")`; `frontend/src/pages/CalibrationPage.tsx`; `frontend/src/pages/DashboardPage.tsx` | already proposal-first | Change risk is assessed before proposal creation; identity values, long-term goals, and similar paths are high risk; proposals link to AgentRun; normal Calibration/Dashboard product flow writes ProposalStore rather than durable LifeModel truth. | Keep this as the product default and route all calibration changes through Review Center. |
-| Calibration direct/evolution apply | `src-tauri/src/commands/calibration.rs::{run_micro_evolution,apply_calibration(mode = "direct")}` | legacy direct write requiring future convergence | W82 guard present: both commands fail closed by default and require explicit Calibration legacy direct apply dev/migration override for remaining legacy persistence; responses are metadata-safe and omit raw LifeModel/calibration/evolution payloads. | Remove the remaining override capability or convert direct/evolution fully to proposal-first before treating Calibration as converged. |
+| Calibration direct/evolution apply | `src-tauri/src/commands/calibration.rs::{run_micro_evolution,apply_calibration(mode = "direct")}` | retired no-write compatibility path | W91 retires durable LifeModel writes from both paths; they fail closed and write no LifeModel. | Keep normal flow on `calibration_create_proposals` / proposal mode. |
 | Feedback signals | `openlife-core/src/feedback.rs::{save_feedback,log_event,save_conversation_inference,fetch_evolution_signals}`; `src-tauri/src/commands/feedback.rs::{save_feedback,log_analytics_event}`; `src-tauri/src/lib.rs::capture_conversation_signals` | low-risk transient state | Append-only local feedback, analytics, and inference rows; they are source data signals, not accepted LifeModel truth. | Promote useful signals into EvidenceStore records and proposals; add retention/deletion policy per ADR 0013. |
-| Feedback evolution direct apply | `src-tauri/src/commands/feedback.rs::apply_feedback_evolution` | legacy direct write requiring future convergence | W83 guard present: command fails closed by default and requires explicit Feedback evolution legacy direct apply dev/migration override for the remaining legacy direct apply path; response is metadata-safe and omits raw feedback, conversation inference, LifeModel, and evolution rule payloads. | Remove the remaining override capability or convert feedback-driven model changes fully to proposal/evidence-first before treating Feedback evolution as converged. |
+| Feedback evolution direct apply | `src-tauri/src/commands/feedback.rs::apply_feedback_evolution` | retired no-write compatibility path | W92 retires durable LifeModel and `evolution_rules` writes; command fails closed for writes and returns only metadata-safe candidate counts/status. | Future feedback-derived changes should create reviewable Proposal/Evidence records. |
 | Feedback evolution report | `src-tauri/src/commands/feedback.rs::generate_evolution_report`; `openlife-core/src/feedback.rs::generate_evolution_report` | read-only low-risk report | W83 read-only report: command returns metadata-safe counts/status only and does not write LifeModel or `evolution_rules` truth. | Keep report read-only; future candidate creation may write only reviewable Proposal/Evidence records, not active rules or LifeModel truth. |
 | State history and current state | `openlife-core/src/memory.rs::record_state_entry`; `src-tauri/src/commands/state.rs::record_state` | low-risk transient source data | W85 boundary proof present: user-initiated state samples append to `state_history` and currently materialize the LifeModel compatibility view / YAML through `persist_life_model`; current custom state dimension and `last_updated` are source data / low-risk transient compatibility state, not accepted durable LifeModel-HS truth, not an active HS LifeModel patch, and not automatically promoted. | Move to StateStore with TTL, source, confidence, and privacy metadata; any promotion to durable identity/preference/state truth must be a separate proposal-first slice. |
 | Daily goals and chat check-in | `src-tauri/src/commands/state.rs::{add_daily_goal,update_daily_goal,delete_daily_goal,toggle_daily_goal}`; `src-tauri/src/lib.rs::try_auto_checkin_daily_goals` call sites | low-risk transient source data | W85 boundary proof present: daily goals/task completion currently materialize the LifeModel compatibility view / YAML through `persist_life_model` and remain source data / low-risk transient compatibility state; chat auto-check-in is keyword-triggered and does not edit long-term goal definitions or accepted LifeModel-HS truth. | Keep as short-lived task state or migrate to StateStore; any promotion to long-term goals or durable LifeModel-HS truth remains proposal-first future work. |
 | Raw chat and memory records | `openlife-core/src/memory.rs::{save_message,save_memory_record}`; `src-tauri/src/lib.rs::persist_chat_message_if_needed`; `src-tauri/src/commands/memory.rs::index_memory_chunk` | low-risk transient state | Local raw/source records with privacy tags; user/manual indexing is explicit; raw memory is not accepted HS truth. | Preserve as raw life data with retention/deletion controls; generated durable memory claims should use MemoryWrite proposals or EvidenceStore. |
 | Memory proposals | `openlife-core/src/agent/proposal_generators/chat.rs`; `openlife-core/src/agent/proposal_engine.rs::MemoryProposalGenerator`; `src-tauri/src/commands/proposal.rs::MemoryWrite` | already proposal-first | Generated memory writes land in ProposalStore and only write memory after accepted proposal application. | Link accepted memory writes to EvidenceStore evidence when HS evidence becomes canonical. |
 | Vector memory maintenance | `openlife-core/src/vectors.rs::{run_tier_maintenance,archive_low_access_memories,restore_archived,set_importance}` | low-risk transient state | Changes retrieval tier/archive metadata, not LifeModel truth. | Keep automatic only for retrieval metadata; proposal-first if memory deletion/forgetting semantics affect accepted evidence. |
-| Snapshots and restore | `openlife-core/src/versioning.rs::{snapshot,snapshot_for_patch}`; `src-tauri/src/commands/version.rs::{create_snapshot,restore_snapshot}` | read-only/materialized for snapshot creation; legacy direct write requiring future convergence for restore | W84 guard present: snapshot creation/list/diff remain materialized/read-only paths; `restore_snapshot` fails closed by default and requires explicit dev/migration/manual restore override; legacy response omits raw LifeModel and snapshot YAML. | Keep snapshot writes as materialized/audit outputs; convert restore to a governed rollback/audit flow or remove the legacy override capability. |
-| Data import/export | `src-tauri/src/commands/settings.rs::{export_all_data,import_all_data,apply_import_payload}` | legacy direct write requiring future convergence | W84 guard present: export remains available; `import_all_data` fails closed by default and requires explicit dev/migration/manual restore override; legacy response omits raw LifeModel, messages, vectors, and imported payload while returning counts/status only. | Keep as explicit migration/restore path with stronger audit; do not treat imports as HS learning or accepted truth without re-materialization. |
+| Snapshots and restore | `openlife-core/src/versioning.rs::{snapshot,snapshot_for_patch}`; `src-tauri/src/commands/version.rs::{create_snapshot,restore_snapshot}` | read-only/materialized for snapshot creation; governed restore/import operation for restore | W93 requires explicit governed restore request, pre-change snapshot, typed materializer restriction, metadata-safe hashes/audit, and no raw LifeModel or snapshot YAML response. | Keep restore explicit and audited. |
+| Data import/export | `src-tauri/src/commands/settings.rs::{export_all_data,import_all_data,apply_import_payload}` | governed restore/import operation for import | W93 requires explicit governed import request, target validation, pre-change snapshot, typed materializer restriction, metadata-safe counts/hashes/audit, and no raw imported payload response. Export remains read-only/materialized. | Keep import explicit and audited; do not treat imports as HS learning without re-materialization. |
 | External writes and declarative tool stubs | `openlife-core/src/agent/action_executor/tool_executor.rs`; `openlife-core/src/agent/action_executor/execution_tools.rs`; `src-tauri/src/commands/proposal.rs::{ExternalWriteAction,ScheduledTask,DataExport}` | already proposal-first; disabled/declarative-only for propose-only tools | HS/tool policy creates ExternalWriteAction proposals instead of direct writes; calendar/email propose tools create declarative proposals; accepted proposals re-check safe paths and payload limits before side effects. | Keep direct external writes blocked until accepted; ensure future tool manifests cannot bypass proposal-first policy. |
 | Compatibility YAML materializer | `openlife-core/src/life_model.rs::materialize_yaml_compatibility_view` | read-only/materialized | Produces a YAML string with source asset refs/digests and compact summaries; does not persist raw HS internals. | When stores become canonical, materializer should be the only YAML writer for HS-derived compatibility state. |
 
@@ -327,60 +365,26 @@ or external side effects. Newly introduced HS writes are candidate evidence,
 seeded built-in heuristics, metadata, or proposal creation paths, and runtime HS
 selection/materialization remains bounded and read-only.
 
-Legacy direct-write paths still exist and are not converged: manual LifeModel
-editor save, Builder legacy apply override, Calibration direct apply/evolution
-override, feedback evolution, restore/import, and several low-risk
-state/memory compatibility writes. These are known convergence items, not HS
-MVP additions. As of W79, they are represented by a machine-readable inventory
-guard; as of W80, manual LifeModel editor save also has a metadata-safe manual
-override audit guard; as of W81, Builder legacy direct apply defaults fail
-closed and no-signal completion is no-write/session-only; as of W82,
-Calibration direct/evolution defaults fail closed and normal flow is
-proposal-first; as of W83, Feedback evolution direct apply defaults fail
-closed and `generate_evolution_report` is read-only/no LifeModel or
-`evolution_rules` write; as of W84, Snapshot restore and Data import default
-fail closed and require explicit dev/migration/manual restore overrides while
-returning metadata-safe responses only; as of W85, State/Daily Goal has a
-metadata-safe source-data boundary proof that keeps it classified as low-risk
-transient source-data compatibility materialized state, acknowledges the
-current `persist_life_model` compatibility view / YAML write, and keeps it
-separate from accepted durable LifeModel-HS truth; as of W86, the LifeModel
-compatibility materializer caller matrix classifies all current production
-`persist_life_model` callsites and production `LifeModelManager::save` related
-entries without changing behavior, routing, signatures, or legacy path
-availability; as of W87, `persist_life_model` requires typed W86 caller
-context and snapshot restore's direct `LifeModelManager::save` has a W87
-restriction guard; as of W88, accepted LifeModel proposal apply maps PatchStore
-source by ProposalSource instead of hardcoding BuilderReview; as of W89, that
-mapping has a metadata-safe readiness proof with fallback blockers still
-explicit. These guards, matrices, restrictions, mappings, and proofs are not
-convergence completion.
+W97 completes the legacy direct-write convergence slice. Builder, Calibration,
+and Feedback legacy direct-write override paths are retired/no-write. Manual
+LifeModel editor save, Snapshot restore, and Data import are explicit governed
+operations with validation, pre-change snapshots, typed materializer
+restriction, and metadata-safe audit/count/hash results. Proposal application
+has exact ProposalSource -> PatchSource mapping with no fallback blocker. State
+and Daily Goal remain source-data compatibility materialization only, separate
+from accepted durable LifeModel-HS truth. The final inventory reports
+`overall_converged=true`, `all_direct_writes_converged=true`, and zero
+high-risk legacy direct-write blockers.
 
 ## Convergence Backlog
 
-1. Make Review Center application the only normal durable LifeModel write path.
-2. Remove or fully proposal-first-convert `builder_apply_signals`; keep Builder
-   no-signal completion session-only with no durable LifeModel write.
-3. Remove or fully proposal-first-convert Calibration direct mode and
-   micro-evolution legacy persistence; keep normal UI flow on
-   `calibration_create_proposals`.
-4. Remove or fully proposal/evidence-first-convert Feedback evolution direct
-   apply and `evolution_rules` updates; keep `generate_evolution_report`
-   read-only unless it creates only reviewable Proposal/Evidence records.
-5. Split transient state into StateStore with TTL/source/confidence/privacy
-   metadata; require proposals before durable preference or identity promotion.
-6. Keep raw chat/memory/vector writes as local source data with retention,
+1. Keep Review Center / accepted proposals as the normal durable LifeModel-HS
+   mutation target.
+2. Keep governed manual editor, restore, and import operations explicit,
+   audited, snapshot-backed, and metadata-safe.
+3. Split transient State/Daily Goal data into a future StateStore with
+   TTL/source/confidence/privacy metadata; require proposals before durable
+   preference or identity promotion.
+4. Keep raw chat/memory/vector writes as local source data with retention,
    deletion, and forgetting controls; route generated durable memory claims
    through proposals/evidence.
-7. W87 complete: `persist_life_model` requires typed W86 caller context and
-   snapshot restore's direct `LifeModelManager::save` has a W87 guard. This is
-   caller restriction only, not full convergence or legacy path retirement.
-8. W88 complete: accepted LifeModel proposal apply now uses source-specific
-   PatchSource mapping and metadata-safe fallback reporting instead of
-   hardcoded BuilderReview.
-9. W89 complete: Proposal Application Source-Specific Patch Audit / Readiness
-   proves apply-path mapping usage and exact/fallback source classification,
-   while keeping fallback strategy blockers and
-   `proposal_first_convergence_complete=false`.
-10. W90: retire or convert Builder legacy direct apply override before marking
-    Builder convergence complete.

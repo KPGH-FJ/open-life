@@ -240,6 +240,11 @@ impl PatchStore {
             "feedback" => PatchSource::Feedback,
             "manual" => PatchSource::Manual,
             "evolution" => PatchSource::Evolution,
+            "chat_conversation" => PatchSource::ChatConversation,
+            "proactive_agent" => PatchSource::ProactiveAgent,
+            "skill_runtime" => PatchSource::SkillRuntime,
+            "plugin" => PatchSource::Plugin,
+            "memory_governance" => PatchSource::MemoryGovernance,
             _ => PatchSource::Manual,
         };
 
