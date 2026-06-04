@@ -1,23 +1,22 @@
 # Plan-Execute Product Vertical Goal Spec
 
-> Last updated: 2026-06-03
+> Last updated: 2026-06-04
 > Status: completed CLI Goal-mode implementation spec / audit trail for W98-W105
 
-This document is the CLI Goal-mode handoff and audit trail for the W98-W105
+This document is the completed CLI Goal-mode spec and audit trail for the W98-W105
 Plan-Execute Product Vertical: turning the existing PlanExecute runtime V1
 slice into one narrow, user-visible product vertical.
 
-The intended use is direct: start Codex CLI from the repository root, point it
-to this file, and ask it to implement the full Goal. The Agent may complete the
-whole block in one sustained run, but must internally keep the W98-W105 order,
-prove each slice with tests, and stop only after final verification. The Agent
-must not commit or push unless the user asks after review.
+The W97 baseline below describes the historical state at Goal start. Do not
+treat it as the current repository state; current status is governed by
+`AGENTS.md`, `plans/README.md`, and
+`plans/lifemodel_governed_runtime_progress.md`.
 
-## 1. Current Baseline
+## 1. Goal-Start Baseline
 
-The authoritative baseline is **W97 Legacy Direct-Write Convergence complete**.
+The goal-start authoritative baseline was **W97 Legacy Direct-Write Convergence complete**.
 
-The Agent must read these files before editing code:
+The implementation Agent was required to read these files before editing code:
 
 1. `AGENTS.md`
 2. `plans/README.md`
@@ -32,7 +31,7 @@ The Agent must read these files before editing code:
 11. `src-tauri/src/commands/agent_runtime/mod.rs`
 12. `frontend/src/tauri.ts`
 
-Current completed preparation:
+Goal-start completed preparation:
 
 - W15 completed the core PlanExecute governed runtime V1 slice.
 - `PlanExecuteService` can draft and execute metadata-safe read-only/write-like

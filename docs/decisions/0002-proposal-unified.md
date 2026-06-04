@@ -1,8 +1,13 @@
 # ADR 0002: Proposal 统一层
 
+> Historical ADR retained for Proposal-layer intent. Current Proposal semantics,
+> LifeModel-HS governance, direct-write convergence, and tool permission/replay
+> constraints are governed by `AGENTS.md`, `plans/README.md`, ADR 0013, and
+> W90-W123 progress docs.
+
 ## 状态
 
-- **状态**: 已接受
+- **状态**: 已接受；实现边界以后续治理文档为准
 - **日期**: 2026-04-24
 - **作者**: OpenLife Team
 

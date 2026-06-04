@@ -25,10 +25,10 @@ The current code already has important Alpha+ pieces:
 - W106-W113 made ReAct and PlanExecute descriptor/registry-ready strategies,
   with metadata-safe selection/execution reports and trace vocabulary.
 
-The current code is not yet ReAct Beta-ready. The next block should harden the
-execution spine so ReAct action planning, tool registry authority, action /
-observation traces, permission/replay, and proposal-first writes become a stable
-contract.
+At Goal start, the W113 code was not yet ReAct Beta-ready. W114-W123 hardened
+the execution spine so ReAct action planning, tool registry authority, action /
+observation traces, permission/replay, and proposal-first writes became a more
+stable contract.
 
 This Goal is explicitly not a default Chat route cutover. It may harden existing
 ReAct/AgentLoop internals and non-default preview/status surfaces, but it must

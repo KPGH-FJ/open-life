@@ -30,8 +30,8 @@ as reference only.
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
 9. `plans/lifemodel_maturation_goal_plan.md`
-   - Current Goal-mode preparation plan for LifeModel Maturation Loop
-     End-to-End after W72.
+   - Completed Goal-mode preparation/spec and audit trail for the W73-W78
+     LifeModel Maturation proof slice after W72.
 10. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
@@ -577,7 +577,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `plans/react_beta_execution_hardening_goal_spec.md` | Completed W114-W123 ReAct Beta Execution Hardening CLI spec/audit trail. |
 | `plans/runtime_strategy_maturity_goal_spec.md` | Completed W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity spec/audit trail. |
 | `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
-| `plans/lifemodel_maturation_goal_plan.md` | Current Goal-mode preparation plan for LifeModel Maturation Loop End-to-End. |
+| `plans/lifemodel_maturation_goal_plan.md` | Completed W73-W78 LifeModel Maturation proof-slice preparation/spec and audit trail. |
 | `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md` | LifeModel-HS source-of-truth, proposal-first, privacy, materialized-view hard rules. |
 | `plans/openlife_react_beta_roadmap.md` | ReAct execution seriousness, Beta gates, tool/action/audit baseline. |
 | `plans/lifemodel_hs_mvp_task_specs.md` | Coding-ready LifeModel-HS MVP task specs. |
@@ -592,6 +592,8 @@ These files are useful context, but they are not current execution authority:
 | Document | Status |
 | --- | --- |
 | `OpenLife_Final_PRD.md` | Historical long-form PRD. Do not use for current task order. |
+| `OpenLife_PRD_v2_Agent_Framework.md` | Product definition baseline only; implementation order is governed by current Agent/LifeModel runtime docs. |
+| `UI_BETA_SHELL_CONTRACT.md` | Historical Beta shell contract; do not use for current Beta status, navigation, or Tool Taxonomy. |
 | `plans/openlife_alpha_beta_plan.md` | Historical Alpha to Beta productization plan. |
 | `plans/openlife_remaining_tasks_plan.md` | Historical sprint debt plan. Re-check code before using any item. |
 | `plans/openlife_stabilization_and_spine_consolidation_plan.md` | Historical stabilization plan. |
@@ -601,7 +603,11 @@ These files are useful context, but they are not current execution authority:
 | `architecture_diagram.md` | Snapshot diagram; verify against code and current program. |
 | `BETA_CHECKLIST.md` | Historical checklist; current Beta/tool status is in AGENTS and roadmap. |
 | `docs/ARCHITECTURE.md` | Quick architecture explainer; defer to current program for implementation order. |
+| `docs/BETA_USER_GUIDE.md` | Historical/draft user guide; current project has not declared full Beta. |
 | `docs/DEV_HANDOVER.md` | General handover; defer to this index and AGENTS for current Agent work. |
+| `docs/decisions/0001-lifemodel-patch.md` | Historical ADR; direct-write compatibility assumptions are superseded by ADR 0013 and W90-W97 convergence. |
+| `docs/decisions/0002-proposal-unified.md` | Historical ADR for Proposal intent; current Proposal semantics are governed by W90-W123 docs. |
+| `docs/decisions/0003-agent-run-tracking.md` | Historical ADR for AgentRun intent; current trace semantics include W10, W98-W105, W106-W113, and W114-W123. |
 
 ## 6. Tool Status Guardrail
 

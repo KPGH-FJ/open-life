@@ -4,6 +4,10 @@
 > authority. Current Agent development order and Tool Taxonomy are governed by
 > `AGENTS.md`, `plans/README.md`, and
 > `plans/openlife_lifemodel_governed_agent_runtime.md`.
+>
+> W123 ReAct Beta Execution Hardening improves execution readiness, but it is
+> not a full Beta declaration. Current Beta blockers are tracked in the
+> authority docs and `plans/openlife_react_beta_roadmap.md`.
 
 ## 核心功能验证
 
@@ -118,7 +122,7 @@
 - [x] 数据目录统一（ai.openlife.app）
 - [x] 环境变量模板更新
 
-## 已知限制（Beta 阶段）
+## 历史已知限制（旧 Beta checklist）
 
 1. **AgentLoop Streaming**: 当前为句子级分块，非真实 token 流
 2. **Tool Execution**: calendar/email 为 declarative-only stub
@@ -126,7 +130,7 @@
 4. **Memory**: 异步 embedding 在首次写入后延迟生成
 5. **Skill Runtime**: 仅内置 3 个 Skill，不支持外部 Skill 注册
 
-## 下一步（Sprint 9+）
+## 历史后续事项（执行前必须重新验代码和权威文档）
 
 - [ ] 外部 Skill 注册和 Marketplace
 - [ ] 真实 token 级流式输出

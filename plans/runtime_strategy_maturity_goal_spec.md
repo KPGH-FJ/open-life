@@ -1,24 +1,23 @@
 # RuntimeStrategy / Multi-Strategy Runtime Maturity Goal Spec
 
-> Last updated: 2026-06-03
+> Last updated: 2026-06-04
 > Status: completed CLI Goal-mode implementation spec / audit trail for W106-W113
 
-This document is the CLI Goal-mode handoff for the next architecture block:
-mature the RuntimeStrategy and MultiStrategy Runtime layer from a lightweight
+This document is the completed CLI Goal-mode spec and audit trail for maturing
+the RuntimeStrategy and MultiStrategy Runtime layer from a lightweight
 adapter/orchestrator into a governed, inspectable, metadata-safe strategy
 protocol.
 
-The intended use is direct: start Codex CLI from the repository root, point it
-to this file, and ask it to implement the full Goal. The Agent may complete the
-whole block in one sustained run, but must internally keep the W106-W113 order,
-prove each slice with tests, and stop only after final verification. The Agent
-must not commit or push unless the user asks after review.
+The W105 baseline below describes the historical state at Goal start. Do not
+treat it as the current repository state; current status is governed by
+`AGENTS.md`, `plans/README.md`, and
+`plans/lifemodel_governed_runtime_progress.md`.
 
-## 1. Current Baseline
+## 1. Goal-Start Baseline
 
-The authoritative baseline is **W105 Plan-Execute Product Vertical complete**.
+The goal-start authoritative baseline was **W105 Plan-Execute Product Vertical complete**.
 
-The Agent must read these files before editing code:
+The implementation Agent was required to read these files before editing code:
 
 1. `AGENTS.md`
 2. `plans/README.md`
@@ -38,7 +37,7 @@ The Agent must read these files before editing code:
 16. `frontend/src/components/RunTracePanel.tsx`
 17. `frontend/src/pages/RunsPage.tsx`
 
-Current completed preparation:
+Goal-start completed preparation:
 
 - `RuntimeStrategy` trait exists in `strategy_runtime.rs`.
 - Fixed ReAct and PlanExecute adapters exist.
@@ -52,20 +51,20 @@ Current completed preparation:
   vertical with durable session lifecycle, proposal-first step execution, and
   Plan-Execute product trace visibility.
 
-Known limitations that remain real:
+Goal-start limitations addressed by W106-W113:
 
-- Runtime strategies do not have first-class capability descriptors.
-- Registry readiness is implicit; there is no report proving required
+- Runtime strategies did not have first-class capability descriptors.
+- Registry readiness was implicit; there was no report proving required
   strategies are present, unique, metadata-safe, and policy-compatible.
-- Selection output has a small summary, but not a full candidate matrix or
+- Selection output had a small summary, but not a full candidate matrix or
   human-reviewable explanation.
-- `RuntimeStrategyOutput.metadata_safe_summary` is not preserved as a stable
+- `RuntimeStrategyOutput.metadata_safe_summary` was not preserved as a stable
   top-level MultiStrategy runtime execution report.
-- Preview trace and Plan-Execute product trace use related but separate shapes.
-- There is no non-default read-only status command that reports runtime strategy
+- Preview trace and Plan-Execute product trace used related but separate shapes.
+- There was no non-default read-only status command that reported runtime strategy
   registry/selection maturity without running a preview.
 - Future strategies such as Workflow, Proactive, Reflective, Direct, or Layered
-  have no declarative boundary in the runtime strategy taxonomy.
+  had no declarative boundary in the runtime strategy taxonomy.
 - Default Chat remains `legacy_stream` and must remain unchanged.
 
 ## 2. Goal Objective

@@ -12,24 +12,14 @@
 OpenLife is now defined as a **local-first, LifeModel-governed personal Agent framework**, not a conventional desktop app.
 
 ReAct remains the current default Chat execution strategy and Beta execution
-kernel, but the long-term architecture is not "ReAct only." W1-W60 have already
+kernel, but the long-term architecture is not "ReAct only." W1-W123 have
 implemented the thin runtime contract, LifeModel governance foundations,
-PlanExecute core/vertical slices, StrategySelector, MultiStrategy preview/audit,
-the lightweight RuntimeStrategy adapter foundation, read-only migration gates,
-visible Settings evidence surfaces, explicit controlled pilot/shadow/candidate
-paths, metadata-safe review evidence, a disabled default Chat adapter guard
-stack through typed callsite contracts, an authority roadmap sync so later
-Agents no longer follow stale W22 route instructions, an ordinary-entry
-preflight / side-effect lock before the legacy Chat entry, and a read-only
-ordinary-entry preflight status surface for Settings review, a read-only
-narrow implementation discussion gate over W48/W56 evidence, a read-only
-narrow implementation plan draft over W57, metadata-safe human review evidence
-over that W58 draft, and a read-only narrow implementation plan approval
-readiness gate over the current draft/review digest. The W65 descriptor
-slice adds only a pure backend mapper for a future controlled adapter candidate
-contract; it stores input length/hash and route/executor metadata, keeps the
-controlled executor disabled/unattached, writes nothing, runs nothing, and does
-not route default Chat.
+StrategySelector, MultiStrategy preview/audit, RuntimeStrategy maturity,
+Default Chat adapter guard/prep, LifeModel maturation proof, Legacy
+Direct-Write Convergence, the non-default Plan-Execute weekly planning product
+vertical, and ReAct Beta execution hardening. The default Chat route still
+stays on `legacy_stream`; ordinary `send_message` / `start_stream_message` do
+not route through MultiStrategy, PlanExecute, or ReAct Beta status surfaces.
 
 The important current boundary is that MultiStrategy Runtime is
 descriptor/readiness/report/status-ready and preview/audit-ready, and ReAct
@@ -148,7 +138,7 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 | Execution tools | Core OS, file/web/calendar/email/task/MCP/A2A taxonomy is synchronized; calendar/email write-like tools are proposal-only governed executors | Keep proposal-only semantics, disabled/declarative-only handling, and tests aligned |
 | Calibration/Evolution | Feedback and model improvement suggestions exist and proposal-first paths are in place | Needs maturation loop V1 rather than scattered direct writes |
 | LifeModel-HS foundations | RuntimeHSPacket, PolicyStore, EvidenceStore, HeuristicStore, RegressionSuite, Governor MVP exist | Still needs end-to-end LifeEvent/Signal/Evidence/Governor/Proposal loop |
-| PlanExecute | Governed V1 runtime slice exists and can appear as a MultiStrategy preview payload/report | Not yet a productized weekly planning vertical slice |
+| PlanExecute | Governed runtime slice plus W98-W105 non-default weekly planning product vertical with durable sessions, review/edit/finalize, proposal-first step execution, and trace linkage | Productized only for the narrow weekly planning vertical; broader Plan-Execute product paths remain future work |
 | MultiStrategy preview | `run_multi_strategy_agent_preview` persists metadata-safe outer AgentRun audit and Runs/Trace can display it | Preview/beta only; not default Chat |
 | Runtime Migration Gate evidence surface | Settings experimental panel can explicitly display `check_runtime_migration_gate` pass/block evidence and blocking reasons | Read-only diagnostic surface; not a Chat switch and not a preview runner |
 | Pilot eligibility | `check_controlled_chat_pilot_eligibility` and Settings Pilot eligibility check recent preview gate evidence for sustained clean runs | Read-only qualification only; not a Chat switch, not a migration trigger, and creates no AgentRun/Proposal/Action/Observation |
@@ -180,12 +170,12 @@ Execution tools are part of the Beta definition. OpenLife must support OpenClaw-
 - ~~No formal `RuntimeStrategy` trait.~~ ✅ 已完成（W16：lightweight adapter/registry foundation for ReAct and PlanExecute）
 - ~~No Runtime Migration Gate.~~ ✅ 已完成（W17：read-only gate for preview audit, fallback, metadata-safe trace, external-write, and proposal-first boundaries）
 - **Default Chat is not migrated to MultiStrategy Runtime.** This is intentional; do not treat it as a gap to close in one direct replacement.
-- **Current boundary: W65 backend-only descriptor skeleton after W64 authority compression validation.** Do not treat W19-W60 eligibility, preview, promotion, evidence, readiness, review, activation, dry-run, controlled preview, cutover plan, route guard, invocation guard, typed callsite, preflight, preflight status, narrow implementation discussion, narrow implementation draft, narrow implementation plan review approval, narrow implementation plan approval readiness, or W65 descriptor readiness as permission to replace default Chat directly.
+- **Current boundary: W123 ReAct Beta Execution Hardening complete.** Do not treat W19-W60 eligibility/review/readiness, W65-W72 adapter descriptor/proof/gate/skeleton readiness, W73-W78 maturation proof readiness, W90-W97 convergence reports, W98-W105 product ids/traces, W106-W113 RuntimeStrategy readiness/status, or W114-W123 ReAct Beta readiness/status/trace reports as permission to replace default Chat directly.
 
 ### 3.2 Product Gaps
 
 - MultiStrategy preview is still not the default Chat path; the migration gate evidence surface, pilot eligibility, controlled pilot/promotion, promotion evidence, migration review, shadow/cutover candidate, activation planning, dry-run/controlled preview, cutover plan approval, and default Chat adapter guard stack exist, but broader Chat migration still requires a separate reviewed implementation phase.
-- Users cannot yet use a productized LifeModel-governed weekly planning flow.
+- Users can use the non-default W98-W105 weekly planning vertical; broader LifeModel-governed product golden paths remain incomplete.
 - LifeModel maturation V1 exists as a service, but is not yet a visible end-to-end product loop.
 - ~~LifeModel updates are not yet presented as one consistent reviewable proposal stream.~~ ✅ 已完成（Builder/Calibration/Chat 统一走 Proposal → Review Center）
 - Dashboard is still closer to a summary page than an operating workspace.

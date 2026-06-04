@@ -2,6 +2,12 @@
 
 > 适用场景：你通过 Codex 持续 coding 推进 OpenLife
 > 目标：让每一轮开发都能稳定推进，而不是在大 PRD 里反复发散
+>
+> 2026-06-04 W123 note: this file describes execution discipline, slicing, and
+> verification habits. It is not the current task-order authority. Current
+> project status and next architecture direction are governed by `AGENTS.md`,
+> `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
 
 ---
 
@@ -21,18 +27,22 @@
 - 下一阶段总纲：见 [plans/openlife_lifemodel_governed_agent_runtime.md](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 - 当前进度索引：见 [plans/lifemodel_governed_runtime_progress.md](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 - 长期目标和产品哲学：见 [OpenLife_Final_PRD.md](/Users/fujing/Desktop/偶来福/OpenLife_Final_PRD.md)
-- 当前阶段主计划：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
+- 当前执行路线参考：见 [plans/openlife_development_plan.md](/Users/fujing/Desktop/偶来福/plans/openlife_development_plan.md)
 - 本文档：规定 Codex 的日常执行方式
 
 ---
 
 ## 2. 当前目标
 
-当前阶段，OpenLife 的目标已经从“做出 Alpha 底座”进一步切换到：
+当前阶段，OpenLife 已经完成 W1-W123 的一大轮 LifeModel-Governed Runtime
+开发与整理。后续每一轮仍应围绕这些目标推进，但具体顺序必须以
+`plans/README.md` 和 `plans/openlife_lifemodel_governed_agent_runtime.md`
+为准：
 
 - 把 LifeModel-HS 作为 Agent Framework 的核心协议层
 - 让 ReAct 作为当前默认执行策略完成治理化收敛
-- 为后续 LifeModel Maturation Loop、Plan-Execute 和多策略 Runtime 打好骨架
+- 在已完成的 LifeModel maturation proof、Plan-Execute vertical、
+  RuntimeStrategy maturity 和 ReAct hardening 基线之上继续补 Beta blocker
 
 当前版本优先按这条顺序推进：
 
@@ -365,7 +375,7 @@ make ci
 1. 当前真实代码行为
 2. `AGENTS.md` 与 `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. 当前阶段主计划
+4. 当前执行路线参考
 5. Codex 执行手册
 6. 大 PRD
 

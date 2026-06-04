@@ -1,22 +1,25 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
-> Date: 2026-06-02
-> Status: W60 Default Chat Adapter Narrow Implementation Plan Approval Readiness Gate complete; default Chat remains unchanged
-> Scope: post-LifeModel-HS MVP convergence, runtime strategy direction, and next implementation order
+> Date: 2026-06-04
+> Status: W123 ReAct Beta Execution Hardening complete; default Chat remains `legacy_stream`
+> Scope: current LifeModel-governed Agent Runtime program, completed W1-W123 baseline, and next Beta blockers
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W60, it records that MultiStrategy work is preview/audit-ready with a
-lightweight fixed RuntimeStrategy adapter boundary, read-only migration gates,
-Settings evidence surfaces, explicit controlled pilot/shadow/candidate paths,
-metadata-safe review evidence, and a disabled default Chat adapter guard stack
-through typed callsite contracts, an ordinary-entry preflight / side-effect
-lock, a read-only ordinary-entry preflight status surface, a read-only
-narrow implementation discussion gate, and a read-only narrow implementation
-plan draft, metadata-safe human review evidence over that draft, and a
-read-only approval readiness gate over the current draft/review digest.
-MultiStrategy is still not the default Chat runtime.
+As of W123, the major scoped blocks are complete: W65-W72 default Chat adapter
+guard stack, W73-W78 LifeModel maturation proof slice, W90-W97 Legacy
+Direct-Write Convergence, W98-W105 Plan-Execute Product Vertical, W106-W113
+RuntimeStrategy / Multi-Strategy Runtime Maturity, and W114-W123 ReAct Beta
+Execution Hardening. These blocks prove contracts, readiness, proposal-first
+writes, trace visibility, and non-default product/runtime surfaces. They do not
+grant default Chat migration permission, and MultiStrategy is still not the
+ordinary Chat runtime.
+
+Full Beta is also not declared by W123. The remaining blockers are primarily
+Skill Runtime maturity, ModelRouter/Privacy hardening, cross-product
+LifeModel/Memory governance golden paths, and any future default Chat route
+migration as a separate reviewed implementation phase.
 
 It updates the project framing from:
 
@@ -113,7 +116,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W60 status table and preview/not-default/gate evidence/pilot eligibility/controlled pilot/promotion-validation/evidence/readiness/planning/review/shadow/cutover/default-adapter guard boundary/status.
+   - Compact W1-W123 status table and compressed guardrail map.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -130,20 +133,20 @@ As of this preparation document, the project already has meaningful primitives:
 | HeuristicStore | `openlife-core/src/agent/heuristic_store.rs` | Persisted collaboration guidance store with lifecycle and seeded MVP heuristics. |
 | RegressionSuite | `openlife-core/src/agent/regression_suite.rs` | Deterministic MVP behavior checks. Not yet a durable user scenario store. |
 | PlanExecute | `openlife-core/src/agent/plan_execute.rs` | Governed plan payloads plus the W98-W105 non-default weekly planning product vertical with durable sessions and proposal-first execution. |
-| StrategySelector | `openlife-core/src/agent/strategy.rs` | Selects ReAct, PlanExecute, or Blocked with metadata-safe summaries. Not a formal strategy trait. |
-| MultiStrategyRuntime | `openlife-core/src/agent/multi_strategy_runtime.rs` | Preview/core orchestrator for selected payloads. Not the default Chat runtime. |
+| StrategySelector | `openlife-core/src/agent/strategy.rs` | Selects ReAct, PlanExecute, or Blocked with metadata-safe candidate matrix/explanations after W106-W113 maturity work. |
+| MultiStrategyRuntime | `openlife-core/src/agent/multi_strategy_runtime.rs` | Preview/core orchestrator with metadata-safe execution report envelope. Not the default Chat runtime. |
 | Preview command | `src-tauri/src/commands/agent_runtime.rs::run_multi_strategy_agent_preview` | Non-default preview/beta command. W10 persists a metadata-safe outer AgentRun audit. |
 | Runtime Migration Gate | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_runtime_migration_gate` | Read-only diagnostic over existing preview AgentRun audit. Does not execute ReAct, PlanExecute, tools, or external writes. |
 | Gate evidence surface | `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | Settings-only Runtime Migration Gate panel that displays pass/block fields and blocking reasons. It is not a Chat switching control and does not run preview automatically. |
 | Pilot Eligibility | `openlife-core/src/agent/runtime_migration_gate.rs`, `check_controlled_chat_pilot_eligibility`, Settings Pilot eligibility panel | W19 read-only sustained evidence check over the latest 3 preview gate reports. It returns eligibility, clean count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation and is not a Chat switch. |
 | Controlled Chat Pilot / Promotion | `frontend/src/pages/ChatPage.tsx` | W20 explicit single-turn pilot plus W21 reviewed promotion and W22 source-bound validation. The pilot calls eligibility before preview, blocks without preview when ineligible, runs `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, displays “Pilot response” separately, and keeps normal Send unchanged. Promotion can write one ordinary assistant chat message with existing `run_id` metadata only after explicit review/confirmation and only when the current target session matches the pilot source session. |
 | Promotion / migration evidence ladder | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | W23-W33 add metadata-safe promotion evidence, readiness, reviewed migration plan, review decision evidence, implementation gate, shadow run/review, cutover readiness, candidate adapter/review, and candidate promotion readiness. These are explicit, evidence-backed, and non-default; readiness means implementation discussion, not migration permission. |
-| Default Chat adapter guard ladder | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Settings panels | W34-W60 make the default Chat boundary observable, activation-planned, reviewable, implementation-gated, disabled-routed, contract-checked, dry-run-reviewed, implementation-readiness-checked, controlled-preview-reviewed, cutover-plan-reviewed, route-guarded, invocation-guarded, typed-callsite-guarded, ordinary-entry-preflighted, preflight-status-visible, narrow-discussion-gated, narrow-plan-drafted, and narrow-plan-reviewed. Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter execution remains disabled and unattached. |
-| Authority roadmap sync | `AGENTS.md`, `README.md`, `plans/README.md`, this document, `plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md` | W54 realigns high-priority route documents with W1-W53 code status so future Agents do not follow stale W22 instructions. This is documentation governance, not runtime migration. |
-| Preview trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, payload, governance, warnings, and metadata-safe trace fields. |
+| Default Chat adapter guard ladder | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Settings panels | W34-W60 make the default Chat boundary observable and guarded; W65-W72 add backend-only descriptor, contract report, non-default harness, send/stream proof, attachment gate, disabled skeleton, and binding integrity proof. Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter execution remains disabled and unattached. |
+| Authority roadmap / docs sync | `AGENTS.md`, `README.md`, `plans/README.md`, this document, `plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md` | W54, W64, W97, W105, W113, and W123 keep authority docs/progress synced so future Agents do not follow stale migration or tool-taxonomy instructions. This is documentation governance, not runtime migration. |
+| Preview / product / ReAct trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, product trace vocabulary, ReAct action/observation lifecycle, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
 | Proposal apply | `src-tauri/src/commands/proposal.rs` | Main convergence target for LifeModel, memory, tool permission, scheduled task, data export, and external write application. |
-| Model routing | `openlife-core/src/agent/model_router.rs`, `openlife-core/src/scheduler.rs` | Role/privacy-aware router plus scheduler integration; HS LocalOnly can fail closed. |
+| Model routing | `openlife-core/src/agent/model_router.rs`, `openlife-core/src/scheduler.rs` | Role/privacy-aware router plus scheduler integration; HS LocalOnly can fail closed. Broader ModelRouter/Privacy hardening remains a Beta blocker. |
 | Compatibility LifeModel | `openlife-core/src/life_model.rs` | YAML/struct compatibility view remains broadly used. It is not the final HS source of truth. |
 
 This means the next phase should not start from blank design. It should
@@ -256,12 +259,14 @@ These early pieces do not change the boundary:
 - PlanExecute now has one narrow product vertical: non-default weekly planning
   with durable sessions, review/edit/finalize, proposal-first write-like steps,
   and metadata-safe AgentRun trace linkage.
-- `RuntimeStrategy` now exists as a lightweight ReAct/PlanExecute adapter
-  boundary; it remains fixed to those adapters and is not plugin loading.
+- `RuntimeStrategy` now exists with W106-W113 descriptor/registry readiness.
+  ReAct and PlanExecute are executable strategies; Direct, Layered, Workflow,
+  Proactive, and Reflective remain disabled/declarative-only future strategies.
 - The next step is still not direct default Chat replacement. W20-W60 evidence,
-  review, readiness, activation, dry-run, controlled preview, cutover plan, and
-  adapter guard/status/discussion-gate/plan-draft/plan-review success are
-  implementation-discussion artifacts, not migration permission.
+  W65-W72 proofs, W73-W78 maturation proofs, W90-W97 convergence reports,
+  W98-W105 product ids, W106-W113 status/readiness, and W114-W123 ReAct Beta
+  readiness/status/trace reports are implementation-discussion or status
+  artifacts, not migration permission.
 
 ## 5. Target Spine
 
@@ -352,7 +357,7 @@ Current implementation note:
   PlanExecute are descriptor/registry-ready executable RuntimeStrategy
   adapters; Direct, Layered, Workflow, Proactive, and Reflective remain
   declarative-only future strategy descriptors unless separately implemented.
-  This is not default Chat migration and not ReAct Beta execution hardening.
+  This is not default Chat migration and not a full Beta declaration.
 
 ## 8. Development Order
 

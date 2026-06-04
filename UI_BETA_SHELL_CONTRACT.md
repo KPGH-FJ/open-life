@@ -1,6 +1,14 @@
 # OpenLife UI Beta Shell Contract
 
-> 本文档定义 OpenLife Beta 阶段的产品能力边界，指导 UI 重构和后续开发。
+> Historical UI shell contract. Do not use this file as current Beta status,
+> navigation, Tool Taxonomy, or implementation authority.
+>
+> Current Agent development order and product/runtime boundary are governed by
+> `AGENTS.md`, `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
+>
+> This file is retained only as a scoped UX reference for older Beta-shell
+> thinking. Re-check current code and docs before reviving any item.
 >
 > 版本：Beta v1.0
 > 日期：2026-04-30
@@ -151,4 +159,4 @@ OpenLife
 
 ---
 
-*本文档随产品迭代更新。当前版本对应 Sprint 1-5 完成后的状态。*
+*历史说明：本文档对应旧 Sprint 1-5 完成后的 UI Beta shell 设想，不代表当前 W123 后的产品/工具状态。*

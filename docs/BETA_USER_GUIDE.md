@@ -1,6 +1,13 @@
 # OpenLife Beta 用户试用指南
 
-> 本文档面向非技术用户，帮助你快速上手 OpenLife 的 Beta 版本。
+> Historical/draft user guide. OpenLife has not been declared full Beta by the
+> current W123 authority docs.
+>
+> Use this file only for product-language reference. Current release status,
+> Beta blockers, tool capabilities, and development order are governed by
+> `AGENTS.md`, `plans/README.md`,
+> `plans/openlife_lifemodel_governed_agent_runtime.md`, and
+> `plans/openlife_react_beta_roadmap.md`.
 
 ---
 
@@ -125,7 +132,7 @@ A: 前往「设置 → 数字遗产 / 数据迁移」，点击「导出全部数
 
 导入时，如果文件版本与当前应用版本的主版本号不一致，系统会拒绝导入以防止数据不兼容。
 
-### Q: Beta 版本有什么已知限制？
+### Q: 旧 Beta 试用设想有什么已知限制？
 
 A:
 - 本地模型（Ollama）在工具调用方面能力有限，涉及工具调用时会自动切换到云端模型

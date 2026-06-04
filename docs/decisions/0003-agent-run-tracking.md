@@ -1,8 +1,13 @@
 # ADR 0003: AgentRun 追踪机制
 
+> Historical ADR retained for AgentRun intent. Current trace semantics are
+> extended by W10 preview audit, W98-W105 Plan-Execute product trace,
+> W106-W113 runtime strategy trace vocabulary, and W114-W123 ReAct
+> `react_trace` lifecycle hardening.
+
 ## 状态
 
-- **状态**: 已接受
+- **状态**: 已接受；trace envelope/current query semantics 以后续治理文档为准
 - **日期**: 2026-04-26
 - **作者**: OpenLife Team
 

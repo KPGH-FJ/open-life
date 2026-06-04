@@ -1,22 +1,22 @@
 # Legacy Direct-Write Convergence Goal Spec
 
-> Last updated: 2026-06-03
-> Status: Goal-mode implementation spec for W90-W97, starting from W89 complete
+> Last updated: 2026-06-04
+> Status: Completed CLI Goal-mode implementation spec / audit trail for W90-W97
 
-This document is the CLI Goal-mode handoff for completing the remaining
-Legacy Direct-Write Convergence block in one sustained Codex run.
+This document is the completed CLI Goal-mode spec and audit trail for the
+Legacy Direct-Write Convergence block.
 
-The intended use is direct: start Codex CLI from the repository root, point it
-to this file, and ask it to implement the full Goal. The Agent may execute the
-whole block in one run, but must internally keep the W90-W97 order, prove each
-slice with tests, and stop only after the final convergence state is verified.
+The pre-W90 baseline below describes the historical state at Goal start. Do not
+treat it as the current repository state; current status is governed by
+`AGENTS.md`, `plans/README.md`, and
+`plans/lifemodel_governed_runtime_progress.md`.
 
-## 1. Current Baseline
+## 1. Goal-Start Baseline
 
-The current authoritative baseline is **W89 Proposal Application
+The goal-start authoritative baseline was **W89 Proposal Application
 Source-Specific Patch Audit / Readiness complete**.
 
-The Agent must read these files before editing code:
+The implementation Agent was required to read these files before editing code:
 
 1. `AGENTS.md`
 2. `plans/README.md`
@@ -24,7 +24,7 @@ The Agent must read these files before editing code:
 4. `plans/lifemodel_hs_legacy_write_path_audit.md`
 5. `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
 
-Current completed preparation:
+Goal-start completed preparation:
 
 - W79 created the machine-readable legacy direct-write inventory guard.
 - W80 added metadata-safe manual LifeModel editor override audit.
@@ -39,7 +39,7 @@ Current completed preparation:
 - W88 mapped accepted LifeModel proposal `PatchSource` by `ProposalSource`.
 - W89 audited that mapping and proved apply-path resolver usage.
 
-Current blockers that remain real:
+Goal-start blockers resolved by W90-W97:
 
 - Builder legacy direct apply override still exists.
 - Calibration direct/evolution override capability still exists.
@@ -628,4 +628,3 @@ Use this checklist before accepting the Agent output:
 - No raw payload leakage in reports/debug/audit.
 - Docs are synchronized to W97.
 - `make ci` passes.
-

@@ -8,9 +8,16 @@
 > `plans/openlife_lifemodel_governed_agent_runtime.md`. This document remains
 > the Agent Framework baseline, but LifeModel-HS should now be treated as the
 > shared protocol layer and ReAct as the current default runtime strategy, not
-> the final architecture boundary. W1-W10 are complete through MultiStrategy
-> Preview AgentRun Audit Persistence; MultiStrategy is preview/audit-ready and
-> must not be treated as the default Chat runtime.
+> the final architecture boundary.
+>
+> 2026-06-04 W123 alignment note: W65-W72 default Chat adapter guard/prep,
+> W73-W78 LifeModel maturation proof slice, W90-W97 Legacy Direct-Write
+> Convergence, W98-W105 Plan-Execute Product Vertical, W106-W113
+> RuntimeStrategy maturity, and W114-W123 ReAct Beta Execution Hardening are
+> complete within their scoped boundaries. This architecture document is still
+> useful for concepts, but current implementation order, migration permission,
+> and Beta blockers are governed by `AGENTS.md`, `plans/README.md`, and
+> `plans/openlife_lifemodel_governed_agent_runtime.md`.
 
 ## 1. Executive Summary
 
