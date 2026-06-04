@@ -3,7 +3,7 @@ use crate::agent::action_executor::{
 };
 use crate::agent::runtime::{AgentRuntime, AgentRuntimeOutput};
 use crate::agent::types::{AgentObservation, AgentRun, AgentRunError, AgentRunStatus, AgentTask};
-use crate::agent::{RuntimeHSPacket, RuntimeInput, RuntimeOutput};
+use crate::agent::{RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput};
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
@@ -72,6 +72,28 @@ impl AgentLoopConfig {
     }
 }
 
+pub fn apply_react_guidance_to_config(
+    mut config: AgentLoopConfig,
+    packet: Option<&RuntimeHSPacket>,
+    mode: RuntimeGuidanceConsumptionMode,
+) -> AgentLoopConfig {
+    if !mode.is_enabled() {
+        return config;
+    }
+    let Some(packet) = packet else {
+        return config;
+    };
+    if packet
+        .guidance_refs
+        .iter()
+        .any(|guidance| guidance.impact_kind == "gentle_planning")
+    {
+        config.max_steps = config.max_steps.min(2);
+        config.max_tool_calls = config.max_tool_calls.min(2);
+    }
+    config
+}
+
 /// Bundles the 5 shared task/life-model/tools/privacy/memory parameters
 /// that flow through the entire agent loop, reducing argument counts below clippy limits.
 struct AgentLoopContext<'a> {
@@ -81,6 +103,7 @@ struct AgentLoopContext<'a> {
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
     pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
 }
 
 /// Boundary markers for prompt injection defense.
@@ -152,6 +175,7 @@ struct StepContext<'a> {
     pub memory_context: Option<String>,
     pub privacy_engine: PrivacyEngine,
     pub hs_runtime_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     pub action_ctx: &'a ActionExecutionContext<'a>,
     pub run: &'a mut AgentRun,
     pub tool_call_count: u32,
@@ -230,6 +254,7 @@ impl AgentLoop {
             memory_context: actx.memory_context.clone(),
             privacy_engine: actx.privacy_engine.clone(),
             hs_runtime_packet: actx.hs_runtime_packet.clone(),
+            guidance_consumption_mode: actx.guidance_consumption_mode,
         };
 
         match self.generate_response(&repair_actx).await {
@@ -271,6 +296,11 @@ impl AgentLoop {
         let mut run = AgentRun::new_chat_run(&actx.task.session_id, &actx.task.user_text);
         run.user_input = Some(actx.task.user_text.clone());
         let mut current_hs_packet = actx.hs_runtime_packet.clone();
+        let guided_config = apply_react_guidance_to_config(
+            config.clone(),
+            current_hs_packet.as_ref(),
+            actx.guidance_consumption_mode,
+        );
         if let Some(packet) = current_hs_packet.as_mut() {
             if packet.audit.agent_run_id.is_none() {
                 packet.audit.agent_run_id = Some(run.id.clone());
@@ -320,12 +350,12 @@ impl AgentLoop {
             );
 
             // Check step budget
-            if step_count >= config.max_steps {
+            if step_count >= guided_config.max_steps {
                 stop_reason = "max_steps_reached".into();
                 if final_response.is_empty() {
                     final_response = format!(
                         "已达到最大执行步数 ({})。当前结果：{}",
-                        config.max_steps, final_response
+                        guided_config.max_steps, final_response
                     );
                 }
                 break;
@@ -369,12 +399,13 @@ impl AgentLoop {
                         memory_context,
                         privacy_engine: current_privacy_engine.clone(),
                         hs_runtime_packet: current_hs_packet.clone(),
+                        guidance_consumption_mode: actx.guidance_consumption_mode,
                         action_ctx,
                         run: &mut run,
                         tool_call_count,
                     },
                     callback.clone(),
-                    config,
+                    &guided_config,
                 )
                 .await
             {
@@ -472,6 +503,7 @@ impl AgentLoop {
             memory_context,
             privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
         self.run_loop_core(&actx, action_ctx, None, &self.config)
             .await
@@ -518,6 +550,7 @@ impl AgentLoop {
             memory_context: input.memory_context.clone(),
             privacy_engine,
             hs_runtime_packet: runtime_action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: input.guidance_consumption_mode,
         };
         let config = self.config_with_runtime_budget(input);
 
@@ -559,6 +592,7 @@ impl AgentLoop {
             memory_context,
             privacy_engine,
             hs_runtime_packet: action_ctx.hs_runtime_packet.cloned(),
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
         };
         self.run_loop_core(&actx, action_ctx, Some(callback), &self.config)
             .await
@@ -588,6 +622,7 @@ impl AgentLoop {
                 memory_context: ctx.memory_context.clone(),
                 privacy_engine: ctx.privacy_engine.clone(),
                 hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                guidance_consumption_mode: ctx.guidance_consumption_mode,
             };
             if let Some(ref cb) = callback {
                 self.generate_response_streaming(&actx, cb.clone()).await
@@ -647,6 +682,7 @@ impl AgentLoop {
                                 memory_context: memory_ctx.clone(),
                                 privacy_engine: privacy.clone(),
                                 hs_runtime_packet: ctx.hs_runtime_packet.clone(),
+                                guidance_consumption_mode: ctx.guidance_consumption_mode,
                             },
                             ctx.action_ctx,
                             ctx.run,
@@ -761,7 +797,7 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task_with_hs_packet(
+            .execute_task_with_hs_packet_and_guidance_mode(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
@@ -769,6 +805,7 @@ impl AgentLoop {
                 memory_hits,
                 actx.privacy_engine.clone(),
                 actx.hs_runtime_packet.clone(),
+                actx.guidance_consumption_mode,
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
@@ -814,7 +851,7 @@ impl AgentLoop {
         let memory_hits = Vec::new();
         let runtime_output = self
             .runtime
-            .execute_task_with_hs_packet(
+            .execute_task_with_hs_packet_and_guidance_mode(
                 actx.task,
                 actx.life_model,
                 actx.tools_prompt,
@@ -822,6 +859,7 @@ impl AgentLoop {
                 memory_hits,
                 actx.privacy_engine.clone(),
                 actx.hs_runtime_packet.clone(),
+                actx.guidance_consumption_mode,
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;

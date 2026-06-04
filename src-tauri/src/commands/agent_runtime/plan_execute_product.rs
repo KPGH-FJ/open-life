@@ -4,7 +4,7 @@ use openlife_core::agent::{
     AgentTaskKind, ContextSummary, LifeModelGovernor, PlanExecuteInput, PlanExecuteProductContract,
     PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteStepEdit,
     PlanExecuteStepExecutionResult, PlanStepStatus, ReasoningTrace, RedactionLevel, RiskLevel,
-    RuntimeInput, RuntimeStrategyRegistry,
+    RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeStrategyRegistry,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::life_model::LifeModel;
@@ -218,7 +218,8 @@ pub(crate) async fn create_plan_execute_session_with_state(
             allow_cloud: false,
             allow_writes: false,
         },
-    );
+    )
+    .with_guidance_consumption_mode(RuntimeGuidanceConsumptionMode::ExplicitRuntime);
     let service = PlanExecuteService;
     let plan_input = PlanExecuteInput::from_runtime_input(
         runtime_input,

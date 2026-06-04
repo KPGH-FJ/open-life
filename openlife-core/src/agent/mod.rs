@@ -44,6 +44,7 @@ pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,
 };
+pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
@@ -69,9 +70,11 @@ pub use heuristic_store::{
     HeuristicUsageMetadata, HeuristicValidationState,
 };
 pub use hs_selector::{
-    behavior_checks_for_packet, build_runtime_hs_packet, HSAssetExclusion, HSAssetKind,
-    HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
-    RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
+    behavior_checks_for_packet, build_guidance_impact_read_model, build_runtime_hs_packet,
+    GuidanceAffectedSurface, GuidanceImpactReadModel, GuidanceImpactRef,
+    GuidancePolicyBoundarySummary, HSAssetExclusion, HSAssetKind, HSExclusionReason,
+    HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket, RuntimeHSPacketBuildInput,
+    SelectedGuidanceRef, SelectedHeuristic, SelectedPolicyRef,
 };
 pub use lifemodel_backend_completion::{
     bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,
@@ -153,7 +156,9 @@ pub use regression_suite::{
     RegressionResult, RegressionScenario, RegressionSuite, RegressionVerdict,
 };
 pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
-pub use runtime_contract::{AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput};
+pub use runtime_contract::{
+    AgentRuntimeParams, LifeEventDraft, RuntimeGuidanceConsumptionMode, RuntimeInput, RuntimeOutput,
+};
 pub use runtime_migration_gate::{
     evaluate_controlled_chat_pilot_eligibility, evaluate_runtime_migration_gate,
     ControlledChatPilotEligibilityInput, ControlledChatPilotEligibilityReport,

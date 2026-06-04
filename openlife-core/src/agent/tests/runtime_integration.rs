@@ -89,6 +89,7 @@ fn hs_runtime_packet_builder_selects_metadata_safe_assets_for_real_task_inputs()
         .selected_heuristics
         .iter()
         .any(|heuristic| heuristic.heuristic_id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+    assert!(packet.guidance_refs.is_empty());
     assert_eq!(packet.audit.agent_run_id.as_deref(), Some("run-builder"));
 
     let audit_json = serde_json::to_string(&packet.audit).unwrap();
@@ -148,7 +149,7 @@ fn hs_policy_forces_model_router_local_only_and_fails_closed_without_local() {
 }
 
 #[tokio::test]
-async fn hs_runtime_packet_adds_bounded_guidance_and_metadata_safe_audit() {
+async fn hs_runtime_packet_keeps_seeded_heuristics_out_of_runtime_guidance_prompt_by_default() {
     let packet = seeded_packet(
         AgentTaskKind::Planning,
         PolicyTopic::General,
@@ -190,7 +191,8 @@ async fn hs_runtime_packet_adds_bounded_guidance_and_metadata_safe_audit() {
         .find(|message| message.role == "system")
         .map(|message| message.content.as_str())
         .unwrap_or("");
-    assert!(system_prompt.contains("Reduce planning intensity"));
+    assert!(!system_prompt.contains("gentle_planning"));
+    assert!(!system_prompt.contains("Reduce planning intensity"));
     assert!(output
         .hs_selection_audit
         .as_ref()
@@ -246,7 +248,8 @@ async fn agent_runtime_execute_task_can_receive_hs_packet_on_real_path() {
         .find(|message| message.role == "system")
         .map(|message| message.content.as_str())
         .unwrap_or("");
-    assert!(system_prompt.contains("Reduce planning intensity"));
+    assert!(!system_prompt.contains("gentle_planning"));
+    assert!(!system_prompt.contains("Reduce planning intensity"));
     assert!(output.hs_selection_audit.is_some());
 
     let audit_json = serde_json::to_string(&output.hs_selection_audit).unwrap();

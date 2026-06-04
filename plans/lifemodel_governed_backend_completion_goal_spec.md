@@ -1,8 +1,8 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
 > Date: 2026-06-04
-> Status: W136 Backend Completion Goal 4 complete; next Goal-mode entry is Goal 5
-> Baseline: W136 Accepted Guidance And Materialization complete; default Chat remains `legacy_stream`
+> Status: W140 Backend Completion Goal 5 complete; next Goal-mode entry is Goal 6
+> Baseline: W140 Runtime Guidance Integration complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
@@ -230,8 +230,9 @@ It must have:
 
 ### 6.6 Runtime Guidance
 
-The selected subset of policies and accepted guidance that a runtime execution
-must honor.
+The selected subset of policies and accepted guidance that an explicit
+non-default/runtime execution may honor when runtime guidance consumption mode
+is enabled. Ordinary Chat keeps guidance consumption disabled.
 
 Runtime guidance must be visible in traces by id/hash/type/count/summary, not
 by raw sensitive content.
@@ -253,7 +254,8 @@ weekly planning intent
 
 Acceptance:
 
-- Plan-Execute behavior changes when accepted guidance is present.
+- Plan-Execute behavior changes only when accepted guidance is present and
+  explicit runtime guidance consumption mode is enabled.
 - Write-like steps still create proposals only.
 - Trace shows selected guidance metadata.
 - Outcome evidence links back to plan session/run/proposals.
@@ -388,21 +390,25 @@ be casually changed. Each W-slice must be independently testable.
   - Complete: backend read model exposes LifeModel version/diff/rollback
     references linked to accepted guidance and materialized view provenance.
 
-### Goal 5: Runtime Guidance Integration (next)
+### Goal 5: Runtime Guidance Integration (complete)
 
 - **W137: RuntimeHSPacket v2 guidance contract**
-  - Extend packet metadata to support guidance impact, risk, privacy, and
-    source lineage summaries.
+  - Complete: packet metadata supports accepted/trial guidance impact, risk,
+    privacy, and source lineage summaries. Seeded built-in heuristics can be
+    selected heuristics, but are not `guidance_refs`.
 - **W138: ReAct guidance consumption**
-  - Make ReAct materially consume selected guidance in prompts/config/action
-    boundaries, with tests proving behavior/trace change.
+  - Complete: explicit non-default ReAct materially consumes selected guidance
+    in prompt/config/action boundaries only when
+    `RuntimeGuidanceConsumptionMode::ExplicitRuntime` is enabled, with tests
+    proving behavior/trace change. The default mode is disabled.
 - **W139: Plan-Execute guidance consumption**
-  - Make Plan-Execute materially consume selected guidance for weekly planning,
+  - Complete: explicit Plan-Execute materially consumes selected guidance for
+    weekly planning only when runtime guidance consumption mode is enabled,
     with tests proving plan shape changes.
 - **W140: Runtime guidance trace/read model**
-  - Add metadata-safe Guidance Impact read model and trace linkage.
+  - Complete: metadata-safe Guidance Impact read model and trace linkage.
 
-### Goal 6: Policy / Privacy / Tool Governance Hardening
+### Goal 6: Policy / Privacy / Tool Governance Hardening (next)
 
 - **W141: ModelRouter/Privacy HS hardening**
   - Enforce HS LocalOnly/redaction/privacy decisions across relevant runtime
@@ -534,8 +540,8 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 5 of the LifeModel-Governed Backend Completion stage:
-Runtime Guidance Integration.
+You are implementing Goal 6 of the LifeModel-Governed Backend Completion stage:
+Policy / Privacy / Tool Governance Hardening.
 
 Read these files first:
 - AGENTS.md
@@ -546,11 +552,11 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W124-W136 Backend Completion Goals 1-4 are complete.
+- W124-W140 Backend Completion Goals 1-5 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W136
+- Ordinary `send_message` / `start_stream_message` must not call W19-W140
   readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline/
-  maturation/guidance/materialization helpers or commands.
+  maturation/guidance/materialization/runtime-guidance helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
 - W73-W78 LifeModel maturation proof exists and remains non-default.
@@ -565,36 +571,34 @@ Current baseline:
   view provenance, and metadata-safe version diff/rollback read model. Trial
   guidance assets preserve proposal/evidence/run lineage and constraints; the
   compatibility materialized view remains derived, not accepted source-of-truth.
+- W137-W140 Runtime Guidance Integration exists as RuntimeHSPacket v2
+  accepted/trial guidance metadata, non-default ReAct and Plan-Execute guidance
+  consumption gated by `RuntimeGuidanceConsumptionMode::ExplicitRuntime`, and
+  metadata-safe Guidance Impact trace/read model. It does not change ordinary
+  Chat routing, consume accepted guidance in ordinary Chat, or relax
+  policy/proposal-first boundaries.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
   RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W137-W140 only:
+Implement W141-W143 only:
 
-W137:
-- Extend RuntimeHSPacket guidance metadata so selected guidance carries
-  impact/risk/privacy/source-lineage summaries and references accepted guidance
-  ids/digests without leaking raw guidance, prompts, memories, LifeModel fields,
-  or tool payloads.
-- Keep policy as a hard boundary: guidance may not relax privacy/model route or
-  tool governance.
+W141:
+- Harden ModelRouter/Privacy HS enforcement across relevant runtime paths.
+- Guidance and heuristics may constrain routing/privacy, but must not relax
+  local-only, redaction, sensitive-domain, or provider policy requirements.
 
-W138:
-- Make ReAct materially consume accepted guidance through prompt/config/action
-  boundaries with tests proving behavior or trace changes when guidance is
-  present.
-- Keep default Chat unchanged; any ReAct consumption must remain on existing
-  non-default/runtime paths.
+W142:
+- Harden ActionExecutor HS tool governance for write-like tools, permission
+  replay, declarative tools, and future Skill Runtime hooks.
+- Unsupported plugin/provider tools must remain disabled/declarative-only unless
+  a real governed executor exists.
 
-W139:
-- Make Plan-Execute materially consume accepted planning guidance for weekly
-  planning with tests proving plan shape/trace changes when guidance is present.
-- Write-like Plan-Execute steps must remain proposal-first.
-
-W140:
-- Add a metadata-safe Guidance Impact read model / trace linkage showing which
-  accepted guidance was selected, why, and what it affected, using ids/digests/
-  counts/status/type only.
+W143:
+- Add a shared Governor decision/report shape for LifeModel maturation, model
+  route, tool action, memory write, and external write decisions.
+- Reports must be metadata-safe and classify allow/block/confirm/proposal-first
+  decisions without exposing raw payloads.
 
 Hard constraints:
 - Do not migrate default Chat.
@@ -607,19 +611,18 @@ Hard constraints:
 
 Verification:
 - Run focused cargo tests for the new modules.
-- Run existing accepted guidance/materializer/version read model, RuntimeHSPacket,
-  ReAct, Plan-Execute, policy/privacy, proposal, and runtime contract tests that
-  are affected.
+- Run affected ModelRouter/privacy, ActionExecutor/tool governance, Governor,
+  RuntimeHSPacket, ReAct, Plan-Execute, proposal, and runtime contract tests.
 - Run `make ci` if the focused tests pass.
-- Run `rg` checks proving ordinary Chat did not call the new guidance or
-  runtime guidance pipeline.
+- Run `rg` checks proving ordinary Chat did not call the new policy/privacy/tool
+  governance pipeline.
 
 Output:
-- W137-W140 change summary.
+- W141-W143 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 5 is complete.
+- Whether Goal 6 is complete.
 ```
 
 ## 14. Handoff Standard

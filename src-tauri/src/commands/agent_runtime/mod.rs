@@ -7,8 +7,8 @@ use openlife_core::agent::{
     EvidenceType, GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit,
     MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeMaturityReport,
     MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
-    ReactBetaExecutionReadinessReport, RedactionLevel, RiskLevel, RuntimeInput,
-    RuntimeMigrationGateReport, RuntimeStrategyKind, RuntimeStrategyRegistry,
+    ReactBetaExecutionReadinessReport, RedactionLevel, RiskLevel, RuntimeGuidanceConsumptionMode,
+    RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind, RuntimeStrategyRegistry,
     RuntimeStrategySideEffectBudget, ToolRegistryBetaReadinessReport,
     DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
@@ -1908,7 +1908,8 @@ async fn execute_multi_strategy_agent_preview(
         tools_prompt,
         hs_packet,
         execution_budget,
-    );
+    )
+    .with_guidance_consumption_mode(RuntimeGuidanceConsumptionMode::ExplicitRuntime);
     let runtime = AgentRuntime::new(life_model, scheduler, &config);
     let multi_strategy_runtime = MultiStrategyRuntime::new(runtime);
     let output = multi_strategy_runtime

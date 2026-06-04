@@ -37,6 +37,7 @@ fn test_hs_packet(source_run_id: &str) -> RuntimeHSPacket {
     RuntimeHSPacket {
         selected_policies: Vec::new(),
         selected_heuristics: Vec::new(),
+        guidance_refs: Vec::new(),
         estimated_tokens: 8,
         audit: HSSelectionAudit {
             agent_task_id: Some("task-plan-execute".into()),
@@ -44,6 +45,8 @@ fn test_hs_packet(source_run_id: &str) -> RuntimeHSPacket {
             input_digest: "digest-input".into(),
             selected_policy_ids: Vec::new(),
             selected_heuristic_ids: Vec::new(),
+            selected_guidance_ids: Vec::new(),
+            selected_guidance_refs: Vec::new(),
             excluded_assets: Vec::new(),
             estimated_tokens: 8,
             token_budget: 128,

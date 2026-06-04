@@ -1,10 +1,13 @@
-use crate::agent::heuristic_store::{HeuristicLifecycleStatus, HeuristicQuery, HeuristicStore};
+use crate::agent::heuristic_store::{
+    HeuristicActivationAuthority, HeuristicConstraintSet, HeuristicLifecycleStatus, HeuristicQuery,
+    HeuristicRecord, HeuristicStore,
+};
 use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyEvaluationRequest, PolicyStore, PolicyTopic,
     BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
 };
 use crate::agent::types::{AgentTaskKind, RiskLevel};
-use crate::agent::{AgentTask, HSBehaviorCheckSummary};
+use crate::agent::{AgentTask, EvidencePrivacyLevel, HSBehaviorCheckSummary};
 use anyhow::Result;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -84,6 +87,63 @@ pub struct SelectedHeuristic {
     pub estimated_tokens: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidanceAffectedSurface {
+    ReactPrompt,
+    ReactConfig,
+    ActionBoundary,
+    PlanExecuteDraft,
+    PlanExecuteTrace,
+    RuntimeTrace,
+}
+
+impl std::fmt::Display for GuidanceAffectedSurface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GuidanceAffectedSurface::ReactPrompt => write!(f, "react_prompt"),
+            GuidanceAffectedSurface::ReactConfig => write!(f, "react_config"),
+            GuidanceAffectedSurface::ActionBoundary => write!(f, "action_boundary"),
+            GuidanceAffectedSurface::PlanExecuteDraft => write!(f, "plan_execute_draft"),
+            GuidanceAffectedSurface::PlanExecuteTrace => write!(f, "plan_execute_trace"),
+            GuidanceAffectedSurface::RuntimeTrace => write!(f, "runtime_trace"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuidancePolicyBoundarySummary {
+    pub hard_policy_boundary: bool,
+    pub route_policy_relaxed: bool,
+    pub tool_policy_relaxed: bool,
+    pub proposal_first_preserved: bool,
+    pub privacy_constraint_count: usize,
+    pub model_constraint_count: usize,
+    pub tool_constraint_count: usize,
+    pub constraint_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectedGuidanceRef {
+    pub guidance_id: String,
+    pub guidance_digest: String,
+    pub guidance_type: String,
+    pub lifecycle_status: HeuristicLifecycleStatus,
+    pub domain: String,
+    pub trigger_digest: String,
+    pub selected_reason: String,
+    pub impact_kind: String,
+    pub impact_summary: String,
+    pub risk_level: RiskLevel,
+    pub privacy_level: EvidencePrivacyLevel,
+    pub source_proposal_id: Option<String>,
+    pub source_evidence_count: usize,
+    pub source_lineage_digest: String,
+    pub policy_boundary: GuidancePolicyBoundarySummary,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HSSelectionAudit {
@@ -92,6 +152,10 @@ pub struct HSSelectionAudit {
     pub input_digest: String,
     pub selected_policy_ids: Vec<String>,
     pub selected_heuristic_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_guidance_ids: Vec<String>,
+    #[serde(default)]
+    pub selected_guidance_refs: Vec<SelectedGuidanceRef>,
     pub excluded_assets: Vec<HSAssetExclusion>,
     pub estimated_tokens: usize,
     pub token_budget: usize,
@@ -102,8 +166,51 @@ pub struct HSSelectionAudit {
 pub struct RuntimeHSPacket {
     pub selected_policies: Vec<SelectedPolicyRef>,
     pub selected_heuristics: Vec<SelectedHeuristic>,
+    #[serde(default)]
+    pub guidance_refs: Vec<SelectedGuidanceRef>,
     pub estimated_tokens: usize,
     pub audit: HSSelectionAudit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuidanceImpactRef {
+    pub guidance_id: String,
+    pub guidance_digest: String,
+    pub guidance_type: String,
+    pub lifecycle_status: HeuristicLifecycleStatus,
+    pub domain: String,
+    pub impact_kind: String,
+    pub selected_reason: String,
+    pub source_proposal_id: Option<String>,
+    pub source_evidence_count: usize,
+    pub source_lineage_digest: String,
+    pub affected_run_count: usize,
+    pub affected_surfaces: Vec<GuidanceAffectedSurface>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuidanceImpactReadModel {
+    pub report_kind: String,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub run_id: Option<String>,
+    pub strategy_kind: String,
+    pub selected_guidance_count: usize,
+    pub selected_policy_count: usize,
+    pub guidance_refs: Vec<GuidanceImpactRef>,
+    pub selected_policy_ids: Vec<String>,
+    pub affected_surfaces: Vec<GuidanceAffectedSurface>,
+    pub behavior_check_count: usize,
+    pub read_model_digest: String,
+    pub raw_prompt_included: bool,
+    pub raw_user_text_included: bool,
+    pub raw_assistant_output_included: bool,
+    pub raw_memory_included: bool,
+    pub raw_life_model_included: bool,
+    pub raw_tool_payload_included: bool,
+    pub raw_guidance_included: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -118,6 +225,7 @@ impl HSSelector {
     ) -> Result<RuntimeHSPacket> {
         let mut selected_policies = Vec::new();
         let mut selected_heuristics = Vec::new();
+        let mut guidance_refs = Vec::new();
         let mut excluded_assets = Vec::new();
         let mut estimated_tokens = 0usize;
 
@@ -166,8 +274,10 @@ impl HSSelector {
                 excluded_assets.push(exclude(&heuristic.id, HSExclusionReason::TriggerMismatch));
                 continue;
             }
-            if is_sensitive_topic(input.privacy_topic)
-                && guidance_relaxes_policy(&heuristic.guidance)
+            if guidance_relaxes_policy(&heuristic.guidance)
+                || constraints_relax_policy(&heuristic.constraints)
+                || (is_sensitive_topic(input.privacy_topic)
+                    && guidance_relaxes_policy(&heuristic.guidance))
             {
                 excluded_assets.push(exclude(&heuristic.id, HSExclusionReason::PolicyConflict));
                 continue;
@@ -180,15 +290,20 @@ impl HSSelector {
             }
 
             estimated_tokens += token_estimate;
+            let guidance_ref = is_accepted_runtime_guidance_asset(&heuristic)
+                .then(|| selected_guidance_ref(&heuristic, input));
             selected_heuristics.push(SelectedHeuristic {
-                heuristic_id: heuristic.id,
-                domain: heuristic.domain,
+                heuristic_id: heuristic.id.clone(),
+                domain: heuristic.domain.clone(),
                 guidance: heuristic.guidance.clone(),
                 priority: heuristic.priority,
-                source_ids: heuristic.evidence_refs,
+                source_ids: heuristic.evidence_refs.clone(),
                 digest: digest_str(&heuristic.guidance),
                 estimated_tokens: token_estimate,
             });
+            if let Some(guidance_ref) = guidance_ref {
+                guidance_refs.push(guidance_ref);
+            }
         }
 
         let audit = HSSelectionAudit {
@@ -206,6 +321,11 @@ impl HSSelector {
                 .iter()
                 .map(|heuristic| heuristic.heuristic_id.clone())
                 .collect(),
+            selected_guidance_ids: guidance_refs
+                .iter()
+                .map(|guidance| guidance.guidance_id.clone())
+                .collect(),
+            selected_guidance_refs: guidance_refs.clone(),
             excluded_assets,
             estimated_tokens,
             token_budget: input.token_budget,
@@ -214,6 +334,7 @@ impl HSSelector {
         Ok(RuntimeHSPacket {
             selected_policies,
             selected_heuristics,
+            guidance_refs,
             estimated_tokens,
             audit,
         })
@@ -284,6 +405,10 @@ pub fn behavior_checks_for_packet(packet: &RuntimeHSPacket) -> Vec<HSBehaviorChe
         .selected_heuristic_ids
         .iter()
         .any(|id| id == crate::agent::BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING)
+        || packet
+            .guidance_refs
+            .iter()
+            .any(|guidance| guidance.impact_kind == "gentle_planning")
     {
         checks.push(HSBehaviorCheckSummary {
             id: "regression.low_energy_planning".into(),
@@ -293,7 +418,86 @@ pub fn behavior_checks_for_packet(packet: &RuntimeHSPacket) -> Vec<HSBehaviorChe
         });
     }
 
+    if !packet.guidance_refs.is_empty() {
+        checks.push(HSBehaviorCheckSummary {
+            id: "runtime_guidance.selected_guidance_metadata".into(),
+            label: "Runtime guidance metadata is traceable".into(),
+            passed: true,
+            summary: Some(format!(
+                "Selected guidance refs are metadata-safe; count={}.",
+                packet.guidance_refs.len()
+            )),
+        });
+    }
+
     checks
+}
+
+pub fn build_guidance_impact_read_model(
+    run_id: Option<&str>,
+    strategy_kind: impl Into<String>,
+    packet: &RuntimeHSPacket,
+    affected_surfaces: Vec<GuidanceAffectedSurface>,
+) -> GuidanceImpactReadModel {
+    let strategy_kind = strategy_kind.into();
+    let guidance_refs = packet
+        .guidance_refs
+        .iter()
+        .map(|guidance| GuidanceImpactRef {
+            guidance_id: guidance.guidance_id.clone(),
+            guidance_digest: guidance.guidance_digest.clone(),
+            guidance_type: guidance.guidance_type.clone(),
+            lifecycle_status: guidance.lifecycle_status,
+            domain: guidance.domain.clone(),
+            impact_kind: guidance.impact_kind.clone(),
+            selected_reason: guidance.selected_reason.clone(),
+            source_proposal_id: guidance.source_proposal_id.clone(),
+            source_evidence_count: guidance.source_evidence_count,
+            source_lineage_digest: guidance.source_lineage_digest.clone(),
+            affected_run_count: run_id.is_some() as usize,
+            affected_surfaces: affected_surfaces.clone(),
+        })
+        .collect::<Vec<_>>();
+    let selected_policy_ids = packet
+        .selected_policies
+        .iter()
+        .map(|policy| policy.policy_id.clone())
+        .collect::<Vec<_>>();
+    let behavior_check_count = behavior_checks_for_packet(packet).len();
+    let read_model_digest = digest_str(
+        &serde_json::json!({
+            "schema": "w140.guidanceImpactReadModel.digest.v1",
+            "runId": run_id,
+            "strategyKind": strategy_kind,
+            "guidanceRefs": guidance_refs,
+            "policyIds": selected_policy_ids,
+            "affectedSurfaces": affected_surfaces,
+            "behaviorCheckCount": behavior_check_count,
+        })
+        .to_string(),
+    );
+
+    GuidanceImpactReadModel {
+        report_kind: "w140.guidanceImpactReadModel.v1".into(),
+        metadata_safe: true,
+        contains_raw_content: false,
+        run_id: run_id.map(str::to_string),
+        strategy_kind,
+        selected_guidance_count: guidance_refs.len(),
+        selected_policy_count: selected_policy_ids.len(),
+        guidance_refs,
+        selected_policy_ids,
+        affected_surfaces,
+        behavior_check_count,
+        read_model_digest: format!("sha256:{read_model_digest}"),
+        raw_prompt_included: false,
+        raw_user_text_included: false,
+        raw_assistant_output_included: false,
+        raw_memory_included: false,
+        raw_life_model_included: false,
+        raw_tool_payload_included: false,
+        raw_guidance_included: false,
+    }
 }
 
 fn task_domain(task_kind: AgentTaskKind) -> Option<&'static str> {
@@ -320,6 +524,140 @@ fn trigger_matches(trigger: &str, state: &Value) -> bool {
     }
 }
 
+fn selected_guidance_ref(
+    heuristic: &HeuristicRecord,
+    input: &HSSelectorInput,
+) -> SelectedGuidanceRef {
+    let policy_boundary = guidance_policy_boundary(heuristic);
+    let impact_kind = guidance_impact_kind(heuristic).to_string();
+    let source_lineage_digest = digest_str(
+        &serde_json::json!({
+            "sourceProposalId": heuristic.source_proposal_id,
+            "sourceEvidenceRefs": sorted_unique(heuristic.evidence_refs.clone()),
+            "opposingEvidenceRefCount": heuristic.opposing_evidence_refs.len(),
+            "version": heuristic.version,
+        })
+        .to_string(),
+    );
+    SelectedGuidanceRef {
+        guidance_id: heuristic.id.clone(),
+        guidance_digest: format!("sha256:{}", digest_str(&heuristic.guidance)),
+        guidance_type: "accepted_guidance".into(),
+        lifecycle_status: heuristic.status,
+        domain: heuristic.domain.clone(),
+        trigger_digest: format!("sha256:{}", digest_str(&heuristic.trigger)),
+        selected_reason: selected_reason(heuristic, input).into(),
+        impact_kind: impact_kind.clone(),
+        impact_summary: guidance_impact_summary(&impact_kind).into(),
+        risk_level: heuristic.risk_level,
+        privacy_level: heuristic.privacy_level,
+        source_proposal_id: heuristic.source_proposal_id.clone(),
+        source_evidence_count: sorted_unique(heuristic.evidence_refs.clone()).len(),
+        source_lineage_digest: format!("sha256:{source_lineage_digest}"),
+        policy_boundary,
+    }
+}
+
+fn is_accepted_runtime_guidance_asset(heuristic: &HeuristicRecord) -> bool {
+    let explicit_accepted_lifecycle_asset = heuristic.id.starts_with("accepted_guidance_")
+        && heuristic
+            .source_proposal_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let accepted_authority = matches!(
+        heuristic.activation_authority,
+        Some(HeuristicActivationAuthority::AcceptedProposal(_))
+    );
+
+    explicit_accepted_lifecycle_asset || accepted_authority
+}
+
+fn selected_reason(heuristic: &HeuristicRecord, input: &HSSelectorInput) -> &'static str {
+    if task_domain(input.task_kind) == Some(heuristic.domain.as_str())
+        && trigger_matches(&heuristic.trigger, &input.current_state_hints)
+    {
+        "task_domain_and_trigger_match"
+    } else {
+        "selector_match"
+    }
+}
+
+fn guidance_policy_boundary(heuristic: &HeuristicRecord) -> GuidancePolicyBoundarySummary {
+    let route_policy_relaxed = guidance_relaxes_policy(&heuristic.guidance)
+        || constraints_relax_route(&heuristic.constraints);
+    let tool_policy_relaxed = guidance_relaxes_tool_policy(&heuristic.guidance)
+        || constraints_relax_tool(&heuristic.constraints);
+    let proposal_first_preserved = !tool_policy_relaxed
+        && (heuristic
+            .constraints
+            .tool
+            .iter()
+            .any(|constraint| constraint.contains("proposal_first"))
+            || !heuristic
+                .guidance
+                .to_ascii_lowercase()
+                .contains("direct write"));
+    let constraint_digest = digest_str(
+        &serde_json::json!({
+            "privacyCount": heuristic.constraints.privacy.len(),
+            "modelCount": heuristic.constraints.model.len(),
+            "toolCount": heuristic.constraints.tool.len(),
+            "routePolicyRelaxed": route_policy_relaxed,
+            "toolPolicyRelaxed": tool_policy_relaxed,
+            "proposalFirstPreserved": proposal_first_preserved,
+        })
+        .to_string(),
+    );
+
+    GuidancePolicyBoundarySummary {
+        hard_policy_boundary: true,
+        route_policy_relaxed,
+        tool_policy_relaxed,
+        proposal_first_preserved,
+        privacy_constraint_count: heuristic.constraints.privacy.len(),
+        model_constraint_count: heuristic.constraints.model.len(),
+        tool_constraint_count: heuristic.constraints.tool.len(),
+        constraint_digest: format!("sha256:{constraint_digest}"),
+    }
+}
+
+fn guidance_impact_kind(heuristic: &HeuristicRecord) -> &'static str {
+    let haystack = format!(
+        "{} {} {} {}",
+        heuristic.domain,
+        heuristic.trigger,
+        heuristic.guidance,
+        heuristic.conditions.join(" ")
+    )
+    .to_ascii_lowercase();
+    if heuristic.domain == "planning"
+        && (heuristic.trigger == "current_energy_is_low"
+            || haystack.contains("low pressure")
+            || haystack.contains("small")
+            || haystack.contains("tiny")
+            || haystack.contains("energy"))
+    {
+        "gentle_planning"
+    } else if heuristic
+        .constraints
+        .tool
+        .iter()
+        .any(|constraint| constraint.contains("proposal_first"))
+    {
+        "proposal_first_boundary"
+    } else {
+        "collaboration_guidance"
+    }
+}
+
+fn guidance_impact_summary(impact_kind: &str) -> &'static str {
+    match impact_kind {
+        "gentle_planning" => "Prefer smaller lower-pressure planning actions.",
+        "proposal_first_boundary" => "Keep write-like actions proposal-first.",
+        _ => "Apply accepted collaboration guidance.",
+    }
+}
+
 fn is_sensitive_topic(topic: PolicyTopic) -> bool {
     matches!(
         topic,
@@ -336,6 +674,39 @@ fn guidance_relaxes_policy(guidance: &str) -> bool {
     lower.contains("use cloud")
         || lower.contains("ignore privacy")
         || lower.contains("relax privacy")
+        || lower.contains("bypass proposal")
+        || lower.contains("skip proposal")
+        || lower.contains("bypass review")
+        || lower.contains("direct write")
+        || lower.contains("ignore tool policy")
+}
+
+fn guidance_relaxes_tool_policy(guidance: &str) -> bool {
+    let lower = guidance.to_lowercase();
+    lower.contains("bypass proposal")
+        || lower.contains("skip proposal")
+        || lower.contains("bypass review")
+        || lower.contains("direct write")
+        || lower.contains("ignore tool policy")
+}
+
+fn constraints_relax_policy(constraints: &HeuristicConstraintSet) -> bool {
+    constraints_relax_route(constraints) || constraints_relax_tool(constraints)
+}
+
+fn constraints_relax_route(constraints: &HeuristicConstraintSet) -> bool {
+    constraints
+        .privacy
+        .iter()
+        .chain(constraints.model.iter())
+        .any(|constraint| guidance_relaxes_policy(constraint))
+}
+
+fn constraints_relax_tool(constraints: &HeuristicConstraintSet) -> bool {
+    constraints
+        .tool
+        .iter()
+        .any(|constraint| guidance_relaxes_tool_policy(constraint))
 }
 
 fn estimate_tokens(text: &str) -> usize {
@@ -358,4 +729,10 @@ fn digest_str(value: &str) -> String {
         out.push_str(&format!("{:02x}", b));
     }
     out
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
 }

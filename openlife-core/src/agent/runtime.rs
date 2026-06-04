@@ -5,8 +5,8 @@ use crate::agent::reasoning::{
 };
 use crate::agent::types::AgentTask;
 use crate::agent::{
-    behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit, RuntimeHSPacket,
-    RuntimeInput, RuntimeOutput,
+    behavior_checks_for_packet, HSBehaviorCheckSummary, HSSelectionAudit,
+    RuntimeGuidanceConsumptionMode, RuntimeHSPacket, RuntimeInput, RuntimeOutput,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -125,6 +125,7 @@ impl AgentRuntime {
             memory_hits,
             privacy_engine,
             None,
+            RuntimeGuidanceConsumptionMode::Disabled,
         )
         .await
     }
@@ -139,7 +140,7 @@ impl AgentRuntime {
     ) -> Result<RuntimeOutput, AgentRuntimeError> {
         let params = input.agent_runtime_params();
         let runtime_output = self
-            .execute_task_with_hs_packet(
+            .execute_task_with_hs_packet_and_guidance_mode(
                 params.task,
                 params.life_model,
                 params.tools_prompt,
@@ -147,6 +148,7 @@ impl AgentRuntime {
                 vec![],
                 crate::privacy::PrivacyEngine::new(),
                 params.hs_packet,
+                params.guidance_consumption_mode,
             )
             .await?;
 
@@ -205,6 +207,32 @@ impl AgentRuntime {
             memory_hits,
             privacy_engine,
             hs_packet,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_task_with_hs_packet_and_guidance_mode(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.execute_task_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            guidance_consumption_mode,
         )
         .await
     }
@@ -219,6 +247,7 @@ impl AgentRuntime {
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
         hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         // 1. Build AssembleInput
         let input = AssembleInput {
@@ -285,14 +314,16 @@ impl AgentRuntime {
             .as_ref()
             .map(behavior_checks_for_packet)
             .unwrap_or_default();
-        if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
-            final_messages.insert(
-                0,
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: prompt,
-                },
-            );
+        if guidance_consumption_mode.is_enabled() {
+            if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+                final_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: prompt,
+                    },
+                );
+            }
         }
 
         Ok(AgentRuntimeOutput {
@@ -325,6 +356,7 @@ impl AgentRuntime {
             memory_hits,
             privacy_engine,
             None,
+            RuntimeGuidanceConsumptionMode::Disabled,
         )
         .await
     }
@@ -348,6 +380,32 @@ impl AgentRuntime {
             memory_hits,
             privacy_engine,
             hs_packet,
+            RuntimeGuidanceConsumptionMode::Disabled,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn generate_direct_with_hs_packet_and_guidance_mode(
+        &self,
+        task: &AgentTask,
+        life_model: &LifeModel,
+        tools_prompt: &str,
+        memory_context: Option<String>,
+        memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
+        privacy_engine: crate::privacy::PrivacyEngine,
+        hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
+    ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
+        self.generate_direct_inner(
+            task,
+            life_model,
+            tools_prompt,
+            memory_context,
+            memory_hits,
+            privacy_engine,
+            hs_packet,
+            guidance_consumption_mode,
         )
         .await
     }
@@ -362,6 +420,7 @@ impl AgentRuntime {
         memory_hits: Vec<crate::agent::context_assembler::MemoryHit>,
         privacy_engine: crate::privacy::PrivacyEngine,
         hs_packet: Option<RuntimeHSPacket>,
+        guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     ) -> Result<AgentRuntimeOutput, AgentRuntimeError> {
         let input = AssembleInput {
             session_id: task.session_id.clone(),
@@ -386,14 +445,16 @@ impl AgentRuntime {
             .as_ref()
             .map(behavior_checks_for_packet)
             .unwrap_or_default();
-        if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
-            final_messages.insert(
-                0,
-                ChatMessage {
-                    role: "system".to_string(),
-                    content: prompt,
-                },
-            );
+        if guidance_consumption_mode.is_enabled() {
+            if let Some(prompt) = hs_packet.as_ref().and_then(build_hs_runtime_prompt) {
+                final_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".to_string(),
+                        content: prompt,
+                    },
+                );
+            }
         }
 
         Ok(AgentRuntimeOutput {
@@ -423,18 +484,23 @@ pub struct AgentRuntimeOutput {
 }
 
 fn build_hs_runtime_prompt(packet: &RuntimeHSPacket) -> Option<String> {
-    if packet.selected_heuristics.is_empty() {
+    if packet.guidance_refs.is_empty() {
         return None;
     }
     let guidance = packet
-        .selected_heuristics
+        .guidance_refs
         .iter()
         .take(4)
-        .map(|heuristic| format!("- [{}] {}", heuristic.heuristic_id, heuristic.guidance))
+        .map(|guidance| {
+            format!(
+                "- [{}] {}: {}",
+                guidance.guidance_id, guidance.impact_kind, guidance.impact_summary
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "Selected personal collaboration guidance for this run:\n{}",
+        "Selected personal collaboration guidance for this run (metadata-safe summaries only):\n{}",
         guidance
     ))
 }

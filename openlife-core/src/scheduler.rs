@@ -461,6 +461,7 @@ mod tests {
                 digest: "digest".into(),
             }],
             selected_heuristics: vec![],
+            guidance_refs: vec![],
             estimated_tokens: 0,
             audit: HSSelectionAudit {
                 agent_task_id: None,
@@ -468,6 +469,8 @@ mod tests {
                 input_digest: "input-digest".into(),
                 selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
                 selected_heuristic_ids: vec![],
+                selected_guidance_ids: vec![],
+                selected_guidance_refs: vec![],
                 excluded_assets: vec![],
                 estimated_tokens: 0,
                 token_budget: 128,

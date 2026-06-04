@@ -6,7 +6,7 @@ use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyStore, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     BUILTIN_HEURISTIC_REJECTED_REMINDER_DELAY,
 };
-use crate::agent::{AgentTaskKind, EvidencePrivacyLevel, RiskLevel};
+use crate::agent::{AgentTaskKind, EvidencePrivacyLevel, HeuristicConstraintSet, RiskLevel};
 
 fn active_test_heuristic(
     store: &HeuristicStore,
@@ -70,6 +70,14 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
         .selected_heuristics
         .iter()
         .any(|h| h.heuristic_id == BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING));
+    assert!(
+        planning_packet.guidance_refs.is_empty(),
+        "seeded built-in heuristics must not be emitted as accepted guidance refs"
+    );
+    assert!(
+        planning_packet.audit.selected_guidance_ids.is_empty(),
+        "seeded built-in heuristics must not be labeled accepted_guidance"
+    );
 
     let proactive_packet = selector
         .select(
@@ -116,6 +124,86 @@ fn selector_selects_mvp_policy_and_task_heuristics() {
         .selected_policies
         .iter()
         .any(|policy| policy.policy_id == "policy.external_writes.proposal_first"));
+}
+
+#[test]
+fn selector_emits_guidance_refs_only_for_accepted_guidance_assets() {
+    let policy_store = PolicyStore::mvp_builtin();
+    let heuristic_store = HeuristicStore::new_in_memory().unwrap();
+    active_test_heuristic(
+        &heuristic_store,
+        "heuristic.selector_builtin_like",
+        "Selected heuristic guidance remains a heuristic, not accepted guidance.",
+    );
+    let accepted = heuristic_store
+        .create_heuristic(
+            HeuristicDraft::new(
+                "planning",
+                "current_energy_is_low",
+                vec!["state.energy <= 3".into()],
+                "Accepted guidance raw text must not enter selector guidance ref metadata.",
+                90,
+                RiskLevel::Low,
+                EvidencePrivacyLevel::Internal,
+            )
+            .with_stable_id("accepted_guidance_selector_low_energy")
+            .with_source_proposal("proposal-selector-low-energy")
+            .with_evidence_ref("evidence-selector-low-energy")
+            .with_constraints(HeuristicConstraintSet {
+                privacy: vec!["do_not_relax_policy".into()],
+                model: vec!["preserve_current_route_policy".into()],
+                tool: vec!["write_tools_remain_proposal_first".into()],
+            }),
+        )
+        .unwrap();
+    heuristic_store
+        .update_lifecycle(&accepted.id, HeuristicLifecycleStatus::Trial, None)
+        .unwrap();
+
+    let packet = HSSelector::default()
+        .select(
+            &policy_store,
+            &heuristic_store,
+            &HSSelectorInput {
+                task_kind: AgentTaskKind::Planning,
+                intent_summary: "metadata-safe selector accepted guidance test".into(),
+                privacy_topic: PolicyTopic::General,
+                risk_level: RiskLevel::Low,
+                tool_requirements: vec![],
+                current_state_hints: serde_json::json!({ "energy": 2 }),
+                token_budget: 512,
+                agent_task_id: Some("task-selector-guidance".into()),
+                agent_run_id: Some("run-selector-guidance".into()),
+            },
+        )
+        .unwrap();
+
+    assert!(packet
+        .selected_heuristics
+        .iter()
+        .any(|heuristic| heuristic.heuristic_id == "heuristic.selector_builtin_like"));
+    assert!(packet
+        .selected_heuristics
+        .iter()
+        .any(|heuristic| heuristic.heuristic_id == "accepted_guidance_selector_low_energy"));
+    assert!(!packet
+        .guidance_refs
+        .iter()
+        .any(|guidance| guidance.guidance_id == "heuristic.selector_builtin_like"));
+    let guidance = packet
+        .guidance_refs
+        .iter()
+        .find(|guidance| guidance.guidance_id == "accepted_guidance_selector_low_energy")
+        .expect("accepted guidance asset should be emitted as guidance ref");
+    assert_eq!(guidance.guidance_type, "accepted_guidance");
+    assert_eq!(
+        guidance.source_proposal_id.as_deref(),
+        Some("proposal-selector-low-energy")
+    );
+
+    let audit_json = serde_json::to_string(&packet.audit).unwrap();
+    assert!(audit_json.contains("accepted_guidance_selector_low_energy"));
+    assert!(!audit_json.contains("raw text must not enter"));
 }
 
 #[test]

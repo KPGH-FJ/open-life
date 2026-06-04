@@ -5973,7 +5973,20 @@ mod hs_runtime_tests {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
         let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let send_agent_loop_body =
+            extract_rust_function_body(&source, "async fn send_message_with_agent_loop(");
         let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+        let stream_agent_loop_body =
+            extract_rust_function_body(&source, "async fn start_stream_message_with_agent_loop(");
+        let ordinary_chat_bodies = [
+            ("send_message", &send_body),
+            ("send_message_with_agent_loop", &send_agent_loop_body),
+            ("start_stream_message", &stream_body),
+            (
+                "start_stream_message_with_agent_loop",
+                &stream_agent_loop_body,
+            ),
+        ];
         let forbidden_command_surfaces = [
             "run_multi_strategy_agent_preview",
             "get_runtime_strategy_registry_status",
@@ -6096,17 +6109,24 @@ mod hs_runtime_tests {
             "build_lifemodel_version_read_model",
             "materialize_yaml_compatibility_view_with_provenance",
             "extract_hs_compatibility_view_from_yaml",
+            "RuntimeGuidanceConsumptionMode::ExplicitRuntime",
+            "with_guidance_consumption_mode",
+            "apply_react_guidance_to_config",
+            "build_guidance_impact_read_model",
+            "GuidanceAffectedSurface::ReactPrompt",
+            "GuidanceAffectedSurface::ReactConfig",
+            "GuidanceAffectedSurface::ActionBoundary",
+            "GuidanceAffectedSurface::PlanExecuteDraft",
+            "GuidanceAffectedSurface::PlanExecuteTrace",
         ];
 
         for forbidden in forbidden_command_surfaces {
-            assert!(
-                !send_body.contains(forbidden),
-                "send_message must not call {forbidden}"
-            );
-            assert!(
-                !stream_body.contains(forbidden),
-                "start_stream_message must not call {forbidden}"
-            );
+            for (body_name, body) in ordinary_chat_bodies {
+                assert!(
+                    !body.contains(forbidden),
+                    "{body_name} must not call or enable {forbidden}"
+                );
+            }
         }
     }
 
@@ -6188,6 +6208,7 @@ mod hs_runtime_tests {
                 digest: "digest".into(),
             }],
             selected_heuristics: vec![],
+            guidance_refs: vec![],
             estimated_tokens: 0,
             audit: openlife_core::agent::HSSelectionAudit {
                 agent_task_id: None,
@@ -6197,6 +6218,8 @@ mod hs_runtime_tests {
                     openlife_core::agent::BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into(),
                 ],
                 selected_heuristic_ids: vec![],
+                selected_guidance_ids: vec![],
+                selected_guidance_refs: vec![],
                 excluded_assets: vec![],
                 estimated_tokens: 0,
                 token_budget: 128,

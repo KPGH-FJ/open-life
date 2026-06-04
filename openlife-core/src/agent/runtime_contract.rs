@@ -6,6 +6,20 @@ use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeGuidanceConsumptionMode {
+    #[default]
+    Disabled,
+    ExplicitRuntime,
+}
+
+impl RuntimeGuidanceConsumptionMode {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::ExplicitRuntime)
+    }
+}
+
 /// Thin input boundary shared by current Direct/Layered/ReAct adapters.
 ///
 /// This is intentionally a contract layer, not a RuntimeStrategy abstraction.
@@ -18,6 +32,7 @@ pub struct RuntimeInput {
     pub memory_context: Option<String>,
     pub tools_prompt: String,
     pub hs_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
     pub execution_budget: AgentExecutionBudget,
 }
 
@@ -36,8 +51,14 @@ impl RuntimeInput {
             memory_context,
             tools_prompt: tools_prompt.into(),
             hs_packet,
+            guidance_consumption_mode: RuntimeGuidanceConsumptionMode::Disabled,
             execution_budget,
         }
+    }
+
+    pub fn with_guidance_consumption_mode(mut self, mode: RuntimeGuidanceConsumptionMode) -> Self {
+        self.guidance_consumption_mode = mode;
+        self
     }
 
     pub fn new_chat(
@@ -73,6 +94,7 @@ impl RuntimeInput {
             tools_prompt: &self.tools_prompt,
             memory_context: self.memory_context.clone(),
             hs_packet: self.hs_packet.clone(),
+            guidance_consumption_mode: self.guidance_consumption_mode,
         }
     }
 
@@ -110,6 +132,7 @@ pub struct AgentRuntimeParams<'a> {
     pub tools_prompt: &'a str,
     pub memory_context: Option<String>,
     pub hs_packet: Option<RuntimeHSPacket>,
+    pub guidance_consumption_mode: RuntimeGuidanceConsumptionMode,
 }
 
 /// Candidate event shape for the future maturation loop.

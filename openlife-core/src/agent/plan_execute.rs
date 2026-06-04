@@ -2,6 +2,9 @@ use crate::agent::governor::{
     GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
     ToolGovernanceInput,
 };
+use crate::agent::hs_selector::{
+    build_guidance_impact_read_model, GuidanceAffectedSurface, GuidanceImpactReadModel,
+};
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use crate::agent::ProposalStore;
@@ -217,6 +220,8 @@ impl PlanExecuteProductContract {
                 "taskKind": input.task.kind.to_string(),
                 "maxStepCount": self.max_step_count,
                 "hasHsPacket": input.hs_packet.is_some(),
+                "selectedGuidanceCount": selected_guidance_count(input),
+                "guidanceImpactKinds": selected_guidance_impact_kinds(input),
                 "toolsPromptPresent": !input.tools_prompt.trim().is_empty(),
                 "memoryContextPresent": input.memory_context.is_some(),
                 "proposalFirstWriteBoundary": true,
@@ -332,6 +337,8 @@ pub struct PlanExecuteReport {
     pub governance_decisions: Vec<PlanGovernanceDecisionSummary>,
     pub observation_summaries: Vec<PlanObservationSummary>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     pub metadata_safe_summary: Value,
 }
 
@@ -443,6 +450,18 @@ impl PlanExecuteService {
             });
         }
 
+        let guidance_impact = if input.runtime_input.guidance_consumption_mode.is_enabled() {
+            input.runtime_input.hs_packet.as_ref().map(|packet| {
+                Box::new(build_guidance_impact_read_model(
+                    source_run_id.as_deref(),
+                    "plan_execute",
+                    packet,
+                    vec![GuidanceAffectedSurface::PlanExecuteTrace],
+                ))
+            })
+        } else {
+            None
+        };
         let report = PlanExecuteReport::new(
             plan_id,
             source_run_id,
@@ -450,6 +469,7 @@ impl PlanExecuteService {
             governance_decisions,
             observation_summaries,
             warnings.clone(),
+            guidance_impact,
         );
 
         PlanExecutionOutput {
@@ -988,6 +1008,38 @@ impl PlanExecuteSessionStore {
 fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
     let max_steps = input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT);
     let mut steps = Vec::new();
+    if has_gentle_planning_guidance(input) {
+        push_step(
+            &mut steps,
+            max_steps,
+            PlanStepSpec {
+                title: "Choose one small weekly focus",
+                intent: "read_only_planning",
+                tool_name: None,
+                action_kind: "plan",
+                risk_level: RiskLevel::Low,
+                declared_write: false,
+            },
+        );
+        push_step(
+            &mut steps,
+            max_steps,
+            PlanStepSpec {
+                title: "Prepare lightweight weekly check-in proposal",
+                intent: "write_like_schedule_task",
+                tool_name: Some("review_center.propose_scheduled_task"),
+                action_kind: "schedule",
+                risk_level: RiskLevel::Medium,
+                declared_write: true,
+            },
+        );
+
+        return PlanDraft {
+            objective: metadata_safe_weekly_objective(input),
+            steps,
+        };
+    }
+
     push_step(
         &mut steps,
         max_steps,
@@ -1033,9 +1085,10 @@ fn draft_weekly_planning_plan(input: &PlanExecuteInput) -> PlanDraft {
 
 fn metadata_safe_weekly_objective(input: &PlanExecuteInput) -> String {
     format!(
-        "scenario=weekly_planning task_kind={} max_steps={}",
+        "scenario=weekly_planning task_kind={} max_steps={} selected_guidance_count={}",
         input.runtime_input.task.kind,
-        input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT)
+        input.max_steps.min(WEEKLY_PLANNING_MAX_STEP_COUNT),
+        selected_guidance_count(&input.runtime_input)
     )
 }
 
@@ -1295,6 +1348,7 @@ impl PlanExecuteReport {
         governance_decisions: Vec<PlanGovernanceDecisionSummary>,
         observation_summaries: Vec<PlanObservationSummary>,
         warnings: Vec<String>,
+        guidance_impact: Option<Box<GuidanceImpactReadModel>>,
     ) -> Self {
         let step_count = traces.len();
         let executed_read_only_step_count = traces
@@ -1319,6 +1373,10 @@ impl PlanExecuteReport {
             "blockedOrProposalRequiredStepCount": blocked_or_proposal_required_step_count,
             "governanceDecisionCount": governance_decisions.len(),
             "observationSummaryCount": observation_summaries.len(),
+            "selectedGuidanceCount": guidance_impact
+                .as_ref()
+                .map(|impact| impact.selected_guidance_count)
+                .unwrap_or(0),
             "warningCount": warnings.len(),
         });
 
@@ -1331,9 +1389,57 @@ impl PlanExecuteReport {
             governance_decisions,
             observation_summaries,
             warnings,
+            guidance_impact,
             metadata_safe_summary,
         }
     }
+}
+
+fn selected_guidance_count(input: &RuntimeInput) -> usize {
+    if !input.guidance_consumption_mode.is_enabled() {
+        return 0;
+    }
+    input
+        .hs_packet
+        .as_ref()
+        .map(|packet| packet.guidance_refs.len())
+        .unwrap_or(0)
+}
+
+fn selected_guidance_impact_kinds(input: &RuntimeInput) -> Vec<String> {
+    if !input.guidance_consumption_mode.is_enabled() {
+        return Vec::new();
+    }
+    input
+        .hs_packet
+        .as_ref()
+        .map(|packet| {
+            packet
+                .guidance_refs
+                .iter()
+                .map(|guidance| guidance.impact_kind.clone())
+                .fold(Vec::new(), |mut kinds, kind| {
+                    push_unique(&mut kinds, kind);
+                    kinds
+                })
+        })
+        .unwrap_or_default()
+}
+
+fn has_gentle_planning_guidance(input: &PlanExecuteInput) -> bool {
+    if !input.runtime_input.guidance_consumption_mode.is_enabled() {
+        return false;
+    }
+    input
+        .runtime_input
+        .hs_packet
+        .as_ref()
+        .is_some_and(|packet| {
+            packet
+                .guidance_refs
+                .iter()
+                .any(|guidance| guidance.impact_kind == "gentle_planning")
+        })
 }
 
 fn source_run_id(input: &RuntimeInput) -> Option<String> {

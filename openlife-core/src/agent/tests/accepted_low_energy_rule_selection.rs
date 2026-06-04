@@ -107,6 +107,7 @@ fn local_only_packet(run_id: &str) -> RuntimeHSPacket {
             digest: "policy-digest".into(),
         }],
         selected_heuristics: Vec::new(),
+        guidance_refs: Vec::new(),
         estimated_tokens: 0,
         audit: crate::agent::HSSelectionAudit {
             agent_task_id: Some("task-w77-local-only".into()),
@@ -114,6 +115,8 @@ fn local_only_packet(run_id: &str) -> RuntimeHSPacket {
             input_digest: "input-digest".into(),
             selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
             selected_heuristic_ids: Vec::new(),
+            selected_guidance_ids: Vec::new(),
+            selected_guidance_refs: Vec::new(),
             excluded_assets: Vec::new(),
             estimated_tokens: 0,
             token_budget: 128,

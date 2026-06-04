@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-04
-> Status: W136 Backend Completion Goal 4 complete
+> Status: W140 Backend Completion Goal 5 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W136 Backend Completion Goal 4 complete**.
+Current latest status is **W140 Backend Completion Goal 5 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -116,6 +116,18 @@ materialized view provenance. W134-W136 add no Tauri command, no frontend
 surface, no runtime/model/tool execution, no ordinary Chat routing change, no
 Memory/Chat/AgentRun/MCP audit/external writes, and no silent durable
 LifeModel-HS truth materialization.
+W137-W140 complete Backend Completion Goal 5 / Runtime Guidance Integration
+without migrating default Chat: W137 extends RuntimeHSPacket with metadata-safe
+selected guidance refs and hard policy-boundary summaries; W138 makes
+non-default ReAct consume guidance through metadata-safe prompt summaries, config
+caps, action-boundary packet propagation, behavior checks, and trace metadata;
+W139 makes the explicit Plan-Execute weekly planning product path consume
+gentle planning guidance while keeping write-like steps proposal-first; W140
+adds a metadata-safe Guidance Impact read model / trace linkage using only
+ids/digests/counts/status/type/impact fields. W137-W140 add no ordinary Chat
+routing change, no migration permission, no direct LifeModel/Memory/external
+write, and no raw prompt/user text/assistant output/memory/LifeModel/tool
+payload leakage in read models.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -479,7 +491,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W136 progress index
+4. This W1-W140 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -498,7 +510,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W136 Structured Index
+## W1-W140 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -638,6 +650,10 @@ permission.
 | W134 | Accepted Guidance Lifecycle | Done | Pure core accepted guidance lifecycle in `accepted_guidance.rs` plus HeuristicStore constraint metadata | Converts accepted maturation candidate proposals into Trial HeuristicStore guidance with source proposal/evidence/run lineage, domain/trigger/guidance digest, priority, privacy/model/tool constraints, usage metadata, and rollback/archive path; unsafe active activation or policy relaxation fails closed | No; no command/frontend/runtime/model/tool/default Chat effect; writes only the explicit Trial heuristic asset | W135 |
 | W135 | Governed Materialized LifeModel View Provenance | Done | `LifeModel` compatibility materializer provenance | Compatibility YAML carries proposal/evidence/patch/heuristic source ids and digests, explicit compatibility-materialized-view provenance, and accepted_source_of_truth=false / durable_truth_materialized=false | No; no command/frontend/runtime/model/tool/default Chat effect | W136 |
 | W136 | Version Diff And Rollback Read Model | Done | Pure core LifeModel version read model in `accepted_guidance.rs` | Adds metadata-safe diff/rollback references for materialized view provenance and accepted guidance ids/digests/status/source refs; rollback references require proposal and omit raw LifeModel/guidance content | No; no command/frontend/runtime/model/tool/default Chat effect | W137 |
+| W137 | RuntimeHSPacket V2 Guidance Contract | Done | Core `hs_selector.rs` packet/audit metadata | Adds metadata-safe selected guidance refs with id/digest/type/status/domain/impact/risk/privacy/source-lineage/policy-boundary summaries for accepted/trial accepted guidance assets only; seeded built-in heuristics remain `selected_heuristics` and are not emitted as `guidance_refs`; policy-relaxing guidance fails closed and raw guidance is omitted from audit/read-model metadata | No; ordinary send/stream stay `legacy_stream` and do not call runtime guidance pipeline | W138 |
+| W138 | ReAct Guidance Consumption | Done | Non-default/runtime `AgentLoop` + `AgentRuntime` path | ReAct runtime consumes selected guidance through metadata-safe prompt summaries, gentle-planning config caps, action-boundary HS packet propagation, behavior checks, and trace metadata only when `RuntimeGuidanceConsumptionMode::ExplicitRuntime` is enabled; default mode is disabled and preserves ordinary prompt/config shape | No; default Chat routing unchanged and ordinary Chat does not consume accepted guidance | W139 |
+| W139 | Plan-Execute Guidance Consumption | Done | `PlanExecuteService` weekly planning product path | Weekly planning drafts materially change under selected gentle planning guidance only when explicit runtime guidance consumption mode is enabled; write-like steps remain Review Center proposal-first; product contract reports selected guidance metadata only in explicit mode | No; only existing explicit Plan-Execute product path, no ordinary Chat route change | W140 |
+| W140 | Runtime Guidance Trace And Read Model | Done | `GuidanceImpactReadModel` in `hs_selector.rs`, Plan-Execute report linkage, AgentRun HS audit refs | Guidance Impact read model links selected guidance to run/strategy/affected surfaces using ids/digests/counts/status/type/impact only; omits raw guidance, prompt, user text, assistant output, memory, LifeModel, and tool payloads | No; read model/trace metadata only and no default Chat migration permission | W141 |
 
 ## Folded Boundary Summary
 
@@ -809,9 +825,12 @@ low-risk multi-domain maturation candidate generation complete -> W132
 proposal outcome to evidence convergence complete -> W133 candidate
 suppression/correction complete -> W134 accepted guidance lifecycle complete
 -> W135 governed materialized LifeModel view provenance complete -> W136
-version diff and rollback read model complete.
-Next Backend Completion work should proceed to Goal 5 / W137-W140 Runtime
-Guidance Integration. Future Beta hardening can move to Skill Runtime,
+version diff and rollback read model complete -> W137 RuntimeHSPacket v2
+guidance contract complete -> W138 ReAct guidance consumption complete -> W139
+Plan-Execute guidance consumption complete -> W140 Guidance Impact read model
+complete.
+Next Backend Completion work should proceed to Goal 6 / W141-W143 Policy /
+Privacy / Tool Governance Hardening. Future Beta hardening can move to Skill Runtime,
 ModelRouter/Privacy, or product golden path work from the W123 ReAct execution
 baseline. Future default Chat executor implementation discussion may build on
 the W65-W72 proofs only through a separately reviewed task; keep default Chat
