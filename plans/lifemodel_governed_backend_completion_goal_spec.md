@@ -1,8 +1,8 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
 > Date: 2026-06-04
-> Status: Goal-mode master preparation for the post-W123 backend completion stage
-> Baseline: W123 ReAct Beta Execution Hardening complete; default Chat remains `legacy_stream`
+> Status: W133 Backend Completion Goal 3 complete; next Goal-mode entry is Goal 4
+> Baseline: W133 Maturation Engine v1 complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
@@ -358,20 +358,25 @@ be casually changed. Each W-slice must be independently testable.
 - **W130: Evidence read model**
   - Complete: added metadata-safe Evidence Timeline backend read model.
 
-### Goal 3: Maturation Engine v1 (next)
+### Goal 3: Maturation Engine v1 (complete)
 
 - **W131: Low-risk multi-domain candidate generation**
-  - Expand beyond the W73-W78 low-energy proof into planning preference,
-    energy pattern, work style, and communication preference.
-  - Still no high-risk automatic materialization.
+  - Complete: expanded beyond the W73-W78 low-energy proof into planning
+    preference, energy pattern, work style, and communication preference using
+    Evidence Graph clusters.
+  - Complete: high-risk identity, values, relationships, health, finance,
+    privacy, and long-term direction clusters fail closed with no automatic
+    materialization.
 - **W132: Proposal outcome to evidence convergence**
-  - Ensure accept/edit/reject outcomes create positive, corrected, or negative
-    evidence across supported low-risk domains.
+  - Complete: accepted/edited/rejected outcomes create positive/corrective/
+    negative ProposalOutcome evidence metadata while preserving proposal/run/
+    evidence lineage and omitting raw edited payloads.
 - **W133: Candidate suppression and correction**
-  - Use opposition/cooldown/conflict evidence to prevent repeated bad
-    suggestions.
+  - Complete: candidate suppression/correction uses opposing evidence,
+    rejected-similar cooldowns, conflict state, decay state, and rejected
+    history deterministically with ids/hashes/counts only.
 
-### Goal 4: Accepted Guidance And Materialization
+### Goal 4: Accepted Guidance And Materialization (next)
 
 - **W134: Accepted guidance lifecycle**
   - Convert accepted maturation candidates into accepted/trial guidance assets
@@ -528,8 +533,8 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 3 of the LifeModel-Governed Backend Completion stage:
-Maturation Engine v1.
+You are implementing Goal 4 of the LifeModel-Governed Backend Completion stage:
+Accepted Guidance And Materialization.
 
 Read these files first:
 - AGENTS.md
@@ -540,46 +545,49 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W124-W130 Backend Completion Goals 1-2 are complete.
+- W124-W133 Backend Completion Goals 1-3 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W130
-  readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline
-  helpers or commands.
+- Ordinary `send_message` / `start_stream_message` must not call W19-W133
+  readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline/
+  maturation helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
-- W73-W78 LifeModel maturation proof exists but is narrow low-energy planning
-  only.
+- W73-W78 LifeModel maturation proof exists and remains non-default.
 - W128-W130 Evidence Graph v1 exists as a pure backend graph/timeline read
   model with support/opposition/dedupe/conflict/decay/cooldown metadata.
+- W131-W133 Maturation Engine v1 exists as pure backend low-risk candidate
+  generation, proposal outcome evidence convergence, and deterministic
+  suppression/correction. It does not materialize LifeModel truth or activate
+  heuristics.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
   RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W131-W133 only:
+Implement W134-W136 only:
 
-W131:
-- Add low-risk multi-domain maturation candidate generation over Evidence Graph
-  clusters.
-- Support planning preference, energy pattern, work style, and communication
-  preference only.
-- High-risk identity, values, relationships, health, finance, privacy, and
-  long-term direction changes must fail closed.
+W134:
+- Add accepted guidance lifecycle for accepted maturation candidates.
+- Preserve source proposal id, source evidence ids, lifecycle status, domain,
+  trigger/guidance payload, priority, privacy/model/tool constraints, usage
+  metadata, and rollback/deactivation path.
+- Accepted guidance may be selected in future runtime packets, but this slice
+  must not silently activate unsafe heuristics or relax policy.
 
-W132:
-- Converge accepted/edited/rejected proposal outcomes into positive,
-  corrected, or negative evidence across the supported low-risk domains.
-- Preserve evidence/proposal/run lineage and metadata-safe outcome summaries.
+W135:
+- Add governed materialized LifeModel view provenance.
+- Ensure compatibility materialized views carry proposal/evidence/patch/
+  heuristic source digests and do not present unproven durable truth as
+  accepted source-of-truth.
 
-W133:
-- Add candidate suppression/correction logic using opposing evidence,
-  rejected-similar cooldowns, conflict state, decay state, and repeated
-  correction history.
-- Suppression must be deterministic and explainable by ids/hashes/counts only.
+W136:
+- Add version diff and rollback read model references for accepted guidance and
+  materialized LifeModel view provenance.
+- Keep rollback/diff metadata safe and proposal/provenance-linked.
 
 Hard constraints:
 - Do not migrate default Chat.
 - Do not modify ordinary Chat routing.
-- Do not auto-materialize LifeModel truth.
+- Do not bypass ProposalStore/governor/materializer caller restrictions.
 - Do not add large UI/UX.
 - Do not leak raw prompt, raw user text, assistant output, memory content,
   LifeModel raw fields, or tool payloads in metadata-safe reports.
@@ -587,17 +595,18 @@ Hard constraints:
 
 Verification:
 - Run focused cargo tests for the new modules.
-- Run existing evidence graph/maturation/evidence/selector/runtime contract tests that are
-  affected.
+- Run existing evidence graph/maturation/proposal/heuristic/materializer/
+  runtime contract tests that are affected.
 - Run `make ci` if the focused tests pass.
-- Run `rg` checks proving ordinary Chat did not call the new pipeline.
+- Run `rg` checks proving ordinary Chat did not call the new guidance or
+  materialization pipeline.
 
 Output:
-- W131-W133 change summary.
+- W134-W136 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 3 is complete.
+- Whether Goal 4 is complete.
 ```
 
 ## 14. Handoff Standard

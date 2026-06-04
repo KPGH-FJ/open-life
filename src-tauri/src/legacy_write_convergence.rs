@@ -2143,6 +2143,11 @@ const W73_W78_MATURATION_HELPERS: &[&str] = &[
     "ensure_accepted_low_energy_rule_selection",
     "evaluate_low_energy_rule_trace_visibility",
     "ensure_low_energy_rule_trace_visibility",
+    "evaluate_maturation_engine_v1",
+    "MaturationEngineV1Input",
+    "MaturationEngineV1Report",
+    "MaturationEngineCandidate",
+    "MaturationCandidateSuppressionReport",
 ];
 
 #[allow(clippy::too_many_arguments)]

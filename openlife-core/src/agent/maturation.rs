@@ -1,9 +1,16 @@
+use crate::agent::evidence_graph::{
+    evaluate_evidence_graph, EvidenceClusterSummary, EvidenceGraphInput, EvidenceGraphReport,
+    EvidencePolarity, EvidenceTimelineItem,
+};
 use crate::agent::evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceRecord, EvidenceSourceRef, EvidenceSourceType,
     EvidenceStore, EvidenceType,
 };
 use crate::agent::governor::{GovernanceDecision, GovernanceDecisionKind, LifeModelGovernor};
 use crate::agent::hs_selector::RuntimeHSPacket;
+use crate::agent::maturation_domain::{
+    classify_supported_maturation_domain, high_risk_maturation_text, SupportedMaturationDomain,
+};
 use crate::agent::policy_store::{
     ModelRoutePolicy, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
     BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
@@ -17,7 +24,7 @@ use anyhow::{anyhow, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 const DEFAULT_CONFIDENCE: f32 = 0.7;
 const MIN_CONFIDENCE: f32 = 0.55;
@@ -30,6 +37,9 @@ const LOW_ENERGY_RULE_CANDIDATE_PATH: &str = "/collaboration/rule_candidates/low
 const LOW_ENERGY_RULE_CANDIDATE_SUMMARY: &str =
     "Prefer low-pressure planning suggestions with small next steps when the user signals low energy.";
 const DEFAULT_LOW_ENERGY_RULE_CANDIDATE_MIN_SUPPORT: usize = 1;
+const MATURATION_ENGINE_V1_REPORT_KIND: &str = "maturation_engine_v1";
+const MIN_ENGINE_EFFECTIVE_CONFIDENCE: f32 = 0.45;
+const MIN_ENGINE_STABILITY_SCORE: f32 = 0.45;
 
 #[derive(Clone, PartialEq)]
 pub struct LifeModelMaturationReadinessInput {
@@ -1489,6 +1499,294 @@ pub fn ensure_low_energy_rule_trace_visibility(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaturationCandidateDomain {
+    PlanningPreference,
+    EnergyPattern,
+    WorkStyle,
+    CommunicationPreference,
+}
+
+impl MaturationCandidateDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MaturationCandidateDomain::PlanningPreference => "planning_preference",
+            MaturationCandidateDomain::EnergyPattern => "energy_pattern",
+            MaturationCandidateDomain::WorkStyle => "work_style",
+            MaturationCandidateDomain::CommunicationPreference => "communication_preference",
+        }
+    }
+}
+
+impl std::fmt::Display for MaturationCandidateDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+#[derive(Clone)]
+pub struct MaturationEngineV1Input {
+    pub evidence_graph: EvidenceGraphReport,
+    pub default_chat_selected_adapter_path: String,
+    pub ordinary_chat_auto_maturation_enabled: bool,
+    pub require_direct_life_model_write: bool,
+    pub require_direct_memory_write: bool,
+    pub require_heuristic_activation: bool,
+    pub min_effective_confidence: f32,
+    pub min_stability_score: f32,
+}
+
+impl MaturationEngineV1Input {
+    pub fn from_graph_input(input: EvidenceGraphInput) -> Self {
+        Self::from_graph_report(evaluate_evidence_graph(input))
+    }
+
+    pub fn from_graph_report(evidence_graph: EvidenceGraphReport) -> Self {
+        Self {
+            evidence_graph,
+            default_chat_selected_adapter_path: DEFAULT_CHAT_LEGACY_PATH.into(),
+            ordinary_chat_auto_maturation_enabled: false,
+            require_direct_life_model_write: false,
+            require_direct_memory_write: false,
+            require_heuristic_activation: false,
+            min_effective_confidence: MIN_ENGINE_EFFECTIVE_CONFIDENCE,
+            min_stability_score: MIN_ENGINE_STABILITY_SCORE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaturationEngineCandidate {
+    pub candidate_id: String,
+    pub candidate_digest: String,
+    pub domain: MaturationCandidateDomain,
+    pub affected_path: String,
+    pub proposal_type: ProposalType,
+    pub risk_level: RiskLevel,
+    pub source_cluster_id: String,
+    pub source_cluster_hash: String,
+    pub support_evidence_ids: Vec<String>,
+    pub opposing_evidence_ids: Vec<String>,
+    pub linked_proposal_ids: Vec<String>,
+    pub linked_agent_run_ids: Vec<String>,
+    pub source_weight_total: f32,
+    pub confidence: f32,
+    pub stability_score: f32,
+    pub proposal_required: bool,
+    pub candidate_only: bool,
+    pub candidate_summary: String,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaturationCandidateSuppressionReport {
+    pub source_cluster_id: String,
+    pub source_cluster_hash: String,
+    pub affected_path: String,
+    pub domain: Option<MaturationCandidateDomain>,
+    pub suppressed: bool,
+    pub correction_recommended: bool,
+    pub reasons: Vec<String>,
+    pub support_evidence_ids: Vec<String>,
+    pub opposing_evidence_ids: Vec<String>,
+    pub rejected_evidence_ids: Vec<String>,
+    pub rejected_proposal_ids: Vec<String>,
+    pub linked_proposal_ids: Vec<String>,
+    pub linked_agent_run_ids: Vec<String>,
+    pub cooldown_active: bool,
+    pub conflict_active: bool,
+    pub decayed: bool,
+    pub rejected_similar_history_count: usize,
+    pub effective_confidence: f32,
+    pub stability_score: f32,
+    pub candidate_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaturationEngineV1Report {
+    pub report_kind: String,
+    pub engine_ready: bool,
+    pub candidate_generation_ready: bool,
+    pub graph_ready: bool,
+    pub metadata_safe: bool,
+    pub contains_raw_content: bool,
+    pub default_chat_unchanged: bool,
+    pub ordinary_chat_entrypoint_unchanged: bool,
+    pub candidate_count: usize,
+    pub suppressed_candidate_count: usize,
+    pub blocked_cluster_count: usize,
+    pub supported_domain_count: usize,
+    pub high_risk_cluster_count: usize,
+    pub unsupported_cluster_count: usize,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
+    pub candidates: Vec<MaturationEngineCandidate>,
+    pub suppressed_candidates: Vec<MaturationCandidateSuppressionReport>,
+    pub blocking_reasons: Vec<String>,
+    pub wrote_evidence_count: u32,
+    pub wrote_proposal_count: u32,
+    pub wrote_life_model_count: u32,
+    pub wrote_memory_count: u32,
+    pub wrote_heuristic_count: u32,
+    pub wrote_chat_message_count: u32,
+    pub wrote_agent_run_count: u32,
+    pub wrote_mcp_audit_count: u32,
+    pub wrote_external_count: u32,
+    pub ran_runtime: bool,
+    pub ran_model: bool,
+    pub ran_tool: bool,
+}
+
+pub fn evaluate_maturation_engine_v1(input: MaturationEngineV1Input) -> MaturationEngineV1Report {
+    let graph = &input.evidence_graph;
+    let mut blocking_reasons = Vec::new();
+    let default_chat_unchanged =
+        input.default_chat_selected_adapter_path == DEFAULT_CHAT_LEGACY_PATH;
+    let ordinary_chat_entrypoint_unchanged = !input.ordinary_chat_auto_maturation_enabled;
+
+    if !graph.graph_ready {
+        push_unique_reason(&mut blocking_reasons, "evidence_graph_not_ready");
+    }
+    if !graph.metadata_safe || graph.contains_raw_content {
+        push_unique_reason(&mut blocking_reasons, "evidence_graph_metadata_not_safe");
+    }
+    if !default_chat_unchanged {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "default_chat_route_migration_assumed",
+        );
+    }
+    if !ordinary_chat_entrypoint_unchanged {
+        push_unique_reason(
+            &mut blocking_reasons,
+            "ordinary_chat_auto_maturation_assumed",
+        );
+    }
+    if input.require_direct_life_model_write {
+        push_unique_reason(&mut blocking_reasons, "direct_lifemodel_write_required");
+    }
+    if input.require_direct_memory_write {
+        push_unique_reason(&mut blocking_reasons, "direct_memory_write_required");
+    }
+    if input.require_heuristic_activation {
+        push_unique_reason(&mut blocking_reasons, "heuristic_activation_required");
+    }
+
+    let mut candidates = Vec::new();
+    let mut suppressed_candidates = Vec::new();
+    let mut supported_domain_count = 0usize;
+    let mut high_risk_cluster_count = 0usize;
+    let mut unsupported_cluster_count = 0usize;
+    let timeline_items = graph.timeline.items.clone();
+
+    let mut clusters = graph.clusters.clone();
+    clusters.sort_by(|a, b| {
+        a.affected_path
+            .cmp(&b.affected_path)
+            .then_with(|| a.cluster_id.cmp(&b.cluster_id))
+    });
+
+    for cluster in &clusters {
+        let cluster_items = timeline_items_for_cluster(&timeline_items, &cluster.cluster_id);
+        let high_risk = cluster_is_high_risk(cluster, &cluster_items);
+        let domain = if high_risk {
+            None
+        } else {
+            supported_candidate_domain(&cluster.affected_path)
+        };
+        if high_risk {
+            high_risk_cluster_count += 1;
+        } else if domain.is_some() {
+            supported_domain_count += 1;
+        } else {
+            unsupported_cluster_count += 1;
+        }
+
+        let suppression =
+            evaluate_cluster_suppression(cluster, &cluster_items, domain, high_risk, &input);
+        if suppression.suppressed {
+            suppressed_candidates.push(suppression);
+            continue;
+        }
+
+        let Some(domain) = domain else {
+            suppressed_candidates.push(suppression);
+            continue;
+        };
+        candidates.push(candidate_from_cluster(
+            cluster,
+            &cluster_items,
+            domain,
+            &input,
+        ));
+    }
+
+    candidates.sort_by(|a, b| {
+        a.domain
+            .cmp(&b.domain)
+            .then_with(|| a.affected_path.cmp(&b.affected_path))
+            .then_with(|| a.candidate_id.cmp(&b.candidate_id))
+    });
+    suppressed_candidates.sort_by(|a, b| {
+        a.affected_path
+            .cmp(&b.affected_path)
+            .then_with(|| a.source_cluster_id.cmp(&b.source_cluster_id))
+    });
+
+    if candidates.is_empty() {
+        if high_risk_cluster_count > 0 {
+            push_unique_reason(&mut blocking_reasons, "high_risk_domain_cluster_present");
+        }
+        push_unique_reason(
+            &mut blocking_reasons,
+            "low_risk_supported_candidate_missing",
+        );
+    }
+
+    let metadata_safe = graph.metadata_safe && !graph.contains_raw_content;
+    let candidate_generation_ready =
+        blocking_reasons.is_empty() && metadata_safe && !candidates.is_empty();
+    MaturationEngineV1Report {
+        report_kind: MATURATION_ENGINE_V1_REPORT_KIND.into(),
+        engine_ready: candidate_generation_ready,
+        candidate_generation_ready,
+        graph_ready: graph.graph_ready,
+        metadata_safe,
+        contains_raw_content: graph.contains_raw_content,
+        default_chat_unchanged,
+        ordinary_chat_entrypoint_unchanged,
+        candidate_count: candidates.len(),
+        suppressed_candidate_count: suppressed_candidates.len(),
+        blocked_cluster_count: suppressed_candidates
+            .iter()
+            .filter(|candidate| candidate.suppressed)
+            .count(),
+        supported_domain_count,
+        high_risk_cluster_count,
+        unsupported_cluster_count,
+        generated_at: graph.generated_at,
+        candidates,
+        suppressed_candidates,
+        blocking_reasons,
+        wrote_evidence_count: 0,
+        wrote_proposal_count: 0,
+        wrote_life_model_count: 0,
+        wrote_memory_count: 0,
+        wrote_heuristic_count: 0,
+        wrote_chat_message_count: 0,
+        wrote_agent_run_count: 0,
+        wrote_mcp_audit_count: 0,
+        wrote_external_count: 0,
+        ran_runtime: false,
+        ran_model: false,
+        ran_tool: false,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MaturationInput {
@@ -2195,6 +2493,332 @@ fn searchable(event_type: &str, summary: &str) -> String {
         event_type.trim().to_ascii_lowercase(),
         summary.to_ascii_lowercase()
     )
+}
+
+fn timeline_items_for_cluster(
+    timeline_items: &[EvidenceTimelineItem],
+    cluster_id: &str,
+) -> Vec<EvidenceTimelineItem> {
+    let mut items = timeline_items
+        .iter()
+        .filter(|item| item.cluster_id == cluster_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    items.sort_by(|a, b| {
+        a.evidence_id
+            .cmp(&b.evidence_id)
+            .then_with(|| a.affected_path.cmp(&b.affected_path))
+    });
+    items
+}
+
+fn supported_candidate_domain(path: &str) -> Option<MaturationCandidateDomain> {
+    classify_supported_maturation_domain(path, None).map(maturation_domain_for_engine)
+}
+
+fn high_risk_maturation_path(path: &str) -> bool {
+    high_risk_maturation_text(path)
+}
+
+fn maturation_domain_for_engine(domain: SupportedMaturationDomain) -> MaturationCandidateDomain {
+    match domain {
+        SupportedMaturationDomain::PlanningPreference => {
+            MaturationCandidateDomain::PlanningPreference
+        }
+        SupportedMaturationDomain::EnergyPattern => MaturationCandidateDomain::EnergyPattern,
+        SupportedMaturationDomain::WorkStyle => MaturationCandidateDomain::WorkStyle,
+        SupportedMaturationDomain::CommunicationPreference => {
+            MaturationCandidateDomain::CommunicationPreference
+        }
+    }
+}
+
+fn cluster_is_high_risk(
+    cluster: &EvidenceClusterSummary,
+    timeline_items: &[EvidenceTimelineItem],
+) -> bool {
+    high_risk_maturation_path(&cluster.affected_path)
+        || timeline_items.iter().any(|item| {
+            matches!(item.risk_level.as_str(), "high" | "critical")
+                || item.privacy_level == "strictly_local"
+        })
+}
+
+fn evaluate_cluster_suppression(
+    cluster: &EvidenceClusterSummary,
+    timeline_items: &[EvidenceTimelineItem],
+    domain: Option<MaturationCandidateDomain>,
+    high_risk: bool,
+    input: &MaturationEngineV1Input,
+) -> MaturationCandidateSuppressionReport {
+    let mut reasons = Vec::new();
+    let support_evidence_ids = sorted_unique(cluster.supporting_evidence_ids.clone());
+    let mut opposing_evidence_ids = sorted_unique(cluster.opposing_evidence_ids.clone());
+    let rejected_evidence_ids = rejected_evidence_ids_for_cluster(cluster, timeline_items);
+    let rejected_proposal_ids = rejected_proposal_ids_for_cluster(cluster, timeline_items);
+    let linked_proposal_ids = linked_proposal_ids_for_timeline(timeline_items);
+    let linked_agent_run_ids = linked_agent_run_ids_for_timeline(timeline_items);
+    let stability_score = cluster_stability_score(cluster);
+
+    if high_risk {
+        push_unique_reason(&mut reasons, "high_risk_domain");
+    }
+    if domain.is_none() && !high_risk {
+        push_unique_reason(&mut reasons, "unsupported_maturation_domain");
+    }
+    if support_evidence_ids.is_empty() {
+        push_unique_reason(&mut reasons, "supporting_evidence_missing");
+    }
+    if cluster.cooldown_state.active {
+        push_unique_reason(&mut reasons, "rejected_similar_cooldown_active");
+    }
+    if cluster.conflict_state.conflicted {
+        push_unique_reason(&mut reasons, "cluster_conflict_active");
+    }
+    if !cluster.conflict_state.opposing_evidence_ids.is_empty() {
+        for id in &cluster.conflict_state.opposing_evidence_ids {
+            push_unique_string(&mut opposing_evidence_ids, id);
+        }
+    }
+    if !opposing_evidence_ids.is_empty() || cluster.opposition_link_count > 0 {
+        push_unique_reason(&mut reasons, "opposing_evidence_present");
+    }
+    if !rejected_evidence_ids.is_empty() {
+        push_unique_reason(&mut reasons, "rejected_similar_history_present");
+        if rejected_evidence_ids.len() >= support_evidence_ids.len().max(1) {
+            push_unique_reason(&mut reasons, "rejected_similar_history_blocks_candidate");
+        }
+    }
+    if cluster.effective_confidence < input.min_effective_confidence
+        || timeline_items
+            .iter()
+            .filter(|item| item.polarity == EvidencePolarity::Supporting)
+            .all(|item| item.decay_state.decayed)
+    {
+        push_unique_reason(&mut reasons, "supporting_evidence_decayed");
+    }
+    if stability_score < input.min_stability_score {
+        push_unique_reason(&mut reasons, "stability_score_too_low");
+    }
+
+    MaturationCandidateSuppressionReport {
+        source_cluster_id: cluster.cluster_id.clone(),
+        source_cluster_hash: cluster.cluster_hash.clone(),
+        affected_path: cluster.affected_path.clone(),
+        domain,
+        suppressed: !reasons.is_empty(),
+        correction_recommended: cluster.conflict_state.conflicted
+            || !opposing_evidence_ids.is_empty()
+            || !rejected_evidence_ids.is_empty(),
+        reasons,
+        support_evidence_ids,
+        opposing_evidence_ids: sorted_unique(opposing_evidence_ids),
+        rejected_evidence_ids,
+        rejected_proposal_ids,
+        linked_proposal_ids,
+        linked_agent_run_ids,
+        cooldown_active: cluster.cooldown_state.active,
+        conflict_active: cluster.conflict_state.conflicted,
+        decayed: cluster.effective_confidence < input.min_effective_confidence,
+        rejected_similar_history_count: rejected_evidence_ids_for_cluster(cluster, timeline_items)
+            .len(),
+        effective_confidence: round4_maturation(cluster.effective_confidence),
+        stability_score,
+        candidate_digest: engine_candidate_digest(EngineCandidateDigestInput {
+            domain,
+            affected_path: &cluster.affected_path,
+            cluster_hash: &cluster.cluster_hash,
+            support_evidence_ids: &cluster.supporting_evidence_ids,
+            opposing_evidence_ids: &cluster.opposing_evidence_ids,
+            linked_proposal_ids: &linked_proposal_ids_for_timeline(timeline_items),
+            linked_agent_run_ids: &linked_agent_run_ids_for_timeline(timeline_items),
+            effective_confidence: cluster.effective_confidence,
+            stability_score,
+        }),
+    }
+}
+
+fn candidate_from_cluster(
+    cluster: &EvidenceClusterSummary,
+    timeline_items: &[EvidenceTimelineItem],
+    domain: MaturationCandidateDomain,
+    _input: &MaturationEngineV1Input,
+) -> MaturationEngineCandidate {
+    let linked_proposal_ids = linked_proposal_ids_for_timeline(timeline_items);
+    let linked_agent_run_ids = linked_agent_run_ids_for_timeline(timeline_items);
+    let support_evidence_ids = sorted_unique(cluster.supporting_evidence_ids.clone());
+    let opposing_evidence_ids = sorted_unique(cluster.opposing_evidence_ids.clone());
+    let stability_score = cluster_stability_score(cluster);
+    let candidate_digest = engine_candidate_digest(EngineCandidateDigestInput {
+        domain: Some(domain),
+        affected_path: &cluster.affected_path,
+        cluster_hash: &cluster.cluster_hash,
+        support_evidence_ids: &support_evidence_ids,
+        opposing_evidence_ids: &opposing_evidence_ids,
+        linked_proposal_ids: &linked_proposal_ids,
+        linked_agent_run_ids: &linked_agent_run_ids,
+        effective_confidence: cluster.effective_confidence,
+        stability_score,
+    });
+    MaturationEngineCandidate {
+        candidate_id: format!("mc_{}", short_hash_maturation(&candidate_digest)),
+        candidate_digest,
+        domain,
+        affected_path: cluster.affected_path.clone(),
+        proposal_type: proposal_type_for_engine_domain(domain),
+        risk_level: RiskLevel::Low,
+        source_cluster_id: cluster.cluster_id.clone(),
+        source_cluster_hash: cluster.cluster_hash.clone(),
+        support_evidence_ids,
+        opposing_evidence_ids,
+        linked_proposal_ids,
+        linked_agent_run_ids,
+        source_weight_total: round4_maturation(cluster.source_weight_total),
+        confidence: round4_maturation(cluster.effective_confidence.clamp(0.0, 1.0)),
+        stability_score,
+        proposal_required: true,
+        candidate_only: true,
+        candidate_summary: engine_candidate_summary(domain).to_string(),
+        metadata_safe: true,
+        contains_raw_content: false,
+    }
+}
+
+fn proposal_type_for_engine_domain(domain: MaturationCandidateDomain) -> ProposalType {
+    match domain {
+        MaturationCandidateDomain::EnergyPattern => ProposalType::StateUpdate,
+        MaturationCandidateDomain::PlanningPreference
+        | MaturationCandidateDomain::WorkStyle
+        | MaturationCandidateDomain::CommunicationPreference => ProposalType::PreferenceUpdate,
+    }
+}
+
+fn engine_candidate_summary(domain: MaturationCandidateDomain) -> &'static str {
+    match domain {
+        MaturationCandidateDomain::PlanningPreference => {
+            "Reviewable planning preference candidate from evidence cluster."
+        }
+        MaturationCandidateDomain::EnergyPattern => {
+            "Reviewable energy pattern candidate from evidence cluster."
+        }
+        MaturationCandidateDomain::WorkStyle => {
+            "Reviewable work style candidate from evidence cluster."
+        }
+        MaturationCandidateDomain::CommunicationPreference => {
+            "Reviewable communication preference candidate from evidence cluster."
+        }
+    }
+}
+
+fn cluster_stability_score(cluster: &EvidenceClusterSummary) -> f32 {
+    let opposition_penalty = (cluster.opposing_evidence_ids.len() as f32 * 0.18)
+        + if cluster.conflict_state.conflicted {
+            0.25
+        } else {
+            0.0
+        }
+        + if cluster.cooldown_state.active {
+            0.25
+        } else {
+            0.0
+        };
+    round4_maturation((cluster.effective_confidence - opposition_penalty).clamp(0.0, 1.0))
+}
+
+fn rejected_evidence_ids_for_cluster(
+    cluster: &EvidenceClusterSummary,
+    timeline_items: &[EvidenceTimelineItem],
+) -> Vec<String> {
+    let mut ids = cluster.cooldown_state.rejected_evidence_ids.clone();
+    for item in timeline_items {
+        if item.evidence_type == "proposal_outcome" && item.polarity == EvidencePolarity::Opposing {
+            push_unique_string(&mut ids, &item.evidence_id);
+        }
+    }
+    sorted_unique(ids)
+}
+
+fn rejected_proposal_ids_for_cluster(
+    cluster: &EvidenceClusterSummary,
+    timeline_items: &[EvidenceTimelineItem],
+) -> Vec<String> {
+    let mut ids = cluster.cooldown_state.rejected_proposal_ids.clone();
+    for item in timeline_items {
+        if item.evidence_type == "proposal_outcome" && item.polarity == EvidencePolarity::Opposing {
+            for proposal_id in &item.linked_proposal_ids {
+                push_unique_string(&mut ids, proposal_id);
+            }
+        }
+    }
+    sorted_unique(ids)
+}
+
+fn linked_proposal_ids_for_timeline(timeline_items: &[EvidenceTimelineItem]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for item in timeline_items {
+        for proposal_id in &item.linked_proposal_ids {
+            push_unique_string(&mut ids, proposal_id);
+        }
+    }
+    sorted_unique(ids)
+}
+
+fn linked_agent_run_ids_for_timeline(timeline_items: &[EvidenceTimelineItem]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for item in timeline_items {
+        for run_id in &item.linked_agent_run_ids {
+            push_unique_string(&mut ids, run_id);
+        }
+    }
+    sorted_unique(ids)
+}
+
+fn sorted_unique(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+struct EngineCandidateDigestInput<'a> {
+    domain: Option<MaturationCandidateDomain>,
+    affected_path: &'a str,
+    cluster_hash: &'a str,
+    support_evidence_ids: &'a [String],
+    opposing_evidence_ids: &'a [String],
+    linked_proposal_ids: &'a [String],
+    linked_agent_run_ids: &'a [String],
+    effective_confidence: f32,
+    stability_score: f32,
+}
+
+fn engine_candidate_digest(input: EngineCandidateDigestInput<'_>) -> String {
+    sha256_hex(
+        json!({
+            "schema": "w131.maturationEngineCandidate.digest.v1",
+            "domain": input.domain.map(|domain| domain.as_str()),
+            "affectedPath": input.affected_path,
+            "sourceClusterHash": input.cluster_hash,
+            "supportEvidenceIds": sorted_unique(input.support_evidence_ids.to_vec()),
+            "opposingEvidenceIds": sorted_unique(input.opposing_evidence_ids.to_vec()),
+            "linkedProposalIds": sorted_unique(input.linked_proposal_ids.to_vec()),
+            "linkedAgentRunIds": sorted_unique(input.linked_agent_run_ids.to_vec()),
+            "effectiveConfidence": round4_maturation(input.effective_confidence),
+            "stabilityScore": input.stability_score,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+fn round4_maturation(value: f32) -> f32 {
+    (value * 10_000.0).round() / 10_000.0
+}
+
+fn short_hash_maturation(value: &str) -> String {
+    sha256_hex(value.as_bytes()).chars().take(16).collect()
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {

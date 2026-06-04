@@ -261,18 +261,18 @@ fn low_energy_collaboration_non_low_energy_domain_fails_closed() {
 fn low_energy_collaboration_non_low_energy_outcome_evidence_fails_closed() {
     let evidence_store = EvidenceStore::new_in_memory().unwrap();
     let mut proposal = AgentProposal::new(
-        ProposalType::LifeModelUpdate,
-        "/identity/values",
-        serde_json::json!({ "summary": "safe identity values candidate" }),
-        "metadata-safe identity proposal",
+        ProposalType::StateUpdate,
+        "/state/energy_pattern/morning",
+        serde_json::json!({ "summary": "safe energy pattern candidate" }),
+        "metadata-safe energy pattern proposal",
         0.9,
-        RiskLevel::High,
+        RiskLevel::Low,
         ProposalSource::FeedbackEvolution,
     );
-    proposal.id = "proposal-w76-identity".into();
-    proposal.run_id = Some("run-w76-identity".into());
-    proposal.source_detail = Some("maturation:identity.values".into());
-    create_source_evidence(&evidence_store, &proposal, "run-w76-identity");
+    proposal.id = "proposal-w76-energy-pattern".into();
+    proposal.run_id = Some("run-w76-energy-pattern".into());
+    proposal.source_detail = Some("maturation:state.energy_pattern".into());
+    create_source_evidence(&evidence_store, &proposal, "run-w76-energy-pattern");
     let outcome = record_outcome(
         &evidence_store,
         &proposal,

@@ -8,6 +8,7 @@ pub mod heuristic_store;
 pub mod hs_selector;
 pub mod lifemodel_backend_completion;
 pub mod maturation;
+mod maturation_domain;
 pub mod memory_service;
 pub mod metrics;
 pub mod model_router;
@@ -79,7 +80,7 @@ pub use maturation::{
     ensure_lifemodel_maturation_readiness, ensure_low_energy_rule_trace_visibility,
     evaluate_accepted_low_energy_rule_selection, evaluate_lifemodel_maturation_readiness,
     evaluate_low_energy_collaboration_rule_candidate, evaluate_low_energy_rule_trace_visibility,
-    propose_low_energy_collaboration_rule_candidate,
+    evaluate_maturation_engine_v1, propose_low_energy_collaboration_rule_candidate,
     run_lifemodel_maturation_non_default_invocation,
     AcceptedLowEnergyRuleSelectionHSPacketAuditProof, AcceptedLowEnergyRuleSelectionInput,
     AcceptedLowEnergyRuleSelectionReport, LifeModelMaturationNonDefaultInvocationInput,
@@ -88,7 +89,9 @@ pub use maturation::{
     LifeModelMaturationService, LowEnergyCollaborationRuleCandidateInput,
     LowEnergyCollaborationRuleCandidateReport, LowEnergyRuleTraceLineageItem,
     LowEnergyRuleTraceLineageSummary, LowEnergyRuleTraceMetadata,
-    LowEnergyRuleTraceVisibilityInput, LowEnergyRuleTraceVisibilityReport, MaturationDropReason,
+    LowEnergyRuleTraceVisibilityInput, LowEnergyRuleTraceVisibilityReport,
+    MaturationCandidateDomain, MaturationCandidateSuppressionReport, MaturationDropReason,
+    MaturationEngineCandidate, MaturationEngineV1Input, MaturationEngineV1Report,
     MaturationGovernanceAudit, MaturationGovernanceSummary, MaturationInput, MaturationOutput,
     MaturationProposalCandidate, MaturationReport, MaturationService,
 };

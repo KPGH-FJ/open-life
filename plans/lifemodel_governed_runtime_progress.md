@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-04
-> Status: W130 Backend Completion Goal 2 complete
+> Status: W133 Backend Completion Goal 3 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W130 Backend Completion Goal 2 complete**.
+Current latest status is **W133 Backend Completion Goal 3 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -85,6 +85,20 @@ rejected-similar cooldown metadata; W130 adds a metadata-safe Evidence Timeline
 read model with ids, type, path, status, confidence, risk/privacy, polarity,
 link counts, proposal/run refs, cluster id/hash, conflict/decay/cooldown state,
 and timestamps. W128-W130 add no Tauri command, no frontend surface, no
+runtime/model/tool execution, no LifeModel / Memory / Heuristic / Chat /
+AgentRun / MCP audit / external writes, no durable truth materialization, and
+no default Chat routing change.
+W131-W133 complete Backend Completion Goal 3 / Maturation Engine v1 without
+migrating default Chat: W131 adds a pure backend Maturation Engine evaluator
+over Evidence Graph clusters for planning preference, energy pattern, work
+style, and communication preference only; high-risk identity, values,
+relationships, health, finance, privacy, and long-term direction clusters fail
+closed. W132 extends maturation proposal outcome evidence so accepted, edited,
+and rejected outcomes carry positive, corrective, and negative metadata while
+preserving proposal/run/evidence lineage and omitting raw edited payloads. W133
+adds deterministic candidate suppression/correction using opposing evidence,
+conflict, decay, rejected-similar cooldown, and rejected-similar history with
+ids/hashes/counts only. W131-W133 add no Tauri command, no frontend surface, no
 runtime/model/tool execution, no LifeModel / Memory / Heuristic / Chat /
 AgentRun / MCP audit / external writes, no durable truth materialization, and
 no default Chat routing change.
@@ -451,7 +465,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W130 progress index
+4. This W1-W133 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -470,7 +484,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W130 Structured Index
+## W1-W133 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -604,6 +618,9 @@ permission.
 | W128 | Evidence Support / Opposition / Dedupe Graph | Done | Pure core evidence graph in `evidence_graph.rs` | Builds support/opposition links, affected-path dedupe clusters, source weights, and cluster summaries from existing EvidenceStore records; no store schema migration or business write | No; ordinary send/stream stay `legacy_stream` and do not call it | W129 |
 | W129 | Conflict / Decay / Cooldown | Done | Pure graph metadata evaluator with injected `now` | Detects conflicts from opposing refs, Contradicted status, rejected ProposalOutcome evidence, and same affected-path cluster opposition; computes deterministic decay and rejected-similar cooldown metadata | No; no command/frontend/runtime/model/tool/default Chat effect | W130 |
 | W130 | Evidence Timeline Read Model | Done | Metadata-safe timeline read model | Timeline exposes ids/type/path/status/confidence/risk/privacy/polarity/link counts/proposal and run refs/cluster id and hash/conflict-decay-cooldown state/timestamps; omits raw prompt/user text/assistant output/tool payload/LifeModel raw content | No; no command/frontend/runtime/model/tool/default Chat effect | W131 |
+| W131 | Low-Risk Multi-Domain Maturation Candidate Generation | Done | Pure core `evaluate_maturation_engine_v1` over Evidence Graph clusters | Generates metadata-safe reviewable candidates for planning preference, energy pattern, work style, and communication preference only; high-risk identity/values/relationships/health/finance/privacy/long-term direction clusters fail closed | No; no command/frontend/runtime/model/tool/store/default Chat effect | W132 |
+| W132 | Proposal Outcome To Evidence Convergence | Done | Core `proposal_outcome.rs` evidence convergence metadata | Accepted/edited/rejected maturation proposal outcomes create positive/corrective/negative ProposalOutcome evidence metadata with proposal/run/evidence lineage; edited payload is digest-only/not included; high-risk outcome risk fails closed | No default Chat effect; existing proposal command integration remains proposal outcome only | W133 |
+| W133 | Candidate Suppression And Correction | Done | Pure core Maturation Engine suppression report | Suppresses candidates deterministically using opposing evidence, graph conflict, decay, rejected-similar cooldown, and rejected-similar history; reports ids/hashes/counts/reasons only, no raw source content | No; no command/frontend/runtime/model/tool/store/default Chat effect | W134 |
 
 ## Folded Boundary Summary
 
@@ -713,6 +730,11 @@ above. The boundary meaning is preserved:
   runtime/model/tool paths, add commands or frontend surfaces, write durable
   LifeModel/Memory/Heuristic truth, write AgentRun/MCP audit/external records,
   materialize accepted truth, or affect default Chat routing.
+- W131-W133 are Backend Completion Goal 3 / Maturation Engine v1 only. They add
+  low-risk graph-based candidate generation, proposal outcome evidence
+  convergence, and deterministic suppression/correction. They do not
+  materialize LifeModel truth, activate heuristics, add commands or frontend
+  surfaces, run runtime/model/tool paths, or affect default Chat routing.
 
 ## Next Recommended Sequence
 
@@ -765,10 +787,12 @@ W124 backend completion readiness/contract report complete -> W125 LifeEvent
 schema/store contract complete -> W126 Signal schema/deterministic extractor
 complete -> W127 safe LifeEvent/Signal/Evidence bridge complete -> W128
 Evidence support/opposition/dedupe graph complete -> W129 conflict/decay/
-cooldown complete -> W130 Evidence Timeline read model complete.
-Next Backend Completion work should proceed to W131-W133 Maturation Engine v1:
-low-risk candidate generation, proposal outcome convergence, and candidate
-suppression/correction on top of Evidence Graph v1. Future Beta hardening can move to Skill Runtime,
+cooldown complete -> W130 Evidence Timeline read model complete -> W131
+low-risk multi-domain maturation candidate generation complete -> W132
+proposal outcome to evidence convergence complete -> W133 candidate
+suppression/correction complete.
+Next Backend Completion work should proceed to Goal 4 / W134-W136 Accepted
+Guidance And Materialization. Future Beta hardening can move to Skill Runtime,
 ModelRouter/Privacy, or product golden path work from the W123 ReAct execution
 baseline. Future default Chat executor implementation discussion may build on
 the W65-W72 proofs only through a separately reviewed task; keep default Chat

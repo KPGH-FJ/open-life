@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-04
-> Status: authoritative document index for Agents, W130 Backend Completion Goal 2 complete; next Goal-mode entry is Maturation Engine v1
+> Status: authoritative document index for Agents, W133 Backend Completion Goal 3 complete; next Goal-mode entry is Accepted Guidance And Materialization
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -19,7 +19,7 @@ as reference only.
    - Next Goal-mode master spec for completing the pre-UI LifeModel-governed
      backend kernel.
 5. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W130 completion/status index. This is not a second roadmap.
+   - Compact W1-W133 completion/status index. This is not a second roadmap.
 6. `plans/react_beta_execution_hardening_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for ReAct Beta Execution
      Hardening W114-W123.
@@ -51,7 +51,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W130 Backend Completion Goal 2 complete**.
+Current latest status is **W133 Backend Completion Goal 3 complete**.
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -126,10 +126,19 @@ surface, no runtime/model/tool execution, no LifeModel/Memory/Heuristic/Chat/
 AgentRun/MCP audit/external writes, no durable truth materialization, and no
 default Chat route change.
 
-The next Goal-mode development entry is Backend Completion Goal 3 from
-`plans/lifemodel_governed_backend_completion_goal_spec.md`: Maturation Engine
-v1 W131-W133. It should build low-risk candidate generation on the graph before
-continuing to governed materialization/versioned truth,
+W131-W133 Backend Completion Goal 3 is complete. It adds a pure backend
+Maturation Engine v1 with low-risk Evidence Graph cluster candidate generation
+for planning preference, energy pattern, work style, and communication
+preference; proposal outcome evidence convergence into positive/corrective/
+negative metadata; and deterministic candidate suppression/correction using
+opposition, conflict, decay, cooldown, and rejected-similar history. W131-W133
+add no Tauri command, no frontend surface, no runtime/model/tool execution, no
+LifeModel/Memory/Heuristic/Chat/AgentRun/MCP audit/external writes, no durable
+truth materialization, and no default Chat route change.
+
+The next Goal-mode development entry is Backend Completion Goal 4 from
+`plans/lifemodel_governed_backend_completion_goal_spec.md`: Accepted Guidance
+And Materialization W134-W136. It should continue to governed materialization/versioned truth,
 RuntimeHSPacket guidance integration, ModelRouter/Privacy and tool governance
 hardening, backend golden paths, and UI read model contract freeze.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
@@ -526,7 +535,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W130 Compression Map
+## 3. W1-W133 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -597,6 +606,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W114-W123 | ReAct Beta Execution Hardening | ReAct readiness/status, AgentLoop action schema/parser, Tool Registry Beta taxonomy/readiness, manifest authority, `react_trace` envelopes, permission/replay scope, proposal-first writes, non-default status command, Runs/Trace hardening, and docs sync are complete; not default Chat migration and not full Beta declaration |
 | W124-W127 | Backend Completion Goal 1: Master Contract And Schemas | Pure backend readiness/contract report, typed LifeEvent store skeleton, deterministic low-risk Signal extractor, and safe Signal -> EvidenceStore candidate bridge are complete; no command/frontend/runtime/model/tool/default Chat impact |
 | W128-W130 | Backend Completion Goal 2: Evidence Graph v1 | Pure backend evidence graph/timeline read model, support/opposition links, dedupe clusters, source weights, cluster summaries, conflict/decay/cooldown, and rejected-similar cooldown metadata are complete; no command/frontend/runtime/model/tool/default Chat impact |
+| W131-W133 | Backend Completion Goal 3: Maturation Engine v1 | Pure backend Maturation Engine v1 candidate generation, proposal outcome evidence convergence, and deterministic suppression/correction are complete for low-risk planning/energy/work-style/communication domains; no command/frontend/runtime/model/tool/default Chat impact |
 
 ## 4. Current Authoritative Entry Points
 
@@ -604,8 +614,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_backend_completion_goal_spec.md` | Current Backend Completion master spec; next implementation entry is Goal 3 / Maturation Engine v1. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W130 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_backend_completion_goal_spec.md` | Current Backend Completion master spec; next implementation entry is Goal 4 / Accepted Guidance And Materialization. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W133 structured status index and compressed guardrail map. |
 | `plans/react_beta_execution_hardening_goal_spec.md` | Completed W114-W123 ReAct Beta Execution Hardening CLI spec/audit trail. |
 | `plans/runtime_strategy_maturity_goal_spec.md` | Completed W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity spec/audit trail. |
 | `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
@@ -800,9 +810,11 @@ W125 LifeEvent schema/store contract complete -> W126 Signal
 schema/deterministic extractor complete -> W127 safe Signal -> EvidenceStore
 candidate bridge complete -> W128 Evidence support/opposition/dedupe graph
 complete -> W129 conflict/decay/cooldown complete -> W130 Evidence Timeline
-read model complete.
-The next architecture block is W131-W133 Maturation Engine v1 from the W130
-Backend Completion Goal 2 baseline. Full Beta still needs separately scoped
+read model complete -> W131 low-risk multi-domain maturation candidate
+generation complete -> W132 proposal outcome to evidence convergence complete
+-> W133 candidate suppression/correction complete.
+The next architecture block is Goal 4 / W134-W136 Accepted Guidance And
+Materialization from the W133 Backend Completion Goal 3 baseline. Full Beta still needs separately scoped
 Skill Runtime, ModelRouter/Privacy, and product golden path work. Any future
 default Chat executor implementation or route cutover remains a separate
 reviewed task that preserves default Chat legacy_stream until a route change is

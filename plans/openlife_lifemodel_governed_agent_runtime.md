@@ -1,37 +1,41 @@
 # OpenLife LifeModel-Governed Agent Runtime Program
 
 > Date: 2026-06-04
-> Status: W130 Backend Completion Goal 2 complete; default Chat remains `legacy_stream`
-> Scope: current LifeModel-governed Agent Runtime program, completed W1-W130 baseline, and the pre-UI backend completion program
+> Status: W133 Backend Completion Goal 3 complete; default Chat remains `legacy_stream`
+> Scope: current LifeModel-governed Agent Runtime program, completed W1-W133 baseline, and the pre-UI backend completion program
 
 ## 1. Purpose
 
 This document is the program baseline for the next OpenLife development cycle.
-As of W130, the major scoped blocks are complete: W65-W72 default Chat adapter
+As of W133, the major scoped blocks are complete: W65-W72 default Chat adapter
 guard stack, W73-W78 LifeModel maturation proof slice, W90-W97 Legacy
 Direct-Write Convergence, W98-W105 Plan-Execute Product Vertical, W106-W113
 RuntimeStrategy / Multi-Strategy Runtime Maturity, and W114-W123 ReAct Beta
 Execution Hardening, plus W124-W127 Backend Completion Goal 1 / Master Contract
-And Schemas and W128-W130 Backend Completion Goal 2 / Evidence Graph v1. These
+And Schemas, W128-W130 Backend Completion Goal 2 / Evidence Graph v1, and
+W131-W133 Backend Completion Goal 3 / Maturation Engine v1. These
 blocks prove contracts, readiness, proposal-first writes, trace visibility,
 non-default product/runtime surfaces, the first LifeEvent/Signal schema bridge
 into EvidenceStore candidate evidence, and a pure backend evidence graph/
-timeline read model with conflict/decay/cooldown metadata. They do
-not grant default Chat migration permission, and MultiStrategy is still not the
-ordinary Chat runtime.
+timeline read model with conflict/decay/cooldown metadata, plus metadata-safe
+low-risk maturation candidate generation, proposal outcome evidence convergence,
+and deterministic candidate suppression/correction. They do not grant default
+Chat migration permission, and MultiStrategy is still not the ordinary Chat
+runtime. Goal 3 is not migration permission, does not materialize accepted
+truth, and W131-W133 grant no runtime/model/tool execution authority.
 
 Full Beta is also not declared by W123. The remaining blockers are primarily
 Skill Runtime maturity, ModelRouter/Privacy hardening, cross-product
 LifeModel/Memory governance golden paths, and any future default Chat route
 migration as a separate reviewed implementation phase.
 
-The next Goal-mode implementation entry is Backend Completion Goal 3 from
-`plans/lifemodel_governed_backend_completion_goal_spec.md`: Maturation Engine
-v1 W131-W133. That spec turns the remaining backend blockers into one
-system-level pre-UI program: Maturation Engine v1, governed materialization/
-versioned truth, RuntimeHSPacket guidance integration, ModelRouter/Privacy and
-tool governance hardening, backend golden paths, and UI read model contract
-freeze. Use it before starting CLI Goal-mode development.
+The next Goal-mode implementation entry is Backend Completion Goal 4 from
+`plans/lifemodel_governed_backend_completion_goal_spec.md`: Accepted Guidance
+And Materialization W134-W136. That spec turns the remaining backend blockers
+into one system-level pre-UI program: governed materialization/versioned truth,
+RuntimeHSPacket guidance integration, ModelRouter/Privacy and tool governance
+hardening, backend golden paths, and UI read model contract freeze. Use it
+before starting CLI Goal-mode development.
 
 It updates the project framing from:
 
@@ -128,7 +132,7 @@ This document sits above these existing baselines:
    - This is the starting point for convergence tasks.
 
 6. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W130 status table and compressed guardrail map.
+   - Compact W1-W133 status table and compressed guardrail map.
    - It must not override the strategic order in this program.
 
 ## 4. Current Code Baseline
@@ -154,7 +158,7 @@ As of this preparation document, the project already has meaningful primitives:
 | Controlled Chat Pilot / Promotion | `frontend/src/pages/ChatPage.tsx` | W20 explicit single-turn pilot plus W21 reviewed promotion and W22 source-bound validation. The pilot calls eligibility before preview, blocks without preview when ineligible, runs `run_multi_strategy_agent_preview` only when eligible with `allowWrites=false`, displays “Pilot response” separately, and keeps normal Send unchanged. Promotion can write one ordinary assistant chat message with existing `run_id` metadata only after explicit review/confirmation and only when the current target session matches the pilot source session. |
 | Promotion / migration evidence ladder | `src-tauri/src/commands/agent_runtime.rs`, `frontend/src/pages/settings/MultiStrategyPreviewSection.tsx` | W23-W33 add metadata-safe promotion evidence, readiness, reviewed migration plan, review decision evidence, implementation gate, shadow run/review, cutover readiness, candidate adapter/review, and candidate promotion readiness. These are explicit, evidence-backed, and non-default; readiness means implementation discussion, not migration permission. |
 | Default Chat adapter guard ladder | `src-tauri/src/default_chat_adapter.rs`, `src-tauri/src/lib.rs`, Settings panels | W34-W60 make the default Chat boundary observable and guarded; W65-W72 add backend-only descriptor, contract report, non-default harness, send/stream proof, attachment gate, disabled skeleton, and binding integrity proof. Ordinary `send_message` / `start_stream_message` still enter `legacy_stream`; controlled adapter execution remains disabled and unattached. |
-| Authority roadmap / docs sync | `AGENTS.md`, `README.md`, `plans/README.md`, this document, `plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md` | W54, W64, W97, W105, W113, W123, W127, and W130 keep authority docs/progress synced so future Agents do not follow stale migration or tool-taxonomy instructions. This is documentation governance, not runtime migration. |
+| Authority roadmap / docs sync | `AGENTS.md`, `README.md`, `plans/README.md`, this document, `plans/openlife_development_plan.md`, `plans/lifemodel_governed_runtime_progress.md` | W54, W64, W97, W105, W113, W123, W127, W130, and W133 keep authority docs/progress synced so future Agents do not follow stale migration or tool-taxonomy instructions. This is documentation governance, not runtime migration. |
 | Preview / product / ReAct trace UI | `frontend/src/utils/previewAudit.ts`, Runs, `RunTracePanel` | Displays preview strategy, product trace vocabulary, ReAct action/observation lifecycle, governance, warnings, and metadata-safe trace fields. |
 | ProposalStore | `openlife-core/src/agent/proposal_store.rs` | Unified proposal storage and review states. |
 | Proposal apply | `src-tauri/src/commands/proposal.rs` | Main convergence target for LifeModel, memory, tool permission, scheduled task, data export, and external write application. |
@@ -726,7 +730,7 @@ Run:
 make ci
 ```
 
-### Completed W1-W60
+### Completed W1-W133
 
 | Work Package | Status | Completion boundary |
 | --- | --- | --- |
@@ -751,6 +755,7 @@ make ci
 | W114-W123 ReAct Beta Execution Hardening | Done | `plans/react_beta_execution_hardening_goal_spec.md` completed the CLI Goal-mode block: ReAct readiness/status, AgentLoop action schema and parser hardening, Tool Registry Beta readiness, ActionExecutor manifest authority, action/observation `react_trace` envelope, permission/replay hardening, proposal-first write hardening, non-default status harness, Runs/Trace UI hardening, and docs sync. This is not default Chat migration or full Beta declaration. |
 | W124-W127 Backend Completion Goal 1 / Master Contract And Schemas | Done | Pure backend readiness/contract report, typed LifeEvent schema/store skeleton, typed Signal schema/deterministic low-risk extractor, and safe Signal -> EvidenceStore candidate bridge are complete. This adds no command/frontend surface, no runtime/model/tool execution, no durable LifeModel/Memory/Heuristic truth write, and no default Chat migration. |
 | W128-W130 Backend Completion Goal 2 / Evidence Graph v1 | Done | Pure backend evidence graph/timeline read model, support/opposition links, dedupe clusters, source weights, cluster summaries, conflict/decay/cooldown, and rejected-similar cooldown metadata are complete. This adds no command/frontend surface, no runtime/model/tool execution, no durable LifeModel/Memory/Heuristic truth write, and no default Chat migration. |
+| W131-W133 Backend Completion Goal 3 / Maturation Engine v1 | Done | Pure backend low-risk maturation candidate generation from Evidence Graph clusters, proposal outcome evidence convergence, and deterministic metadata-safe candidate suppression/correction are complete. Goal 3 is not default Chat migration permission, does not materialize accepted truth, grants no runtime/model/tool execution authority, writes no durable LifeModel/Memory/Heuristic truth, and keeps default Chat on `legacy_stream`. |
 | W17 Runtime Integration Hardening / Chat Migration Gate | Done | Read-only gate reports default Chat unchanged, preview health, metadata-safe trace, fallback, no external writes, proposal-first, and blocking reasons. |
 | W18 Runtime Migration Gate Evidence Surface | Done | Settings exposes the gate report as a read-only pass/block evidence panel with visible blocking reasons; normal Chat Send still does not call gate or preview. |
 | W19 Sustained Gate Evidence / Pilot Eligibility | Done | Read-only eligibility checks the latest 3 preview gate reports, clean run count, checked run ids, blockers, and latest gate report; it creates no AgentRun/Proposal/Action/Observation. |

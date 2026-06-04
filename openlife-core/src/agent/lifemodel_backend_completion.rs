@@ -122,14 +122,14 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         raw_content_allowed_in_reports: false,
     };
     let next_required_schemas = vec![
-        "maturation_engine_v1".to_string(),
         "accepted_guidance_lifecycle".to_string(),
+        "governed_materialized_lifemodel_view_provenance".to_string(),
         "runtime_hs_packet_v2_guidance".to_string(),
         "ui_read_model_contracts".to_string(),
     ];
     let blockers = vec![
-        "maturation_engine_v1_missing".to_string(),
         "accepted_guidance_lifecycle_missing".to_string(),
+        "materialized_lifemodel_view_provenance_missing".to_string(),
         "runtime_guidance_consumption_missing".to_string(),
         "ui_read_model_contract_freeze_missing".to_string(),
     ];
@@ -155,7 +155,6 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
             LifeModelBackendGateBlocker {
                 gate: "lifemodel_maturity_gate".to_string(),
                 blockers: vec![
-                    "maturation_engine_v1_missing".to_string(),
                     "accepted_guidance_lifecycle_missing".to_string(),
                     "materialized_lifemodel_view_provenance_missing".to_string(),
                 ],

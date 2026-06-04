@@ -48,12 +48,18 @@ fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers
     assert!(report.governance_readiness.evidence_graph_present);
     assert!(report.governance_readiness.policy_store_present);
     assert!(report.governance_readiness.heuristic_store_present);
-    assert!(report
+    assert!(!report
         .next_required_schemas
         .contains(&"maturation_engine_v1".to_string()));
+    assert!(report
+        .next_required_schemas
+        .contains(&"accepted_guidance_lifecycle".to_string()));
     assert!(!report
         .next_required_schemas
         .contains(&"evidence_graph_v1".to_string()));
+    assert!(!report
+        .blockers
+        .contains(&"maturation_engine_v1_missing".to_string()));
     assert!(!report
         .blockers
         .contains(&"evidence_graph_v1_missing".to_string()));

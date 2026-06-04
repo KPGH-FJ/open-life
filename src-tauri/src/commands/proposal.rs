@@ -2444,9 +2444,9 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
-            ProposalType::GoalUpdate,
-            "identity.name",
-            serde_json::json!("W75 Accepted"),
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("W132 accepted communication style"),
             "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET unredacted reviewer note",
             0.9,
             RiskLevel::Low,
@@ -2482,7 +2482,10 @@ mod tests {
         assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
 
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(model.identity.name, "W75 Accepted");
+        assert_eq!(
+            model.preferences.communication_style,
+            "W132 accepted communication style"
+        );
     }
 
     #[tokio::test]
@@ -2490,16 +2493,16 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
-            ProposalType::GoalUpdate,
-            "identity.name",
-            serde_json::json!("W75 Rejected Should Not Apply"),
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
+            serde_json::json!("W132 rejected communication style should not apply"),
             "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
             0.86,
             RiskLevel::Low,
             ProposalSource::FeedbackEvolution,
         );
         proposal.run_id = Some("run-tauri-w75-reject".into());
-        proposal.source_detail = Some("maturation:goal.short_term".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
         let proposal_id = proposal.id.clone();
         state
             .proposal_store
@@ -2523,7 +2526,10 @@ mod tests {
         assert_eq!(evidence.run_metadata["opposing"], true);
         assert_eq!(evidence.opposing_refs, vec![source_evidence_id]);
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_ne!(model.identity.name, "W75 Rejected Should Not Apply");
+        assert_ne!(
+            model.preferences.communication_style,
+            "W132 rejected communication style should not apply"
+        );
         let stored = state
             .proposal_store
             .as_ref()
@@ -2582,8 +2588,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
         let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
-            "state.current_focus",
+            ProposalType::PreferenceUpdate,
+            "preferences.communication_style",
             serde_json::json!("before edit"),
             "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
             0.82,
@@ -2591,7 +2597,7 @@ mod tests {
             ProposalSource::FeedbackEvolution,
         );
         proposal.run_id = Some("run-tauri-w75-edit".into());
-        proposal.source_detail = Some("maturation:state.current_focus".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
         let proposal_id = proposal.id.clone();
         state
             .proposal_store
@@ -2619,7 +2625,98 @@ mod tests {
         assert_no_w75_raw_content(&serde_json::to_string(evidence).unwrap());
 
         let model = state.life_model_manager.lock().await.load().unwrap();
-        assert_eq!(model.state.current_focus, "RAW_EDITED_PAYLOAD_SECRET");
+        assert_eq!(
+            model.preferences.communication_style,
+            "RAW_EDITED_PAYLOAD_SECRET"
+        );
+    }
+
+    #[tokio::test]
+    async fn high_risk_identity_maturation_proposal_does_not_record_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::GoalUpdate,
+            "identity.name",
+            serde_json::json!("W132 high-risk identity should not record outcome evidence"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.84,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w132-high-risk".into());
+        proposal.source_detail = Some("maturation:preference.communication".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 0);
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
+    }
+
+    #[tokio::test]
+    async fn unsupported_domain_maturation_proposal_does_not_record_outcome_evidence() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let mut proposal = AgentProposal::new(
+            ProposalType::StateUpdate,
+            "state.current_focus",
+            serde_json::json!("W132 unsupported state update should not record outcome evidence"),
+            "RAW_PROMPT_SECRET RAW_ASSISTANT_OUTPUT_SECRET",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::FeedbackEvolution,
+        );
+        proposal.run_id = Some("run-tauri-w132-unsupported".into());
+        proposal.source_detail = Some("maturation:state.current_focus".into());
+        let proposal_id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        create_maturation_source_evidence(&state, &proposal).await;
+
+        reject_proposal_with_state(proposal_id.clone(), &state)
+            .await
+            .unwrap();
+
+        let records = proposal_outcome_records(&state, &proposal_id).await;
+        assert_eq!(records.len(), 0);
+        let stored = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, ProposalStatus::Rejected);
     }
 
     #[tokio::test]

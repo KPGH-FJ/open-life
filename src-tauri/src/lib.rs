@@ -6079,6 +6079,12 @@ mod hs_runtime_tests {
             "EvidenceTimelineReadModel",
             "evaluate_evidence_graph",
             "build_evidence_timeline",
+            "MaturationEngineV1Input",
+            "MaturationEngineV1Report",
+            "MaturationEngineCandidate",
+            "MaturationCandidateDomain",
+            "MaturationCandidateSuppressionReport",
+            "evaluate_maturation_engine_v1",
         ];
 
         for forbidden in forbidden_command_surfaces {
