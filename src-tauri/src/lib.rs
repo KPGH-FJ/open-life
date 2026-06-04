@@ -6065,6 +6065,15 @@ mod hs_runtime_tests {
             "StateSourceDataBoundaryReport",
             "evaluate_state_source_data_boundary",
             "ensure_state_source_data_boundary",
+            "evaluate_lifemodel_backend_completion_readiness",
+            "LifeModelBackendCompletionReadinessReport",
+            "LifeEventStore",
+            "LifeEventSourceRef",
+            "LifeSignalExtractorInput",
+            "extract_life_signals",
+            "LifeSignalBridgeInput",
+            "bridge_life_signal_to_evidence",
+            "LifeSignalEvidenceBridgeReport",
         ];
 
         for forbidden in forbidden_command_surfaces {

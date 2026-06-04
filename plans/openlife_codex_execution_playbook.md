@@ -34,32 +34,32 @@
 
 ## 2. 当前目标
 
-当前阶段，OpenLife 已经完成 W1-W123 的一大轮 LifeModel-Governed Runtime
-开发与整理。后续每一轮仍应围绕这些目标推进，但具体顺序必须以
+当前阶段，OpenLife 已经完成 W1-W127 的一大轮 LifeModel-Governed Runtime
+开发与整理。下一轮 Goal-mode 开发应以
+`plans/lifemodel_governed_backend_completion_goal_spec.md` 的 Goal 2 /
+Evidence Graph v1 为直接入口，并以
 `plans/README.md` 和 `plans/openlife_lifemodel_governed_agent_runtime.md`
-为准：
+作为权威上下文：
 
 - 把 LifeModel-HS 作为 Agent Framework 的核心协议层
 - 让 ReAct 作为当前默认执行策略完成治理化收敛
 - 在已完成的 LifeModel maturation proof、Plan-Execute vertical、
-  RuntimeStrategy maturity 和 ReAct hardening 基线之上继续补 Beta blocker
+  RuntimeStrategy maturity、ReAct hardening 和 Backend Completion Goal 1
+  schema/bridge 基线之上完成进入大规模 UI/UX 前的后端 kernel
 
-当前版本优先按这条顺序推进：
-
-```text
-tool/proposal hygiene
--> thin runtime spine
--> ReAct convergence
--> maturation loop
--> governor
--> Plan-Execute
--> strategy abstraction
-```
-
-W1-W17 已完成到 Runtime integration hardening / Chat migration gate。下一步实际执行顺序是：
+当前版本的实际下一步不是继续单点 controlled Chat migration follow-up，
+而是按新的 backend completion master spec 推进：
 
 ```text
-Controlled Chat migration follow-up after gate evidence
+Master contract and schemas
+-> LifeEvent / Signal pipeline
+-> Evidence Graph v1
+-> Maturation Engine v1
+-> accepted guidance and governed materialization
+-> RuntimeHSPacket guidance integration
+-> Policy / Privacy / Tool governance hardening
+-> backend golden paths
+-> pre-UI read model contract freeze
 ```
 
 注意：`run_multi_strategy_agent_preview` 是 preview/beta command。它写入
@@ -67,7 +67,7 @@ metadata-safe 外层 AgentRun audit，但不代表 MultiStrategy Runtime 已接�
 默认 Chat。`check_runtime_migration_gate` 只是只读诊断，不执行 ReAct、
 PlanExecute、工具调用或外部写入。
 
-当前版本优先围绕五个闭环推进：
+当前版本优先围绕这些闭环推进：
 
 1. 工具 Proposal 治理闭环
 2. ReAct AgentRun / Action / Observation 闭环

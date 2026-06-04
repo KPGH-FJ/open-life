@@ -5,6 +5,7 @@ pub mod evidence_store;
 pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
+pub mod lifemodel_backend_completion;
 pub mod maturation;
 pub mod memory_service;
 pub mod metrics;
@@ -56,6 +57,15 @@ pub use hs_selector::{
     behavior_checks_for_packet, build_runtime_hs_packet, HSAssetExclusion, HSAssetKind,
     HSExclusionReason, HSSelectionAudit, HSSelector, HSSelectorInput, RuntimeHSPacket,
     RuntimeHSPacketBuildInput, SelectedHeuristic, SelectedPolicyRef,
+};
+pub use lifemodel_backend_completion::{
+    bridge_life_signal_to_evidence, evaluate_lifemodel_backend_completion_readiness,
+    extract_life_signals, DroppedLifeSignal, LifeDomain, LifeEvent, LifeEventPrivacyLevel,
+    LifeEventSourceRef, LifeEventSourceType, LifeEventStore,
+    LifeModelBackendCompletionReadinessReport, LifeModelBackendGateBlocker,
+    LifeModelBackendGovernanceReadiness, LifeModelBackendPrerequisites, LifeSignal,
+    LifeSignalBridgeInput, LifeSignalEvidenceBridgeReport, LifeSignalExtractorInput,
+    LifeSignalExtractorReport, LifeSignalPolarity, LifeSignalType,
 };
 pub use maturation::{
     ensure_accepted_low_energy_rule_selection, ensure_lifemodel_maturation_non_default_invocation,
