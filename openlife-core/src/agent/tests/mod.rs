@@ -1,5 +1,6 @@
 //! Agent module tests
 
+mod accepted_guidance_materialization;
 mod accepted_low_energy_rule_selection;
 mod evidence_graph;
 mod evidence_store;

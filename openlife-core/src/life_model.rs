@@ -490,6 +490,163 @@ impl LifeModelCompatibilityAssetRef {
             content_digest,
         }
     }
+
+    fn from_patch(record: &crate::life_model::patch::LifeModelPatch) -> Self {
+        let mut source_ids = Vec::new();
+        if let Some(proposal_id) = record.proposal_id.clone() {
+            source_ids.push(proposal_id);
+        }
+        source_ids.sort();
+        source_ids.dedup();
+
+        let content_digest = sha256_hex(
+            serde_json::json!({
+                "asset_kind": "patch",
+                "asset_id": record.id,
+                "proposal_id": record.proposal_id,
+                "path_pointer": record.path_pointer,
+                "operation": record.operation.to_string(),
+                "source": record.source.to_string(),
+                "risk_level": record.risk_level.to_string(),
+                "status": record.status.to_string(),
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            asset_kind: "patch".into(),
+            asset_id: record.id.clone(),
+            affected_path: record.path_pointer.clone(),
+            source_ids,
+            content_digest,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct LifeModelMaterializedViewProvenance {
+    pub compatibility_materialized_view: bool,
+    pub accepted_source_of_truth: bool,
+    pub durable_truth_materialized: bool,
+    pub proposal_first_required_for_truth: bool,
+    pub source_proposal_ids: Vec<String>,
+    pub source_evidence_ids: Vec<String>,
+    pub source_patch_ids: Vec<String>,
+    pub source_heuristic_ids: Vec<String>,
+    pub proposal_source_digests: Vec<String>,
+    pub evidence_source_digests: Vec<String>,
+    pub patch_source_digests: Vec<String>,
+    pub heuristic_source_digests: Vec<String>,
+    pub provenance_digest: String,
+}
+
+impl LifeModelMaterializedViewProvenance {
+    fn from_sources(
+        evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
+        heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
+        patch_records: &[crate::life_model::patch::LifeModelPatch],
+    ) -> Self {
+        let mut source_proposal_ids = Vec::new();
+        let mut source_evidence_ids = evidence_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let mut source_patch_ids = patch_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+        let mut source_heuristic_ids = heuristic_records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<Vec<_>>();
+
+        let mut proposal_source_digests = Vec::new();
+        let mut evidence_source_digests = evidence_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_evidence(record).content_digest)
+            .collect::<Vec<_>>();
+        let mut patch_source_digests = patch_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_patch(record).content_digest)
+            .collect::<Vec<_>>();
+        let mut heuristic_source_digests = heuristic_records
+            .iter()
+            .map(|record| LifeModelCompatibilityAssetRef::from_heuristic(record).content_digest)
+            .collect::<Vec<_>>();
+
+        for record in evidence_records {
+            for proposal_id in &record.linked_proposal_ids {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id.clone());
+            }
+            for source_ref in &record.source_refs {
+                if source_ref.source_type
+                    == crate::agent::evidence_store::EvidenceSourceType::Proposal
+                {
+                    push_unique_lifemodel(&mut source_proposal_ids, source_ref.source_id.clone());
+                    push_unique_lifemodel(&mut proposal_source_digests, source_ref.digest.clone());
+                }
+            }
+        }
+        for record in heuristic_records {
+            if let Some(proposal_id) = record.source_proposal_id.clone() {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id);
+            }
+        }
+        for record in patch_records {
+            if let Some(proposal_id) = record.proposal_id.clone() {
+                push_unique_lifemodel(&mut source_proposal_ids, proposal_id.clone());
+                push_unique_lifemodel(
+                    &mut proposal_source_digests,
+                    sha256_hex(proposal_id.as_bytes()),
+                );
+            }
+        }
+
+        sort_dedup_lifemodel(&mut source_proposal_ids);
+        sort_dedup_lifemodel(&mut source_evidence_ids);
+        sort_dedup_lifemodel(&mut source_patch_ids);
+        sort_dedup_lifemodel(&mut source_heuristic_ids);
+        sort_dedup_lifemodel(&mut proposal_source_digests);
+        sort_dedup_lifemodel(&mut evidence_source_digests);
+        sort_dedup_lifemodel(&mut patch_source_digests);
+        sort_dedup_lifemodel(&mut heuristic_source_digests);
+
+        let provenance_digest = sha256_hex(
+            serde_json::json!({
+                "schema": "w135.materializedLifeModelViewProvenance.v1",
+                "sourceProposalIds": source_proposal_ids.clone(),
+                "sourceEvidenceIds": source_evidence_ids.clone(),
+                "sourcePatchIds": source_patch_ids.clone(),
+                "sourceHeuristicIds": source_heuristic_ids.clone(),
+                "proposalSourceDigests": proposal_source_digests.clone(),
+                "evidenceSourceDigests": evidence_source_digests.clone(),
+                "patchSourceDigests": patch_source_digests.clone(),
+                "heuristicSourceDigests": heuristic_source_digests.clone(),
+                "acceptedSourceOfTruth": false,
+                "compatibilityMaterializedView": true,
+            })
+            .to_string()
+            .as_bytes(),
+        );
+
+        Self {
+            compatibility_materialized_view: true,
+            accepted_source_of_truth: false,
+            durable_truth_materialized: false,
+            proposal_first_required_for_truth: true,
+            source_proposal_ids,
+            source_evidence_ids,
+            source_patch_ids,
+            source_heuristic_ids,
+            proposal_source_digests,
+            evidence_source_digests,
+            patch_source_digests,
+            heuristic_source_digests,
+            provenance_digest,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -500,6 +657,7 @@ pub struct LifeModelHSCompatibilityView {
     pub current_state_summary: LifeModelCompatibilityStateSummary,
     pub collaboration_summaries: Vec<LifeModelCompatibilitySummary>,
     pub asset_refs: Vec<LifeModelCompatibilityAssetRef>,
+    pub provenance: LifeModelMaterializedViewProvenance,
     pub source_digest: String,
 }
 
@@ -508,6 +666,16 @@ struct LifeModelCompatibilityEnvelope<'a> {
     #[serde(flatten)]
     life_model: &'a LifeModel,
     hs_compatibility: LifeModelHSCompatibilityView,
+}
+
+pub fn extract_hs_compatibility_view_from_yaml(yaml: &str) -> Result<LifeModelHSCompatibilityView> {
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(yaml).with_context(|| "解析 LifeModel HS 兼容视图失败")?;
+    let hs_value = value
+        .get("hs_compatibility")
+        .ok_or_else(|| anyhow::anyhow!("LifeModel HS 兼容视图缺少 hs_compatibility"))?
+        .clone();
+    serde_yaml::from_value(hs_value).with_context(|| "解析 LifeModel HS 兼容视图 provenance 失败")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -636,6 +804,21 @@ impl LifeModel {
         evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
         heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
     ) -> Result<String> {
+        self.materialize_yaml_compatibility_view_with_provenance(
+            collaboration_summaries,
+            evidence_records,
+            heuristic_records,
+            &[],
+        )
+    }
+
+    pub fn materialize_yaml_compatibility_view_with_provenance(
+        &self,
+        collaboration_summaries: Vec<LifeModelCompatibilitySummary>,
+        evidence_records: &[crate::agent::evidence_store::EvidenceRecord],
+        heuristic_records: &[crate::agent::heuristic_store::HeuristicRecord],
+        patch_records: &[crate::life_model::patch::LifeModelPatch],
+    ) -> Result<String> {
         let current_state_summary = LifeModelCompatibilityStateSummary::from_life_model(self);
         let mut asset_refs = evidence_records
             .iter()
@@ -645,12 +828,22 @@ impl LifeModel {
                     .iter()
                     .map(LifeModelCompatibilityAssetRef::from_heuristic),
             )
+            .chain(
+                patch_records
+                    .iter()
+                    .map(LifeModelCompatibilityAssetRef::from_patch),
+            )
             .collect::<Vec<_>>();
         asset_refs.sort_by(|left, right| {
             left.asset_kind
                 .cmp(&right.asset_kind)
                 .then_with(|| left.asset_id.cmp(&right.asset_id))
         });
+        let provenance = LifeModelMaterializedViewProvenance::from_sources(
+            evidence_records,
+            heuristic_records,
+            patch_records,
+        );
 
         let source_digest = sha256_hex(
             serde_json::json!({
@@ -665,6 +858,7 @@ impl LifeModel {
                     .iter()
                     .map(|asset| asset.content_digest.clone())
                     .collect::<Vec<_>>(),
+                "provenance_digest": provenance.provenance_digest.clone(),
             })
             .to_string()
             .as_bytes(),
@@ -678,6 +872,7 @@ impl LifeModel {
                 current_state_summary,
                 collaboration_summaries,
                 asset_refs,
+                provenance,
                 source_digest,
             },
         };
@@ -1478,6 +1673,18 @@ fn sha256_hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{:02x}", b));
     }
     out
+}
+
+fn push_unique_lifemodel(values: &mut Vec<String>, value: String) {
+    if !value.trim().is_empty() && !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn sort_dedup_lifemodel(values: &mut Vec<String>) {
+    values.retain(|value| !value.trim().is_empty());
+    values.sort();
+    values.dedup();
 }
 
 pub mod patch;

@@ -122,15 +122,16 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         raw_content_allowed_in_reports: false,
     };
     let next_required_schemas = vec![
-        "accepted_guidance_lifecycle".to_string(),
-        "governed_materialized_lifemodel_view_provenance".to_string(),
         "runtime_hs_packet_v2_guidance".to_string(),
+        "runtime_guidance_impact_read_model".to_string(),
+        "model_router_privacy_hs_hardening".to_string(),
+        "action_executor_hs_tool_governance".to_string(),
         "ui_read_model_contracts".to_string(),
     ];
     let blockers = vec![
-        "accepted_guidance_lifecycle_missing".to_string(),
-        "materialized_lifemodel_view_provenance_missing".to_string(),
         "runtime_guidance_consumption_missing".to_string(),
+        "model_router_privacy_hardening_incomplete".to_string(),
+        "action_executor_hs_tool_governance_incomplete".to_string(),
         "ui_read_model_contract_freeze_missing".to_string(),
     ];
     LifeModelBackendCompletionReadinessReport {
@@ -154,10 +155,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         master_spec_gate_blockers: vec![
             LifeModelBackendGateBlocker {
                 gate: "lifemodel_maturity_gate".to_string(),
-                blockers: vec![
-                    "accepted_guidance_lifecycle_missing".to_string(),
-                    "materialized_lifemodel_view_provenance_missing".to_string(),
-                ],
+                blockers: vec!["runtime_guidance_consumption_missing".to_string()],
             },
             LifeModelBackendGateBlocker {
                 gate: "runtime_driven_gate".to_string(),
@@ -182,7 +180,6 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
                     "learning_inbox_read_model_missing".to_string(),
                     "guidance_impact_read_model_missing".to_string(),
                     "privacy_policy_read_model_missing".to_string(),
-                    "version_diff_read_model_missing".to_string(),
                 ],
             },
         ],

@@ -6085,6 +6085,17 @@ mod hs_runtime_tests {
             "MaturationCandidateDomain",
             "MaturationCandidateSuppressionReport",
             "evaluate_maturation_engine_v1",
+            "AcceptedGuidanceLifecycleInput",
+            "AcceptedGuidanceLifecycleReport",
+            "AcceptedGuidanceRollbackPath",
+            "create_accepted_guidance_from_maturation_candidate",
+            "deactivate_accepted_guidance",
+            "LifeModelVersionReadModel",
+            "LifeModelVersionAssetDiffRef",
+            "LifeModelRollbackReadModelRef",
+            "build_lifemodel_version_read_model",
+            "materialize_yaml_compatibility_view_with_provenance",
+            "extract_hs_compatibility_view_from_yaml",
         ];
 
         for forbidden in forbidden_command_surfaces {

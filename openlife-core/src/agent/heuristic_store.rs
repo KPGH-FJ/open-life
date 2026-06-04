@@ -78,6 +78,14 @@ impl Default for HeuristicUsageMetadata {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HeuristicConstraintSet {
+    pub privacy: Vec<String>,
+    pub model: Vec<String>,
+    pub tool: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HeuristicRecord {
@@ -96,6 +104,8 @@ pub struct HeuristicRecord {
     pub source_proposal_id: Option<String>,
     pub version: u32,
     pub usage: HeuristicUsageMetadata,
+    #[serde(default)]
+    pub constraints: HeuristicConstraintSet,
     pub activation_authority: Option<HeuristicActivationAuthority>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -117,6 +127,7 @@ pub struct HeuristicDraft {
     pub opposing_evidence_refs: Vec<String>,
     pub validation_state: HeuristicValidationState,
     pub source_proposal_id: Option<String>,
+    pub constraints: HeuristicConstraintSet,
 }
 
 impl HeuristicDraft {
@@ -142,6 +153,7 @@ impl HeuristicDraft {
             opposing_evidence_refs: Vec::new(),
             validation_state: HeuristicValidationState::Untested,
             source_proposal_id: None,
+            constraints: HeuristicConstraintSet::default(),
         }
     }
 
@@ -172,6 +184,11 @@ impl HeuristicDraft {
 
     pub fn with_validation_state(mut self, validation_state: HeuristicValidationState) -> Self {
         self.validation_state = validation_state;
+        self
+    }
+
+    pub fn with_constraints(mut self, constraints: HeuristicConstraintSet) -> Self {
+        self.constraints = constraints;
         self
     }
 }
@@ -292,6 +309,7 @@ impl HeuristicStore {
             source_proposal_id: draft.source_proposal_id,
             version: 1,
             usage: HeuristicUsageMetadata::default(),
+            constraints: draft.constraints,
             activation_authority: None,
             created_at: now,
             updated_at: now,

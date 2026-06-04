@@ -1,8 +1,8 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
 > Date: 2026-06-04
-> Status: W133 Backend Completion Goal 3 complete; next Goal-mode entry is Goal 4
-> Baseline: W133 Maturation Engine v1 complete; default Chat remains `legacy_stream`
+> Status: W136 Backend Completion Goal 4 complete; next Goal-mode entry is Goal 5
+> Baseline: W136 Accepted Guidance And Materialization complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
@@ -376,18 +376,19 @@ be casually changed. Each W-slice must be independently testable.
     rejected-similar cooldowns, conflict state, decay state, and rejected
     history deterministically with ids/hashes/counts only.
 
-### Goal 4: Accepted Guidance And Materialization (next)
+### Goal 4: Accepted Guidance And Materialization (complete)
 
 - **W134: Accepted guidance lifecycle**
-  - Convert accepted maturation candidates into accepted/trial guidance assets
+  - Complete: converts accepted maturation candidates into accepted/trial guidance assets
     with HeuristicStore lifecycle and provenance.
 - **W135: Governed materialized LifeModel view provenance**
-  - Ensure materialized compatibility view carries source proposal/evidence/
+  - Complete: materialized compatibility view carries source proposal/evidence/
     patch/heuristic digests.
 - **W136: Version diff and rollback read model**
-  - Add backend read model for LifeModel version/diff/rollback references.
+  - Complete: backend read model exposes LifeModel version/diff/rollback
+    references linked to accepted guidance and materialized view provenance.
 
-### Goal 5: Runtime Guidance Integration
+### Goal 5: Runtime Guidance Integration (next)
 
 - **W137: RuntimeHSPacket v2 guidance contract**
   - Extend packet metadata to support guidance impact, risk, privacy, and
@@ -533,8 +534,8 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 4 of the LifeModel-Governed Backend Completion stage:
-Accepted Guidance And Materialization.
+You are implementing Goal 5 of the LifeModel-Governed Backend Completion stage:
+Runtime Guidance Integration.
 
 Read these files first:
 - AGENTS.md
@@ -545,11 +546,11 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W124-W133 Backend Completion Goals 1-3 are complete.
+- W124-W136 Backend Completion Goals 1-4 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W133
+- Ordinary `send_message` / `start_stream_message` must not call W19-W136
   readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline/
-  maturation helpers or commands.
+  maturation/guidance/materialization helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
 - W73-W78 LifeModel maturation proof exists and remains non-default.
@@ -559,30 +560,41 @@ Current baseline:
   generation, proposal outcome evidence convergence, and deterministic
   suppression/correction. It does not materialize LifeModel truth or activate
   heuristics.
+- W134-W136 Accepted Guidance And Materialization exists as pure backend
+  accepted guidance lifecycle, governed LifeModel compatibility materialized
+  view provenance, and metadata-safe version diff/rollback read model. Trial
+  guidance assets preserve proposal/evidence/run lineage and constraints; the
+  compatibility materialized view remains derived, not accepted source-of-truth.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
   RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W134-W136 only:
+Implement W137-W140 only:
 
-W134:
-- Add accepted guidance lifecycle for accepted maturation candidates.
-- Preserve source proposal id, source evidence ids, lifecycle status, domain,
-  trigger/guidance payload, priority, privacy/model/tool constraints, usage
-  metadata, and rollback/deactivation path.
-- Accepted guidance may be selected in future runtime packets, but this slice
-  must not silently activate unsafe heuristics or relax policy.
+W137:
+- Extend RuntimeHSPacket guidance metadata so selected guidance carries
+  impact/risk/privacy/source-lineage summaries and references accepted guidance
+  ids/digests without leaking raw guidance, prompts, memories, LifeModel fields,
+  or tool payloads.
+- Keep policy as a hard boundary: guidance may not relax privacy/model route or
+  tool governance.
 
-W135:
-- Add governed materialized LifeModel view provenance.
-- Ensure compatibility materialized views carry proposal/evidence/patch/
-  heuristic source digests and do not present unproven durable truth as
-  accepted source-of-truth.
+W138:
+- Make ReAct materially consume accepted guidance through prompt/config/action
+  boundaries with tests proving behavior or trace changes when guidance is
+  present.
+- Keep default Chat unchanged; any ReAct consumption must remain on existing
+  non-default/runtime paths.
 
-W136:
-- Add version diff and rollback read model references for accepted guidance and
-  materialized LifeModel view provenance.
-- Keep rollback/diff metadata safe and proposal/provenance-linked.
+W139:
+- Make Plan-Execute materially consume accepted planning guidance for weekly
+  planning with tests proving plan shape/trace changes when guidance is present.
+- Write-like Plan-Execute steps must remain proposal-first.
+
+W140:
+- Add a metadata-safe Guidance Impact read model / trace linkage showing which
+  accepted guidance was selected, why, and what it affected, using ids/digests/
+  counts/status/type only.
 
 Hard constraints:
 - Do not migrate default Chat.
@@ -595,18 +607,19 @@ Hard constraints:
 
 Verification:
 - Run focused cargo tests for the new modules.
-- Run existing evidence graph/maturation/proposal/heuristic/materializer/
-  runtime contract tests that are affected.
+- Run existing accepted guidance/materializer/version read model, RuntimeHSPacket,
+  ReAct, Plan-Execute, policy/privacy, proposal, and runtime contract tests that
+  are affected.
 - Run `make ci` if the focused tests pass.
 - Run `rg` checks proving ordinary Chat did not call the new guidance or
-  materialization pipeline.
+  runtime guidance pipeline.
 
 Output:
-- W134-W136 change summary.
+- W137-W140 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 4 is complete.
+- Whether Goal 5 is complete.
 ```
 
 ## 14. Handoff Standard

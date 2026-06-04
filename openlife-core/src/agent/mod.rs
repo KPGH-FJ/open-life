@@ -1,3 +1,4 @@
+pub mod accepted_guidance;
 pub mod action_executor;
 pub mod agent_loop;
 pub mod context_assembler;
@@ -33,6 +34,12 @@ pub mod types;
 #[cfg(test)]
 mod tests;
 
+pub use accepted_guidance::{
+    build_lifemodel_version_read_model, create_accepted_guidance_from_maturation_candidate,
+    deactivate_accepted_guidance, AcceptedGuidanceLifecycleInput, AcceptedGuidanceLifecycleReport,
+    AcceptedGuidanceRollbackPath, AcceptedGuidanceVersionRef, LifeModelRollbackReadModelRef,
+    LifeModelVersionAssetDiffRef, LifeModelVersionReadModel,
+};
 pub use action_executor::{
     ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutor,
     ActionExecutorConfig, AgentActionRequest,
@@ -57,9 +64,9 @@ pub use governor::{
     ModelRouteGovernanceInput, ToolGovernanceInput,
 };
 pub use heuristic_store::{
-    DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicDraft, HeuristicLifecycleStatus,
-    HeuristicLineage, HeuristicQuery, HeuristicRecord, HeuristicStore, HeuristicUsageMetadata,
-    HeuristicValidationState,
+    DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicConstraintSet, HeuristicDraft,
+    HeuristicLifecycleStatus, HeuristicLineage, HeuristicQuery, HeuristicRecord, HeuristicStore,
+    HeuristicUsageMetadata, HeuristicValidationState,
 };
 pub use hs_selector::{
     behavior_checks_for_packet, build_runtime_hs_packet, HSAssetExclusion, HSAssetKind,

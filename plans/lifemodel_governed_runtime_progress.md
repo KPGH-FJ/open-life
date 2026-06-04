@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-04
-> Status: W133 Backend Completion Goal 3 complete
+> Status: W136 Backend Completion Goal 4 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W133 Backend Completion Goal 3 complete**.
+Current latest status is **W136 Backend Completion Goal 4 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -102,6 +102,20 @@ ids/hashes/counts only. W131-W133 add no Tauri command, no frontend surface, no
 runtime/model/tool execution, no LifeModel / Memory / Heuristic / Chat /
 AgentRun / MCP audit / external writes, no durable truth materialization, and
 no default Chat routing change.
+W134-W136 complete Backend Completion Goal 4 / Accepted Guidance And
+Materialization without migrating default Chat: W134 adds a pure backend
+accepted guidance lifecycle that converts accepted maturation candidate
+proposals into Trial HeuristicStore guidance with source proposal/evidence/run
+lineage, privacy/model/tool constraints, usage metadata, and rollback/archive
+paths while blocking unsafe activation or policy relaxation. W135 extends the
+LifeModel compatibility materialized YAML view with proposal/evidence/patch/
+heuristic source digests and explicit compatibility-view provenance so it is
+not represented as accepted durable source-of-truth. W136 adds a metadata-safe
+LifeModel version diff / rollback read model linked to accepted guidance and
+materialized view provenance. W134-W136 add no Tauri command, no frontend
+surface, no runtime/model/tool execution, no ordinary Chat routing change, no
+Memory/Chat/AgentRun/MCP audit/external writes, and no silent durable
+LifeModel-HS truth materialization.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -465,7 +479,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W133 progress index
+4. This W1-W136 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -484,7 +498,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W133 Structured Index
+## W1-W136 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -621,6 +635,9 @@ permission.
 | W131 | Low-Risk Multi-Domain Maturation Candidate Generation | Done | Pure core `evaluate_maturation_engine_v1` over Evidence Graph clusters | Generates metadata-safe reviewable candidates for planning preference, energy pattern, work style, and communication preference only; high-risk identity/values/relationships/health/finance/privacy/long-term direction clusters fail closed | No; no command/frontend/runtime/model/tool/store/default Chat effect | W132 |
 | W132 | Proposal Outcome To Evidence Convergence | Done | Core `proposal_outcome.rs` evidence convergence metadata | Accepted/edited/rejected maturation proposal outcomes create positive/corrective/negative ProposalOutcome evidence metadata with proposal/run/evidence lineage; edited payload is digest-only/not included; high-risk outcome risk fails closed | No default Chat effect; existing proposal command integration remains proposal outcome only | W133 |
 | W133 | Candidate Suppression And Correction | Done | Pure core Maturation Engine suppression report | Suppresses candidates deterministically using opposing evidence, graph conflict, decay, rejected-similar cooldown, and rejected-similar history; reports ids/hashes/counts/reasons only, no raw source content | No; no command/frontend/runtime/model/tool/store/default Chat effect | W134 |
+| W134 | Accepted Guidance Lifecycle | Done | Pure core accepted guidance lifecycle in `accepted_guidance.rs` plus HeuristicStore constraint metadata | Converts accepted maturation candidate proposals into Trial HeuristicStore guidance with source proposal/evidence/run lineage, domain/trigger/guidance digest, priority, privacy/model/tool constraints, usage metadata, and rollback/archive path; unsafe active activation or policy relaxation fails closed | No; no command/frontend/runtime/model/tool/default Chat effect; writes only the explicit Trial heuristic asset | W135 |
+| W135 | Governed Materialized LifeModel View Provenance | Done | `LifeModel` compatibility materializer provenance | Compatibility YAML carries proposal/evidence/patch/heuristic source ids and digests, explicit compatibility-materialized-view provenance, and accepted_source_of_truth=false / durable_truth_materialized=false | No; no command/frontend/runtime/model/tool/default Chat effect | W136 |
+| W136 | Version Diff And Rollback Read Model | Done | Pure core LifeModel version read model in `accepted_guidance.rs` | Adds metadata-safe diff/rollback references for materialized view provenance and accepted guidance ids/digests/status/source refs; rollback references require proposal and omit raw LifeModel/guidance content | No; no command/frontend/runtime/model/tool/default Chat effect | W137 |
 
 ## Folded Boundary Summary
 
@@ -790,9 +807,11 @@ Evidence support/opposition/dedupe graph complete -> W129 conflict/decay/
 cooldown complete -> W130 Evidence Timeline read model complete -> W131
 low-risk multi-domain maturation candidate generation complete -> W132
 proposal outcome to evidence convergence complete -> W133 candidate
-suppression/correction complete.
-Next Backend Completion work should proceed to Goal 4 / W134-W136 Accepted
-Guidance And Materialization. Future Beta hardening can move to Skill Runtime,
+suppression/correction complete -> W134 accepted guidance lifecycle complete
+-> W135 governed materialized LifeModel view provenance complete -> W136
+version diff and rollback read model complete.
+Next Backend Completion work should proceed to Goal 5 / W137-W140 Runtime
+Guidance Integration. Future Beta hardening can move to Skill Runtime,
 ModelRouter/Privacy, or product golden path work from the W123 ReAct execution
 baseline. Future default Chat executor implementation discussion may build on
 the W65-W72 proofs only through a separately reviewed task; keep default Chat

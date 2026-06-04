@@ -51,9 +51,18 @@ fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers
     assert!(!report
         .next_required_schemas
         .contains(&"maturation_engine_v1".to_string()));
-    assert!(report
+    assert!(!report
         .next_required_schemas
         .contains(&"accepted_guidance_lifecycle".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"governed_materialized_lifemodel_view_provenance".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"version_diff_rollback_read_model".to_string()));
+    assert!(report
+        .next_required_schemas
+        .contains(&"runtime_hs_packet_v2_guidance".to_string()));
     assert!(!report
         .next_required_schemas
         .contains(&"evidence_graph_v1".to_string()));
@@ -63,14 +72,29 @@ fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers
     assert!(!report
         .blockers
         .contains(&"evidence_graph_v1_missing".to_string()));
+    assert!(!report
+        .blockers
+        .contains(&"accepted_guidance_lifecycle_missing".to_string()));
+    assert!(!report
+        .blockers
+        .contains(&"materialized_lifemodel_view_provenance_missing".to_string()));
+    assert!(!report
+        .blockers
+        .contains(&"version_diff_read_model_missing".to_string()));
     assert!(!report.master_spec_gate_blockers.iter().any(|gate| {
         gate.blockers
             .contains(&"evidence_timeline_read_model_missing".to_string())
     }));
-    assert!(report
-        .master_spec_gate_blockers
-        .iter()
-        .any(|gate| gate.gate == "lifemodel_maturity_gate"));
+    assert!(!report.master_spec_gate_blockers.iter().any(|gate| {
+        gate.blockers
+            .contains(&"accepted_guidance_lifecycle_missing".to_string())
+            || gate
+                .blockers
+                .contains(&"materialized_lifemodel_view_provenance_missing".to_string())
+            || gate
+                .blockers
+                .contains(&"version_diff_read_model_missing".to_string())
+    }));
 }
 
 #[test]
