@@ -4,12 +4,13 @@ use crate::agent::hs_selector::{
 };
 use crate::agent::policy_store::{
     PolicyStore, PolicyTopic, BUILTIN_HEURISTIC_LOW_ENERGY_PLANNING,
-    BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST,
+    BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST, BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY,
 };
 use crate::agent::{
     ActionExecutionContext, ActionExecutor, ActionExecutorConfig, AgentActionRequest, AgentRun,
     AgentRunStore, AgentRuntime, AgentRuntimeConfig, AgentTask, AgentTaskKind,
-    HSBehaviorCheckSummary, HeuristicStore, ModelRouter, ProviderAvailability, RiskLevel, TaskType,
+    GovernanceDecisionClassification, HSBehaviorCheckSummary, HSSelectionAudit, HeuristicStore,
+    ModelRouter, ProviderAvailability, RiskLevel, TaskType,
 };
 use crate::layer_router::Layer;
 use crate::life_model::LifeModel;
@@ -97,14 +98,19 @@ fn hs_runtime_packet_builder_selects_metadata_safe_assets_for_real_task_inputs()
     assert!(!audit_json.contains("Reduce planning intensity"));
 }
 
-fn test_router(ollama_available: bool, cloud_available: bool) -> ModelRouter {
+fn test_router_with_latencies(
+    ollama_available: bool,
+    cloud_available: bool,
+    ollama_latency_ms: u64,
+    cloud_latency_ms: u64,
+) -> ModelRouter {
     let mut router = ModelRouter::new();
     router.providers.insert(
         "ollama".into(),
         ProviderAvailability {
             provider: "ollama".into(),
             available: ollama_available,
-            latency_ms: Some(100),
+            latency_ms: Some(ollama_latency_ms),
             models: vec!["local-model".into()],
             last_checked: chrono::Utc::now(),
             last_error: None,
@@ -116,7 +122,7 @@ fn test_router(ollama_available: bool, cloud_available: bool) -> ModelRouter {
         ProviderAvailability {
             provider: "deepseek".into(),
             available: cloud_available,
-            latency_ms: Some(400),
+            latency_ms: Some(cloud_latency_ms),
             models: vec!["deepseek-chat".into()],
             last_checked: chrono::Utc::now(),
             last_error: None,
@@ -124,6 +130,10 @@ fn test_router(ollama_available: bool, cloud_available: bool) -> ModelRouter {
         },
     );
     router
+}
+
+fn test_router(ollama_available: bool, cloud_available: bool) -> ModelRouter {
+    test_router_with_latencies(ollama_available, cloud_available, 100, 400)
 }
 
 #[test]
@@ -146,6 +156,95 @@ fn hs_policy_forces_model_router_local_only_and_fails_closed_without_local() {
 
     let no_local = test_router(false, true).route_with_hs_packet(TaskType::Chat, false, &packet);
     assert!(no_local.is_err());
+}
+
+#[test]
+fn hs_model_router_enforces_local_only_from_audit_ids_and_removes_cloud_fallback() {
+    let packet = RuntimeHSPacket {
+        selected_policies: Vec::new(),
+        selected_heuristics: Vec::new(),
+        guidance_refs: Vec::new(),
+        estimated_tokens: 8,
+        audit: HSSelectionAudit {
+            agent_task_id: Some("task-route-audit-only".into()),
+            agent_run_id: Some("run-route-audit-only".into()),
+            input_digest: "digest-route-audit-only".into(),
+            selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
+            selected_heuristic_ids: Vec::new(),
+            selected_guidance_ids: Vec::new(),
+            selected_guidance_refs: Vec::new(),
+            excluded_assets: Vec::new(),
+            estimated_tokens: 8,
+            token_budget: 128,
+        },
+    };
+
+    let decision = test_router_with_latencies(true, true, 5_000, 10)
+        .route_with_hs_packet(TaskType::ToolUse, true, &packet)
+        .unwrap();
+
+    assert_eq!(decision.provider, "ollama");
+    assert_eq!(decision.route_type, "local");
+    assert!(decision.prefer_local);
+    assert_eq!(
+        decision.privacy_level,
+        crate::agent::RedactionLevel::LocalOnly
+    );
+    assert_eq!(decision.fallback_provider, None);
+    assert_eq!(decision.fallback_model, None);
+    let report = decision
+        .governance_report
+        .as_ref()
+        .expect("HS route should include metadata-safe governor report");
+    assert_eq!(
+        report.classification,
+        GovernanceDecisionClassification::LocalOnly
+    );
+    assert!(report.requires_local_only);
+    assert!(report
+        .selected_policy_ids
+        .contains(&BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.to_string()));
+    let report_json = serde_json::to_string(report).unwrap();
+    assert!(!report_json.contains("raw prompt"));
+    assert!(!report_json.contains("raw user text"));
+    assert!(!report_json.contains("raw assistant output"));
+    assert!(!report_json.contains("raw memory"));
+    assert!(!report_json.contains("raw LifeModel"));
+    assert!(!report_json.contains("raw tool payload"));
+}
+
+#[test]
+fn hs_model_router_fails_closed_when_local_only_audit_id_has_no_local_model() {
+    let packet = RuntimeHSPacket {
+        selected_policies: Vec::new(),
+        selected_heuristics: Vec::new(),
+        guidance_refs: Vec::new(),
+        estimated_tokens: 8,
+        audit: HSSelectionAudit {
+            agent_task_id: Some("task-route-no-local".into()),
+            agent_run_id: Some("run-route-no-local".into()),
+            input_digest: "digest-route-no-local".into(),
+            selected_policy_ids: vec![BUILTIN_POLICY_SENSITIVE_TOPICS_LOCAL_ONLY.into()],
+            selected_heuristic_ids: Vec::new(),
+            selected_guidance_ids: Vec::new(),
+            selected_guidance_refs: Vec::new(),
+            excluded_assets: Vec::new(),
+            estimated_tokens: 8,
+            token_budget: 128,
+        },
+    };
+
+    let result = test_router_with_latencies(false, true, 5_000, 10).route_with_hs_packet(
+        TaskType::Planner,
+        true,
+        &packet,
+    );
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("local-only policy selected but no local model is available"));
 }
 
 #[tokio::test]
@@ -384,6 +483,91 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         )
         .unwrap();
     assert_eq!(proposals.len(), 1);
+}
+
+#[test]
+fn unsupported_plugin_tool_is_blocked_before_permission_replay_or_execution() {
+    let mut registry = crate::mcp::McpRegistry::new();
+    registry.register_builtin(
+        ToolManifest {
+            id: "plugin.demo.write".into(),
+            name: "plugin.demo.write".into(),
+            description: "Plugin write hook without governed executor".into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "high".into(),
+            risk_level: "high".into(),
+            version: "1.0.0".into(),
+            source: ToolSource::Plugin {
+                plugin_id: "demo".into(),
+            },
+            capabilities: vec!["write".into(), "external_side_effect".into()],
+            requires_confirmation: true,
+            enabled: true,
+            declarative_only: false,
+            action_type: "write".into(),
+            tags: vec![],
+        },
+        Box::new(|_| Ok("unsupported plugin executor must not run".into())),
+    );
+    let permission_store = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
+    permission_store
+        .grant(
+            "plugin.demo.write",
+            "plugin:demo",
+            "high",
+            "write",
+            ToolPermissionPolicy::AllowUntilRevoked,
+            None,
+        )
+        .unwrap();
+    let audit_file = tempfile::NamedTempFile::new().unwrap();
+    let audit_store = crate::mcp_audit::McpAuditStore::new(audit_file.path());
+    let privacy_engine = PrivacyEngine::new();
+    let ctx = ActionExecutionContext::new(
+        &registry,
+        &permission_store,
+        &audit_store,
+        &privacy_engine,
+        &[],
+    );
+
+    let result = ActionExecutor::new(ActionExecutorConfig {
+        consume_allow_once: false,
+        ..Default::default()
+    })
+    .execute(
+        AgentActionRequest {
+            action_type: "plugin_tool".into(),
+            target: "plugin.demo.write".into(),
+            input: serde_json::json!({
+                "arguments": {
+                    "body": "raw plugin payload must not appear in governance report"
+                }
+            }),
+            source_run_id: Some("run-plugin-block".into()),
+            step_index: 0,
+        },
+        &ctx,
+    )
+    .unwrap();
+
+    assert_eq!(result.status, crate::agent::ActionExecutionStatus::Blocked);
+    assert_eq!(
+        result.stop_reason.as_deref(),
+        Some("unsupported_tool_source")
+    );
+    let report = result
+        .governance_report
+        .as_ref()
+        .expect("blocked tool should include governor report");
+    assert_eq!(
+        report.classification,
+        GovernanceDecisionClassification::Block
+    );
+    assert!(report.blocked);
+    assert!(!serde_json::to_string(report)
+        .unwrap()
+        .contains("raw plugin payload"));
 }
 
 #[test]
@@ -817,6 +1001,16 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
         result.status,
         crate::agent::ActionExecutionStatus::NeedsConfirmation
     );
+    let report = result
+        .governance_report
+        .as_ref()
+        .expect("HS proposal-first write should include governor report");
+    assert_eq!(
+        report.classification,
+        GovernanceDecisionClassification::ProposalFirst
+    );
+    assert!(report.requires_proposal);
+    assert!(!report.raw_tool_payload_included);
     assert!(!executor_ran.load(Ordering::SeqCst));
     assert!(!file_path.exists());
 

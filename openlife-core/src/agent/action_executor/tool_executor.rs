@@ -25,6 +25,7 @@ use crate::agent::types::{
     AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType,
     ReactActionTraceEnvelope, RiskLevel, ToolActionScope,
 };
+use crate::agent::{ExternalWriteGovernanceInput, LifeModelGovernor, MemoryWriteGovernanceInput};
 use ring::digest::{digest, SHA256};
 
 impl super::ActionExecutor {
@@ -51,6 +52,44 @@ impl super::ActionExecutor {
 
         // 2. Inspect PII
         let inspection = ctx.registry.inspect_call_arguments(tool_name, &args);
+
+        if let Some(m) = manifest
+            .as_ref()
+            .filter(|m| matches!(m.source, ToolSource::Plugin { .. } | ToolSource::A2A { .. }))
+        {
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "blocked".into(),
+                reason:
+                    "tool source has no governed executor and remains disabled/declarative-only"
+                        .into(),
+                policy_id: None,
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                manifest.as_ref(),
+                &request,
+            );
+            let report = LifeModelGovernor
+                .govern_unsupported_tool_source(
+                    &m.name,
+                    manifest_risk_level(m),
+                    request.source_run_id.as_deref(),
+                    "unsupported_tool_source",
+                )
+                .to_report();
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("unsupported_tool_source".into()),
+                governance_report: Some(report),
+            });
+        }
 
         // 3. Check permission with canonical decision order:
         //    unknown -> blocked
@@ -139,6 +178,7 @@ impl super::ActionExecutor {
                     observation,
                     status: ActionExecutionStatus::Blocked,
                     stop_reason: Some("allow_writes_false".into()),
+                    governance_report: None,
                 });
             }
         }
@@ -181,6 +221,16 @@ impl super::ActionExecutor {
                 observation,
                 status: ActionExecutionStatus::NeedsConfirmation,
                 stop_reason: Some("hs_external_write_proposal_first".into()),
+                governance_report: Some(
+                    LifeModelGovernor
+                        .govern_external_write(ExternalWriteGovernanceInput {
+                            tool_name: tool_name.clone(),
+                            risk_level: manifest_risk_level(m),
+                            source_run_id: request.source_run_id.clone(),
+                            proposal_already_created: false,
+                        })
+                        .to_report(),
+                ),
             });
         }
 
@@ -284,6 +334,7 @@ impl super::ActionExecutor {
                 observation,
                 status,
                 stop_reason: Some("blocked_by_policy".into()),
+                governance_report: None,
             });
         }
 
@@ -314,6 +365,7 @@ impl super::ActionExecutor {
                         observation,
                         status: ActionExecutionStatus::Blocked,
                         stop_reason: Some("path_not_in_safe_paths".into()),
+                        governance_report: None,
                     });
                 }
             }
@@ -405,6 +457,7 @@ impl super::ActionExecutor {
                             observation,
                             status: ActionExecutionStatus::NeedsConfirmation,
                             stop_reason: Some("hs_external_write_proposal_first".into()),
+                            governance_report: None,
                         });
                     }
                     if error.contains("blocked") || error.contains("ask_every_time") {
@@ -414,6 +467,7 @@ impl super::ActionExecutor {
                             observation,
                             status: ActionExecutionStatus::NeedsConfirmation,
                             stop_reason: Some("target_tool_needs_confirmation".into()),
+                            governance_report: None,
                         });
                     }
                 }
@@ -431,6 +485,7 @@ impl super::ActionExecutor {
             observation,
             status,
             stop_reason: None,
+            governance_report: None,
         })
     }
 
@@ -721,6 +776,19 @@ impl super::ActionExecutor {
             timestamp: now,
             react_trace: Some(trace),
         };
+        let governance_report = match request.action_type.as_str() {
+            "memory_write" | "memory_archive" => Some(
+                LifeModelGovernor
+                    .govern_memory_write(MemoryWriteGovernanceInput {
+                        risk_level: RiskLevel::Medium,
+                        source_run_id: request.source_run_id.clone(),
+                        proposal_already_created: false,
+                    })
+                    .to_report(),
+            ),
+            _ => None,
+        };
+
         ActionExecutionResult {
             action,
             observation,
@@ -730,6 +798,7 @@ impl super::ActionExecutor {
                 ActionExecutionStatus::Blocked
             },
             stop_reason: Some("proposal_required".into()),
+            governance_report,
         }
     }
 
@@ -948,6 +1017,16 @@ impl super::ActionExecutor {
             ),
         );
         result.stop_reason = Some("hs_external_write_proposal_first".into());
+        result.governance_report = Some(
+            LifeModelGovernor
+                .govern_external_write(ExternalWriteGovernanceInput {
+                    tool_name: tool_name.to_string(),
+                    risk_level: manifest_risk_level(manifest),
+                    source_run_id: request.source_run_id.clone(),
+                    proposal_already_created: false,
+                })
+                .to_report(),
+        );
         if let Some(trace) = result.action.react_trace.as_mut() {
             trace.proposal_id = Some(proposal_id.clone());
             trace.action_category = "proposal".into();
@@ -1063,4 +1142,13 @@ fn extract_proposal_id_from_text(text: &str) -> Option<String> {
             .and_then(Value::as_str)
             .map(ToString::to_string)
     })
+}
+
+fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
+    match manifest.risk_level.trim().to_ascii_lowercase().as_str() {
+        "critical" => RiskLevel::Critical,
+        "high" => RiskLevel::High,
+        "medium" => RiskLevel::Medium,
+        _ => RiskLevel::Low,
+    }
 }

@@ -1508,5 +1508,7 @@ fn governance_subject_kind(subject: GovernanceSubject) -> &'static str {
         GovernanceSubject::ToolAction => "tool_action",
         GovernanceSubject::MaturationCandidate => "maturation_candidate",
         GovernanceSubject::ModelRoute => "model_route",
+        GovernanceSubject::MemoryWrite => "memory_write",
+        GovernanceSubject::ExternalWrite => "external_write",
     }
 }

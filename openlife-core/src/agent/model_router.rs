@@ -1,6 +1,9 @@
 use crate::agent::types::RedactionLevel;
-use crate::agent::ModelRouteTrace;
 use crate::agent::RuntimeHSPacket;
+use crate::agent::{
+    GovernanceDecisionKind, GovernorDecisionReport, LifeModelGovernor, ModelRouteGovernanceInput,
+    ModelRouteTrace, RiskLevel,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,6 +52,7 @@ pub struct ModelRouteDecision {
     pub estimated_latency_ms: Option<u64>,
     pub fallback_provider: Option<String>,
     pub fallback_model: Option<String>,
+    pub governance_report: Option<GovernorDecisionReport>,
 }
 
 impl ModelRouteDecision {
@@ -381,6 +385,14 @@ impl ModelRouter {
         privacy_requirement: PrivacyRequirement,
         tools_needed: bool,
     ) -> Option<ModelRouteScore> {
+        if matches!(
+            privacy_requirement,
+            PrivacyRequirement::High | PrivacyRequirement::Critical
+        ) && provider != "ollama"
+        {
+            return None;
+        }
+
         // Check provider health first (if available), fallback to providers map
         let (is_available, latency_ms) = if let Some(health) = self.provider_health.get(provider) {
             (health.available, health.latency_ms)
@@ -554,6 +566,7 @@ impl ModelRouter {
             estimated_latency_ms: best.latency_ms,
             fallback_provider: fallback.map(|s| s.provider.clone()),
             fallback_model: fallback.map(|s| s.model.clone()),
+            governance_report: None,
         })
     }
 
@@ -563,10 +576,30 @@ impl ModelRouter {
         tools_needed: bool,
         hs_packet: &RuntimeHSPacket,
     ) -> Result<ModelRouteDecision> {
-        let hs_requires_local_only = hs_packet
-            .selected_policies
-            .iter()
-            .any(|policy| policy.route == Some(crate::agent::ModelRoutePolicy::LocalOnly));
+        let local_model_available = self
+            .score_provider(
+                "ollama",
+                task_type,
+                PrivacyRequirement::Critical,
+                tools_needed,
+            )
+            .is_some();
+        let governor_decision = LifeModelGovernor.govern_model_route(ModelRouteGovernanceInput {
+            hs_packet: Some(hs_packet.clone()),
+            risk_level: if crate::agent::governor::packet_requires_local_only(Some(hs_packet)) {
+                RiskLevel::High
+            } else {
+                RiskLevel::Low
+            },
+            local_model_available,
+        });
+
+        if governor_decision.kind == GovernanceDecisionKind::Block {
+            return Err(anyhow::anyhow!("{}", governor_decision.reason));
+        }
+
+        let hs_requires_local_only =
+            governor_decision.kind == GovernanceDecisionKind::RequireLocalOnly;
         let mut decision = self.route(
             task_type,
             tools_needed,
@@ -577,7 +610,11 @@ impl ModelRouter {
                 "{}; HS policy enforced LocalOnly via {:?}",
                 decision.reason, hs_packet.audit.selected_policy_ids
             );
+            decision.fallback_provider = None;
+            decision.fallback_model = None;
+            decision.privacy_level = RedactionLevel::LocalOnly;
         }
+        decision.governance_report = Some(governor_decision.to_report());
         Ok(decision)
     }
 
@@ -648,6 +685,14 @@ mod tests {
         router
     }
 
+    fn create_fast_cloud_slow_local_router() -> ModelRouter {
+        let mut router = create_test_router();
+        router.providers.get_mut("ollama").unwrap().latency_ms = Some(5_000);
+        router.providers.get_mut("deepseek").unwrap().latency_ms = Some(10);
+        router.providers.get_mut("openrouter").unwrap().latency_ms = Some(20);
+        router
+    }
+
     #[test]
     fn test_route_chat_local_preferred() {
         let router = create_test_router();
@@ -676,6 +721,36 @@ mod tests {
 
         // High privacy should prefer local
         assert_eq!(decision.provider, "ollama");
+    }
+
+    #[test]
+    fn test_high_privacy_hard_filters_cloud_even_when_tool_use_prefers_fast_cloud() {
+        let router = create_fast_cloud_slow_local_router();
+        let decision = router
+            .route(TaskType::ToolUse, true, Some(PrivacyRequirement::High))
+            .unwrap();
+
+        assert_eq!(decision.provider, "ollama");
+        assert_eq!(decision.route_type, "local");
+        assert!(decision.prefer_local);
+        assert_eq!(decision.privacy_level, RedactionLevel::Strict);
+        assert_eq!(decision.fallback_provider, None);
+        assert_eq!(decision.fallback_model, None);
+    }
+
+    #[test]
+    fn test_critical_privacy_hard_filters_cloud_even_when_planner_prefers_fast_cloud() {
+        let router = create_fast_cloud_slow_local_router();
+        let decision = router
+            .route(TaskType::Planner, true, Some(PrivacyRequirement::Critical))
+            .unwrap();
+
+        assert_eq!(decision.provider, "ollama");
+        assert_eq!(decision.route_type, "local");
+        assert!(decision.prefer_local);
+        assert_eq!(decision.privacy_level, RedactionLevel::LocalOnly);
+        assert_eq!(decision.fallback_provider, None);
+        assert_eq!(decision.fallback_model, None);
     }
 
     #[test]
@@ -748,6 +823,28 @@ mod tests {
         );
 
         let result = router.route(TaskType::Extractor, false, Some(PrivacyRequirement::High));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No local provider"));
+    }
+
+    #[test]
+    fn test_critical_privacy_requires_local_provider_and_never_cloud_fallback() {
+        let mut router = create_fast_cloud_slow_local_router();
+        router.provider_health.insert(
+            "ollama".into(),
+            ProviderHealth {
+                available: false,
+                latency_ms: None,
+                last_error: Some("ollama not running".into()),
+                last_check_at: std::time::Instant::now(),
+                consecutive_failures: 3,
+            },
+        );
+
+        let result = router.route(TaskType::Planner, true, Some(PrivacyRequirement::Critical));
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-04
-> Status: W140 Backend Completion Goal 5 complete
+> Status: W143 Backend Completion Goal 6 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W140 Backend Completion Goal 5 complete**.
+Current latest status is **W143 Backend Completion Goal 6 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -60,7 +60,7 @@ scope without raw risky payloads; write-like LifeModel/Memory/file/calendar/
 email/task tools remain proposal-first; `get_react_beta_execution_status` is
 explicitly non-default/read-only; Runs/Trace UI renders lifecycle metadata
 without raw payload leakage. W114-W123 is not a full Beta declaration; Skill
-Runtime, ModelRouter/Privacy, and product golden path work may still be needed.
+Runtime and product golden path work may still be needed.
 Ordinary `send_message` / `start_stream_message` remain on `legacy_stream`.
 W124-W127 complete Backend Completion Goal 1 / Master Contract And Schemas
 without migrating default Chat: W124 adds a pure backend readiness/contract
@@ -128,6 +128,18 @@ ids/digests/counts/status/type/impact fields. W137-W140 add no ordinary Chat
 routing change, no migration permission, no direct LifeModel/Memory/external
 write, and no raw prompt/user text/assistant output/memory/LifeModel/tool
 payload leakage in read models.
+W141-W143 complete Backend Completion Goal 6 / Policy / Privacy / Tool
+Governance Hardening without migrating default Chat: W141 hardens ModelRouter
+and privacy enforcement so High/Critical privacy and HS LocalOnly hard-filter
+non-local providers, select local `ollama`, remove cloud fallback, and fail
+closed when no local model is available; W142 hardens ActionExecutor HS tool
+governance so unsupported Plugin/A2A tools remain disabled/declarative-only
+before permission replay or execution and HS write-like paths remain
+proposal-first; W143 adds a shared metadata-safe Governor decision report for
+maturation, model route, tool action, memory write, and external write
+decisions. W141-W143 add no ordinary Chat routing change, no migration
+permission, no direct LifeModel/Memory/external write, and no raw prompt/user
+text/assistant output/memory/LifeModel/tool payload leakage.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -491,7 +503,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W140 progress index
+4. This W1-W143 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -510,7 +522,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W140 Structured Index
+## W1-W143 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -654,6 +666,9 @@ permission.
 | W138 | ReAct Guidance Consumption | Done | Non-default/runtime `AgentLoop` + `AgentRuntime` path | ReAct runtime consumes selected guidance through metadata-safe prompt summaries, gentle-planning config caps, action-boundary HS packet propagation, behavior checks, and trace metadata only when `RuntimeGuidanceConsumptionMode::ExplicitRuntime` is enabled; default mode is disabled and preserves ordinary prompt/config shape | No; default Chat routing unchanged and ordinary Chat does not consume accepted guidance | W139 |
 | W139 | Plan-Execute Guidance Consumption | Done | `PlanExecuteService` weekly planning product path | Weekly planning drafts materially change under selected gentle planning guidance only when explicit runtime guidance consumption mode is enabled; write-like steps remain Review Center proposal-first; product contract reports selected guidance metadata only in explicit mode | No; only existing explicit Plan-Execute product path, no ordinary Chat route change | W140 |
 | W140 | Runtime Guidance Trace And Read Model | Done | `GuidanceImpactReadModel` in `hs_selector.rs`, Plan-Execute report linkage, AgentRun HS audit refs | Guidance Impact read model links selected guidance to run/strategy/affected surfaces using ids/digests/counts/status/type/impact only; omits raw guidance, prompt, user text, assistant output, memory, LifeModel, and tool payloads | No; read model/trace metadata only and no default Chat migration permission | W141 |
+| W141 | ModelRouter / Privacy HS Hardening | Done | `ModelRouter::score_provider`, `route`, and `route_with_hs_packet` | High/Critical privacy hard-filters non-local providers before scoring; HS LocalOnly from selected policy refs or audit ids selects local `ollama`, route_type `local`, prefer_local=true, privacy LocalOnly, no cloud fallback, metadata-safe `local_only` governor report, and fail-closed no-local behavior | No; ordinary send/stream stay `legacy_stream` and must not call W141 helpers except existing fail-closed HS packet boundary | W142 |
+| W142 | ActionExecutor HS Tool Governance | Done | `ActionExecutor` manifest/source gate and HS proposal-first write paths | Unsupported Plugin/A2A tools block before permission replay or execution; HS direct external write paths remain proposal-first and attach metadata-safe governance reports; no real provider/plugin executor is added or advertised | No; non-default/runtime executor governance only, no ordinary Chat route change | W143 |
+| W143 | Governor Unified Decision Report | Done | `LifeModelGovernor`, `GovernorDecisionReport`, and shared governance inputs | Shared metadata-safe report classifies allow/block/confirm/proposal-first/local-only decisions for maturation, model route, tool action, memory write, and external write; omits raw prompt/user text/assistant output/memory/LifeModel/tool payload | No; report/read model only and not migration permission | W144 |
 
 ## Folded Boundary Summary
 
@@ -828,14 +843,16 @@ suppression/correction complete -> W134 accepted guidance lifecycle complete
 version diff and rollback read model complete -> W137 RuntimeHSPacket v2
 guidance contract complete -> W138 ReAct guidance consumption complete -> W139
 Plan-Execute guidance consumption complete -> W140 Guidance Impact read model
-complete.
-Next Backend Completion work should proceed to Goal 6 / W141-W143 Policy /
-Privacy / Tool Governance Hardening. Future Beta hardening can move to Skill Runtime,
-ModelRouter/Privacy, or product golden path work from the W123 ReAct execution
-baseline. Future default Chat executor implementation discussion may build on
-the W65-W72 proofs only through a separately reviewed task; keep default Chat
-on legacy_stream unless that separate task explicitly implements, reviews,
-verifies, and authorizes a route change.
+complete -> W141 ModelRouter/Privacy HS hardening complete -> W142
+ActionExecutor HS tool governance complete -> W143 Governor unified decision
+report complete.
+Next Backend Completion work should proceed to Goal 7 / W144-W146 Backend
+Golden Paths. Future Beta hardening can move to Skill Runtime or product golden
+path work from the W143 backend completion baseline. Future default Chat
+executor implementation discussion may build on the W65-W72 proofs only through
+a separately reviewed task; keep default Chat on legacy_stream unless that
+separate task explicitly implements, reviews, verifies, and authorizes a route
+change.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

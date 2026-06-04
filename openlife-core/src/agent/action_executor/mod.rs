@@ -8,6 +8,7 @@ pub mod tool_executor;
 pub use helpers::{filesystem_access_error, is_path_in_safe_paths};
 
 use crate::agent::types::{AgentAction, AgentObservation};
+use crate::agent::GovernorDecisionReport;
 use crate::mcp::McpRegistry;
 use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
@@ -55,6 +56,7 @@ pub struct ActionExecutionResult {
     pub observation: AgentObservation,
     pub status: ActionExecutionStatus,
     pub stop_reason: Option<String>,
+    pub governance_report: Option<GovernorDecisionReport>,
 }
 
 /// Status of action execution.

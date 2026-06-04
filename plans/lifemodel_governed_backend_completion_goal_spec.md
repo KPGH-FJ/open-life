@@ -1,8 +1,8 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
 > Date: 2026-06-04
-> Status: W140 Backend Completion Goal 5 complete; next Goal-mode entry is Goal 6
-> Baseline: W140 Runtime Guidance Integration complete; default Chat remains `legacy_stream`
+> Status: W143 Backend Completion Goal 6 complete; next Goal-mode entry is Goal 7
+> Baseline: W143 Policy / Privacy / Tool Governance Hardening complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
@@ -124,8 +124,8 @@ rather than rebuild from scratch.
 | RuntimeHSPacket | Metadata-safe selected policy/heuristic packet exists | Become mandatory guidance contract for ReAct and Plan-Execute product runtime paths |
 | AgentLoop / ReAct | ReAct Beta execution hardening W114-W123 complete | Consume HS guidance materially and emit outcome candidates/trace linkage |
 | Plan-Execute | W98-W105 weekly planning vertical exists | Consume HS guidance and produce outcome evidence for future behavior |
-| ModelRouter | Has `route_with_hs_packet` LocalOnly enforcement | Harden privacy/redaction/model route contract across runtime paths |
-| ActionExecutor | Manifest authority and proposal-first write hardening exist | Ensure HS policy/guidance controls write-like tools, permissions, replay, and future Skill Runtime |
+| ModelRouter | Has `route_with_hs_packet` LocalOnly enforcement plus W141 hard filtering so High/Critical privacy and HS LocalOnly cannot select cloud providers or cloud fallback | Prove privacy/model route behavior in backend golden paths |
+| ActionExecutor | Manifest authority, proposal-first write hardening, and W142 HS tool governance block unsupported Plugin/A2A sources before permission replay/execution | Prove tool/write governance in backend golden paths |
 | Read models | Runs/Trace, Proposal Review, Settings proof/status surfaces exist | Freeze UI-facing backend read models for Learning Inbox, Evidence Timeline, Guidance Impact, and Privacy Controls |
 
 ## 6. Target Backend Concepts
@@ -408,17 +408,22 @@ be casually changed. Each W-slice must be independently testable.
 - **W140: Runtime guidance trace/read model**
   - Complete: metadata-safe Guidance Impact read model and trace linkage.
 
-### Goal 6: Policy / Privacy / Tool Governance Hardening (next)
+### Goal 6: Policy / Privacy / Tool Governance Hardening (complete)
 
 - **W141: ModelRouter/Privacy HS hardening**
-  - Enforce HS LocalOnly/redaction/privacy decisions across relevant runtime
-    paths.
+  - Complete: High/Critical privacy hard-filters non-local providers before
+    scoring; HS LocalOnly selects local `ollama`, emits a metadata-safe
+    `local_only` governor report, removes cloud fallback, and fails closed when
+    no local model is available.
 - **W142: ActionExecutor HS tool governance**
-  - Ensure write-like tools, permission replay, declarative tools, and future
-    Skill Runtime hooks obey HS policy and proposal-first boundaries.
+  - Complete: unsupported Plugin/A2A tools remain disabled/declarative-only
+    before permission replay or execution; HS direct external write paths remain
+    proposal-first with metadata-safe governance reports.
 - **W143: Governor unified decision report**
-  - Add a shared decision/report shape for LifeModel maturation, model route,
-    tool action, memory write, and external write decisions.
+  - Complete: shared Governor decision/report shape classifies allow, block,
+    confirm, proposal-first, and local-only decisions for LifeModel maturation,
+    model route, tool action, memory write, and external write decisions without
+    raw prompt/user text/assistant output/memory/LifeModel/tool payload leakage.
 
 ### Goal 7: Backend Golden Paths
 
@@ -540,8 +545,8 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 6 of the LifeModel-Governed Backend Completion stage:
-Policy / Privacy / Tool Governance Hardening.
+You are implementing Goal 7 of the LifeModel-Governed Backend Completion stage:
+Backend Golden Paths.
 
 Read these files first:
 - AGENTS.md
@@ -552,11 +557,12 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W124-W140 Backend Completion Goals 1-5 are complete.
+- W124-W143 Backend Completion Goals 1-6 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W140
+- Ordinary `send_message` / `start_stream_message` must not call W19-W143
   readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline/
-  maturation/guidance/materialization/runtime-guidance helpers or commands.
+  maturation/guidance/materialization/runtime-guidance/policy-privacy-tool
+  governance helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
 - W73-W78 LifeModel maturation proof exists and remains non-default.
@@ -577,28 +583,30 @@ Current baseline:
   metadata-safe Guidance Impact trace/read model. It does not change ordinary
   Chat routing, consume accepted guidance in ordinary Chat, or relax
   policy/proposal-first boundaries.
+- W141-W143 Policy / Privacy / Tool Governance Hardening exists as ModelRouter
+  High/Critical local-only hard filtering, ActionExecutor HS tool governance,
+  and shared metadata-safe Governor decision reports. It does not change
+  ordinary Chat routing, grant migration permission, or allow cloud fallback for
+  LocalOnly/High/Critical routes.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
-  RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
+ RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W141-W143 only:
+Implement W144-W146 only:
 
-W141:
-- Harden ModelRouter/Privacy HS enforcement across relevant runtime paths.
-- Guidance and heuristics may constrain routing/privacy, but must not relax
-  local-only, redaction, sensitive-domain, or provider policy requirements.
+W144:
+- Prove the weekly planning guidance loop end-to-end across RuntimeHSPacket
+  selected guidance, Plan-Execute draft/finalize/step execution, proposal-first
+  write-like steps, outcome evidence, and future planning guidance.
 
-W142:
-- Harden ActionExecutor HS tool governance for write-like tools, permission
-  replay, declarative tools, and future Skill Runtime hooks.
-- Unsupported plugin/provider tools must remain disabled/declarative-only unless
-  a real governed executor exists.
+W145:
+- Prove the low-energy support loop from LifeEvent/Signal/Evidence through
+  accepted guidance to explicit runtime behavior change, without automatic
+  high-risk truth materialization.
 
-W143:
-- Add a shared Governor decision/report shape for LifeModel maturation, model
-  route, tool action, memory write, and external write decisions.
-- Reports must be metadata-safe and classify allow/block/confirm/proposal-first
-  decisions without exposing raw payloads.
+W146:
+- Prove preference correction: rejection/edit outcomes create negative or
+  corrective evidence and suppress or change future behavior deterministically.
 
 Hard constraints:
 - Do not migrate default Chat.
@@ -610,19 +618,18 @@ Hard constraints:
 - Do not push. Do not commit unless explicitly instructed by the reviewer.
 
 Verification:
-- Run focused cargo tests for the new modules.
-- Run affected ModelRouter/privacy, ActionExecutor/tool governance, Governor,
-  RuntimeHSPacket, ReAct, Plan-Execute, proposal, and runtime contract tests.
+- Run focused cargo tests for the new golden path code.
+- Run affected RuntimeHSPacket, Evidence Graph, Maturation Engine, accepted
+  guidance, Plan-Execute, ReAct, Governor, proposal, and runtime contract tests.
 - Run `make ci` if the focused tests pass.
-- Run `rg` checks proving ordinary Chat did not call the new policy/privacy/tool
-  governance pipeline.
+- Run `rg` checks proving ordinary Chat did not call the golden path pipeline.
 
 Output:
-- W141-W143 change summary.
+- W144-W146 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 6 is complete.
+- Whether Goal 7 is complete.
 ```
 
 ## 14. Handoff Standard

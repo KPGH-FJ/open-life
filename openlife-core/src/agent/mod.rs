@@ -61,8 +61,9 @@ pub use evidence_store::{
     EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
 };
 pub use governor::{
-    GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
-    ModelRouteGovernanceInput, ToolGovernanceInput,
+    ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,
+    GovernanceDecisionKind, GovernanceSubject, GovernorDecisionReport, LifeModelGovernor,
+    MemoryWriteGovernanceInput, ModelRouteGovernanceInput, ToolGovernanceInput,
 };
 pub use heuristic_store::{
     DomainCapDiagnostic, HeuristicActivationAuthority, HeuristicConstraintSet, HeuristicDraft,
