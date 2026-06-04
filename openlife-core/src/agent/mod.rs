@@ -1,6 +1,7 @@
 pub mod action_executor;
 pub mod agent_loop;
 pub mod context_assembler;
+pub mod evidence_graph;
 pub mod evidence_store;
 pub mod governor;
 pub mod heuristic_store;
@@ -39,6 +40,12 @@ pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallb
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,
+};
+pub use evidence_graph::{
+    build_evidence_timeline, evaluate_evidence_graph, EvidenceClusterSummary,
+    EvidenceConflictState, EvidenceCooldownState, EvidenceDecayState, EvidenceGraphInput,
+    EvidenceGraphLink, EvidenceGraphLinkKind, EvidenceGraphReport, EvidencePolarity,
+    EvidenceSourceWeightSummary, EvidenceTimelineItem, EvidenceTimelineReadModel,
 };
 pub use evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,

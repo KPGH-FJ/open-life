@@ -6074,6 +6074,11 @@ mod hs_runtime_tests {
             "LifeSignalBridgeInput",
             "bridge_life_signal_to_evidence",
             "LifeSignalEvidenceBridgeReport",
+            "EvidenceGraphInput",
+            "EvidenceGraphReport",
+            "EvidenceTimelineReadModel",
+            "evaluate_evidence_graph",
+            "build_evidence_timeline",
         ];
 
         for forbidden in forbidden_command_surfaces {

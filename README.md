@@ -16,12 +16,12 @@ LifeModel-HS Protocol Layer
 
 ## 当前定位
 
-- **当前阶段是 W127 LifeModel-Governed Backend Completion Goal 1 complete**：W124-W127 已完成 pure backend readiness/contract report、typed LifeEvent schema/store skeleton、typed Signal schema/deterministic low-risk extractor，以及 safe Signal -> EvidenceStore candidate bridge。
-- **七个大板块按各自 scope 已完成**：Default Chat Adapter guard/prep（W65-W72）、LifeModel Maturation proof slice（W73-W78）、Legacy Direct-Write Convergence（W90-W97）、Plan-Execute Product Vertical（W98-W105）、RuntimeStrategy / Multi-Strategy Runtime Maturity（W106-W113）、ReAct Beta Execution Hardening（W114-W123）、Backend Completion Goal 1 Master Contract And Schemas（W124-W127）。
-- **Default Chat 仍保持 `legacy_stream`**：普通 `Send` / `send_message` / `start_stream_message` 只允许进入 legacy path，并只能调用 W49-W55 pure ordinary-entry guard/preflight。W19-W127 的 readiness/status/proof/report/review/trace/schema/bridge 结果都不是 migration permission。
+- **当前阶段是 W130 LifeModel-Governed Backend Completion Goal 2 complete**：W124-W127 已完成 pure backend readiness/contract report、typed LifeEvent schema/store skeleton、typed Signal schema/deterministic low-risk extractor，以及 safe Signal -> EvidenceStore candidate bridge；W128-W130 已完成 pure backend Evidence Graph v1、conflict/decay/cooldown metadata 和 metadata-safe Evidence Timeline read model。
+- **八个大板块按各自 scope 已完成**：Default Chat Adapter guard/prep（W65-W72）、LifeModel Maturation proof slice（W73-W78）、Legacy Direct-Write Convergence（W90-W97）、Plan-Execute Product Vertical（W98-W105）、RuntimeStrategy / Multi-Strategy Runtime Maturity（W106-W113）、ReAct Beta Execution Hardening（W114-W123）、Backend Completion Goal 1 Master Contract And Schemas（W124-W127）、Backend Completion Goal 2 Evidence Graph v1（W128-W130）。
+- **Default Chat 仍保持 `legacy_stream`**：普通 `Send` / `send_message` / `start_stream_message` 只允许进入 legacy path，并只能调用 W49-W55 pure ordinary-entry guard/preflight。W19-W130 的 readiness/status/proof/report/review/trace/schema/bridge/graph/timeline 结果都不是 migration permission。
 - **Plan-Execute 已有非默认产品纵切**：W98-W105 提供 weekly planning session、review/edit/finalize、proposal-first step execution、AgentRun/trace linkage 和 Workspace/Runs surface；它不是 default Chat migration，也不是外部 provider 写入。
 - **完整 Beta 尚未宣告**：W114-W123 提升了 ReAct 执行严肃性和可观察性，但完整 Beta 仍需要 Skill Runtime、ModelRouter/Privacy、跨产品 LifeModel/Memory governance golden path，以及任何 default Chat route migration 的单独人工 review。
-- **下一轮 Goal-mode 入口是 Backend Completion Goal 2**：在大规模 UI/UX 前，下一阶段先完成 Evidence Graph v1（support/opposition/dedupe、conflict/decay/cooldown、Evidence Timeline read model），再继续 Maturation Engine v1、governed materialization、RuntimeHSPacket guidance integration、ModelRouter/Privacy 与 tool governance hardening、backend golden paths 和 UI read model contract freeze。
+- **下一轮 Goal-mode 入口是 Backend Completion Goal 3**：在大规模 UI/UX 前，下一阶段继续 Maturation Engine v1，再推进 governed materialization、RuntimeHSPacket guidance integration、ModelRouter/Privacy 与 tool governance hardening、backend golden paths 和 UI read model contract freeze。
 - **文档与 taxonomy 是硬约束**：入口文档、progress index、Tool Taxonomy 和代码状态必须同步。过期 P1/P2 标签、旧 W60/W65 当前状态、或把 readiness 当迁移许可的文案都视为开发阻塞项。
 
 下一阶段总纲和架构基准文档见：
@@ -50,7 +50,7 @@ LifeModel-HS MVP / architecture 文档仍是后续开发的硬基线，但当前
 | Default Chat Adapter Guard | W65-W72 完成 backend-only descriptor、contract、harness、send/stream proof、gate、disabled skeleton 和 integrity proof | 仅作为未来受控迁移准备；当前不接 ordinary Chat，不接 executor |
 | MultiStrategy Runtime | W106-W113 完成 strategy descriptor、registry readiness、selection matrix、execution envelope、status command 和 trace vocabulary | 支持 ReAct / PlanExecute 之外的未来策略，但 disabled/declarative-only 策略不能伪装可执行 |
 | ReAct Execution | W114-W123 完成 Beta execution hardening：action schema/parser、Tool Registry readiness、manifest authority、trace、permission/replay、proposal-first writes | 继续补齐 Skill Runtime、ModelRouter/Privacy 和产品 golden path 后再评估完整 Beta |
-| LifeEvent / Signal | W124-W127 完成 typed LifeEvent/Signal schema、deterministic low-risk extractor、safe Signal -> Evidence bridge | 扩展 Evidence Graph v1、Maturation Engine v1、read model 和 golden path |
+| LifeEvent / Signal / Evidence Graph | W124-W130 完成 typed LifeEvent/Signal schema、deterministic low-risk extractor、safe Signal -> Evidence bridge、Evidence Graph v1 和 Evidence Timeline read model | 继续扩展 Maturation Engine v1、accepted guidance、read model 和 golden path |
 | PlanExecute | W98-W105 完成非默认 weekly planning 产品纵切：session lifecycle、review/edit/finalize、proposal-first step execution、trace linkage | 扩展更多 Plan-Execute 产品场景，并保持非默认/受治理边界 |
 | Runs / Trace | 支持 preview/product/ReAct trace lifecycle 的 metadata-safe 展示 | 成为所有 runtime strategy 的统一可审计视图 |
 | ModelRouter | 已具备任务/隐私感知路由和健康检查语义 | 继续强化 privacy policy、local-only 阻断和 route trace |

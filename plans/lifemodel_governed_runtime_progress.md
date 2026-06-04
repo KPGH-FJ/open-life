@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-04
-> Status: W127 Backend Completion Goal 1 complete
+> Status: W130 Backend Completion Goal 2 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W127 Backend Completion Goal 1 complete**.
+Current latest status is **W130 Backend Completion Goal 2 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -75,6 +75,19 @@ missing-lineage, and unsupported signals fail closed. W124-W127 add no Tauri
 command, no frontend surface, no runtime/model/tool execution, no LifeModel /
 Memory / Heuristic / Chat / AgentRun / MCP audit / external writes, and no
 default Chat routing change.
+W128-W130 complete Backend Completion Goal 2 / Evidence Graph v1 without
+migrating default Chat: W128 adds a pure backend evidence graph layer with
+support/opposition links, affected-path dedupe clusters, source weights, and
+cluster summaries; W129 adds deterministic conflict detection from
+`opposing_refs`, `Contradicted` status, rejected `ProposalOutcome` evidence,
+and same affected-path cluster opposition, plus injected-now decay and
+rejected-similar cooldown metadata; W130 adds a metadata-safe Evidence Timeline
+read model with ids, type, path, status, confidence, risk/privacy, polarity,
+link counts, proposal/run refs, cluster id/hash, conflict/decay/cooldown state,
+and timestamps. W128-W130 add no Tauri command, no frontend surface, no
+runtime/model/tool execution, no LifeModel / Memory / Heuristic / Chat /
+AgentRun / MCP audit / external writes, no durable truth materialization, and
+no default Chat routing change.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -438,7 +451,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W127 progress index
+4. This W1-W130 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -457,7 +470,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W127 Structured Index
+## W1-W130 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -588,6 +601,9 @@ permission.
 | W125 | LifeEvent Schema And Store Contract | Done | Core typed schema plus `LifeEventStore` skeleton | Metadata-safe LifeEvent records with source refs, risk/privacy/domain, digest, safe summary, dedupe key, and raw-content blocking; LifeEvents are not durable LifeModel truth | No; no command/frontend/runtime/model/tool/default Chat effect | W126 |
 | W126 | Signal Schema And Deterministic Extractor | Done | Core typed Signal schema plus deterministic extractor | Extracts only low-risk low-energy planning signals; includes confidence, polarity, uncertainty reasons, dedupe key, source event refs, extractor id/version, risk/privacy/domain; no LLM/model/runtime/tool execution | No; no command/frontend/default Chat effect | W127 |
 | W127 | LifeEvent / Signal / Evidence Bridge | Done | Core bridge to `EvidenceStore` | Writes EvidenceStore candidate records only for metadata-safe, low-risk, sufficiently confident signals with lineage; high-risk/raw/low-confidence/missing-lineage/unsupported signals fail closed; writes no LifeModel/Memory/Heuristic/Chat/AgentRun/MCP audit/external records | No; ordinary send/stream stay `legacy_stream` and do not call it | W128 |
+| W128 | Evidence Support / Opposition / Dedupe Graph | Done | Pure core evidence graph in `evidence_graph.rs` | Builds support/opposition links, affected-path dedupe clusters, source weights, and cluster summaries from existing EvidenceStore records; no store schema migration or business write | No; ordinary send/stream stay `legacy_stream` and do not call it | W129 |
+| W129 | Conflict / Decay / Cooldown | Done | Pure graph metadata evaluator with injected `now` | Detects conflicts from opposing refs, Contradicted status, rejected ProposalOutcome evidence, and same affected-path cluster opposition; computes deterministic decay and rejected-similar cooldown metadata | No; no command/frontend/runtime/model/tool/default Chat effect | W130 |
+| W130 | Evidence Timeline Read Model | Done | Metadata-safe timeline read model | Timeline exposes ids/type/path/status/confidence/risk/privacy/polarity/link counts/proposal and run refs/cluster id and hash/conflict-decay-cooldown state/timestamps; omits raw prompt/user text/assistant output/tool payload/LifeModel raw content | No; no command/frontend/runtime/model/tool/default Chat effect | W131 |
 
 ## Folded Boundary Summary
 
@@ -691,6 +707,12 @@ above. The boundary meaning is preserved:
   paths, add commands or frontend surfaces, write durable LifeModel/Memory/
   Heuristic truth, write AgentRun/MCP audit/external records, or affect default
   Chat routing.
+- W128-W130 are Backend Completion Goal 2 / Evidence Graph v1 only. They add a
+  pure backend graph/timeline read model, conflict/decay/cooldown state, source
+  weights, and rejected-similar cooldown metadata. They do not run
+  runtime/model/tool paths, add commands or frontend surfaces, write durable
+  LifeModel/Memory/Heuristic truth, write AgentRun/MCP audit/external records,
+  materialize accepted truth, or affect default Chat routing.
 
 ## Next Recommended Sequence
 
@@ -741,10 +763,12 @@ non-default ReAct Beta status harness complete -> W122 Runs/Trace lifecycle UI
 hardening complete -> W123 docs/progress/verification sync complete ->
 W124 backend completion readiness/contract report complete -> W125 LifeEvent
 schema/store contract complete -> W126 Signal schema/deterministic extractor
-complete -> W127 safe LifeEvent/Signal/Evidence bridge complete.
-Next Backend Completion work should proceed to W128-W130 Evidence Graph v1:
-support/opposition/dedupe graph semantics, conflict/decay/cooldown, and the
-Evidence Timeline read model. Future Beta hardening can move to Skill Runtime,
+complete -> W127 safe LifeEvent/Signal/Evidence bridge complete -> W128
+Evidence support/opposition/dedupe graph complete -> W129 conflict/decay/
+cooldown complete -> W130 Evidence Timeline read model complete.
+Next Backend Completion work should proceed to W131-W133 Maturation Engine v1:
+low-risk candidate generation, proposal outcome convergence, and candidate
+suppression/correction on top of Evidence Graph v1. Future Beta hardening can move to Skill Runtime,
 ModelRouter/Privacy, or product golden path work from the W123 ReAct execution
 baseline. Future default Chat executor implementation discussion may build on
 the W65-W72 proofs only through a separately reviewed task; keep default Chat

@@ -1,6 +1,7 @@
 //! Agent module tests
 
 mod accepted_low_energy_rule_selection;
+mod evidence_graph;
 mod evidence_store;
 mod governor;
 mod heuristic_store;

@@ -1,3 +1,4 @@
+use crate::agent::evidence_graph::EvidenceGraphReport;
 use crate::agent::evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceSourceRef, EvidenceSourceType, EvidenceStore,
     EvidenceType,
@@ -54,6 +55,7 @@ pub struct LifeModelBackendPrerequisites {
     pub legacy_direct_write_convergence_complete: bool,
     pub default_chat_legacy_stream: bool,
     pub evidence_store_present: bool,
+    pub evidence_graph_present: bool,
     pub heuristic_store_present: bool,
     pub policy_store_present: bool,
     pub proposal_store_present: bool,
@@ -69,6 +71,7 @@ pub struct LifeModelBackendPrerequisites {
 #[serde(rename_all = "camelCase")]
 pub struct LifeModelBackendGovernanceReadiness {
     pub evidence_store_present: bool,
+    pub evidence_graph_present: bool,
     pub heuristic_store_present: bool,
     pub policy_store_present: bool,
     pub proposal_store_present: bool,
@@ -94,6 +97,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         legacy_direct_write_convergence_complete: true,
         default_chat_legacy_stream: true,
         evidence_store_present: type_available::<EvidenceStore>(),
+        evidence_graph_present: type_available::<EvidenceGraphReport>(),
         heuristic_store_present: type_available::<crate::agent::heuristic_store::HeuristicStore>(),
         policy_store_present: type_available::<crate::agent::policy_store::PolicyStore>(),
         proposal_store_present: type_available::<crate::agent::proposal_store::ProposalStore>(),
@@ -106,6 +110,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
     };
     let governance_readiness = LifeModelBackendGovernanceReadiness {
         evidence_store_present: current_prerequisites.evidence_store_present,
+        evidence_graph_present: current_prerequisites.evidence_graph_present,
         heuristic_store_present: current_prerequisites.heuristic_store_present,
         policy_store_present: current_prerequisites.policy_store_present,
         proposal_store_present: current_prerequisites.proposal_store_present,
@@ -117,17 +122,12 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         raw_content_allowed_in_reports: false,
     };
     let next_required_schemas = vec![
-        "life_event".to_string(),
-        "signal".to_string(),
-        "life_event_signal_evidence_bridge".to_string(),
-        "evidence_graph_v1".to_string(),
         "maturation_engine_v1".to_string(),
         "accepted_guidance_lifecycle".to_string(),
         "runtime_hs_packet_v2_guidance".to_string(),
         "ui_read_model_contracts".to_string(),
     ];
     let blockers = vec![
-        "evidence_graph_v1_missing".to_string(),
         "maturation_engine_v1_missing".to_string(),
         "accepted_guidance_lifecycle_missing".to_string(),
         "runtime_guidance_consumption_missing".to_string(),
@@ -155,7 +155,6 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
             LifeModelBackendGateBlocker {
                 gate: "lifemodel_maturity_gate".to_string(),
                 blockers: vec![
-                    "evidence_graph_v1_missing".to_string(),
                     "maturation_engine_v1_missing".to_string(),
                     "accepted_guidance_lifecycle_missing".to_string(),
                     "materialized_lifemodel_view_provenance_missing".to_string(),
@@ -182,7 +181,6 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
                 gate: "ui_read_model_gate".to_string(),
                 blockers: vec![
                     "learning_inbox_read_model_missing".to_string(),
-                    "evidence_timeline_read_model_missing".to_string(),
                     "guidance_impact_read_model_missing".to_string(),
                     "privacy_policy_read_model_missing".to_string(),
                     "version_diff_read_model_missing".to_string(),

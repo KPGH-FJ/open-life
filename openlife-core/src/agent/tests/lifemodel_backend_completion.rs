@@ -45,18 +45,22 @@ fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers
     assert!(!report.tauri_command_required);
     assert!(report.governance_readiness.proposal_store_present);
     assert!(report.governance_readiness.evidence_store_present);
+    assert!(report.governance_readiness.evidence_graph_present);
     assert!(report.governance_readiness.policy_store_present);
     assert!(report.governance_readiness.heuristic_store_present);
     assert!(report
         .next_required_schemas
-        .contains(&"life_event".to_string()));
-    assert!(report.next_required_schemas.contains(&"signal".to_string()));
-    assert!(report
+        .contains(&"maturation_engine_v1".to_string()));
+    assert!(!report
         .next_required_schemas
-        .contains(&"life_event_signal_evidence_bridge".to_string()));
-    assert!(report
+        .contains(&"evidence_graph_v1".to_string()));
+    assert!(!report
         .blockers
         .contains(&"evidence_graph_v1_missing".to_string()));
+    assert!(!report.master_spec_gate_blockers.iter().any(|gate| {
+        gate.blockers
+            .contains(&"evidence_timeline_read_model_missing".to_string())
+    }));
     assert!(report
         .master_spec_gate_blockers
         .iter()

@@ -347,18 +347,18 @@ be casually changed. Each W-slice must be independently testable.
   - Convert accepted safe signals into EvidenceStore records with lineage.
   - Low confidence, sensitive/high-risk, and raw-content signals fail closed.
 
-### Goal 2: Evidence Graph v1
+### Goal 2: Evidence Graph v1 (complete)
 
 - **W128: Evidence support/opposition/dedupe graph**
-  - Add support/opposition links, dedupe keys, source weights, and cluster
-    summaries.
+  - Complete: added support/opposition links, dedupe clusters, source weights,
+    and cluster summaries.
 - **W129: Conflict, decay, and cooldown**
-  - Add conflict detection, recency/decay metadata, and rejected-similar
-    cooldown support.
+  - Complete: added conflict detection, injected-now decay metadata, and
+    rejected-similar cooldown support.
 - **W130: Evidence read model**
-  - Add metadata-safe Evidence Timeline backend read model.
+  - Complete: added metadata-safe Evidence Timeline backend read model.
 
-### Goal 3: Maturation Engine v1
+### Goal 3: Maturation Engine v1 (next)
 
 - **W131: Low-risk multi-domain candidate generation**
   - Expand beyond the W73-W78 low-energy proof into planning preference,
@@ -523,13 +523,13 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 - Keep product UI out of scope except minimal read-model wrappers/mocks needed
   to keep contracts testable.
 
-## 13. First CLI Goal Prompt
+## 13. Next CLI Goal Prompt
 
-Use this prompt for the first implementation Goal.
+Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 1 of the LifeModel-Governed Backend Completion stage:
-Master Contract And Schemas.
+You are implementing Goal 3 of the LifeModel-Governed Backend Completion stage:
+Maturation Engine v1.
 
 Read these files first:
 - AGENTS.md
@@ -540,50 +540,41 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W123 ReAct Beta Execution Hardening is complete.
+- W124-W130 Backend Completion Goals 1-2 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W123
-  readiness/status/proof/review/product/maturity helpers or commands.
+- Ordinary `send_message` / `start_stream_message` must not call W19-W130
+  readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline
+  helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
 - W73-W78 LifeModel maturation proof exists but is narrow low-energy planning
   only.
+- W128-W130 Evidence Graph v1 exists as a pure backend graph/timeline read
+  model with support/opposition/dedupe/conflict/decay/cooldown metadata.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
   RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W124-W127 only:
+Implement W131-W133 only:
 
-W124:
-- Add a pure backend LifeModel-Governed Backend Completion readiness/contract
-  report.
-- It must report current prerequisites, blockers, default Chat isolation,
-  governance readiness, and next required schemas.
-- No runtime/model/tool execution.
-- No business writes.
-- No Tauri command unless strictly needed; prefer core/internal API.
+W131:
+- Add low-risk multi-domain maturation candidate generation over Evidence Graph
+  clusters.
+- Support planning preference, energy pattern, work style, and communication
+  preference only.
+- High-risk identity, values, relationships, health, finance, privacy, and
+  long-term direction changes must fail closed.
 
-W125:
-- Add typed LifeEvent schema and store contract/skeleton.
-- Include source refs, risk/privacy/domain, digest, metadata-safe summary, and
-  raw-content blocking.
-- Add focused tests.
+W132:
+- Converge accepted/edited/rejected proposal outcomes into positive,
+  corrected, or negative evidence across the supported low-risk domains.
+- Preserve evidence/proposal/run lineage and metadata-safe outcome summaries.
 
-W126:
-- Add typed Signal schema and deterministic extractor contract/skeleton.
-- Extract only low-risk deterministic signals in this first slice.
-- Include confidence, polarity, uncertainty reasons, dedupe key, source event
-  refs, extractor id/version, risk/privacy/domain.
-- Add focused tests.
-
-W127:
-- Add LifeEvent/Signal/Evidence bridge for safe low-risk signals.
-- Bridge must write EvidenceStore records only when metadata-safe, confidence
-  is sufficient, risk/domain allowed, and lineage is present.
-- High-risk, raw-content, low-confidence, missing-lineage, or unsupported
-  signals fail closed.
-- Add tests proving no LifeModel/Memory/Heuristic/Chat/AgentRun/MCP audit/
-  external writes happen.
+W133:
+- Add candidate suppression/correction logic using opposing evidence,
+  rejected-similar cooldowns, conflict state, decay state, and repeated
+  correction history.
+- Suppression must be deterministic and explainable by ids/hashes/counts only.
 
 Hard constraints:
 - Do not migrate default Chat.
@@ -596,17 +587,17 @@ Hard constraints:
 
 Verification:
 - Run focused cargo tests for the new modules.
-- Run existing maturation/evidence/selector/runtime contract tests that are
+- Run existing evidence graph/maturation/evidence/selector/runtime contract tests that are
   affected.
 - Run `make ci` if the focused tests pass.
 - Run `rg` checks proving ordinary Chat did not call the new pipeline.
 
 Output:
-- W124-W127 change summary.
+- W131-W133 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 1 is complete.
+- Whether Goal 3 is complete.
 ```
 
 ## 14. Handoff Standard
