@@ -279,6 +279,7 @@ pub async fn run_skill(
         finished_at: run.finished_at,
         error: parse_error.clone(),
         timestamp: chrono::Utc::now(),
+        react_trace: None,
     });
     // Build observation content including warnings
     let observation_content = if envelope.warnings.is_empty() {
@@ -298,6 +299,7 @@ pub async fn run_skill(
         source: format!("skill:{}", skill_id),
         structured_result: Some(serde_json::to_value(&envelope).unwrap_or_default()),
         timestamp: chrono::Utc::now(),
+        react_trace: None,
     });
 
     // 8. Generate proposals from envelope

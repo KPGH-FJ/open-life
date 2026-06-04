@@ -18,6 +18,11 @@ import {
   ListOrdered,
 } from "lucide-react";
 
+function redactedLength(value?: string | null): string {
+  if (!value) return "0 chars redacted";
+  return `${value.length} chars redacted`;
+}
+
 function statusIcon(status: string) {
   switch (status) {
     case "running":
@@ -219,18 +224,18 @@ export default function AgentRunDetail() {
 
           {run.userInput && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入</h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">用户输入摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {run.userInput}
+                {redactedLength(run.userInput)}
               </div>
             </div>
           )}
 
           {run.outputPreview && (
             <div className="mb-6">
-              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出预览</h3>
+              <h3 className="text-sm font-semibold text-stone-700 mb-2">输出摘要</h3>
               <div className="bg-stone-50 rounded-lg p-3 text-sm text-stone-800">
-                {run.outputPreview}
+                {redactedLength(run.outputPreview)}
               </div>
             </div>
           )}
@@ -390,6 +395,7 @@ export default function AgentRunDetail() {
                   return timeline.map(entry => {
                     if (entry.type === "action") {
                       const action = entry.item;
+                      const trace = action.reactTrace;
                       return (
                         <div
                           key={action.id}
@@ -410,6 +416,18 @@ export default function AgentRunDetail() {
                             {action.permissionDecision ?? "n/a"} ·{" "}
                             {new Date(action.startedAt ?? action.timestamp).toLocaleString()}
                           </div>
+                          {trace && (
+                            <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
+                              <div className="font-medium mb-1">ReAct Trace:</div>
+                              <div>Tool: {trace.toolName}</div>
+                              <div>Source: {trace.toolSource}</div>
+                              <div>Risk: {trace.riskLevel}</div>
+                              <div>Status: {trace.status}</div>
+                              <div>Category: {trace.actionCategory}</div>
+                              {trace.outputPreview && <div>Output: {trace.outputPreview}</div>}
+                              {trace.outputHash && <div>Hash: {trace.outputHash}</div>}
+                            </div>
+                          )}
                           {action.toolScope && (
                             <div className="mt-2 text-xs text-stone-600 bg-white rounded p-2">
                               <div className="font-medium mb-1">Tool Scope:</div>
@@ -424,7 +442,9 @@ export default function AgentRunDetail() {
                           {/* Linked proposal extraction */}
                           {(() => {
                             let proposalId: string | null = null;
-                            if (action.output) {
+                            if (trace?.proposalId) {
+                              proposalId = trace.proposalId;
+                            } else if (action.output) {
                               // Try direct proposal_id
                               if (typeof action.output === "object" && action.output !== null) {
                                 const direct = (action.output as any).proposal_id;
@@ -480,18 +500,14 @@ export default function AgentRunDetail() {
                           )}
                           {action.error && (
                             <div className="mt-2 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
-                              {action.error}
+                              {redactedLength(action.error)}
                             </div>
-                          )}
-                          {action.output && (
-                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                              {JSON.stringify(action.output, null, 2)}
-                            </pre>
                           )}
                         </div>
                       );
                     } else {
                       const obs = entry.item;
+                      const trace = obs.reactTrace;
                       return (
                         <div
                           key={obs.id}
@@ -503,15 +519,17 @@ export default function AgentRunDetail() {
                               {new Date(obs.timestamp).toLocaleString()}
                             </span>
                           </div>
-                          <div className="text-stone-800">{obs.content}</div>
+                          <div className="text-stone-800">
+                            {trace?.outputPreview ?? redactedLength(obs.content)}
+                          </div>
                           <div className="text-xs text-stone-500 mt-1">
                             Source: {obs.source}
                             {obs.actionId ? ` · Action: ${obs.actionId.slice(0, 8)}` : ""}
                           </div>
-                          {obs.structuredResult && (
-                            <pre className="mt-2 max-h-32 overflow-auto rounded bg-white px-2 py-1 text-xs text-stone-600">
-                              {JSON.stringify(obs.structuredResult, null, 2)}
-                            </pre>
+                          {trace?.outputHash && (
+                            <div className="mt-2 rounded bg-white px-2 py-1 text-xs text-stone-600">
+                              {trace.outputHash}
+                            </div>
                           )}
                         </div>
                       );

@@ -801,6 +801,7 @@ mod tests {
             finished_at: None,
             error: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         });
 
         let proposals = gen.generate(&run, "", &LifeModel::default()).unwrap();
@@ -827,6 +828,7 @@ mod tests {
             finished_at: None,
             error: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         });
 
         let proposals = gen.generate(&run, "", &LifeModel::default()).unwrap();

@@ -11,6 +11,13 @@
 > must stay synchronized with `AGENTS.md` Tool Taxonomy. W1-W10 are complete;
 > `run_multi_strategy_agent_preview` is preview/beta only and does not replace
 > the default Chat path.
+>
+> 2026-06-04 W123 note: W114-W123 ReAct Beta Execution Hardening is complete.
+> The execution spine is more inspectable through readiness/status, manifest
+> authority, `react_trace`, permission/replay scope, and proposal-first writes,
+> but this is not default Chat migration and not a full Beta declaration. Full
+> Beta may still require Skill Runtime, ModelRouter/Privacy, and product golden
+> path work.
 
 ## 1. Alignment
 
@@ -101,7 +108,7 @@ These tools let the agent act outside the LifeModel. They are required for Beta 
 | `web.fetch` | Fetch a specific URL/document | Network capability declared; privacy routed; content summarized/audited |
 | `calendar.read` | Read configured calendar context | Read-only connector; explicit account/source scope |
 | `calendar.propose_event` | Propose event creation/update | P1 proposal-only governed executor: creates `ScheduledTask` Proposal only; no direct calendar write and no `ExternalWriteAction` fallback |
-| `email.read` | Read configured email context | Read-only connector; explicit account/source scope; privacy filtered |
+| `email.read` | Read configured email context | Disabled/declarative-only unless a real governed executor exists |
 | `email.propose_draft` | Draft email without sending | P1 proposal-only governed executor: creates `DataExport`/email-draft Proposal only; no send and no `ExternalWriteAction` fallback |
 | `task.create_proposal` | Propose a task/reminder/action item | Creates ScheduledTask or Goal/Task Proposal |
 

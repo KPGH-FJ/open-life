@@ -63,6 +63,82 @@ describe("RunTracePanel", () => {
     expect(screen.queryByText("AI collaboration style")).not.toBeInTheDocument();
   });
 
+  it("renders ReAct action lifecycle metadata without raw payloads or PII", () => {
+    renderPanel({
+      ...baseRun,
+      actions: [
+        {
+          id: "action-1",
+          actionType: "mcp_tool",
+          target: "file.write_proposal",
+          input: { arguments: { content: "raw-file-secret@example.com" } },
+          status: "succeeded",
+          timestamp: new Date().toISOString(),
+          reactTrace: {
+            actionId: "action-1",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "mcp_tool",
+            toolId: "file.write_proposal",
+            toolName: "file.write_proposal",
+            toolSource: "builtin",
+            actionCategory: "proposal",
+            riskLevel: "high",
+            status: "succeeded",
+            proposalId: "proposal-1",
+            observationId: "observation-1",
+            observationStatus: "succeeded",
+            outputPreview: "128 bytes redacted",
+            outputHash: "sha256:def456",
+            outputByteCount: 128,
+            metadataSafe: true,
+          },
+        },
+      ],
+      observations: [
+        {
+          id: "observation-1",
+          actionId: "action-1",
+          content: "raw observation with secret@example.com",
+          source: "builtin",
+          timestamp: new Date().toISOString(),
+          reactTrace: {
+            actionId: "action-1",
+            stepIndex: 1,
+            toolCallIndex: 1,
+            actionType: "mcp_tool",
+            toolId: "file.write_proposal",
+            toolName: "file.write_proposal",
+            toolSource: "builtin",
+            actionCategory: "proposal",
+            riskLevel: "high",
+            status: "succeeded",
+            proposalId: "proposal-1",
+            observationId: "observation-1",
+            observationStatus: "succeeded",
+            outputPreview: "128 bytes redacted",
+            outputHash: "sha256:def456",
+            outputByteCount: 128,
+            metadataSafe: true,
+          },
+        },
+      ],
+      outputPreview: "raw output should not render",
+    });
+
+    expect(screen.getByText("ReAct action lifecycle")).toBeInTheDocument();
+    expect(screen.getByText("file.write_proposal")).toBeInTheDocument();
+    expect(screen.getByText("Source: builtin")).toBeInTheDocument();
+    expect(screen.getByText("Risk: high")).toBeInTheDocument();
+    expect(screen.getByText("Status: succeeded")).toBeInTheDocument();
+    expect(screen.getByText("Proposal: proposal-1")).toBeInTheDocument();
+    expect(screen.getByText("128 bytes redacted")).toBeInTheDocument();
+    expect(screen.getByText("sha256:def456")).toBeInTheDocument();
+    expect(screen.queryByText(/raw-file-secret/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/secret@example.com/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw output should not render/)).not.toBeInTheDocument();
+  });
+
   it("renders metadata-safe multi-strategy preview audit", () => {
     renderPanel({
       ...baseRun,

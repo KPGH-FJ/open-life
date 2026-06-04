@@ -23,7 +23,32 @@ describe("RunsPage contract", () => {
             userInput: "camel case user input",
             outputPreview: "camel case output preview",
             generatedProposals: ["proposal-1"],
-            actions: [],
+            actions: [
+              {
+                id: "action-1",
+                actionType: "mcp_tool",
+                target: "memory.search",
+                input: { arguments: { query: "raw query should not render" } },
+                status: "succeeded",
+                timestamp: new Date().toISOString(),
+                reactTrace: {
+                  actionId: "action-1",
+                  stepIndex: 0,
+                  toolCallIndex: 0,
+                  actionType: "mcp_tool",
+                  toolId: "memory.search",
+                  toolName: "memory.search",
+                  toolSource: "builtin",
+                  actionCategory: "read",
+                  riskLevel: "low",
+                  status: "succeeded",
+                  outputPreview: "40 bytes redacted",
+                  outputHash: "sha256:run1",
+                  outputByteCount: 40,
+                  metadataSafe: true,
+                },
+              },
+            ],
             observations: [],
             startedAt: new Date().toISOString(),
           },
@@ -125,14 +150,14 @@ describe("RunsPage contract", () => {
     vi.clearAllMocks();
   });
 
-  it("uses camelCase AgentRun fields for search, preview, proposals, and trash filtering", async () => {
+  it("uses metadata-safe AgentRun fields for search, preview, proposals, and trash filtering", async () => {
     render(
       <MemoryRouter>
         <RunsPage />
       </MemoryRouter>
     );
 
-    expect(await screen.findByText("camel case output preview")).toBeInTheDocument();
+    expect(await screen.findByText("25 chars redacted")).toBeInTheDocument();
     expect(screen.getAllByText("1 个提案").length).toBeGreaterThan(0);
     expect(screen.getByText("Multi-Strategy Preview")).toBeInTheDocument();
     expect(screen.getByText("Strategy: planExecute")).toBeInTheDocument();
@@ -146,26 +171,29 @@ describe("RunsPage contract", () => {
     expect(
       screen.queryByText("raw-sensitive-weekly-plan-should-not-render")
     ).not.toBeInTheDocument();
+    expect(screen.queryByText("camel case output preview")).not.toBeInTheDocument();
+    expect(screen.queryByText(/camel case user input/)).not.toBeInTheDocument();
     expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
+    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
       target: { value: "plan-session-1" },
     });
     expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
+    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
       target: { value: "weekly_planning_product" },
     });
     expect(screen.getByText("Plan-Execute Weekly Plan")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索输入内容或输出..."), {
-      target: { value: "camel case user" },
+    fireEvent.change(screen.getByPlaceholderText("搜索工具、来源或状态..."), {
+      target: { value: "memory.search" },
     });
-    expect(screen.getByText(/camel case user input/)).toBeInTheDocument();
+    expect(screen.getAllByText("Chat").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByText("已删除"));
     await waitFor(() => {
-      expect(screen.getByText("hidden by default")).toBeInTheDocument();
+      expect(screen.getByText("17 chars redacted")).toBeInTheDocument();
     });
+    expect(screen.queryByText("hidden by default")).not.toBeInTheDocument();
   });
 });

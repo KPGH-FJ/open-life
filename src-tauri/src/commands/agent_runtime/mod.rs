@@ -7,8 +7,10 @@ use openlife_core::agent::{
     EvidenceType, GovernanceDecisionKind, HSBehaviorCheckSummary, HSSelectionAudit,
     MultiStrategyRuntime, MultiStrategyRuntimeInput, MultiStrategyRuntimeMaturityReport,
     MultiStrategyRuntimeOutput, MultiStrategyRuntimePayload, PlanExecutionOutput, PlanStepStatus,
-    RedactionLevel, RiskLevel, RuntimeInput, RuntimeMigrationGateReport, RuntimeStrategyKind,
-    RuntimeStrategyRegistry, DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
+    ReactBetaExecutionReadinessReport, RedactionLevel, RiskLevel, RuntimeInput,
+    RuntimeMigrationGateReport, RuntimeStrategyKind, RuntimeStrategyRegistry,
+    RuntimeStrategySideEffectBudget, ToolRegistryBetaReadinessReport,
+    DEFAULT_CONTROLLED_CHAT_PILOT_REQUIRED_CLEAN_RUNS,
 };
 use openlife_core::layer_router::Layer;
 use openlife_core::llm::ChatMessage;
@@ -150,6 +152,21 @@ pub struct MultiStrategyAgentPreviewOutput {
     pub metadata_safe_summary: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub governance_decision_kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactBetaExecutionStatusReport {
+    pub report_kind: String,
+    pub readiness: ReactBetaExecutionReadinessReport,
+    pub tool_registry_readiness: ToolRegistryBetaReadinessReport,
+    pub default_chat_unchanged: bool,
+    pub migration_permission: bool,
+    pub no_runtime_model_tool_execution: bool,
+    pub no_business_writes: bool,
+    pub status_command_side_effect_budget: RuntimeStrategySideEffectBudget,
+    pub metadata_safe: bool,
+    pub metadata_safe_summary: Value,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1643,6 +1660,45 @@ pub(crate) async fn get_runtime_strategy_registry_status_with_state(
     Ok(RuntimeStrategyRegistry::maturity_report())
 }
 
+#[tauri::command]
+pub async fn get_react_beta_execution_status(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ReactBetaExecutionStatusReport, String> {
+    get_react_beta_execution_status_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn get_react_beta_execution_status_with_state(
+    _state: &Arc<AppState>,
+) -> Result<ReactBetaExecutionStatusReport, String> {
+    let registry = openlife_core::mcp::McpRegistry::new();
+    let tool_registry_readiness =
+        openlife_core::agent::evaluate_tool_registry_beta_readiness(&registry);
+    let readiness = openlife_core::agent::evaluate_react_beta_execution_readiness();
+    let metadata_safe_summary = json!({
+        "reportKind": "react_beta_execution_status",
+        "readinessReady": readiness.ready,
+        "toolRegistryReady": tool_registry_readiness.ready,
+        "defaultChatUnchanged": true,
+        "migrationPermission": false,
+        "runtimeModelToolExecuted": false,
+        "businessWrites": false,
+        "metadataSafe": true,
+    });
+
+    Ok(ReactBetaExecutionStatusReport {
+        report_kind: "react_beta_execution_status".into(),
+        readiness,
+        tool_registry_readiness,
+        default_chat_unchanged: true,
+        migration_permission: false,
+        no_runtime_model_tool_execution: true,
+        no_business_writes: true,
+        status_command_side_effect_budget: RuntimeStrategySideEffectBudget::zero(),
+        metadata_safe: true,
+        metadata_safe_summary,
+    })
+}
+
 async fn find_preview_run_for_gate(
     input: RuntimeMigrationGateCheckInput,
     state: &Arc<AppState>,
@@ -2907,6 +2963,45 @@ mod tests {
         assert!(!serialized.contains("memory context"));
         assert!(!serialized.contains("tool payload"));
         assert!(!serialized.contains("alice@example.com"));
+
+        let after = status_side_effect_counts(&state).await;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn react_beta_execution_status_command_reports_ready_read_only_and_not_migration_permission(
+    ) {
+        let state = preview_state().await;
+        let before = status_side_effect_counts(&state).await;
+
+        let report = get_react_beta_execution_status_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(report.report_kind, "react_beta_execution_status");
+        assert!(
+            report.readiness.ready,
+            "{:?}",
+            report.readiness.blocking_reasons
+        );
+        assert!(report.tool_registry_readiness.ready);
+        assert!(report.default_chat_unchanged);
+        assert!(!report.migration_permission);
+        assert!(report.no_runtime_model_tool_execution);
+        assert!(report.no_business_writes);
+        assert!(report.metadata_safe);
+        assert_eq!(report.status_command_side_effect_budget.runtime_calls, 0);
+        assert_eq!(report.status_command_side_effect_budget.model_calls, 0);
+        assert_eq!(report.status_command_side_effect_budget.tool_calls, 0);
+        assert_eq!(report.status_command_side_effect_budget.store_writes, 0);
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("raw tool payload"));
+        assert!(!serialized.contains("memory context"));
+        assert!(!serialized.contains("LifeModel text"));
+        assert!(!serialized.contains("secret@example.com"));
 
         let after = status_side_effect_counts(&state).await;
         assert_eq!(before, after);

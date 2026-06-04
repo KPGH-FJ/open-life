@@ -341,6 +341,70 @@ export interface MultiStrategyRuntimeMaturityReport {
   metadataSafeSummary: Record<string, unknown>;
 }
 
+export interface ToolRegistryBetaToolReport {
+  toolId: string;
+  requiredState: string;
+  actualState: string;
+  ready: boolean;
+  executable: boolean;
+  source?: string;
+  riskLevel?: string;
+  actionType?: string;
+  capabilities: string[];
+  proposalType?: string;
+  blockingReasons: string[];
+}
+
+export interface ToolRegistryBetaReadinessReport {
+  reportKind: "tool_registry_beta_readiness";
+  ready: boolean;
+  metadataSafe: boolean;
+  requiredToolIds: string[];
+  tools: ToolRegistryBetaToolReport[];
+  executableReadTools: string[];
+  proposalOnlyTools: string[];
+  permissionGatedTools: string[];
+  disabledOrDeclarativeOnlyTools: string[];
+  unsupportedOrMissingTools: string[];
+  unknownToolsBlocked: boolean;
+  pluginToolsExecutableWithoutExecutor: string[];
+  calendarEmailProposalToolsAvoidExternalWriteFallback: boolean;
+  blockingReasons: string[];
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ReactBetaExecutionReadinessReport {
+  reportKind: "react_beta_execution_readiness";
+  ready: boolean;
+  reactLoopPresent: boolean;
+  actionSchemaReady: boolean;
+  toolRegistryReady: boolean;
+  actionExecutorManifestAuthorityReady: boolean;
+  agentRunTraceReady: boolean;
+  permissionReplayReady: boolean;
+  proposalFirstWritesReady: boolean;
+  runsTraceSurfaceReady: boolean;
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  runtimeStrategyReady: boolean;
+  blockingReasons: string[];
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
+export interface ReactBetaExecutionStatusReport {
+  reportKind: "react_beta_execution_status";
+  readiness: ReactBetaExecutionReadinessReport;
+  toolRegistryReadiness: ToolRegistryBetaReadinessReport;
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  noRuntimeModelToolExecution: boolean;
+  noBusinessWrites: boolean;
+  statusCommandSideEffectBudget: RuntimeStrategySideEffectBudget;
+  metadataSafe: boolean;
+  metadataSafeSummary: Record<string, unknown>;
+}
+
 export type PlanExecuteScenario = "weekly_planning";
 export type PlanExecuteSessionStatus =
   | "draft"

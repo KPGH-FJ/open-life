@@ -9,7 +9,7 @@ use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::privacy::PrivacyEngine;
 use crate::scheduler::InferenceScheduler;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use futures::StreamExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -892,7 +892,7 @@ impl AgentLoop {
     pub(crate) fn parse_agent_reply(
         &self,
         reply: &str,
-        _action_ctx: &ActionExecutionContext<'_>,
+        action_ctx: &ActionExecutionContext<'_>,
         run: &mut AgentRun,
         tool_call_count: &mut u32,
     ) -> Result<ParsedAgentReply> {
@@ -930,12 +930,16 @@ impl AgentLoop {
 
         // Check for thought_summary and warnings
         if let Some(thought) = v.get("thought_summary").and_then(|t| t.as_str()) {
-            run.warnings.push(format!("Model thought: {}", thought));
+            run.warnings.push(format!(
+                "Model thought: {}",
+                metadata_safe_model_note(thought)
+            ));
         }
         if let Some(warnings) = v.get("warnings").and_then(|w| w.as_array()) {
             for warning in warnings {
                 if let Some(w) = warning.as_str() {
-                    run.warnings.push(format!("Model warning: {}", w));
+                    run.warnings
+                        .push(format!("Model warning: {}", metadata_safe_model_note(w)));
                 }
             }
         }
@@ -978,24 +982,51 @@ impl AgentLoop {
 
         let mut requests = Vec::new();
         for (idx, call) in calls.iter().enumerate() {
-            let name = call
+            let Some(name) = call
                 .get("name")
                 .or_else(|| call.get("tool"))
                 .and_then(|n| n.as_str())
-                .context("tool call missing name")?;
-            let args = call
+            else {
+                run.warnings.push(format!(
+                    "Parse warning: missing_tool_name at action_index={idx}"
+                ));
+                continue;
+            };
+            let args = match call
                 .get("arguments")
                 .or_else(|| call.get("args"))
                 .or_else(|| call.get("input"))
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
+            {
+                None => serde_json::json!({}),
+                Some(value) if value.is_object() => value.clone(),
+                Some(Value::Null) => serde_json::json!({}),
+                Some(_) => {
+                    run.warnings.push(format!(
+                        "Parse warning: invalid_arguments_defaulted_empty for action_index={idx}"
+                    ));
+                    serde_json::json!({})
+                }
+            };
+
+            let explicit_action_type = call.get("action_type").and_then(|t| t.as_str());
+            let registered_tool_like = action_ctx
+                .registry
+                .list_manifests()
+                .iter()
+                .any(|manifest| manifest.name == name || manifest.id == name);
+            let action_type = explicit_action_type
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    if !registered_tool_like {
+                        run.warnings.push(format!(
+                            "Parse warning: unregistered_tool_defaulted_mcp_tool at action_index={idx}"
+                        ));
+                    }
+                    "mcp_tool".to_string()
+                });
 
             requests.push(AgentActionRequest {
-                action_type: call
-                    .get("action_type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("mcp_tool")
-                    .to_string(),
+                action_type,
                 target: name.to_string(),
                 input: serde_json::json!({ "arguments": args }),
                 source_run_id: Some(run.id.clone()),
@@ -1159,6 +1190,7 @@ impl AgentLoop {
                         finished_at: Some(now),
                         timestamp: now,
                         tool_scope: None,
+                        react_trace: None,
                     };
                     let obs = AgentObservation {
                         id: format!("obs-fail-{}", now.timestamp_nanos_opt().unwrap_or_default()),
@@ -1167,6 +1199,7 @@ impl AgentLoop {
                         source: "action_executor".into(),
                         structured_result: Some(serde_json::json!({"error": e.to_string()})),
                         timestamp: now,
+                        react_trace: None,
                     };
                     run.actions.push(fail_action.clone());
                     observations.push(obs.clone());
@@ -1374,6 +1407,7 @@ impl AgentLoop {
                 "current_count": tool_call_count,
             })),
             timestamp: now,
+            react_trace: None,
         }
     }
 
@@ -1423,6 +1457,24 @@ pub(crate) struct ParsedAgentReply {
     /// True if the model generated a JSON-like response that failed to parse.
     /// When true, the caller should attempt a one-shot repair round.
     pub(crate) json_parse_failed: bool,
+}
+
+fn metadata_safe_model_note(note: &str) -> String {
+    let lower = note.to_ascii_lowercase();
+    let looks_sensitive = lower.contains("raw")
+        || lower.contains("secret")
+        || note.contains('@')
+        || lower.contains("prompt")
+        || lower.contains("assistant output")
+        || lower.contains("tool payload")
+        || lower.contains("memory context")
+        || lower.contains("lifemodel");
+    if looks_sensitive {
+        let (byte_count, hash) = crate::agent::react_beta::metadata_safe_text_digest(note);
+        format!("{byte_count} bytes redacted ({hash})")
+    } else {
+        note.to_string()
+    }
 }
 
 fn preview_text(text: &str, max_len: usize) -> String {
@@ -1632,6 +1684,86 @@ mod tests {
     }
 
     #[test]
+    fn react_beta_parse_missing_tool_name_fails_soft_without_raw_reply() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let reply = r#"{
+            "final": "checking",
+            "actions": [
+                {"arguments": {"query": "secret@example.com raw prompt"}}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+
+        assert!(!result.json_parse_failed);
+        assert!(result.actions.is_empty());
+        let warnings = serde_json::to_string(&run.warnings).unwrap();
+        assert!(warnings.contains("missing_tool_name"));
+        assert!(!warnings.contains("secret@example.com"));
+        assert!(!warnings.contains("raw prompt"));
+    }
+
+    #[test]
+    fn react_beta_parse_invalid_arguments_defaults_empty_and_records_warning() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 2;
+
+        let reply = r#"{
+            "final": "checking",
+            "actions": [
+                {"name": "memory.search", "arguments": "not an object"}
+            ]
+        }"#;
+        let result = agent
+            .parse_agent_reply(reply, &action_ctx, &mut run, &mut tc)
+            .unwrap();
+
+        assert_eq!(result.actions.len(), 1);
+        assert_eq!(result.actions[0].step_index, 2);
+        assert_eq!(
+            result.actions[0].input,
+            serde_json::json!({ "arguments": {} })
+        );
+        assert!(run
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("invalid_arguments_defaulted_empty")));
+    }
+
+    #[test]
+    fn react_beta_broad_tools_prompt_text_alone_does_not_create_actions() {
+        let agent = make_test_agent_loop();
+        let ctx = TestCtx::new();
+        let action_ctx = ctx.as_ctx();
+        let mut run = AgentRun::new_chat_run("s1", "hello");
+        let mut tc: u32 = 0;
+
+        let result = agent
+            .parse_agent_reply(
+                "Available tools: memory.search, file.write_proposal. Use them when useful.",
+                &action_ctx,
+                &mut run,
+                &mut tc,
+            )
+            .unwrap();
+
+        assert!(result.actions.is_empty());
+        assert_eq!(
+            result.final_text,
+            "Available tools: memory.search, file.write_proposal. Use them when useful."
+        );
+    }
+
+    #[test]
     fn parse_empty_actions_array_yields_final_only() {
         let agent = make_test_agent_loop();
         let ctx = TestCtx::new();
@@ -1705,6 +1837,7 @@ mod tests {
             source: "web.search".into(),
             structured_result: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         }];
         let tools_prompt = "可用工具: web.search, file.read";
 
@@ -1765,6 +1898,7 @@ mod tests {
             source: "web.search".into(),
             structured_result: None,
             timestamp: chrono::Utc::now(),
+            react_trace: None,
         }];
 
         let messages = agent.build_follow_up_messages(&task, "查询天气中...", &obs, "工具: web");

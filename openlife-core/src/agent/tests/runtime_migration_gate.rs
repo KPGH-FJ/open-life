@@ -150,6 +150,7 @@ fn runtime_migration_gate_does_not_execute_tools_or_external_writes() {
         error: None,
         timestamp: Utc::now(),
         tool_scope: None,
+        react_trace: None,
     });
     run.tool_call_count = 1;
 

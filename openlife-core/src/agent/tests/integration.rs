@@ -175,8 +175,14 @@ fn test_action_parser_actions_envelope() {
 
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].target, "weather");
-    assert_eq!(run.warnings.len(), 1);
-    assert!(run.warnings[0].contains("Test warning"));
+    assert!(run
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Test warning")));
+    assert!(run
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("unregistered_tool_defaulted_mcp_tool")));
 }
 
 /// Test 8: Action Parser - legacy tool_calls format still works
@@ -328,6 +334,7 @@ fn test_follow_up_messages_retain_tools() {
         source: "web.search".into(),
         structured_result: None,
         timestamp: chrono::Utc::now(),
+        react_trace: None,
     }];
 
     let tools_prompt = "Available tools: web.search, web.fetch";

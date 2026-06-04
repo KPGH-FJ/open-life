@@ -70,7 +70,8 @@ use commands::agent_runtime::{
     get_default_chat_adapter_narrow_implementation_plan_review_summary,
     get_default_chat_adapter_ordinary_entry_preflight_status,
     get_default_chat_adapter_routing_status, get_default_chat_runtime_boundary_status,
-    get_plan_execute_session, get_runtime_strategy_registry_status, list_plan_execute_sessions,
+    get_plan_execute_session, get_react_beta_execution_status,
+    get_runtime_strategy_registry_status, list_plan_execute_sessions,
     record_controlled_chat_cutover_candidate_review_decision,
     record_controlled_chat_migration_review_decision,
     record_controlled_chat_migration_shadow_review_decision,
@@ -173,6 +174,7 @@ pub struct ToolCallResult {
     pub action_id: Option<String>,
     pub run_id: Option<String>,
     pub permission_decision: Option<String>,
+    pub react_trace: Option<openlife_core::agent::ReactActionTraceEnvelope>,
 }
 
 #[derive(serde::Serialize)]
@@ -1623,6 +1625,7 @@ fn agent_actions_to_tool_call_results(
                 action_id: Some(action.id.clone()),
                 run_id: Some(run_id.to_string()),
                 permission_decision: action.permission_decision.clone(),
+                react_trace: action.react_trace.clone(),
             }
         })
         .collect()
@@ -3005,6 +3008,7 @@ async fn execute_tool_call(
         action_id: Some(result.action.id),
         run_id: Some(run_id),
         permission_decision: result.action.permission_decision,
+        react_trace: result.action.react_trace,
     };
 
     Ok(tool_result)
@@ -3132,6 +3136,7 @@ pub fn run() {
             replay_agent_action,
             run_multi_strategy_agent_preview,
             get_runtime_strategy_registry_status,
+            get_react_beta_execution_status,
             create_plan_execute_session,
             get_plan_execute_session,
             list_plan_execute_sessions,
@@ -5973,6 +5978,9 @@ mod hs_runtime_tests {
             "run_multi_strategy_agent_preview",
             "get_runtime_strategy_registry_status",
             "get_runtime_strategy_registry_status_with_state",
+            "get_react_beta_execution_status",
+            "get_react_beta_execution_status_with_state",
+            "ReactBetaExecutionStatusReport",
             "MultiStrategyRuntimeMaturityReport",
             "RuntimeStrategyRegistry::maturity_report",
             "create_plan_execute_session",

@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-06-03
-> Status: W113 RuntimeStrategy / Multi-Strategy Runtime Maturity complete
+> Last updated: 2026-06-04
+> Status: W123 ReAct Beta Execution Hardening complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,8 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W113 RuntimeStrategy / Multi-Strategy Runtime
-Maturity complete**.
+Current latest status is **W123 ReAct Beta Execution Hardening complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -48,6 +47,21 @@ no business writes; preview and Plan-Execute product traces share strategy trace
 vocabulary; and Direct, Layered, Workflow, Proactive, and Reflective are
 future/declarative-only descriptors, not executable capabilities. W106-W113 is
 not ReAct Beta execution hardening and is not migration permission.
+W114-W123 harden the ReAct execution spine without migrating default Chat:
+ReAct Beta readiness/status is metadata-safe and not migration permission;
+AgentLoop uses a typed action schema with fail-soft parser warnings; Tool
+Registry Beta readiness classifies executable reads, proposal-only tools,
+permission-gated helpers, disabled/declarative-only stubs, unsupported tools,
+and plugin declarations; ActionExecutor resolves manifest authority before
+execution and blocks unknown/disabled/declarative-only/direct-write-like paths;
+AgentAction and AgentObservation now carry metadata-safe `react_trace`
+envelopes; ToolPermission proposals/replay preserve canonical blocked action
+scope without raw risky payloads; write-like LifeModel/Memory/file/calendar/
+email/task tools remain proposal-first; `get_react_beta_execution_status` is
+explicitly non-default/read-only; Runs/Trace UI renders lifecycle metadata
+without raw payload leakage. W114-W123 is not a full Beta declaration; Skill
+Runtime, ModelRouter/Privacy, and product golden path work may still be needed.
+Ordinary `send_message` / `start_stream_message` remain on `legacy_stream`.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -411,7 +425,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W113 progress index
+4. This W1-W123 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -430,7 +444,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W113 Structured Index
+## W1-W123 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -546,7 +560,17 @@ permission.
 | W110 | Preview/Product Strategy Trace Convergence | Done | Preview audit, Plan-Execute product trace, frontend trace parsing/UI | Shared vocabulary includes runtimeStrategyTraceKind, selectedStrategyKind, payloadKind, strategyDescriptorId, strategyCapabilityIds, selectionReasonCode, governanceDecisionKind, sideEffectBudget, registryReady, metadataSafe, defaultChatUnchanged | No; trace metadata only | W111 |
 | W111 | Future Strategy Boundary Descriptors | Done | Declarative future strategy descriptors | Direct, Layered, Workflow, Proactive, Reflective appear as disabled/declarative-only future descriptors and are not executable/selectable capabilities | No; future taxonomy only | W112 |
 | W112 | Default Chat Isolation / Side-Effect Hardening | Done | Regression tests and forbidden-call guard updates | Ordinary send/stream forbidden list includes W106-W113 command/helpers; readiness/status does not create AgentRun/Proposal/Evidence/Memory/LifeModel/MCP/Chat/external writes and is not migration authority | No; default Chat remains `legacy_stream` | W113 |
-| W113 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | W113 authority docs synced; RuntimeStrategy maturity complete; next block can start ReAct Beta Execution Hardening from a stable strategy protocol | No; docs/status only | ReAct Beta Execution Hardening |
+| W113 | Docs / Progress / Final Verification Sync | Done | Docs/progress index plus verification matrix | Historical RuntimeStrategy maturity handoff; superseded by W114-W123 ReAct Beta execution hardening | No; docs/status only | W114 |
+| W114 | ReAct Beta Readiness Contract | Done | Core `react_beta` readiness report/evaluator | Covers loop/schema/registry/executor/trace/permission/proposal/UI/default Chat isolation, is metadata-safe, pure, and fixes `migration_permission=false` | No; readiness only | W115 |
+| W115 | AgentLoop Action Schema / Parser Hardening | Done | Typed action request parsing and parser warnings | New `actions` schema and legacy `tool_calls` normalize into the same request shape; missing names/invalid args fail soft; broad prompt text remains final-only; raw model replies stay out of reports | No; internal parser only | W116 |
+| W116 | Tool Registry Beta Taxonomy / Readiness | Done | `ToolRegistryBetaReadinessReport` | Required tool ids are classified as executable read, proposal-only, permission-gated, disabled/declarative-only, unsupported, or plugin-declared; calendar/email proposal tools stay proposal-only; plugin tools are not executable without executor evidence | No; registry/readiness only | W117 |
+| W117 | ActionExecutor Manifest Authority | Done | Manifest-governed execution gate | Every execution path resolves manifest authority; unknown/disabled/declarative-only tools block; direct write/external side-effect tools respect `allow_writes=false`; errors and previews are metadata-safe | No; execution hardening only | W118 |
+| W118 | AgentRun Action/Observation Trace Envelope | Done | `ReactActionTraceEnvelope` on `AgentAction` and `AgentObservation` | Records run/action/observation ids, step/tool indices, tool/source/category/risk/permission/status/proposal id, output preview/hash/counts, and timing metadata without raw payloads | No; trace metadata only | W119 |
+| W119 | Permission Proposal / Replay Hardening | Done | Canonical ToolPermission proposal scope and replay preservation | Proposal payloads include canonical tool scope and risky input hash/length/preview instead of raw payload; replay keeps original action/observation identity and blocks unknown/declarative-only tools | No; explicit Review Center / replay only | W120 |
+| W120 | Proposal-First Write Hardening | Done | Proposal-only write semantics and tests | LifeModel/Memory/file/calendar/email/task write-like ReAct tools create governed proposals only; `ExternalWriteAction` fallback remains blocked where taxonomy forbids it and size/minimization gates stay enforced | No; proposals only, no silent writes | W121 |
+| W121 | Non-Default ReAct Beta Status Harness | Done | Tauri `get_react_beta_execution_status` and frontend wrapper | Returns readiness plus tool registry readiness and zero side-effect proof; runs no runtime/model/tool calls, writes no stores, and ordinary send/stream forbidden-call tests exclude it | No; explicit read-only status only | W122 |
+| W122 | Runs/Trace UI Action Lifecycle Hardening | Done | Runs detail/list, ToolCallCard, RunTracePanel | UI shows tool/source/status/risk/permission/proposal/replay/observation metadata and redacted previews; raw prompt/tool/output/memory/file/web/email/PII payloads are not rendered | No; inspection surface only | W123 |
+| W123 | Docs / Progress / Verification Sync | Done | Authority docs/progress index plus verification matrix | Docs mark W114-W123 complete, scope W113 as historical, preserve default Chat `legacy_stream`, state readiness/status are not migration permission, and record remaining Beta dependencies | No; docs/status only | Next Beta hardening block |
 
 ## Folded Boundary Summary
 
@@ -638,6 +662,12 @@ above. The boundary meaning is preserved:
   apply-path ensure/resolver usage, no hardcoded BuilderReview reintroduction,
   and no default Chat helper calls. Fallback source strategy remains a blocker,
   so proposal-first convergence is still not complete.
+- W114-W123 are ReAct Beta Execution Hardening only. They make ReAct action
+  parsing, tool taxonomy/readiness, manifest authority, trace visibility,
+  permission/replay, and proposal-first write behavior harder and more
+  inspectable, but they do not replace default Chat, do not attach a controlled
+  executor to ordinary send/stream, do not grant migration permission, and do
+  not declare full Beta complete.
 
 ## Next Recommended Sequence
 
@@ -678,12 +708,20 @@ descriptor/readiness complete -> W107 selection candidate matrix complete ->
 W108 execution report envelope complete -> W109 non-default registry status
 command complete -> W110 preview/product trace convergence complete -> W111
 future strategy declarative boundary complete -> W112 default Chat isolation
-hardening complete -> W113 docs/progress/verification sync complete.
-Future ReAct Beta Execution Hardening may start from the W113 strategy protocol
-baseline. Future default Chat executor implementation discussion may build on
-the W65-W72 proofs only through a separately reviewed task; keep default Chat
-on legacy_stream unless that separate task explicitly implements, reviews,
-verifies, and authorizes a route change.
+hardening complete -> W113 docs/progress/verification sync complete -> W114
+ReAct Beta readiness contract complete -> W115 AgentLoop action schema/parser
+hardening complete -> W116 Tool Registry Beta taxonomy/readiness complete ->
+W117 ActionExecutor manifest authority complete -> W118 AgentRun
+action/observation trace envelope complete -> W119 permission proposal/replay
+hardening complete -> W120 proposal-first write hardening complete -> W121
+non-default ReAct Beta status harness complete -> W122 Runs/Trace lifecycle UI
+hardening complete -> W123 docs/progress/verification sync complete.
+Future Beta hardening can move to Skill Runtime, ModelRouter/Privacy, or
+product golden path work from the W123 ReAct execution baseline. Future default
+Chat executor implementation discussion may build on the W65-W72 proofs only
+through a separately reviewed task; keep default Chat on legacy_stream unless
+that separate task explicitly implements, reviews, verifies, and authorizes a
+route change.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

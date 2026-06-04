@@ -116,6 +116,7 @@ fn runtime_output_carries_current_runtime_results_with_empty_life_event_candidat
         error: None,
         timestamp: chrono::Utc::now(),
         tool_scope: None,
+        react_trace: None,
     };
     let observation = AgentObservation {
         id: "observation-1".into(),
@@ -124,6 +125,7 @@ fn runtime_output_carries_current_runtime_results_with_empty_life_event_candidat
         source: "memory.search".into(),
         structured_result: None,
         timestamp: chrono::Utc::now(),
+        react_trace: None,
     };
 
     let output = RuntimeOutput {

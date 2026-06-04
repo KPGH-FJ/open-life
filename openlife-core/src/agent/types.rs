@@ -231,6 +231,44 @@ pub struct ToolActionScope {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ReactActionTraceEnvelope {
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub action_id: String,
+    pub step_index: u32,
+    pub tool_call_index: u32,
+    pub action_type: String,
+    pub tool_id: String,
+    pub tool_name: String,
+    pub tool_source: String,
+    pub action_category: String,
+    pub risk_level: String,
+    #[serde(default)]
+    pub permission_decision: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub proposal_id: Option<String>,
+    #[serde(default)]
+    pub observation_id: Option<String>,
+    #[serde(default)]
+    pub observation_status: Option<String>,
+    #[serde(default)]
+    pub output_preview: Option<String>,
+    #[serde(default)]
+    pub output_hash: Option<String>,
+    #[serde(default)]
+    pub output_byte_count: Option<usize>,
+    #[serde(default)]
+    pub output_item_count: Option<usize>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
+    pub metadata_safe: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentAction {
     pub id: String,
     pub action_type: String,
@@ -250,6 +288,8 @@ pub struct AgentAction {
     pub timestamp: DateTime<Utc>,
     #[serde(default)]
     pub tool_scope: Option<ToolActionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub react_trace: Option<ReactActionTraceEnvelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +303,8 @@ pub struct AgentObservation {
     #[serde(default)]
     pub structured_result: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub react_trace: Option<ReactActionTraceEnvelope>,
 }
 
 /// Error information when a run fails.

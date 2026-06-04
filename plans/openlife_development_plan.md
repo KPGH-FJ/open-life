@@ -1,7 +1,7 @@
 # OpenLife Development Plan
 
-> Version: 2026-06-02 W65 Default Chat Adapter Backend-Only Descriptor Skeleton
-> Current direction: W1-W60 runtime/adapter guard ladder plus W65 descriptor skeleton complete; default Chat remains unchanged
+> Version: 2026-06-04 W123 ReAct Beta Execution Hardening complete
+> Current direction: W114-W123 execution hardening is complete; default Chat remains unchanged
 > Architecture program baseline: [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md)
 > Progress index: [`lifemodel_governed_runtime_progress.md`](/Users/fujing/Desktop/偶来福/plans/lifemodel_governed_runtime_progress.md)
 > Architecture source of truth: [`openlife_agent_framework_architecture.md`](/Users/fujing/Desktop/偶来福/plans/openlife_agent_framework_architecture.md)
@@ -32,11 +32,14 @@ controlled executor disabled/unattached, writes nothing, runs nothing, and does
 not route default Chat.
 
 The important current boundary is that MultiStrategy Runtime is
-descriptor/readiness/report/status-ready and preview/audit-ready, but it is not
-productized as the default Chat path. W106-W113 status/readiness/maturity
-reports are not migration permission. Future work must move from preview to
-controlled product migration without directly replacing `send_message` or the
-existing Chat main flow.
+descriptor/readiness/report/status-ready and preview/audit-ready, and ReAct
+Beta execution has now been hardened across readiness/status, action parsing,
+Tool Registry taxonomy, ActionExecutor manifest authority, trace envelopes,
+permission/replay, proposal-first writes, and Runs trace visibility. W106-W113
+status/readiness/maturity reports and W114-W123 ReAct Beta readiness/status
+reports are not migration permission. This work does not productize ReAct as
+the default Chat path and does not replace `send_message` or the existing Chat
+main flow.
 
 The immediate order is defined in
 [`openlife_lifemodel_governed_agent_runtime.md`](/Users/fujing/Desktop/偶来福/plans/openlife_lifemodel_governed_agent_runtime.md):
@@ -79,10 +82,19 @@ docs/status sync
 -> narrow implementation plan approval readiness
 ```
 
-The next practical sequence after W60 is:
+W114-W123 completed this sequence:
 
 ```text
-keep authority docs synced -> use narrow implementation plan approval readiness only as discussion evidence -> default Chat remains unchanged
+ReAct Beta readiness contract
+-> AgentLoop action schema and parser hardening
+-> Tool Registry Beta taxonomy/readiness
+-> ActionExecutor manifest authority
+-> AgentRun action/observation trace envelope
+-> permission proposal and replay hardening
+-> proposal-first write hardening
+-> non-default ReAct Beta status harness
+-> Runs/Trace UI hardening
+-> docs/progress/verification sync
 ```
 
 `calendar.propose_event` and `email.propose_draft` are now P1 proposal-only
@@ -115,7 +127,11 @@ and actual code status still agree. Stale runtime authority, tool taxonomy,
 proposal semantics, metadata-safe audit, or AgentRun trace descriptions are
 treated as blockers because they mislead later work.
 
-Beta must not be declared because one blocker is fixed. Beta requires the Beta Gates in `openlife_react_beta_roadmap.md` to pass, especially ReAct execution, tool registry/action execution, permission replay, LifeModel/Memory governance, skill runtime, ModelRouter privacy, and Runs traceability.
+Beta must not be declared because one blocker is fixed. W114-W123 makes ReAct
+execution harder and more inspectable, but full Beta still requires the Beta
+Gates in `openlife_react_beta_roadmap.md` to pass, especially Skill Runtime,
+ModelRouter privacy, LifeModel/Memory governance across product paths, and a
+product golden path.
 
 Execution tools are part of the Beta definition. OpenLife must support OpenClaw-like execution seriousness through governed tools such as `mcp.call_tool`, `a2a.call_agent`, `file.read`, `file.write_proposal`, `web.search`, `web.fetch`, `calendar.read`, `calendar.propose_event`, `email.read`, `email.propose_draft`, and `task.create_proposal`. Connectors that cannot truly execute must be registered as disabled/declarative-only and may only create proposals.
 

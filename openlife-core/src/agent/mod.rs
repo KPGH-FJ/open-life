@@ -16,6 +16,7 @@ pub mod proposal_engine;
 pub mod proposal_generators;
 pub mod proposal_outcome;
 pub mod proposal_store;
+pub mod react_beta;
 pub mod reasoning;
 pub mod regression_suite;
 pub mod runtime;
@@ -109,6 +110,13 @@ pub use proposal_outcome::{
     MaturationProposalOutcome, MaturationProposalOutcomeEvidenceReport,
 };
 pub use proposal_store::ProposalStore;
+pub use react_beta::{
+    evaluate_react_beta_execution_readiness, evaluate_react_beta_execution_readiness_for_input,
+    evaluate_tool_registry_beta_readiness, metadata_safe_value_digest, metadata_safe_value_preview,
+    ReactBetaExecutionReadinessInput, ReactBetaExecutionReadinessReport,
+    ReactBetaReadinessComponentOverride, ToolRegistryBetaReadinessReport,
+    ToolRegistryBetaToolReport,
+};
 pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
 pub use reasoning::{
     DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,

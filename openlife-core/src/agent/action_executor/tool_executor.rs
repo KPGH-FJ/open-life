@@ -17,9 +17,13 @@ use super::ActionExecutionResult;
 use super::ActionExecutionStatus;
 use super::AgentActionRequest;
 use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
+use crate::agent::react_beta::{
+    metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
+    metadata_safe_value_preview,
+};
 use crate::agent::types::{
-    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType, RiskLevel,
-    ToolActionScope,
+    AgentAction, AgentObservation, AgentProposal, ProposalSource, ProposalType,
+    ReactActionTraceEnvelope, RiskLevel, ToolActionScope,
 };
 use ring::digest::{digest, SHA256};
 
@@ -109,6 +113,35 @@ impl super::ActionExecutor {
                 policy_id: None,
             }
         };
+
+        if let Some(ref m) = manifest {
+            if !self.config.allow_writes
+                && is_direct_external_write_tool(m)
+                && !is_proposal_generation_tool(&m.name)
+            {
+                let forced_decision = ToolPermissionDecision {
+                    allowed: false,
+                    requires_confirmation: false,
+                    decision: "blocked".into(),
+                    reason: "write-like tool blocked because allow_writes=false".into(),
+                    policy_id: None,
+                };
+                let (action, observation) = self.build_blocked_action_observation(
+                    tool_name,
+                    &args,
+                    &inspection,
+                    &forced_decision,
+                    manifest.as_ref(),
+                    &request,
+                );
+                return Ok(ActionExecutionResult {
+                    action,
+                    observation,
+                    status: ActionExecutionStatus::Blocked,
+                    stop_reason: Some("allow_writes_false".into()),
+                });
+            }
+        }
 
         // 4. Determine if blocked.
         // Proposal-generation tools (file.write_proposal, memory.propose_write, etc.)
@@ -468,6 +501,24 @@ impl super::ActionExecutor {
             requires_confirmation: needs_confirmation,
             allowed: false,
         });
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            tool_name,
+            args,
+            None,
+            manifest,
+            request,
+            status,
+            Some(decision.decision.clone()),
+            Some(now),
+            Some(now),
+        );
 
         let action = AgentAction {
             id: action_id.clone(),
@@ -486,14 +537,11 @@ impl super::ActionExecutor {
                 Some(decision.reason.clone())
             },
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
 
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: if needs_confirmation {
                 "Tool call requires permission confirmation".to_string()
@@ -510,6 +558,7 @@ impl super::ActionExecutor {
                 "permission_decision": decision.decision,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
 
         (action, observation)
@@ -546,6 +595,24 @@ impl super::ActionExecutor {
             requires_confirmation: false,
             allowed: result.success,
         });
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            tool_name,
+            args,
+            result.output.as_deref().or(result.error.as_deref()),
+            manifest,
+            request,
+            status,
+            None,
+            Some(now),
+            Some(now),
+        );
 
         let action = AgentAction {
             id: action_id.clone(),
@@ -563,14 +630,11 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: result.error.clone(),
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
 
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: result
                 .output
@@ -587,6 +651,7 @@ impl super::ActionExecutor {
                 "permission_decision": null,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
 
         (action, observation)
@@ -608,6 +673,24 @@ impl super::ActionExecutor {
         } else {
             "blocked"
         };
+        let observation_id = format!(
+            "observation-{}-{}",
+            request.step_index,
+            now.timestamp_nanos_opt().unwrap_or_default()
+        );
+        let trace = self.build_react_trace_envelope(
+            &action_id,
+            Some(&observation_id),
+            &request.target,
+            &request.input,
+            Some(reason),
+            None,
+            &request,
+            status,
+            Some("proposal_required".into()),
+            Some(now),
+            Some(now),
+        );
         let action = AgentAction {
             id: action_id.clone(),
             action_type: request.action_type.clone(),
@@ -621,13 +704,10 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: Some(reason.to_string()),
             timestamp: now,
+            react_trace: Some(trace.clone()),
         };
         let observation = AgentObservation {
-            id: format!(
-                "observation-{}-{}",
-                request.step_index,
-                now.timestamp_nanos_opt().unwrap_or_default()
-            ),
+            id: observation_id,
             action_id: Some(action_id),
             content: reason.to_string(),
             source: "action_executor".into(),
@@ -639,6 +719,7 @@ impl super::ActionExecutor {
                 "proposal_required": true,
             })),
             timestamp: now,
+            react_trace: Some(trace),
         };
         ActionExecutionResult {
             action,
@@ -649,6 +730,98 @@ impl super::ActionExecutor {
                 ActionExecutionStatus::Blocked
             },
             stop_reason: Some("proposal_required".into()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_react_trace_envelope(
+        &self,
+        action_id: &str,
+        observation_id: Option<&str>,
+        tool_name: &str,
+        args: &Value,
+        output_or_error: Option<&str>,
+        manifest: Option<&ToolManifest>,
+        request: &AgentActionRequest,
+        status: &str,
+        permission_decision: Option<String>,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+        finished_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ReactActionTraceEnvelope {
+        let (output_byte_count, output_hash, output_preview) = if let Some(text) = output_or_error {
+            let (byte_count, hash) = metadata_safe_text_digest(text);
+            (
+                Some(byte_count),
+                Some(hash),
+                Some(metadata_safe_text_preview(text)),
+            )
+        } else {
+            let (byte_count, hash) = metadata_safe_value_digest(args);
+            (
+                Some(byte_count),
+                Some(hash),
+                Some(metadata_safe_value_preview(args)),
+            )
+        };
+        let output_item_count = output_or_error
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .map(|value| match value {
+                Value::Array(items) => items.len(),
+                Value::Object(map) => map.len(),
+                Value::Null => 0,
+                _ => 1,
+            });
+        let proposal_id = output_or_error.and_then(extract_proposal_id_from_text);
+        let tool_source = manifest
+            .map(canonical_tool_source)
+            .unwrap_or_else(|| "unregistered".into());
+        let action_category = manifest
+            .map(|m| {
+                if proposal_id.is_some() || is_proposal_generation_tool(&m.name) {
+                    "proposal".to_string()
+                } else if m.action_type.is_empty() {
+                    "read".to_string()
+                } else {
+                    m.action_type.clone()
+                }
+            })
+            .unwrap_or_else(|| {
+                if request.action_type.contains("proposal") {
+                    "proposal".into()
+                } else {
+                    "unknown".into()
+                }
+            });
+
+        ReactActionTraceEnvelope {
+            run_id: request.source_run_id.clone(),
+            action_id: action_id.to_string(),
+            step_index: request.step_index,
+            tool_call_index: request.step_index,
+            action_type: request.action_type.clone(),
+            tool_id: manifest
+                .map(|m| m.id.clone())
+                .unwrap_or_else(|| tool_name.to_string()),
+            tool_name: manifest
+                .map(|m| m.name.clone())
+                .unwrap_or_else(|| tool_name.to_string()),
+            tool_source,
+            action_category,
+            risk_level: manifest
+                .map(|m| m.risk_level.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            permission_decision,
+            status: status.to_string(),
+            proposal_id,
+            observation_id: observation_id.map(str::to_string),
+            observation_status: Some(status.to_string()),
+            output_preview,
+            output_hash,
+            output_byte_count,
+            output_item_count,
+            started_at,
+            finished_at,
+            metadata_safe: true,
         }
     }
 
@@ -671,17 +844,34 @@ impl super::ActionExecutor {
         let risk_level = manifest
             .map(|m| m.risk_level.clone())
             .unwrap_or_else(|| "medium".to_string());
+        let action_type = manifest
+            .map(|m| m.action_type.clone())
+            .unwrap_or_else(|| request.action_type.clone());
+        let capabilities = manifest.map(|m| m.capabilities.clone()).unwrap_or_default();
+        let (input_length_bytes, input_hash) = metadata_safe_value_digest(args);
+        let input_preview = metadata_safe_value_preview(args);
 
         let after = serde_json::json!({
             "permission_action": "grant",
             "tool_name": tool_name,
-            "source": source,
-            "risk_level": risk_level,
+            "source": source.clone(),
+            "risk_level": risk_level.clone(),
             "policy": "allow_until_revoked",
+            "canonical_scope": {
+                "tool_name": tool_name,
+                "source": source.clone(),
+                "risk_level": risk_level.clone(),
+                "action_type": action_type,
+                "capabilities": capabilities,
+                "blocked_run_id": request.source_run_id,
+                "blocked_step_index": request.step_index,
+                "input_hash": input_hash,
+                "input_length_bytes": input_length_bytes,
+                "input_preview": input_preview,
+            },
             "blocked_action": {
                 "action_type": request.action_type,
                 "target": request.target,
-                "input": args,
                 "source_run_id": request.source_run_id,
                 "step_index": request.step_index,
             },
@@ -715,13 +905,21 @@ impl super::ActionExecutor {
             return None;
         }
 
-        let result = self.build_proposal_required_action(
+        let mut result = self.build_proposal_required_action(
             request.clone(),
             &format!(
                 "{}: 已创建 ToolPermission 提案 (id: {})，请前往 Review Center 审批",
                 tool_name, proposal.id
             ),
         );
+        if let Some(trace) = result.action.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal.id.clone());
+            trace.action_category = "proposal".into();
+        }
+        if let Some(trace) = result.observation.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal.id.clone());
+            trace.action_category = "proposal".into();
+        }
 
         Some(Ok(result))
     }
@@ -750,6 +948,14 @@ impl super::ActionExecutor {
             ),
         );
         result.stop_reason = Some("hs_external_write_proposal_first".into());
+        if let Some(trace) = result.action.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal_id.clone());
+            trace.action_category = "proposal".into();
+        }
+        if let Some(trace) = result.observation.react_trace.as_mut() {
+            trace.proposal_id = Some(proposal_id);
+            trace.action_category = "proposal".into();
+        }
 
         Some(Ok(result))
     }
@@ -847,4 +1053,14 @@ impl super::ActionExecutor {
 
         Some(Ok(proposal_id))
     }
+}
+
+fn extract_proposal_id_from_text(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text).ok().and_then(|value| {
+        value
+            .get("proposal_id")
+            .or_else(|| value.get("proposalId"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    })
 }

@@ -8,6 +8,7 @@ import type {
   MultiStrategyAgentPreviewInput,
   MultiStrategyAgentPreviewOutput,
   MultiStrategyRuntimeMaturityReport,
+  ReactBetaExecutionStatusReport,
   ControlledChatPilotEligibilityCheckInput,
   ControlledChatPilotEligibilityReport,
   ControlledPilotPromotionEvidenceInput,
@@ -245,6 +246,33 @@ export interface ToolCallResult {
   action_id?: string;
   run_id?: string;
   permission_decision?: string;
+  react_trace?: ReactActionTraceEnvelope;
+  replayable?: boolean;
+}
+
+export interface ReactActionTraceEnvelope {
+  runId?: string;
+  actionId: string;
+  stepIndex: number;
+  toolCallIndex: number;
+  actionType: string;
+  toolId: string;
+  toolName: string;
+  toolSource: string;
+  actionCategory: string;
+  riskLevel: string;
+  permissionDecision?: string;
+  status: string;
+  proposalId?: string;
+  observationId?: string;
+  observationStatus?: string;
+  outputPreview?: string;
+  outputHash?: string;
+  outputByteCount?: number;
+  outputItemCount?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  metadataSafe: boolean;
 }
 
 export interface ReasoningTrace {
@@ -331,6 +359,10 @@ export async function runMultiStrategyAgentPreview(
 
 export async function getRuntimeStrategyRegistryStatus(): Promise<MultiStrategyRuntimeMaturityReport> {
   return safeInvoke<MultiStrategyRuntimeMaturityReport>("get_runtime_strategy_registry_status");
+}
+
+export async function getReactBetaExecutionStatus(): Promise<ReactBetaExecutionStatusReport> {
+  return safeInvoke<ReactBetaExecutionStatusReport>("get_react_beta_execution_status");
 }
 
 export async function createPlanExecuteSession(
@@ -1815,6 +1847,7 @@ export interface AgentAction {
   error?: string;
   timestamp: string;
   toolScope?: ToolActionScope;
+  reactTrace?: ReactActionTraceEnvelope;
 }
 
 export interface AgentObservation {
@@ -1824,6 +1857,7 @@ export interface AgentObservation {
   source: string;
   structuredResult?: any;
   timestamp: string;
+  reactTrace?: ReactActionTraceEnvelope;
 }
 
 export interface AgentStatusUpdate {

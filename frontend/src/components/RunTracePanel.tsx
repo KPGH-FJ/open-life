@@ -1,6 +1,12 @@
-import { CheckCircle2, CircleAlert, ListChecks, ShieldCheck, Sparkles } from "lucide-react";
+import { CheckCircle2, CircleAlert, ListChecks, ShieldCheck, Sparkles, Wrench } from "lucide-react";
 import { Link } from "react-router-dom";
-import type { AgentRun, HSBehaviorCheckSummary, HSSelectionAudit, ReasoningTrace } from "../tauri";
+import type {
+  AgentRun,
+  HSBehaviorCheckSummary,
+  HSSelectionAudit,
+  ReactActionTraceEnvelope,
+  ReasoningTrace,
+} from "../tauri";
 import { getPlanExecuteProductTrace } from "../utils/planExecuteProduct";
 import { getMultiStrategyPreviewAudit } from "../utils/previewAudit";
 
@@ -53,6 +59,19 @@ function collectBehaviorChecks(
   return run?.behaviorChecks ?? run?.reasoningTrace?.behaviorChecks ?? trace?.behaviorChecks ?? [];
 }
 
+function collectReactActionTraces(run?: AgentRun | null): ReactActionTraceEnvelope[] {
+  const byAction = new Map<string, ReactActionTraceEnvelope>();
+  for (const action of run?.actions ?? []) {
+    if (action.reactTrace) byAction.set(action.reactTrace.actionId, action.reactTrace);
+  }
+  for (const observation of run?.observations ?? []) {
+    if (observation.reactTrace && !byAction.has(observation.reactTrace.actionId)) {
+      byAction.set(observation.reactTrace.actionId, observation.reactTrace);
+    }
+  }
+  return [...byAction.values()].sort((a, b) => a.toolCallIndex - b.toolCallIndex);
+}
+
 export default function RunTracePanel({ run, trace }: Props) {
   const audit =
     run?.hsSelectionAudit ?? run?.reasoningTrace?.hsSelectionAudit ?? trace?.hsSelectionAudit;
@@ -61,9 +80,11 @@ export default function RunTracePanel({ run, trace }: Props) {
   const checks = collectBehaviorChecks(run, trace);
   const previewAudit = getMultiStrategyPreviewAudit(run);
   const productTrace = getPlanExecuteProductTrace(run);
+  const reactActionTraces = collectReactActionTraces(run);
   const hasCollaborationContent = policies.length > 0 || styles.length > 0 || checks.length > 0;
   const hasStrategyContent = !!previewAudit || !!productTrace;
-  const hasContent = hasCollaborationContent || hasStrategyContent;
+  const hasReactActionContent = reactActionTraces.length > 0;
+  const hasContent = hasCollaborationContent || hasStrategyContent || hasReactActionContent;
 
   if (!hasContent) {
     return (
@@ -75,8 +96,53 @@ export default function RunTracePanel({ run, trace }: Props) {
 
   return (
     <section className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950">
-      {productTrace && (
+      {hasReactActionContent && (
         <div className="rounded-lg bg-white/80 p-3 text-stone-800">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-semibold text-stone-900">
+              <Wrench size={16} />
+              ReAct action lifecycle
+            </div>
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">
+              metadata-safe
+            </span>
+          </div>
+
+          <div className="mt-2 space-y-2">
+            {reactActionTraces.map(trace => (
+              <div
+                key={`${trace.actionId}-${trace.observationId ?? "no-observation"}`}
+                className="rounded border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-700"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-stone-900">{trace.toolName}</span>
+                  <span>Status: {trace.status}</span>
+                  <span>Source: {trace.toolSource}</span>
+                  <span>Risk: {trace.riskLevel}</span>
+                  <span>Category: {trace.actionCategory}</span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  <span>Step: {trace.stepIndex}</span>
+                  <span>Tool call: {trace.toolCallIndex}</span>
+                  {trace.permissionDecision && <span>Permission: {trace.permissionDecision}</span>}
+                  {trace.outputPreview && <span>{trace.outputPreview}</span>}
+                  {trace.outputHash && <span>{trace.outputHash}</span>}
+                  {trace.proposalId && (
+                    <Link to="/review" className="text-blue-700 hover:text-blue-900">
+                      Proposal: {trace.proposalId}
+                    </Link>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {productTrace && (
+        <div
+          className={`rounded-lg bg-white/80 p-3 text-stone-800 ${hasReactActionContent ? "mt-3" : ""}`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 font-semibold text-stone-900">
               <ListChecks size={16} />
@@ -186,7 +252,11 @@ export default function RunTracePanel({ run, trace }: Props) {
       )}
 
       {previewAudit && (
-        <div className={`rounded-lg bg-white/80 p-3 text-stone-800 ${productTrace ? "mt-3" : ""}`}>
+        <div
+          className={`rounded-lg bg-white/80 p-3 text-stone-800 ${
+            productTrace || hasReactActionContent ? "mt-3" : ""
+          }`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="font-semibold text-stone-900">Multi-strategy preview trace</div>
             {previewAudit.metadataSafe && (
@@ -253,7 +323,7 @@ export default function RunTracePanel({ run, trace }: Props) {
         <>
           <div
             className={`flex flex-wrap items-center justify-between gap-2 ${
-              hasStrategyContent ? "mt-3" : ""
+              hasStrategyContent || hasReactActionContent ? "mt-3" : ""
             }`}
           >
             <div className="flex items-center gap-2 font-semibold">

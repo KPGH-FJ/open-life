@@ -214,6 +214,13 @@ pub async fn replay_agent_action(
     let mut new_observation = exec_result.observation;
     new_action.id = action_id.clone();
     new_observation.action_id = Some(action_id.clone());
+    if let Some(trace) = new_action.react_trace.as_mut() {
+        trace.action_id = action_id.clone();
+    }
+    if let Some(trace) = new_observation.react_trace.as_mut() {
+        trace.action_id = action_id.clone();
+        trace.observation_id = Some(new_observation.id.clone());
+    }
 
     run.actions[action_idx] = new_action.clone();
 

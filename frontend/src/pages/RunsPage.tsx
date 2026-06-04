@@ -67,7 +67,25 @@ function runSubtitle(run: AgentRun): string {
   if (audit) {
     return [audit.strategyKind, audit.payloadKind, audit.reasonCode].filter(Boolean).join(" · ");
   }
-  return run.userInput ? run.userInput.slice(0, 60) + "..." : "No user input";
+  return run.userInput ? `${run.userInput.length} chars redacted` : "No user input";
+}
+
+function reactTraceSearchText(run: AgentRun): string {
+  const actionText = run.actions
+    .map(action => {
+      const trace = action.reactTrace;
+      if (!trace) return `${action.actionType} ${action.target ?? ""} ${action.status}`;
+      return `${trace.toolName} ${trace.toolSource} ${trace.status} ${trace.riskLevel} ${trace.actionCategory} ${trace.permissionDecision ?? ""} ${trace.proposalId ?? ""}`;
+    })
+    .join(" ");
+  const observationText = run.observations
+    .map(observation => {
+      const trace = observation.reactTrace;
+      if (!trace) return observation.source;
+      return `${trace.toolName} ${trace.toolSource} ${trace.observationStatus ?? ""} ${trace.outputHash ?? ""}`;
+    })
+    .join(" ");
+  return `${actionText} ${observationText}`;
 }
 
 const PAGE_SIZE = 20;
@@ -124,9 +142,10 @@ export default function RunsPage() {
         ? `${audit.runtimeStrategyTraceKind ?? ""} ${audit.selectedStrategyKind ?? ""} ${audit.strategyKind ?? ""} ${audit.payloadKind ?? ""} ${audit.strategyDescriptorId ?? ""} ${audit.governanceDecisionKind ?? ""} ${audit.selectionReasonCode ?? ""} ${audit.reasonCode ?? ""} ${(audit.strategyCapabilityIds ?? []).join(" ")}`
         : "";
       const productText = productTrace ? planExecuteProductSearchText(productTrace) : "";
-      const outputText = productTrace ? "" : (run.outputPreview ?? "");
+      const outputText = productTrace ? "" : "";
+      const traceText = reactTraceSearchText(run);
       const text =
-        `${run.userInput ?? ""} ${outputText} ${run.kind} ${auditText} ${productText}`.toLowerCase();
+        `${outputText} ${run.kind} ${auditText} ${productText} ${traceText}`.toLowerCase();
       if (!text.includes(query)) return false;
     }
 
@@ -249,7 +268,7 @@ export default function RunsPage() {
                 />
                 <input
                   type="text"
-                  placeholder="搜索输入内容或输出..."
+                  placeholder="搜索工具、来源或状态..."
                   value={searchQuery}
                   onChange={e => {
                     setSearchQuery(e.target.value);
@@ -389,7 +408,7 @@ export default function RunsPage() {
                             </div>
                             {!productTrace && run.outputPreview && (
                               <div className="text-xs text-stone-500 mt-1 max-w-xs truncate">
-                                {run.outputPreview}
+                                {run.outputPreview.length} chars redacted
                               </div>
                             )}
                           </div>
