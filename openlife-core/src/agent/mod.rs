@@ -1,6 +1,7 @@
 pub mod accepted_guidance;
 pub mod action_executor;
 pub mod agent_loop;
+pub mod backend_contract_freeze;
 pub mod context_assembler;
 pub mod evidence_graph;
 pub mod evidence_store;
@@ -47,6 +48,17 @@ pub use action_executor::{
 };
 pub use agent_loop::apply_react_guidance_to_config;
 pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
+pub use backend_contract_freeze::{
+    evaluate_final_backend_completion_gate, freeze_pre_ui_backend_read_model_contracts,
+    BackendCompletionAcceptanceGateStatus, BackendCompletionGateEvidence,
+    DefaultChatIsolationProof, FinalBackendCompletionGateInput, FinalBackendCompletionGateReport,
+    GoldenPathCoverageProof, LearningInboxItem, LearningInboxReadModel, LifeModelOverviewReadModel,
+    LocalOnlyPrivacyProof, PreUiBackendContractFreezeInput, PreUiBackendContractFreezeReport,
+    PrivacyControlsReadModel, PrivacyDecisionSummary, ProposalFirstBoundaryProof,
+    ProposalReviewItem, ProposalReviewReadModel, RawContentExclusionProof, RuntimeTraceHsInfluence,
+    RuntimeTraceReadModel, RuntimeTraceRunItem, ToolGovernanceProof, UiReadModelGateProof,
+    UiReadModelSurfaceContract,
+};
 pub use context_assembler::{
     AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, LifeModelAssembler,
     MemoryAssembler, MemoryHit, PrivacyAssembler, ToolsAssembler,

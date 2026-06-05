@@ -30,7 +30,7 @@ fn low_energy_event_draft() -> LifeEventDraft {
 }
 
 #[test]
-fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers() {
+fn backend_completion_readiness_reports_w149_contract_freeze_complete() {
     let report = evaluate_lifemodel_backend_completion_readiness();
 
     assert!(report.report_ready);
@@ -60,9 +60,24 @@ fn w124_backend_completion_readiness_reports_current_goal1_contract_and_blockers
     assert!(!report
         .next_required_schemas
         .contains(&"version_diff_rollback_read_model".to_string()));
-    assert!(report
+    assert!(report.next_required_schemas.is_empty());
+    assert!(report.blockers.is_empty());
+    assert!(report.master_spec_gate_blockers.is_empty());
+    assert!(!report
         .next_required_schemas
         .contains(&"runtime_hs_packet_v2_guidance".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"runtime_guidance_impact_read_model".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"model_router_privacy_hs_hardening".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"action_executor_hs_tool_governance".to_string()));
+    assert!(!report
+        .next_required_schemas
+        .contains(&"ui_read_model_contracts".to_string()));
     assert!(!report
         .next_required_schemas
         .contains(&"evidence_graph_v1".to_string()));

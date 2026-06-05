@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-05
-> Status: authoritative document index for Agents, W146 Backend Completion Goal 7 complete; next Goal-mode entry is Goal 8 / Pre-UI Backend Contract Freeze
+> Status: authoritative document index for Agents, W149 Backend Completion Goal 8 complete; default Chat remains `legacy_stream`
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -16,10 +16,10 @@ as reference only.
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
 4. `plans/lifemodel_governed_backend_completion_goal_spec.md`
-   - Next Goal-mode master spec for completing the pre-UI LifeModel-governed
-     backend kernel.
+   - Completed Goal-mode master spec for the pre-UI LifeModel-governed
+     backend kernel through W149.
 5. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W146 completion/status index. This is not a second roadmap.
+   - Compact W1-W149 completion/status index. This is not a second roadmap.
 6. `plans/react_beta_execution_hardening_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for ReAct Beta Execution
      Hardening W114-W123.
@@ -51,7 +51,7 @@ as reference only.
 
 ## 2. Current Position
 
-Current latest status is **W146 Backend Completion Goal 7 complete**.
+Current latest status is **W149 Backend Completion Goal 8 complete**.
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -181,9 +181,22 @@ LifeModel/Memory/external provider state write, and no migration permission.
 Ordinary Chat must not call W144-W146 golden path helpers and must not treat
 golden path ready as migration permission.
 
-The next Goal-mode development entry is Backend Completion Goal 8 from
-`plans/lifemodel_governed_backend_completion_goal_spec.md`: Pre-UI Backend
-Contract Freeze W147-W149.
+W147-W149 Backend Completion Goal 8 is complete. It freezes pure backend/core
+metadata-safe read-model contracts for Learning Inbox, Evidence Timeline,
+Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and
+LifeModel Overview; adds a final read-only backend completion gate report; and
+syncs authority docs/progress/verification. Goal 8 adds no ordinary Chat
+routing change, no `send_message` / `start_stream_message` replacement, no
+Tauri command, no UI, no runtime/model/tool execution, no durable
+LifeModel/Memory/external provider state write, and no migration permission.
+Ordinary Chat must not call W147-W149 contract/final-gate helpers and must not
+treat contract frozen or final gate ready as migration permission.
+
+Backend Completion Goal 8 is no longer a future entry. The next implementation
+entry should be chosen explicitly, such as Skill Runtime, pre-UI product surface
+design, or a separately reviewed default Chat route migration Goal. Old docs
+that still name Goal 8 as next defer to this file, the backend completion spec,
+and `plans/lifemodel_governed_runtime_progress.md`.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -578,7 +591,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W146 Compression Map
+## 3. W1-W149 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -654,15 +667,16 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W137-W140 | Backend Completion Goal 5: Runtime Guidance Integration | RuntimeHSPacket v2 accepted/trial guidance metadata, non-default ReAct guidance consumption gated by `RuntimeGuidanceConsumptionMode::ExplicitRuntime`, explicit Plan-Execute weekly planning guidance consumption, and Guidance Impact trace/read model are complete; ordinary Chat keeps guidance consumption disabled and has no routing change or migration permission |
 | W141-W143 | Backend Completion Goal 6: Policy / Privacy / Tool Governance Hardening | ModelRouter/Privacy HS LocalOnly hard enforcement, ActionExecutor HS tool governance, and Governor unified metadata-safe decision reports are complete; High/Critical privacy cannot select cloud providers, HS LocalOnly has no cloud fallback, unsupported Plugin/A2A tools remain disabled/declarative-only, and ordinary Chat does not consume these results as migration permission |
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
+| W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 
 ## 4. Current Authoritative Entry Points
 
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
-| `plans/openlife_lifemodel_governed_agent_runtime.md` | Next implementation order and LifeModel-Governed Runtime program. |
-| `plans/lifemodel_governed_backend_completion_goal_spec.md` | Current Backend Completion master spec; next implementation entry is Goal 8 / Pre-UI Backend Contract Freeze. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W146 structured status index and compressed guardrail map. |
+| `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |
+| `plans/lifemodel_governed_backend_completion_goal_spec.md` | Completed Backend Completion master spec through Goal 8 / W147-W149. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W149 structured status index and compressed guardrail map. |
 | `plans/react_beta_execution_hardening_goal_spec.md` | Completed W114-W123 ReAct Beta Execution Hardening CLI spec/audit trail. |
 | `plans/runtime_strategy_maturity_goal_spec.md` | Completed W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity spec/audit trail. |
 | `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
@@ -868,10 +882,11 @@ W140 Guidance Impact read model complete -> W141 ModelRouter/Privacy HS
 hardening complete -> W142 ActionExecutor HS tool governance complete -> W143
 Governor unified decision report complete -> W144 Weekly Planning golden path
 complete -> W145 Low-Energy Support golden path complete -> W146 Preference
-Correction golden path complete.
-The next architecture block is Goal 8 / W147-W149 Pre-UI Backend Contract
-Freeze from the W146 Backend Completion Goal 7 baseline. Full Beta still needs
-separately scoped Skill Runtime and product surface work. Any future
+Correction golden path complete -> W147 UI read model contract freeze complete
+-> W148 final backend completion gate complete -> W149 docs/progress/
+verification sync complete.
+Backend Completion Goal 8 is complete. Full Beta still needs separately scoped
+Skill Runtime and product surface work. Any future
 default Chat executor implementation or route cutover remains a separate
 reviewed task that preserves default Chat legacy_stream until a route change is
 explicitly implemented, reviewed, verified, and authorized.

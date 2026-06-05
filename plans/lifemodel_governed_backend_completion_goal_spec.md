@@ -1,14 +1,14 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
 > Date: 2026-06-05
-> Status: W146 Backend Completion Goal 7 complete; next Goal-mode entry is Goal 8
-> Baseline: W146 Backend Golden Paths complete; default Chat remains `legacy_stream`
+> Status: W149 Backend Completion Goal 8 complete
+> Baseline: W149 Pre-UI Backend Contract Freeze complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
 
-This document defines the next large OpenLife development stage before
-large-scale product UI/UX work.
+This document defines the completed pre-UI OpenLife backend completion stage
+before large-scale product UI/UX work.
 
 The goal is not to add another isolated feature. The goal is to complete the
 backend kernel that makes OpenLife a LifeModel-governed Personal Agent OS:
@@ -113,7 +113,7 @@ These invariants are mandatory in every slice:
 The project already has meaningful primitives. This stage must converge them
 rather than rebuild from scratch.
 
-| Area | Current state | Required next maturity |
+| Area | Current state | Completion maturity |
 | --- | --- | --- |
 | LifeModel compatibility model | `openlife-core/src/life_model.rs` has structured Identity/Goals/Capabilities/State/Relationships/Preferences plus YAML compatibility materialization | Treat YAML as materialized view; durable HS source must be evidence/proposal/guidance governed |
 | Patch / PatchStore | LifeModel patches and source-specific PatchSource mapping exist | Ensure every materialized change has source/evidence/proposal provenance |
@@ -126,7 +126,7 @@ rather than rebuild from scratch.
 | Plan-Execute | W98-W105 weekly planning vertical exists | Consume HS guidance and produce outcome evidence for future behavior |
 | ModelRouter | Has `route_with_hs_packet` LocalOnly enforcement plus W141 hard filtering so High/Critical privacy and HS LocalOnly cannot select cloud providers or cloud fallback | Prove privacy/model route behavior in backend golden paths |
 | ActionExecutor | Manifest authority, proposal-first write hardening, and W142 HS tool governance block unsupported Plugin/A2A sources before permission replay/execution | Prove tool/write governance in backend golden paths |
-| Read models | Runs/Trace, Proposal Review, Settings proof/status surfaces exist | Freeze UI-facing backend read models for Learning Inbox, Evidence Timeline, Guidance Impact, and Privacy Controls |
+| Read models | Runs/Trace, Proposal Review, Settings proof/status surfaces exist | UI-facing backend read models are frozen for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview |
 
 ## 6. Target Backend Concepts
 
@@ -447,15 +447,24 @@ be casually changed. Each W-slice must be independently testable.
     W144-W146 golden path helpers or treat golden path ready as migration
     permission.
 
-### Goal 8: Pre-UI Backend Contract Freeze (next)
+### Goal 8: Pre-UI Backend Contract Freeze (complete)
 
 - **W147: UI read model contract freeze**
-  - Add backend structs/commands only if needed for read models. No large UI.
+  - Complete: frozen pure backend/core metadata-safe read-model contracts for
+    Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance
+    Impact, Privacy Controls, and LifeModel Overview. No command/UI/store
+    write/runtime/model/tool/default Chat impact.
 - **W148: Final backend completion gate**
-  - One read-only report proving all required gates pass or listing blockers.
+  - Complete: one metadata-safe read-only final backend completion gate report
+    proves required gates or lists blockers, including default Chat isolation,
+    proposal-first boundaries, raw-content exclusion, local-only privacy
+    behavior, tool governance, golden path coverage, and remaining Beta
+    blockers.
 - **W149: Docs/progress/verification sync**
-  - Update `AGENTS.md`, `plans/README.md`, progress index, and relevant docs.
-  - Make stale docs explicitly defer to this spec.
+  - Complete: `AGENTS.md`, `README.md`, `plans/README.md`, this spec,
+    `plans/openlife_lifemodel_governed_agent_runtime.md`, and progress index
+    are synced. Stale docs that still name Goal 8 as future defer to this spec,
+    `plans/README.md`, and the progress index.
 
 ## 10. Acceptance Gates
 
@@ -552,9 +561,12 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 - Keep product UI out of scope except minimal read-model wrappers/mocks needed
   to keep contracts testable.
 
-## 13. Next CLI Goal Prompt
+## 13. Completed CLI Goal Prompt / Audit
 
-Use this prompt for the next implementation Goal.
+Goal 8 has been implemented. The prompt below is retained as the historical
+implementation prompt and audit trail, not as the next implementation entry.
+Future work should be scoped separately; Goal 8 readiness/final gate is not
+default Chat migration permission.
 
 ```text
 You are implementing Goal 8 of the LifeModel-Governed Backend Completion stage:

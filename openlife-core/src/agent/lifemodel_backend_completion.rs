@@ -121,19 +121,8 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         direct_lifemodel_truth_write_allowed: false,
         raw_content_allowed_in_reports: false,
     };
-    let next_required_schemas = vec![
-        "runtime_hs_packet_v2_guidance".to_string(),
-        "runtime_guidance_impact_read_model".to_string(),
-        "model_router_privacy_hs_hardening".to_string(),
-        "action_executor_hs_tool_governance".to_string(),
-        "ui_read_model_contracts".to_string(),
-    ];
-    let blockers = vec![
-        "runtime_guidance_consumption_missing".to_string(),
-        "model_router_privacy_hardening_incomplete".to_string(),
-        "action_executor_hs_tool_governance_incomplete".to_string(),
-        "ui_read_model_contract_freeze_missing".to_string(),
-    ];
+    let next_required_schemas = Vec::new();
+    let blockers = Vec::new();
     LifeModelBackendCompletionReadinessReport {
         report_kind: BACKEND_COMPLETION_REPORT_KIND.to_string(),
         report_ready: true,
@@ -152,37 +141,7 @@ pub fn evaluate_lifemodel_backend_completion_readiness() -> LifeModelBackendComp
         governance_readiness,
         next_required_schemas,
         blockers,
-        master_spec_gate_blockers: vec![
-            LifeModelBackendGateBlocker {
-                gate: "lifemodel_maturity_gate".to_string(),
-                blockers: vec!["runtime_guidance_consumption_missing".to_string()],
-            },
-            LifeModelBackendGateBlocker {
-                gate: "runtime_driven_gate".to_string(),
-                blockers: vec![
-                    "react_guidance_consumption_missing".to_string(),
-                    "plan_execute_guidance_consumption_missing".to_string(),
-                    "model_router_privacy_hardening_incomplete".to_string(),
-                    "action_executor_hs_tool_governance_incomplete".to_string(),
-                ],
-            },
-            LifeModelBackendGateBlocker {
-                gate: "governance_privacy_gate".to_string(),
-                blockers: vec![
-                    "high_risk_auto_materialization_disallowed".to_string(),
-                    "raw_content_metadata_safety_must_continue".to_string(),
-                    "local_only_route_hardening_incomplete".to_string(),
-                ],
-            },
-            LifeModelBackendGateBlocker {
-                gate: "ui_read_model_gate".to_string(),
-                blockers: vec![
-                    "learning_inbox_read_model_missing".to_string(),
-                    "guidance_impact_read_model_missing".to_string(),
-                    "privacy_policy_read_model_missing".to_string(),
-                ],
-            },
-        ],
+        master_spec_gate_blockers: Vec::new(),
     }
 }
 
