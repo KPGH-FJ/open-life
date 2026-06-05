@@ -104,13 +104,16 @@ impl MemoryService {
         vector_store: &VectorStore,
         config: &EmbeddingConfig,
     ) -> Result<Vec<(MemoryChunk, f32)>> {
-        let embedding = crate::vectors::embed_text_with_config(
+        let privacy_engine = crate::privacy::PrivacyEngine::new();
+        let embedding = crate::vectors::embed_text_with_privacy(
             query,
             &config.provider,
             &config.openai_base,
             &config.openai_key,
             &config.embedding_model,
-            true, // embedding_enabled
+            config.enabled,
+            &privacy_engine,
+            config.hs_local_only,
         )
         .await?;
 
@@ -184,6 +187,7 @@ pub struct EmbeddingConfig {
     pub openai_base: String,
     pub openai_key: String,
     pub embedding_model: String,
+    pub hs_local_only: bool,
 }
 
 #[cfg(test)]

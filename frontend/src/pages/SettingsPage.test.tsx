@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 
 describe("SettingsPage", () => {
   beforeEach(() => {
+    vi.stubGlobal("__OPENLIFE_INTERNAL_DEBUG__", true);
     vi.mocked(invoke).mockImplementation(mockInvoke);
   });
 
@@ -69,6 +70,19 @@ describe("SettingsPage", () => {
 
     await clickTab("数据");
     expect(screen.getByText(/导出全部数据/)).toBeInTheDocument();
+  });
+
+  it("hides internal multi-strategy and default Chat migration surfaces by default", async () => {
+    vi.stubGlobal("__OPENLIFE_INTERNAL_DEBUG__", false);
+    renderSettings();
+
+    await waitFor(() => {
+      expect(screen.getByText("试用控制台")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByRole("button", { name: "实验" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/MultiStrategy/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Chat migration/i)).not.toBeInTheDocument();
   });
 
   it("shows readiness issues when diagnostics reports chat is not ready", async () => {

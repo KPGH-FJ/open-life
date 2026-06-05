@@ -110,9 +110,17 @@ import {
   type MultiStrategyPanelProps,
 } from "./multiStrategy/panels";
 import { readableError, safeSummaryEntries } from "./multiStrategy/shared";
+import { isInternalDebugSurfaceEnabled } from "../../utils/internalDebug";
 
 const NO_TOOLS_PROMPT = "No developer tools catalog supplied for this preview.";
 export default function MultiStrategyPreviewSection() {
+  if (!isInternalDebugSurfaceEnabled()) {
+    return null;
+  }
+  return <MultiStrategyPreviewSectionInner />;
+}
+
+function MultiStrategyPreviewSectionInner() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);

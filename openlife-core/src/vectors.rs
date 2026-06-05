@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ring::digest::{digest, SHA256};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -830,6 +831,242 @@ pub async fn embed_text_with_config(
     Ok(embedding)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingSensitiveTopic {
+    Health,
+    Finance,
+    Identity,
+    Relationship,
+    PrivateFile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingPrivacyPlan {
+    pub embedding_text: String,
+    pub cloud_allowed: bool,
+    pub hs_local_only: bool,
+    pub detected_privacy_types: Vec<String>,
+    pub sensitive_topic: Option<EmbeddingSensitiveTopic>,
+    pub blocking_reasons: Vec<String>,
+}
+
+pub fn plan_embedding_privacy(
+    text: &str,
+    privacy_engine: &crate::privacy::PrivacyEngine,
+    hs_local_only: bool,
+) -> EmbeddingPrivacyPlan {
+    let findings = privacy_engine.detect(text);
+    let (embedding_text, _) = privacy_engine.desensitize(text);
+    let mut detected_privacy_types: Vec<String> = findings
+        .iter()
+        .map(|(ptype, _)| ptype.placeholder_prefix().to_string())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    detected_privacy_types.sort();
+
+    let sensitive_topic = classify_embedding_sensitive_topic(text, &findings);
+    let mut blocking_reasons = Vec::new();
+    if hs_local_only {
+        blocking_reasons.push("hs_local_only".to_string());
+    }
+    if !findings.is_empty() {
+        blocking_reasons.push("pii_detected".to_string());
+    }
+    if let Some(topic) = sensitive_topic {
+        blocking_reasons.push(format!("sensitive_topic:{:?}", topic).to_lowercase());
+    }
+
+    EmbeddingPrivacyPlan {
+        embedding_text,
+        cloud_allowed: blocking_reasons.is_empty(),
+        hs_local_only,
+        detected_privacy_types,
+        sensitive_topic,
+        blocking_reasons,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn embed_text_with_privacy(
+    text: &str,
+    provider: &str,
+    openai_base: &str,
+    openai_key: &str,
+    embedding_model: &str,
+    embedding_enabled: bool,
+    privacy_engine: &crate::privacy::PrivacyEngine,
+    hs_local_only: bool,
+) -> Result<Vec<f32>> {
+    let plan = plan_embedding_privacy(text, privacy_engine, hs_local_only);
+    embed_text_with_config(
+        &plan.embedding_text,
+        provider,
+        openai_base,
+        openai_key,
+        embedding_model,
+        embedding_enabled && plan.cloud_allowed,
+    )
+    .await
+}
+
+fn classify_embedding_sensitive_topic(
+    text: &str,
+    findings: &[(crate::privacy::PrivacyType, String)],
+) -> Option<EmbeddingSensitiveTopic> {
+    if findings
+        .iter()
+        .any(|(ptype, _)| matches!(ptype, crate::privacy::PrivacyType::IdCard))
+    {
+        return Some(EmbeddingSensitiveTopic::Identity);
+    }
+    if findings
+        .iter()
+        .any(|(ptype, _)| matches!(ptype, crate::privacy::PrivacyType::BankCard))
+    {
+        return Some(EmbeddingSensitiveTopic::Finance);
+    }
+    if findings.iter().any(|(ptype, _)| {
+        matches!(
+            ptype,
+            crate::privacy::PrivacyType::Email
+                | crate::privacy::PrivacyType::Phone
+                | crate::privacy::PrivacyType::Address
+                | crate::privacy::PrivacyType::Name
+                | crate::privacy::PrivacyType::Generic
+        )
+    }) {
+        return Some(EmbeddingSensitiveTopic::PrivateFile);
+    }
+
+    let lower = text.to_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "health",
+            "medical",
+            "medicine",
+            "medication",
+            "prescription",
+            "doctor",
+            "therapy",
+            "mental",
+            "illness",
+            "diagnosis",
+            "anxiety",
+            "depression",
+            "drug",
+            "药",
+            "用药",
+            "处方",
+            "病",
+            "医院",
+            "健康",
+            "心理",
+            "焦虑",
+            "抑郁",
+            "诊断",
+            "治疗",
+        ],
+    ) {
+        Some(EmbeddingSensitiveTopic::Health)
+    } else if contains_any(
+        &lower,
+        &[
+            "finance",
+            "bank",
+            "salary",
+            "income",
+            "insurance",
+            "debt",
+            "loan",
+            "tax",
+            "credit",
+            "mortgage",
+            "投资",
+            "银行",
+            "工资",
+            "收入",
+            "保险",
+            "债务",
+            "负债",
+            "贷款",
+            "税",
+            "信用卡",
+        ],
+    ) {
+        Some(EmbeddingSensitiveTopic::Finance)
+    } else if contains_any(
+        &lower,
+        &[
+            "identity",
+            "identity card",
+            "id card",
+            "passport",
+            "ssn",
+            "values",
+            "mission",
+            "身份",
+            "身份证",
+            "护照",
+            "证件",
+            "价值观",
+            "使命",
+        ],
+    ) {
+        Some(EmbeddingSensitiveTopic::Identity)
+    } else if contains_any(
+        &lower,
+        &[
+            "relationship",
+            "intimate relationship",
+            "partner",
+            "family",
+            "breakup",
+            "break up",
+            "divorce",
+            "family conflict",
+            "关系",
+            "亲密关系",
+            "伴侣",
+            "家人",
+            "分手",
+            "家庭矛盾",
+            "家庭冲突",
+            "婚姻",
+            "离婚",
+            "恋爱",
+        ],
+    ) {
+        Some(EmbeddingSensitiveTopic::Relationship)
+    } else if contains_any(
+        &lower,
+        &[
+            "private file",
+            "privacy",
+            "private",
+            "secret",
+            "confidential",
+            "contract",
+            "resume",
+            "cv",
+            "私人文件",
+            "隐私",
+            "机密",
+            "合同",
+            "简历",
+        ],
+    ) {
+        Some(EmbeddingSensitiveTopic::PrivateFile)
+    } else {
+        None
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1191,5 +1428,91 @@ mod tests {
         // Should be expired immediately
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(cache.get("test").is_none());
+    }
+
+    #[test]
+    fn embedding_privacy_plan_masks_pii_and_blocks_cloud() {
+        let engine = crate::privacy::PrivacyEngine::new();
+        let plan = super::plan_embedding_privacy(
+            "我的身份证是11010519491231002X，邮箱 test@example.com，最近在看用药记录",
+            &engine,
+            false,
+        );
+
+        assert!(!plan.cloud_allowed);
+        assert!(plan.embedding_text.contains("<BLOCKED_IDCARD_0>"));
+        assert!(plan.embedding_text.contains("<EMAIL_0>"));
+        assert!(!plan.embedding_text.contains("11010519491231002X"));
+        assert!(!plan.embedding_text.contains("test@example.com"));
+        assert!(plan
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason == "pii_detected"));
+    }
+
+    #[test]
+    fn embedding_privacy_plan_blocks_sensitive_topics_and_hs_local_only() {
+        let engine = crate::privacy::PrivacyEngine::new();
+        let health = super::plan_embedding_privacy("帮我分析一下最近的用药和诊断", &engine, false);
+        assert!(!health.cloud_allowed);
+        assert_eq!(
+            health.sensitive_topic,
+            Some(super::EmbeddingSensitiveTopic::Health)
+        );
+
+        let local_only = super::plan_embedding_privacy("普通任务安排", &engine, true);
+        assert!(!local_only.cloud_allowed);
+        assert!(local_only
+            .blocking_reasons
+            .iter()
+            .any(|reason| reason == "hs_local_only"));
+    }
+
+    #[tokio::test]
+    async fn sensitive_embedding_does_not_call_cloud_endpoint() {
+        super::clear_embedding_cache();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cloud_call_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cloud_call_count_clone = cloud_call_count.clone();
+
+        tokio::spawn(async move {
+            if let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
+            {
+                cloud_call_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let engine = crate::privacy::PrivacyEngine::new();
+        let embedding = super::embed_text_with_privacy(
+            "银行卡 6222 0202 0202 0202，邮箱 test@example.com，我最近焦虑失眠",
+            "openai",
+            &format!("http://{}", addr),
+            "sk-test",
+            "text-embedding-3-small",
+            true,
+            &engine,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(!embedding.is_empty());
+        assert_eq!(
+            cloud_call_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "sensitive embedding must use local/hash fallback without cloud request"
+        );
     }
 }

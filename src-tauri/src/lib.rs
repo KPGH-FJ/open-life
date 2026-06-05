@@ -8,7 +8,7 @@ use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
 use openlife_core::router::RouterStatus;
 use openlife_core::scheduler::InferenceScheduler;
-use openlife_core::vectors::{embed_text_with_config, MemoryChunk, VectorInsertItem};
+use openlife_core::vectors::{embed_text_with_privacy, MemoryChunk, VectorInsertItem};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -397,13 +397,18 @@ async fn persist_vector_memory_for_message(
             cfg.llm.embedding_enabled,
         )
     };
-    let embedding = match embed_text_with_config(
+    let privacy_engine = state.privacy_engine.lock().await.clone();
+    let hs_local_only =
+        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
+    let embedding = match embed_text_with_privacy(
         content,
         &provider,
         &openai_base,
         &openai_key,
         &embedding_model,
         embedding_enabled,
+        &privacy_engine,
+        hs_local_only,
     )
     .await
     {
@@ -593,20 +598,25 @@ async fn preprocess_chat_input(
     };
     let memory_context = if let Some(user_msg) = messages.last() {
         if user_msg.role == "user" {
+            let (memory_query, _) = privacy_engine.desensitize(&user_msg.content);
             let text_hits = {
                 let store = state.memory_store.lock().await;
                 store
-                    .search_text_memories(Some(session_id), &user_msg.content, memory_top_k)
+                    .search_text_memories(Some(session_id), &memory_query, memory_top_k)
                     .unwrap_or_default()
             };
 
-            let vector_hits = match embed_text_with_config(
-                &user_msg.content,
+            let hs_local_only = classify_hs_policy_topic(&user_msg.content, &tools_prompt)
+                != openlife_core::agent::PolicyTopic::General;
+            let vector_hits = match embed_text_with_privacy(
+                &memory_query,
                 &provider,
                 &openai_base,
                 &openai_key,
                 &embedding_model,
                 embedding_enabled,
+                &privacy_engine,
+                hs_local_only,
             )
             .await
             {
@@ -756,7 +766,10 @@ async fn preprocess_chat_input_v2(
         reg.tools_prompt()
     };
 
-    // Step 5: Prefetch memory using MemoryService
+    // Step 5: Build privacy engine before memory retrieval so queries are redacted before embedding.
+    let privacy_engine = state.privacy_engine.lock().await.clone();
+
+    // Step 6: Prefetch memory using MemoryService
     let memory_top_k = {
         let cfg = state.config.lock().await;
         cfg.system.memory_search_top_k
@@ -771,17 +784,20 @@ async fn preprocess_chat_input_v2(
                     openai_base: cfg.llm.openai_base.clone(),
                     openai_key: cfg.llm.openai_key.clone(),
                     embedding_model: cfg.llm.embedding_model.clone(),
+                    hs_local_only: classify_hs_policy_topic(&user_msg.content, &tools_prompt)
+                        != openlife_core::agent::PolicyTopic::General,
                 };
                 drop(cfg);
 
                 let service = openlife_core::agent::MemoryService::new();
                 let memory_store = state.memory_store.lock().await;
                 let vector_store = state.vector_store.lock().await;
+                let (memory_query, _) = privacy_engine.desensitize(&user_msg.content);
 
                 match service
                     .retrieve_context(
                         session_id,
-                        &user_msg.content,
+                        &memory_query,
                         &memory_store,
                         &vector_store,
                         &embedding_config,
@@ -809,9 +825,6 @@ async fn preprocess_chat_input_v2(
         } else {
             (None, vec![], 0)
         };
-
-    // Step 6: Build privacy engine
-    let privacy_engine = state.privacy_engine.lock().await.clone();
 
     // Step 7: Assemble using ContextAssembler
     let input = openlife_core::agent::AssembleInput {
@@ -1071,12 +1084,67 @@ pub(crate) fn merge_memory_hits(
     results.truncate(top_k);
     results
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OrdinaryChatRouteKind {
+    LegacyNonStream,
+    LegacyStream,
+    DirectReflex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OrdinaryChatExecutionPlan {
+    route_kind: OrdinaryChatRouteKind,
+    constructs_agent_loop: bool,
+    constructs_action_executor: bool,
+    tool_execution_allowed: bool,
+    agent_actions_allowed: bool,
+    agent_observations_allowed: bool,
+    mcp_audit_write_allowed: bool,
+    external_write_allowed: bool,
+    plan_execute_allowed: bool,
+    golden_path_allowed: bool,
+    final_gate_allowed: bool,
+    guidance_consumption_enabled: bool,
+}
+
+impl OrdinaryChatExecutionPlan {
+    fn legacy(route_kind: OrdinaryChatRouteKind) -> Self {
+        Self {
+            route_kind,
+            constructs_agent_loop: false,
+            constructs_action_executor: false,
+            tool_execution_allowed: false,
+            agent_actions_allowed: false,
+            agent_observations_allowed: false,
+            mcp_audit_write_allowed: false,
+            external_write_allowed: false,
+            plan_execute_allowed: false,
+            golden_path_allowed: false,
+            final_gate_allowed: false,
+            guidance_consumption_enabled: false,
+        }
+    }
+}
+
+fn ordinary_send_chat_execution_plan(_layer: Layer) -> OrdinaryChatExecutionPlan {
+    OrdinaryChatExecutionPlan::legacy(OrdinaryChatRouteKind::LegacyNonStream)
+}
+
+fn ordinary_stream_chat_execution_plan(layer: Layer) -> OrdinaryChatExecutionPlan {
+    if layer == Layer::L1 {
+        OrdinaryChatExecutionPlan::legacy(OrdinaryChatRouteKind::DirectReflex)
+    } else {
+        OrdinaryChatExecutionPlan::legacy(OrdinaryChatRouteKind::LegacyStream)
+    }
+}
+
 #[tauri::command]
 async fn send_message(
     session_id: String,
     messages: Vec<ChatMessage>,
     state: State<'_, Arc<AppState>>,
-    app_handle: tauri::AppHandle,
+    _app_handle: tauri::AppHandle,
 ) -> Result<SendMessageResult, String> {
     let adapter_route = default_chat_adapter::resolve_default_chat_adapter_route();
     let _adapter_preflight =
@@ -1223,9 +1291,9 @@ async fn send_message(
         None
     };
 
-    return send_message_with_agent_loop(
+    let ordinary_plan = ordinary_send_chat_execution_plan(layer);
+    return send_message_with_legacy_generation(
         session_id,
-        messages,
         user_msg,
         life_model,
         tools_prompt,
@@ -1235,14 +1303,113 @@ async fn send_message(
         embed_err,
         auto_checkin_msg,
         layer,
+        _context_summary,
+        ordinary_plan,
         state,
-        app_handle,
     )
     .await;
 }
 
-/// AgentLoop-based chat execution (primary path).
+/// Legacy ordinary Chat execution. This is the default send_message path and
+/// intentionally does not construct AgentLoop, ActionExecutor, or tool actions.
 #[allow(clippy::too_many_arguments)]
+async fn send_message_with_legacy_generation(
+    session_id: String,
+    user_msg: Option<ChatMessage>,
+    life_model: LifeModel,
+    tools_prompt: String,
+    privacy_engine: PrivacyEngine,
+    privacy_map: HashMap<String, String>,
+    desensitized_messages: Vec<ChatMessage>,
+    embed_err: Option<String>,
+    auto_checkin_msg: Option<String>,
+    layer: Layer,
+    context_summary: openlife_core::agent::types::ContextSummary,
+    ordinary_plan: OrdinaryChatExecutionPlan,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    debug_assert_eq!(
+        ordinary_plan.route_kind,
+        OrdinaryChatRouteKind::LegacyNonStream
+    );
+    debug_assert!(!ordinary_plan.constructs_agent_loop);
+    debug_assert!(!ordinary_plan.constructs_action_executor);
+    debug_assert!(!ordinary_plan.tool_execution_allowed);
+
+    let scheduler = state.scheduler.lock().await.clone();
+    let task = openlife_core::agent::AgentTask {
+        kind: openlife_core::agent::AgentTaskKind::Conversation,
+        session_id: session_id.clone(),
+        user_text: user_msg
+            .as_ref()
+            .map(|m| m.content.clone())
+            .unwrap_or_default(),
+        messages: desensitized_messages.clone(),
+        layer,
+    };
+    let hs_packet =
+        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
+            .await?;
+
+    let mut reply = generate_non_stream_fallback(
+        &scheduler,
+        desensitized_messages,
+        &life_model,
+        &tools_prompt,
+        hs_packet.clone(),
+    )
+    .await?;
+    reply = privacy_engine.reconstruct(&reply, &privacy_map);
+
+    if let Some(msg) = auto_checkin_msg {
+        if !reply.contains(&msg) {
+            reply = format!("{}\n\n[系统] {}", reply, msg);
+        }
+    }
+
+    let assistant_message = ChatMessage {
+        role: "assistant".into(),
+        content: reply.clone(),
+    };
+    let user_input_text = user_msg
+        .as_ref()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let mut agent_run = openlife_core::agent::AgentRun::new_chat_run(&session_id, &user_input_text);
+    agent_run.reasoning_strategy = Some("legacy_generation".to_string());
+    agent_run.hs_selection_audit = hs_packet.as_ref().map(|packet| packet.audit.clone());
+    let model_route = scheduler.preview_chat_route(Some(&tools_prompt)).await;
+    agent_run.complete(&preview_text(&reply, 200), model_route, context_summary);
+
+    let mut reasoning_trace = ReasoningTrace {
+        generation_result: Some(serde_json::json!({ "text": reply })),
+        ..Default::default()
+    };
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
+
+    finalize_chat_agent_run(
+        &session_id,
+        &assistant_message,
+        &reply,
+        &mut reasoning_trace,
+        &mut agent_run,
+        &life_model,
+        &state,
+    )
+    .await?;
+
+    Ok(SendMessageResult {
+        reply,
+        reasoning_trace,
+        tool_calls: Vec::new(),
+        run_id: Some(agent_run.id.clone()),
+    })
+}
+
+/// AgentLoop-based chat execution for explicit non-default / controlled paths only.
+#[allow(dead_code, clippy::too_many_arguments)]
 async fn send_message_with_agent_loop(
     session_id: String,
     _messages: Vec<ChatMessage>,
@@ -1452,6 +1619,7 @@ const CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS: u64 = 5;
 
 /// Emit a unified agent-status-update event for both streaming and non-streaming paths.
 /// Frontend AgentStateIndicator expects: phase, message, step_index, tool_call_index, timestamp.
+#[allow(dead_code)]
 fn emit_agent_status_update(
     app_handle: &tauri::AppHandle,
     session_id: &str,
@@ -1528,6 +1696,7 @@ async fn generate_non_stream_fallback(
 /// error context, persist the run. Returns (reply, agent_run) on success, or
 /// an error message string if both AgentLoop and fallback fail.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_agent_loop_fallback(
     scheduler: &InferenceScheduler,
     messages: Vec<ChatMessage>,
@@ -1584,6 +1753,7 @@ fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
     }
 }
 
+#[allow(dead_code)]
 fn agent_actions_to_tool_call_results(
     actions: &[openlife_core::agent::AgentAction],
     run_id: &str,
@@ -1898,6 +2068,7 @@ fn contains_any(text: &str, needles: &[&str]) -> bool {
 }
 
 /// Streaming callback that forwards AgentLoop events to Tauri frontend via emit().
+#[allow(dead_code)]
 struct TauriStreamingCallback {
     app_handle: tauri::AppHandle,
     session_id: String,
@@ -1969,6 +2140,7 @@ impl StreamingCallback for TauriStreamingCallback {
 
 /// Stream-mode AgentLoop execution: runs AgentLoop and emits real token-level stream events.
 /// This provides consistency when use_agent_loop=true in stream mode.
+#[allow(dead_code)]
 async fn start_stream_message_with_agent_loop(
     session_id: String,
     messages: Vec<ChatMessage>,
@@ -2284,13 +2456,10 @@ async fn start_stream_message(
         Layer::L2
     };
 
-    // Route L2/L3 to AgentLoop streaming path; L1 uses direct reflex below
-    if layer != Layer::L1 {
-        return start_stream_message_with_agent_loop(
-            session_id, messages, user_msg, layer, app_handle, state,
-        )
-        .await;
-    }
+    let ordinary_plan = ordinary_stream_chat_execution_plan(layer);
+    debug_assert!(!ordinary_plan.constructs_agent_loop);
+    debug_assert!(!ordinary_plan.constructs_action_executor);
+    debug_assert!(!ordinary_plan.tool_execution_allowed);
 
     // L1 direct reflex — no AgentLoop needed
     let user_input_text = messages
@@ -2427,7 +2596,7 @@ async fn start_stream_message(
         privacy_engine,
         privacy_map,
         desensitized_messages,
-        _embed_err,
+        embed_err,
         context_summary,
     ) = match if use_v2 {
         preprocess_chat_input_v2(&session_id, &messages, &state).await
@@ -2513,6 +2682,9 @@ async fn start_stream_message(
             .await?;
 
     let mut reasoning_trace = ReasoningTrace::default();
+    if let Some(err) = embed_err {
+        reasoning_trace.errors.push(err);
+    }
     let mut messages_with_reasoning = desensitized_messages.clone();
 
     let _actual_layer = if layer == Layer::L3 {
@@ -5702,6 +5874,44 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn ordinary_send_chat_execution_plan_has_no_agent_loop_or_tool_side_effects() {
+        let plan = ordinary_send_chat_execution_plan(Layer::L2);
+
+        assert_eq!(plan.route_kind, OrdinaryChatRouteKind::LegacyNonStream);
+        assert!(!plan.constructs_agent_loop);
+        assert!(!plan.constructs_action_executor);
+        assert!(!plan.tool_execution_allowed);
+        assert!(!plan.agent_actions_allowed);
+        assert!(!plan.agent_observations_allowed);
+        assert!(!plan.mcp_audit_write_allowed);
+        assert!(!plan.external_write_allowed);
+        assert!(!plan.plan_execute_allowed);
+        assert!(!plan.golden_path_allowed);
+        assert!(!plan.final_gate_allowed);
+        assert!(!plan.guidance_consumption_enabled);
+    }
+
+    #[test]
+    fn ordinary_stream_chat_l2_l3_execution_plan_stays_legacy_stream() {
+        for layer in [Layer::L2, Layer::L3] {
+            let plan = ordinary_stream_chat_execution_plan(layer);
+
+            assert_eq!(plan.route_kind, OrdinaryChatRouteKind::LegacyStream);
+            assert!(!plan.constructs_agent_loop);
+            assert!(!plan.constructs_action_executor);
+            assert!(!plan.tool_execution_allowed);
+            assert!(!plan.agent_actions_allowed);
+            assert!(!plan.agent_observations_allowed);
+            assert!(!plan.mcp_audit_write_allowed);
+            assert!(!plan.external_write_allowed);
+            assert!(!plan.plan_execute_allowed);
+            assert!(!plan.golden_path_allowed);
+            assert!(!plan.final_gate_allowed);
+            assert!(!plan.guidance_consumption_enabled);
+        }
+    }
+
+    #[test]
     fn default_chat_adapter_skeleton_binding_integrity_debug_dump_omits_raw_content() {
         let route = crate::default_chat_adapter::resolve_default_chat_adapter_route();
         let raw_input = "raw-user-secret prompt-token assistant-output tool-payload LifeModel-memory memory-raw-content";
@@ -5922,6 +6132,32 @@ mod hs_runtime_tests {
     }
 
     #[test]
+    fn ordinary_chat_entrypoints_do_not_dispatch_to_agent_loop_helpers() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
+
+        assert!(
+            !send_body.contains("send_message_with_agent_loop("),
+            "ordinary send_message must not dispatch to AgentLoop"
+        );
+        assert!(
+            !stream_body.contains("start_stream_message_with_agent_loop("),
+            "ordinary start_stream_message must not dispatch to AgentLoop"
+        );
+        assert!(
+            !send_body.contains("ActionExecutor::new(") && !send_body.contains("AgentLoop::new("),
+            "ordinary send_message must not construct AgentLoop or ActionExecutor"
+        );
+        assert!(
+            !stream_body.contains("ActionExecutor::new(")
+                && !stream_body.contains("AgentLoop::new("),
+            "ordinary start_stream_message must not construct AgentLoop or ActionExecutor"
+        );
+    }
+
+    #[test]
     fn default_chat_adapter_controlled_adapter_invocation_harness_is_not_called_by_ordinary_entrypoints(
     ) {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
@@ -5973,19 +6209,10 @@ mod hs_runtime_tests {
         let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
         let send_body = extract_rust_function_body(&source, "async fn send_message(");
-        let send_agent_loop_body =
-            extract_rust_function_body(&source, "async fn send_message_with_agent_loop(");
         let stream_body = extract_rust_function_body(&source, "async fn start_stream_message(");
-        let stream_agent_loop_body =
-            extract_rust_function_body(&source, "async fn start_stream_message_with_agent_loop(");
         let ordinary_chat_bodies = [
             ("send_message", &send_body),
-            ("send_message_with_agent_loop", &send_agent_loop_body),
             ("start_stream_message", &stream_body),
-            (
-                "start_stream_message_with_agent_loop",
-                &stream_agent_loop_body,
-            ),
         ];
         let forbidden_command_surfaces = [
             "run_multi_strategy_agent_preview",

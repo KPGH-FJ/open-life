@@ -770,6 +770,41 @@ fn memory_content(after: &Value) -> Result<String, String> {
     Err("MemoryWrite Proposal 缺少 after.content。".to_string())
 }
 
+async fn embed_proposal_memory_with_privacy(
+    content: &str,
+    state: &Arc<AppState>,
+) -> Result<Vec<f32>, String> {
+    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
+        let cfg = state.config.lock().await;
+        (
+            cfg.llm.provider.clone(),
+            cfg.llm.openai_base.clone(),
+            cfg.llm.openai_key.clone(),
+            cfg.llm.embedding_model.clone(),
+            cfg.llm.embedding_enabled,
+        )
+    };
+    let privacy_engine = {
+        let engine = state.privacy_engine.lock().await;
+        engine.clone()
+    };
+    let hs_local_only =
+        crate::classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
+
+    openlife_core::vectors::embed_text_with_privacy(
+        content,
+        &provider,
+        &openai_base,
+        &openai_key,
+        &embedding_model,
+        embedding_enabled,
+        &privacy_engine,
+        hs_local_only,
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
 fn memory_archive_ids(after: &Value) -> Result<Vec<i64>, String> {
     let value = after
         .get("chunk_ids")
@@ -1061,26 +1096,7 @@ async fn apply_proposal_to_state(
                 }
 
                 let embedding_id = {
-                    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-                        let cfg = state.config.lock().await;
-                        (
-                            cfg.llm.provider.clone(),
-                            cfg.llm.openai_base.clone(),
-                            cfg.llm.openai_key.clone(),
-                            cfg.llm.embedding_model.clone(),
-                            cfg.llm.embedding_enabled,
-                        )
-                    };
-                    match openlife_core::vectors::embed_text_with_config(
-                        &content,
-                        &provider,
-                        &openai_base,
-                        &openai_key,
-                        &embedding_model,
-                        embedding_enabled,
-                    )
-                    .await
-                    {
+                    match embed_proposal_memory_with_privacy(&content, state).await {
                         Ok(embedding) if !embedding.is_empty() => {
                             let store = state.vector_store.lock().await;
                             store
@@ -1843,6 +1859,7 @@ mod tests {
         versioning::VersionManager,
     };
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
@@ -1917,6 +1934,46 @@ mod tests {
             scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
+    }
+
+    async fn fake_cloud_embedding_endpoint() -> (String, Arc<AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cloud_call_count = Arc::new(AtomicUsize::new(0));
+        let cloud_call_count_clone = cloud_call_count.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let accepted =
+                    tokio::time::timeout(std::time::Duration::from_millis(750), listener.accept())
+                        .await;
+                let Ok(Ok((mut socket, _))) = accepted else {
+                    break;
+                };
+                cloud_call_count_clone.fetch_add(1, Ordering::SeqCst);
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let body = r#"{"data":[{"embedding":[0.1,0.2,0.3]}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        (format!("http://{}", addr), cloud_call_count)
+    }
+
+    async fn configure_cloud_embeddings(state: &Arc<AppState>, openai_base: String) {
+        let mut cfg = state.config.lock().await;
+        cfg.llm.provider = "openai".to_string();
+        cfg.llm.openai_base = openai_base;
+        cfg.llm.openai_key = "sk-test".to_string();
+        cfg.llm.embedding_model = "text-embedding-3-small".to_string();
+        cfg.llm.embedding_enabled = true;
     }
 
     async fn create_maturation_source_evidence(
@@ -2769,6 +2826,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(stored.status, ProposalStatus::Accepted);
+    }
+
+    #[tokio::test]
+    async fn accept_sensitive_memory_write_proposal_does_not_call_cloud_embedding() {
+        openlife_core::vectors::clear_embedding_cache();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
+        configure_cloud_embeddings(&state, openai_base).await;
+
+        let proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.records",
+            serde_json::json!({
+                "session_id": "proposal-sensitive-session",
+                "content": "身份证 11010519491231002X，邮箱 proposal-sensitive@example.com，最近健康诊断和负债压力",
+                "source": "review_center"
+            }),
+            "用户确认写入长期记忆",
+            0.8,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        let id = proposal.id.clone();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let result = accept_proposal_with_state(id, &state).await.unwrap();
+
+        assert_eq!(result["success"], true);
+        assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -55,6 +55,10 @@ import {
   saveChatMessage,
   startStreamMessage,
   importAllData,
+  redactInvokeArgs,
+  saveConfig,
+  sendMessageV2,
+  executeToolCall,
 } from "./tauri";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -64,6 +68,120 @@ vi.mock("@tauri-apps/api/core", () => ({
 describe("tauri command argument aliases", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockResolvedValue(undefined);
+  });
+
+  function redactedLogForLastInvoke(): string {
+    const calls = vi.mocked(invoke).mock.calls;
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall).toBeTruthy();
+    const [cmd, args] = lastCall as [string, Record<string, any> | undefined];
+    return JSON.stringify(redactInvokeArgs(cmd, args));
+  }
+
+  it("redacts send_message content from dev invoke logs", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reply: "ok",
+      reasoning_trace: {},
+      tool_calls: [],
+      run_id: "run-1",
+    });
+
+    await sendMessageV2("session-secret", [
+      { role: "user", content: "我的邮箱 test@example.com 和身份证 11010519491231002X" },
+    ]);
+
+    const redacted = redactedLogForLastInvoke();
+    expect(redacted).toContain("session-secret");
+    expect(redacted).not.toContain("test@example.com");
+    expect(redacted).not.toContain("11010519491231002X");
+    expect(redacted).toContain('"redacted":true');
+  });
+
+  it("redacts save_config secrets from dev invoke logs", async () => {
+    await saveConfig({
+      llm: {
+        provider: "openai",
+        openai_base: "https://api.openai.com/v1",
+        openai_key: "sk-openai-secret",
+        embedding_model: "text-embedding-3-small",
+        chat_model: "gpt-4o-mini",
+      },
+      prefer_local_model: false,
+      local_model: "llama3",
+    });
+
+    const redacted = redactedLogForLastInvoke();
+    expect(redacted).not.toContain("sk-openai-secret");
+    expect(redacted).toContain("openai_key");
+    expect(redacted).toContain('"redacted":true');
+  });
+
+  it("redacts import_all_data payloads from dev invoke logs", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      success: true,
+      legacy: false,
+      governed_operation: true,
+      metadata_safe: true,
+      durable_lifemodel_write: true,
+      imported_message_count: 1,
+      imported_vector_count: 1,
+    });
+
+    await importAllData({
+      version: "1.0",
+      exported_at: "2026-06-03T00:00:00Z",
+      life_model: { identity: { name: "张三" } } as any,
+      messages: [
+        {
+          session_id: "session-import",
+          role: "user",
+          content: "导入的私密聊天原文",
+          created_at: "2026-06-03T00:00:00Z",
+        },
+      ],
+      vectors: [
+        {
+          session_id: "session-import",
+          content: "导入的向量原文",
+          embedding: [1, 2, 3],
+          source: "chat",
+          created_at: "2026-06-03T00:00:00Z",
+          tier: 1,
+          access_count: 0,
+          last_accessed_at: "2026-06-03T00:00:00Z",
+        },
+      ],
+    });
+
+    const redacted = redactedLogForLastInvoke();
+    expect(redacted).not.toContain("导入的私密聊天原文");
+    expect(redacted).not.toContain("导入的向量原文");
+    expect(redacted).not.toContain("张三");
+    expect(redacted).toContain("payload");
+    expect(redacted).toContain('"redacted":true');
+  });
+
+  it("redacts tool arguments and file or email content from dev invoke logs", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      name: "email.propose_draft",
+      arguments: {},
+      success: true,
+    });
+
+    await executeToolCall("email.propose_draft", {
+      to: "person@example.com",
+      body: "邮件正文原文",
+      file_content: "文件内容原文",
+      token: "tool-token-secret",
+    });
+
+    const redacted = redactedLogForLastInvoke();
+    expect(redacted).not.toContain("person@example.com");
+    expect(redacted).not.toContain("邮件正文原文");
+    expect(redacted).not.toContain("文件内容原文");
+    expect(redacted).not.toContain("tool-token-secret");
+    expect(redacted).toContain("arguments");
+    expect(redacted).toContain('"redacted":true');
   });
 
   it("adds camelCase aliases for snake_case command arguments", async () => {
