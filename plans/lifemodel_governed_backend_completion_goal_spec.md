@@ -1,8 +1,8 @@
 # LifeModel-Governed Backend Completion Goal Spec
 
-> Date: 2026-06-04
-> Status: W143 Backend Completion Goal 6 complete; next Goal-mode entry is Goal 7
-> Baseline: W143 Policy / Privacy / Tool Governance Hardening complete; default Chat remains `legacy_stream`
+> Date: 2026-06-05
+> Status: W146 Backend Completion Goal 7 complete; next Goal-mode entry is Goal 8
+> Baseline: W146 Backend Golden Paths complete; default Chat remains `legacy_stream`
 > Scope: backend/kernel work required before large-scale product UI/UX
 
 ## 1. Purpose
@@ -425,17 +425,29 @@ be casually changed. Each W-slice must be independently testable.
     model route, tool action, memory write, and external write decisions without
     raw prompt/user text/assistant output/memory/LifeModel/tool payload leakage.
 
-### Goal 7: Backend Golden Paths
+### Goal 7: Backend Golden Paths (complete)
 
 - **W144: Weekly Planning golden path**
-  - Prove planning guidance loop end-to-end.
+  - Complete: pure backend/core proof for the weekly planning guidance loop
+    across selected RuntimeHSPacket guidance, Plan-Execute draft/finalize/step
+    execution, proposal-first write-like step metadata, outcome evidence, and
+    future planning guidance refs.
 - **W145: Low-Energy Support golden path**
-  - Prove low-energy loop from signal to accepted guidance to runtime behavior.
+  - Complete: pure backend/core proof for low-energy support from LifeEvent /
+    Signal / Evidence through accepted guidance to explicit runtime behavior
+    change, without automatic high-risk truth materialization.
 - **W146: Preference Correction golden path**
-  - Prove rejection/edit creates negative/corrective evidence and changes
-    future behavior.
+  - Complete: pure backend/core proof that rejection/edit outcomes create
+    negative/corrective evidence and deterministically suppress or change future
+    behavior.
+  - Goal 7 adds no default Chat migration, no ordinary `send_message` /
+    `start_stream_message` replacement, no Tauri command, no UI, no runtime
+    executor/model/tool call, no durable LifeModel/Memory/external provider
+    state write, and no migration permission. Ordinary Chat must not call
+    W144-W146 golden path helpers or treat golden path ready as migration
+    permission.
 
-### Goal 8: Pre-UI Backend Contract Freeze
+### Goal 8: Pre-UI Backend Contract Freeze (next)
 
 - **W147: UI read model contract freeze**
   - Add backend structs/commands only if needed for read models. No large UI.
@@ -545,8 +557,8 @@ rg -n "LifeEvent|Signal|Evidence|RuntimeHSPacket|LocalOnly|proposal-first" openl
 Use this prompt for the next implementation Goal.
 
 ```text
-You are implementing Goal 7 of the LifeModel-Governed Backend Completion stage:
-Backend Golden Paths.
+You are implementing Goal 8 of the LifeModel-Governed Backend Completion stage:
+Pre-UI Backend Contract Freeze.
 
 Read these files first:
 - AGENTS.md
@@ -557,12 +569,12 @@ Read these files first:
 - plans/adr/0013-lifemodel-hs-source-of-truth-governance.md
 
 Current baseline:
-- W124-W143 Backend Completion Goals 1-6 are complete.
+- W124-W146 Backend Completion Goals 1-7 are complete.
 - Default Chat remains `legacy_stream`.
-- Ordinary `send_message` / `start_stream_message` must not call W19-W143
+- Ordinary `send_message` / `start_stream_message` must not call W19-W146
   readiness/status/proof/review/product/maturity/schema/bridge/graph/timeline/
   maturation/guidance/materialization/runtime-guidance/policy-privacy-tool
-  governance helpers or commands.
+  governance/golden-path helpers or commands.
 - Legacy Direct-Write Convergence remains complete; do not reintroduce hidden
   durable LifeModel writes.
 - W73-W78 LifeModel maturation proof exists and remains non-default.
@@ -588,29 +600,40 @@ Current baseline:
   and shared metadata-safe Governor decision reports. It does not change
   ordinary Chat routing, grant migration permission, or allow cloud fallback for
   LocalOnly/High/Critical routes.
+- W144-W146 Backend Golden Paths exist as pure backend/core proofs for Weekly
+  Planning, Low-Energy Support, and Preference Correction. They do not migrate
+  default Chat, replace ordinary send/stream, add Tauri commands, add UI, run
+  runtime/model/tool calls, write durable LifeModel/Memory/external provider
+  state, or grant migration permission.
 - EvidenceStore, HeuristicStore, PolicyStore, ProposalStore, PatchStore,
- RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
+  RuntimeHSPacket, ReAct, Plan-Execute, ModelRouter, and ActionExecutor already
   exist. Reuse them.
 
-Implement W144-W146 only:
+Implement W147-W149 only:
 
-W144:
-- Prove the weekly planning guidance loop end-to-end across RuntimeHSPacket
-  selected guidance, Plan-Execute draft/finalize/step execution, proposal-first
-  write-like steps, outcome evidence, and future planning guidance.
+W147:
+- Freeze backend read model contracts needed before large UI/UX work. Cover the
+  Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance
+  Impact, Privacy Controls, and LifeModel Overview surfaces with stable,
+  metadata-safe structs or read-model wrappers. Add backend command wrappers
+  only if the contract cannot otherwise be tested, and keep them read-only.
 
-W145:
-- Prove the low-energy support loop from LifeEvent/Signal/Evidence through
-  accepted guidance to explicit runtime behavior change, without automatic
-  high-risk truth materialization.
+W148:
+- Add one final backend completion gate report that proves all required gates
+  pass or lists blockers. The report must be metadata-safe, read-only, and
+  explicit about default Chat isolation, proposal-first boundaries, raw-content
+  exclusion, local-only privacy behavior, tool governance, golden path coverage,
+  and remaining Beta blockers.
 
-W146:
-- Prove preference correction: rejection/edit outcomes create negative or
-  corrective evidence and suppress or change future behavior deterministically.
+W149:
+- Sync authority docs, progress index, verification matrix, and stale-reference
+  guidance. Make old docs explicitly defer to this spec where they conflict.
 
 Hard constraints:
 - Do not migrate default Chat.
 - Do not modify ordinary Chat routing.
+- Do not call W144-W146 golden path helpers from ordinary Chat.
+- Do not treat Goal 7 golden path readiness as migration permission.
 - Do not bypass ProposalStore/governor/materializer caller restrictions.
 - Do not add large UI/UX.
 - Do not leak raw prompt, raw user text, assistant output, memory content,
@@ -618,18 +641,20 @@ Hard constraints:
 - Do not push. Do not commit unless explicitly instructed by the reviewer.
 
 Verification:
-- Run focused cargo tests for the new golden path code.
+- Run focused cargo tests for the new contract-freeze code.
 - Run affected RuntimeHSPacket, Evidence Graph, Maturation Engine, accepted
-  guidance, Plan-Execute, ReAct, Governor, proposal, and runtime contract tests.
+  guidance, Plan-Execute, ReAct, Governor, proposal, golden path, and runtime
+  contract tests.
 - Run `make ci` if the focused tests pass.
-- Run `rg` checks proving ordinary Chat did not call the golden path pipeline.
+- Run `rg` checks proving ordinary Chat did not call W144-W146 golden path
+  helpers or any new Goal 8 read-model/gate helpers.
 
 Output:
-- W144-W146 change summary.
+- W147-W149 change summary.
 - New structs/functions/files.
 - Tests run and results.
 - Remaining blockers mapped to the master spec gates.
-- Whether Goal 7 is complete.
+- Whether Goal 8 is complete.
 ```
 
 ## 14. Handoff Standard

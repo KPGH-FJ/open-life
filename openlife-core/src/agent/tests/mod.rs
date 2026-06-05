@@ -2,6 +2,7 @@
 
 mod accepted_guidance_materialization;
 mod accepted_low_energy_rule_selection;
+mod backend_golden_paths;
 mod evidence_graph;
 mod evidence_store;
 mod governor;

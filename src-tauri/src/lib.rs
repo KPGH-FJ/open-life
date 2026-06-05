@@ -6118,6 +6118,15 @@ mod hs_runtime_tests {
             "GuidanceAffectedSurface::ActionBoundary",
             "GuidanceAffectedSurface::PlanExecuteDraft",
             "GuidanceAffectedSurface::PlanExecuteTrace",
+            "run_weekly_planning_golden_path",
+            "run_low_energy_support_golden_path",
+            "run_preference_correction_golden_path",
+            "WeeklyPlanningGoldenPathInput",
+            "WeeklyPlanningGoldenPathReport",
+            "LowEnergySupportGoldenPathInput",
+            "LowEnergySupportGoldenPathReport",
+            "PreferenceCorrectionGoldenPathInput",
+            "PreferenceCorrectionGoldenPathReport",
         ];
 
         for forbidden in forbidden_command_surfaces {

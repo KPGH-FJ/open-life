@@ -4,6 +4,7 @@ pub mod agent_loop;
 pub mod context_assembler;
 pub mod evidence_graph;
 pub mod evidence_store;
+pub mod golden_paths;
 pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
@@ -59,6 +60,13 @@ pub use evidence_graph::{
 pub use evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
     EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
+};
+pub use golden_paths::{
+    run_low_energy_support_golden_path, run_preference_correction_golden_path,
+    run_weekly_planning_golden_path, LowEnergySupportGoldenPathInput,
+    LowEnergySupportGoldenPathReport, PreferenceCorrectionGoldenPathInput,
+    PreferenceCorrectionGoldenPathReport, WeeklyPlanningGoldenPathInput,
+    WeeklyPlanningGoldenPathReport,
 };
 pub use governor::{
     ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,

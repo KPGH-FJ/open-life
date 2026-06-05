@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-06-04
-> Status: W143 Backend Completion Goal 6 complete
+> Last updated: 2026-06-05
+> Status: W146 Backend Completion Goal 7 complete
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W143 Backend Completion Goal 6 complete**.
+Current latest status is **W146 Backend Completion Goal 7 complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -140,6 +140,20 @@ maturation, model route, tool action, memory write, and external write
 decisions. W141-W143 add no ordinary Chat routing change, no migration
 permission, no direct LifeModel/Memory/external write, and no raw prompt/user
 text/assistant output/memory/LifeModel/tool payload leakage.
+W144-W146 complete Backend Completion Goal 7 / Backend Golden Paths without
+migrating default Chat: W144 proves the Weekly Planning golden path as a pure
+backend/core planning guidance loop across selected guidance, Plan-Execute
+metadata, proposal-first write-like step refs, outcome evidence, and future
+planning guidance; W145 proves the Low-Energy Support golden path from
+LifeEvent/Signal/Evidence through accepted guidance to explicit runtime
+behavior-change metadata without high-risk truth materialization; W146 proves
+the Preference Correction golden path where rejection/edit outcomes create
+negative/corrective evidence and deterministically suppress or change future
+behavior. W144-W146 add no ordinary Chat routing change, no ordinary
+`send_message` / `start_stream_message` replacement, no Tauri command, no UI,
+no runtime/model/tool call, no durable LifeModel/Memory/external provider state
+write, and no migration permission. Ordinary Chat must not call W144-W146
+golden path helpers or treat golden path ready as migration permission.
 W61-W64 were documentation/index整理 and authority compression stages only. W65
 adds a pure Rust descriptor mapper in `src-tauri/src/default_chat_adapter.rs`
 for a future controlled adapter candidate contract. W66 adds a pure Rust
@@ -503,7 +517,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W143 progress index
+4. This W1-W146 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -522,7 +536,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W143 Structured Index
+## W1-W146 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -669,6 +683,9 @@ permission.
 | W141 | ModelRouter / Privacy HS Hardening | Done | `ModelRouter::score_provider`, `route`, and `route_with_hs_packet` | High/Critical privacy hard-filters non-local providers before scoring; HS LocalOnly from selected policy refs or audit ids selects local `ollama`, route_type `local`, prefer_local=true, privacy LocalOnly, no cloud fallback, metadata-safe `local_only` governor report, and fail-closed no-local behavior | No; ordinary send/stream stay `legacy_stream` and must not call W141 helpers except existing fail-closed HS packet boundary | W142 |
 | W142 | ActionExecutor HS Tool Governance | Done | `ActionExecutor` manifest/source gate and HS proposal-first write paths | Unsupported Plugin/A2A tools block before permission replay or execution; HS direct external write paths remain proposal-first and attach metadata-safe governance reports; no real provider/plugin executor is added or advertised | No; non-default/runtime executor governance only, no ordinary Chat route change | W143 |
 | W143 | Governor Unified Decision Report | Done | `LifeModelGovernor`, `GovernorDecisionReport`, and shared governance inputs | Shared metadata-safe report classifies allow/block/confirm/proposal-first/local-only decisions for maturation, model route, tool action, memory write, and external write; omits raw prompt/user text/assistant output/memory/LifeModel/tool payload | No; report/read model only and not migration permission | W144 |
+| W144 | Weekly Planning Golden Path | Done | Pure core `run_weekly_planning_golden_path` | Proves the weekly planning guidance loop across selected RuntimeHSPacket guidance, Plan-Execute draft/finalize/step metadata, proposal-first write-like step refs, outcome evidence, and future planning guidance without raw payloads | No; pure backend/core proof only, ordinary send/stream stay `legacy_stream` and do not call golden path helpers | W145 |
+| W145 | Low-Energy Support Golden Path | Done | Pure core `run_low_energy_support_golden_path` | Proves LifeEvent/Signal/Evidence to accepted guidance to explicit runtime behavior-change metadata, while high-risk truth materialization, runtime/model/tool calls, command/frontend surfaces, and durable LifeModel/Memory/external provider writes remain absent | No; pure backend/core proof only and not migration permission | W146 |
+| W146 | Preference Correction Golden Path | Done | Pure core `run_preference_correction_golden_path` | Proves rejection/edit outcomes create negative/corrective evidence and deterministically suppress or change future behavior; no Tauri command, UI, ordinary send/stream replacement, runtime executor, model call, real tool call, or durable LifeModel/Memory/external provider write is added | No; ordinary Chat must not call W144-W146 helpers or treat golden path ready as migration permission | W147 |
 
 ## Folded Boundary Summary
 
@@ -845,10 +862,12 @@ guidance contract complete -> W138 ReAct guidance consumption complete -> W139
 Plan-Execute guidance consumption complete -> W140 Guidance Impact read model
 complete -> W141 ModelRouter/Privacy HS hardening complete -> W142
 ActionExecutor HS tool governance complete -> W143 Governor unified decision
-report complete.
-Next Backend Completion work should proceed to Goal 7 / W144-W146 Backend
-Golden Paths. Future Beta hardening can move to Skill Runtime or product golden
-path work from the W143 backend completion baseline. Future default Chat
+report complete -> W144 Weekly Planning golden path complete -> W145
+Low-Energy Support golden path complete -> W146 Preference Correction golden
+path complete.
+Next Backend Completion work should proceed to Goal 8 / W147-W149 Pre-UI
+Backend Contract Freeze. Future Beta hardening can move to Skill Runtime or
+product surface work from the W146 backend completion baseline. Future default Chat
 executor implementation discussion may build on the W65-W72 proofs only through
 a separately reviewed task; keep default Chat on legacy_stream unless that
 separate task explicitly implements, reviews, verifies, and authorizes a route
