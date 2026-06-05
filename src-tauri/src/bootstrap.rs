@@ -530,6 +530,18 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
             .borrow_mut()
             .push(format!("plugins manifest reload failed: {}", e));
     }
+    let mut skill_registry = openlife_core::skills::SkillRegistry::built_in();
+    for record in plugin_registry.list() {
+        if record.enabled && record.error.is_none() {
+            for skill in &record.manifest.skills {
+                let mut skill_clone = skill
+                    .clone()
+                    .as_plugin_declarative_only(&record.manifest.id);
+                skill_clone.id = format!("plugin:{}:{}", record.manifest.id, skill.id);
+                skill_registry.register(skill_clone);
+            }
+        }
+    }
 
     let rollout_metrics_store = {
         let store_path = data_dir.join("rollout_metrics.db");
@@ -572,7 +584,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
-        skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
+        skill_registry: Arc::new(Mutex::new(skill_registry)),
         plugin_registry: Arc::new(Mutex::new(plugin_registry)),
         hot_cache,
         proposal_engine: Arc::new(tokio::sync::Mutex::new({

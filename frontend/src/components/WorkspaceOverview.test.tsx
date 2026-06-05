@@ -68,6 +68,63 @@ describe("WorkspaceOverview contract", () => {
     });
   });
 
+  it("does not render plugin declarative-only skills as executable workspace skills", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "list_agent_runs") return Promise.resolve([] as any);
+      if (cmd === "list_proposals") return Promise.resolve([] as any);
+      if (cmd === "list_skills") {
+        return Promise.resolve([
+          {
+            id: "weekly_review",
+            name: "Weekly Review",
+            description: "Built-in weekly review",
+            requiredContext: [],
+            allowedTools: [],
+            executionBudget: {
+              maxSteps: 5,
+              maxToolCalls: 0,
+              timeoutSeconds: 60,
+              allowCloud: true,
+              allowWrites: false,
+            },
+            outputSchema: {},
+            proposalPolicy: "review_required",
+            sourceKind: "built_in",
+            executionStatus: "executable_built_in",
+          },
+          {
+            id: "plugin:demo:weekly_review",
+            name: "Plugin Weekly Review",
+            description: "Declarative plugin skill",
+            requiredContext: [],
+            allowedTools: [],
+            executionBudget: {
+              maxSteps: 5,
+              maxToolCalls: 0,
+              timeoutSeconds: 60,
+              allowCloud: true,
+              allowWrites: false,
+            },
+            outputSchema: {},
+            proposalPolicy: "review_required",
+            sourceKind: "plugin",
+            executionStatus: "disabled_declarative_only",
+          },
+        ] as any);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter>
+        <WorkspaceOverview />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("Weekly Review")).toBeInTheDocument();
+    expect(screen.queryByText("Plugin Weekly Review")).not.toBeInTheDocument();
+  });
+
   it("creates, edits, finalizes, and executes a weekly planning session", async () => {
     const user = userEvent.setup();
     const now = new Date().toISOString();

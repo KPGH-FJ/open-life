@@ -50,6 +50,8 @@ function kindLabel(kind: string): string {
     review: "Review",
     writing: "Writing",
     memory_governance: "Memory",
+    skill: "Skill Runtime",
+    plugin: "Plugin",
   };
   return labels[kind] || kind;
 }

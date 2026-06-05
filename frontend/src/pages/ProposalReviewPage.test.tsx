@@ -97,4 +97,35 @@ describe("ProposalReviewPage", () => {
     expect(screen.getByText("External writes stay reviewable")).toBeInTheDocument();
     expect(screen.queryByText("raw-sensitive-payload")).not.toBeInTheDocument();
   });
+
+  it("shows Skill Runtime as a proposal source with run linkage", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        const proposal: AgentProposal = {
+          id: "proposal-skill-1",
+          runId: "run-skill-123456",
+          proposalType: "memory_write",
+          source: "skill_runtime",
+          sourceDetail: "skill_id=weekly_review;candidate_digest=sha256:abc",
+          affectedPath: "memory.candidates",
+          after: { digest: "sha256:memory" },
+          reason: "Skill generated a reviewable memory candidate.",
+          confidence: 0.7,
+          riskLevel: "medium",
+          status: "pending",
+          createdAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString(),
+        };
+        return Promise.resolve([proposal]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(<ProposalReviewPage />);
+
+    expect(await screen.findByText("memory.candidates")).toBeInTheDocument();
+    expect(screen.getByText("Skill")).toBeInTheDocument();
+    expect(screen.getByTitle("查看来源 Run: run-skill-123456")).toBeInTheDocument();
+    expect(screen.queryByText(/raw-sensitive-payload/)).not.toBeInTheDocument();
+  });
 });

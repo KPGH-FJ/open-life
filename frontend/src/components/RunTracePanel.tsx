@@ -15,6 +15,34 @@ interface Props {
   trace?: ReasoningTrace | null;
 }
 
+interface SkillRuntimeTraceEnvelope {
+  traceKind: "skill_runtime";
+  skillId?: string;
+  skillSourceKind?: string;
+  executionStatus?: string;
+  parseStatus?: string;
+  validationStatus?: string;
+  warningCount?: number;
+  proposalCandidateCount?: number;
+  acceptedProposalCandidateCount?: number;
+  skippedProposalCandidateCount?: number;
+  generatedProposalIds?: string[];
+  metadataSafe?: boolean;
+  containsRawContent?: boolean;
+  guidanceConsumptionMode?: string;
+  contextReport?: {
+    requiredContextCount?: number;
+    availableContextCount?: number;
+    promptContextDigest?: string;
+    items?: Array<{
+      contextId?: string;
+      available?: boolean;
+      itemCount?: number;
+      digest?: string;
+    }>;
+  };
+}
+
 function selectedPolicies(audit?: HSSelectionAudit): string[] {
   const raw = audit as any;
   return audit?.selectedPolicyIds ?? raw?.selected_policy_ids ?? [];
@@ -72,6 +100,25 @@ function collectReactActionTraces(run?: AgentRun | null): ReactActionTraceEnvelo
   return [...byAction.values()].sort((a, b) => a.toolCallIndex - b.toolCallIndex);
 }
 
+function extractSkillTrace(value: any): SkillRuntimeTraceEnvelope | null {
+  const trace = value?.skillTrace;
+  if (!trace || trace.traceKind !== "skill_runtime") return null;
+  return trace as SkillRuntimeTraceEnvelope;
+}
+
+function collectSkillRuntimeTraces(run?: AgentRun | null): SkillRuntimeTraceEnvelope[] {
+  const bySkill = new Map<string, SkillRuntimeTraceEnvelope>();
+  for (const action of run?.actions ?? []) {
+    const trace = extractSkillTrace(action.output);
+    if (trace) bySkill.set(`${action.id}:${trace.skillId ?? "skill"}`, trace);
+  }
+  for (const observation of run?.observations ?? []) {
+    const trace = extractSkillTrace(observation.structuredResult);
+    if (trace) bySkill.set(`${observation.id}:${trace.skillId ?? "skill"}`, trace);
+  }
+  return [...bySkill.values()];
+}
+
 export default function RunTracePanel({ run, trace }: Props) {
   const audit =
     run?.hsSelectionAudit ?? run?.reasoningTrace?.hsSelectionAudit ?? trace?.hsSelectionAudit;
@@ -81,10 +128,16 @@ export default function RunTracePanel({ run, trace }: Props) {
   const previewAudit = getMultiStrategyPreviewAudit(run);
   const productTrace = getPlanExecuteProductTrace(run);
   const reactActionTraces = collectReactActionTraces(run);
+  const skillRuntimeTraces = collectSkillRuntimeTraces(run);
   const hasCollaborationContent = policies.length > 0 || styles.length > 0 || checks.length > 0;
   const hasStrategyContent = !!previewAudit || !!productTrace;
   const hasReactActionContent = reactActionTraces.length > 0;
-  const hasContent = hasCollaborationContent || hasStrategyContent || hasReactActionContent;
+  const hasSkillRuntimeContent = skillRuntimeTraces.length > 0;
+  const hasContent =
+    hasCollaborationContent ||
+    hasStrategyContent ||
+    hasReactActionContent ||
+    hasSkillRuntimeContent;
 
   if (!hasContent) {
     return (
@@ -96,8 +149,79 @@ export default function RunTracePanel({ run, trace }: Props) {
 
   return (
     <section className="rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-950">
-      {hasReactActionContent && (
+      {hasSkillRuntimeContent && (
         <div className="rounded-lg bg-white/80 p-3 text-stone-800">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 font-semibold text-stone-900">
+              <Sparkles size={16} />
+              Skill Runtime trace
+            </div>
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-700">
+              metadata-safe
+            </span>
+          </div>
+
+          <div className="mt-2 space-y-2">
+            {skillRuntimeTraces.map((trace, index) => (
+              <div
+                key={`${trace.skillId ?? "skill"}-${index}`}
+                className="rounded border border-stone-200 bg-stone-50 px-3 py-2 text-xs text-stone-700"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-stone-900">
+                    {trace.skillId ?? "unknown_skill"}
+                  </span>
+                  {trace.parseStatus && <span>Parse: {trace.parseStatus}</span>}
+                  {trace.validationStatus && <span>Validation: {trace.validationStatus}</span>}
+                  {trace.executionStatus && <span>Status: {trace.executionStatus}</span>}
+                  {trace.guidanceConsumptionMode && (
+                    <span>Guidance: {trace.guidanceConsumptionMode}</span>
+                  )}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {trace.proposalCandidateCount !== undefined && (
+                    <span>Candidates: {trace.proposalCandidateCount}</span>
+                  )}
+                  {trace.acceptedProposalCandidateCount !== undefined && (
+                    <span>Accepted: {trace.acceptedProposalCandidateCount}</span>
+                  )}
+                  {trace.skippedProposalCandidateCount !== undefined && (
+                    <span>Skipped: {trace.skippedProposalCandidateCount}</span>
+                  )}
+                  {trace.warningCount !== undefined && <span>Warnings: {trace.warningCount}</span>}
+                  {trace.contextReport?.availableContextCount !== undefined && (
+                    <span>
+                      Context: {trace.contextReport.availableContextCount}/
+                      {trace.contextReport.requiredContextCount ?? "?"}
+                    </span>
+                  )}
+                  {trace.contextReport?.promptContextDigest && (
+                    <span>{trace.contextReport.promptContextDigest}</span>
+                  )}
+                </div>
+                {trace.generatedProposalIds && trace.generatedProposalIds.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {trace.generatedProposalIds.map(proposalId => (
+                      <Link
+                        key={proposalId}
+                        to="/review"
+                        className="rounded border border-blue-100 bg-blue-50 px-2 py-0.5 text-blue-700 hover:bg-blue-100"
+                      >
+                        Proposal: {proposalId}
+                      </Link>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {hasReactActionContent && (
+        <div
+          className={`rounded-lg bg-white/80 p-3 text-stone-800 ${hasSkillRuntimeContent ? "mt-3" : ""}`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2 font-semibold text-stone-900">
               <Wrench size={16} />
@@ -323,7 +447,7 @@ export default function RunTracePanel({ run, trace }: Props) {
         <>
           <div
             className={`flex flex-wrap items-center justify-between gap-2 ${
-              hasStrategyContent || hasReactActionContent ? "mt-3" : ""
+              hasStrategyContent || hasReactActionContent || hasSkillRuntimeContent ? "mt-3" : ""
             }`}
           >
             <div className="flex items-center gap-2 font-semibold">

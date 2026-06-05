@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-05
-> Status: authoritative document index for Agents, W149 Backend Completion Goal 8 complete; default Chat remains `legacy_stream`
+> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; default Chat remains `legacy_stream`
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -19,39 +19,42 @@ as reference only.
    - Completed Goal-mode master spec for the pre-UI LifeModel-governed
      backend kernel through W149.
 5. `plans/lifemodel_governed_runtime_progress.md`
-   - Compact W1-W149 completion/status index. This is not a second roadmap.
-6. `plans/react_beta_execution_hardening_goal_spec.md`
+   - Compact W1-W158 completion/status index. This is not a second roadmap.
+6. `plans/skill_runtime_goal_spec.md`
+   - Completed CLI Goal-mode spec and audit trail for W150-W158 Skill Runtime
+     Beta Maturity. This is not default Chat migration permission.
+7. `plans/react_beta_execution_hardening_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for ReAct Beta Execution
      Hardening W114-W123.
-7. `plans/runtime_strategy_maturity_goal_spec.md`
+8. `plans/runtime_strategy_maturity_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for RuntimeStrategy /
      Multi-Strategy Runtime Maturity W106-W113.
-8. `plans/plan_execute_product_vertical_goal_spec.md`
+9. `plans/plan_execute_product_vertical_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for the Plan-Execute Product
      Vertical W98-W105.
-9. `plans/legacy_direct_write_convergence_goal_spec.md`
+10. `plans/legacy_direct_write_convergence_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
-10. `plans/lifemodel_maturation_goal_plan.md`
+11. `plans/lifemodel_maturation_goal_plan.md`
    - Completed Goal-mode preparation/spec and audit trail for the W73-W78
      LifeModel Maturation proof slice after W72.
-11. Hard governance baselines:
+12. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-12. Scoped architecture/product baselines:
+13. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-13. Current execution helpers:
+14. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-14. Historical/reference documents.
+15. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
 
-Current latest status is **W149 Backend Completion Goal 8 complete**.
+Current latest status is **W150-W158 Skill Runtime Beta Maturity complete**.
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -105,7 +108,8 @@ hardening, and this docs/progress sync. W114-W123 is not default Chat migration
 and not a full Beta declaration; ordinary `send_message` /
 `start_stream_message` remain unchanged on `legacy_stream` unless a later
 separate reviewed route task explicitly changes them. Full Beta may still
-require Skill Runtime and product golden path work.
+require product surface work and any separately reviewed default Chat route
+migration.
 
 W124-W127 Backend Completion Goal 1 is complete. It adds the pure backend
 LifeModel-Governed Backend Completion readiness/contract report, typed
@@ -192,11 +196,17 @@ LifeModel/Memory/external provider state write, and no migration permission.
 Ordinary Chat must not call W147-W149 contract/final-gate helpers and must not
 treat contract frozen or final gate ready as migration permission.
 
-Backend Completion Goal 8 is no longer a future entry. The next implementation
-entry should be chosen explicitly, such as Skill Runtime, pre-UI product surface
-design, or a separately reviewed default Chat route migration Goal. Old docs
-that still name Goal 8 as next defer to this file, the backend completion spec,
-and `plans/lifemodel_governed_runtime_progress.md`.
+Backend Completion Goal 8 is no longer a future entry. W150-W158 Skill Runtime
+Beta Maturity is complete: built-in skill readiness, bounded Skill context
+assembly, LifeModel-HS privacy/model-route governance, output envelope and trace
+stability, proposal candidate governance, plugin declarative-only boundaries,
+non-default read-only Skill Runtime status, Runs/Review trace integration, and
+docs sync are in place. This does not grant default Chat migration permission.
+Other future options, such as pre-UI product surface design or a separately
+reviewed default Chat route migration Goal, must be started through separate
+specs. Old docs that still name Goal 8 as next or Skill Runtime as prepared
+defer to this file, the backend completion spec, the Skill Runtime spec, and
+`plans/lifemodel_governed_runtime_progress.md`.
 W64 validated the compressed W1-W63 authority/index entry. W65 adds a pure Rust
 descriptor mapper in `src-tauri/src/default_chat_adapter.rs` for a future
 controlled adapter candidate contract. W66 adds a pure Rust controlled adapter
@@ -482,13 +492,15 @@ Any next controlled adapter work must arrive through a separate task that
 explicitly asks for it and preserves default Chat `legacy_stream` until a
 reviewed route change is implemented and verified.
 
-The next active Goal-mode preparation entry is
-`plans/lifemodel_maturation_goal_plan.md`. It starts LifeModel Maturation Loop
-End-to-End with a narrow low-energy / low-pressure planning domain. That Goal
-must not migrate default Chat, attach the controlled adapter executor, directly
-write LifeModel/Memory/Heuristic truth, or bypass proposal-first governance.
-W78 completes the current LifeModel maturation proof slice without authorizing
-runtime execution, persistent AgentRun trace writes, or default Chat migration.
+`plans/skill_runtime_goal_spec.md` is the completed W150-W158 Skill Runtime Beta
+Maturity spec / audit trail on top of the W149 backend kernel. Skill Runtime
+does not migrate default Chat, replace ordinary `send_message` /
+`start_stream_message`, call Skill Runtime readiness/status from ordinary Chat,
+directly write LifeModel/Memory/file/calendar/email/external/plugin state from
+skills, or bypass proposal-first governance. Skill Runtime readiness/status
+remains non-default, read-only, metadata-safe, and not migration permission.
+`plans/lifemodel_maturation_goal_plan.md` is retained as the completed W73-W78
+LifeModel maturation proof-slice spec/audit trail.
 W79 completes only the inventory guard for the next Legacy Direct-Write
 Convergence phase. W80 adds a metadata-safe manual override audit guard to the
 highest-risk manual editor save path; actual proposal-first convergence remains
@@ -591,7 +603,7 @@ Hard current constraints:
   `binding_integrity_ready` only means the disabled skeleton binding metadata is
   internally consistent and still no-run.
 
-## 3. W1-W149 Compression Map
+## 3. W1-W158 Compression Map
 
 For the row-level structured index, use
 `plans/lifemodel_governed_runtime_progress.md`. It lists every stage with:
@@ -668,6 +680,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W141-W143 | Backend Completion Goal 6: Policy / Privacy / Tool Governance Hardening | ModelRouter/Privacy HS LocalOnly hard enforcement, ActionExecutor HS tool governance, and Governor unified metadata-safe decision reports are complete; High/Critical privacy cannot select cloud providers, HS LocalOnly has no cloud fallback, unsupported Plugin/A2A tools remain disabled/declarative-only, and ordinary Chat does not consume these results as migration permission |
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
+| W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
 
 ## 4. Current Authoritative Entry Points
 
@@ -676,7 +689,8 @@ metadata-safe safety, default Chat impact, and next dependency.
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |
 | `plans/lifemodel_governed_backend_completion_goal_spec.md` | Completed Backend Completion master spec through Goal 8 / W147-W149. |
-| `plans/lifemodel_governed_runtime_progress.md` | W1-W149 structured status index and compressed guardrail map. |
+| `plans/lifemodel_governed_runtime_progress.md` | W1-W158 structured status index and compressed guardrail map. |
+| `plans/skill_runtime_goal_spec.md` | Completed W150-W158 Skill Runtime Beta Maturity CLI spec/audit trail. |
 | `plans/react_beta_execution_hardening_goal_spec.md` | Completed W114-W123 ReAct Beta Execution Hardening CLI spec/audit trail. |
 | `plans/runtime_strategy_maturity_goal_spec.md` | Completed W106-W113 RuntimeStrategy / Multi-Strategy Runtime Maturity spec/audit trail. |
 | `plans/plan_execute_product_vertical_goal_spec.md` | Completed W98-W105 Plan-Execute Product Vertical spec/audit trail. |
@@ -884,9 +898,14 @@ Governor unified decision report complete -> W144 Weekly Planning golden path
 complete -> W145 Low-Energy Support golden path complete -> W146 Preference
 Correction golden path complete -> W147 UI read model contract freeze complete
 -> W148 final backend completion gate complete -> W149 docs/progress/
-verification sync complete.
-Backend Completion Goal 8 is complete. Full Beta still needs separately scoped
-Skill Runtime and product surface work. Any future
+verification sync complete -> W150 Skill Runtime readiness complete -> W151
+bounded context assembly complete -> W152 HS privacy/model-route governance
+complete -> W153 output envelope/trace complete -> W154 proposal candidate
+governance complete -> W155 plugin skill boundary complete -> W156 read-only
+status command complete -> W157 Runs/Review trace integration complete -> W158
+docs/progress/verification sync complete.
+Backend Completion Goal 8 and Skill Runtime Beta Maturity are complete. Full
+Beta still needs separately scoped product surface work. Any future
 default Chat executor implementation or route cutover remains a separate
 reviewed task that preserves default Chat legacy_stream until a route change is
 explicitly implemented, reviewed, verified, and authorized.

@@ -133,7 +133,14 @@ impl PluginRegistry {
         self.records
             .values()
             .filter(|record| record.enabled && record.error.is_none())
-            .flat_map(|record| record.manifest.skills.clone())
+            .flat_map(|record| {
+                record
+                    .manifest
+                    .skills
+                    .clone()
+                    .into_iter()
+                    .map(|skill| skill.as_plugin_declarative_only(&record.manifest.id))
+            })
             .collect()
     }
 

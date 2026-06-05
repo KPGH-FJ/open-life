@@ -139,6 +139,87 @@ describe("RunTracePanel", () => {
     expect(screen.queryByText(/raw output should not render/)).not.toBeInTheDocument();
   });
 
+  it("renders Skill Runtime trace metadata without raw skill payloads", () => {
+    renderPanel({
+      ...baseRun,
+      kind: "skill",
+      generatedProposals: ["proposal-skill-1"],
+      actions: [
+        {
+          id: "action-skill-1",
+          actionType: "skill_run",
+          target: "weekly_review",
+          input: { text: "raw private skill input should not render" },
+          status: "completed_with_warnings",
+          timestamp: new Date().toISOString(),
+          output: {
+            skillTrace: {
+              traceKind: "skill_runtime",
+              skillId: "weekly_review",
+              executionStatus: "ExecutableBuiltIn",
+              parseStatus: "parsed",
+              validationStatus: "valid_with_warnings",
+              warningCount: 1,
+              proposalCandidateCount: 2,
+              acceptedProposalCandidateCount: 1,
+              skippedProposalCandidateCount: 1,
+              generatedProposalIds: ["proposal-skill-1"],
+              guidanceConsumptionMode: "disabled",
+              metadataSafe: true,
+              containsRawContent: false,
+              contextReport: {
+                requiredContextCount: 4,
+                availableContextCount: 3,
+                promptContextDigest: "sha256:context",
+              },
+            },
+            rawModelOutput: "raw assistant output should not render",
+          },
+        },
+      ],
+      observations: [
+        {
+          id: "observation-skill-1",
+          actionId: "action-skill-1",
+          content: "raw observation with private model payload",
+          source: "skill:weekly_review",
+          timestamp: new Date().toISOString(),
+          structuredResult: {
+            skillTrace: {
+              traceKind: "skill_runtime",
+              skillId: "weekly_review",
+              parseStatus: "parsed",
+              validationStatus: "valid_with_warnings",
+              warningCount: 1,
+              generatedProposalIds: ["proposal-skill-1"],
+              contextReport: {
+                requiredContextCount: 4,
+                availableContextCount: 3,
+                promptContextDigest: "sha256:context",
+              },
+            },
+          },
+        },
+      ],
+      outputPreview: "raw skill output preview should not render",
+    });
+
+    expect(screen.getByText("Skill Runtime trace")).toBeInTheDocument();
+    expect(screen.getAllByText("weekly_review").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Parse: parsed").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Validation: valid_with_warnings").length).toBeGreaterThan(0);
+    expect(screen.getByText("Candidates: 2")).toBeInTheDocument();
+    expect(screen.getByText("Accepted: 1")).toBeInTheDocument();
+    expect(screen.getByText("Skipped: 1")).toBeInTheDocument();
+    expect(screen.getAllByText("Warnings: 1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Proposal: proposal-skill-1").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("sha256:context").length).toBeGreaterThan(0);
+    expect(screen.queryByText(/raw private skill input/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw assistant output/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw observation/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/raw skill output preview/)).not.toBeInTheDocument();
+  });
+
   it("renders metadata-safe multi-strategy preview audit", () => {
     renderPanel({
       ...baseRun,

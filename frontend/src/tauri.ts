@@ -2122,8 +2122,17 @@ export interface SkillManifest {
     allowCloud: boolean;
     allowWrites: boolean;
   };
+  inputSchema?: any;
   outputSchema: any;
   proposalPolicy: string;
+  sourceKind?: "built_in" | "plugin";
+  executionStatus?:
+    | "executable_built_in"
+    | "disabled_declarative_only"
+    | "model_only_no_tools"
+    | "blocked";
+  capabilityFlags?: string[];
+  pluginId?: string;
 }
 
 export interface SkillRunResponse {
@@ -2133,8 +2142,68 @@ export interface SkillRunResponse {
   generatedProposals: string[];
 }
 
+export interface SkillRuntimeDescriptor {
+  id: string;
+  name: string;
+  sourceKind: "built_in" | "plugin";
+  executionStatus:
+    | "executable_built_in"
+    | "disabled_declarative_only"
+    | "model_only_no_tools"
+    | "blocked";
+  inputSchemaDigest: string;
+  outputSchemaDigest: string;
+  proposalPolicy: string;
+  requiredContextIds: string[];
+  allowedToolIds: string[];
+  allowedToolCount: number;
+  executionBudget: SkillManifest["executionBudget"];
+  capabilityFlags: string[];
+  metadataSafe: boolean;
+  containsRawContent: boolean;
+  directWriteImplied: boolean;
+}
+
+export interface SkillRuntimeStatusReport {
+  reportKind: string;
+  readiness: {
+    reportKind: string;
+    ready: boolean;
+    metadataSafe: boolean;
+    containsRawContent: boolean;
+    requiredBuiltinsPresent: boolean;
+    builtInSkillCount: number;
+    pluginSkillCount: number;
+    descriptors: SkillRuntimeDescriptor[];
+    pluginBoundarySummary: any;
+    proposalGovernanceSummary: any;
+    privacyModelRouteBoundarySummary: any;
+    traceContractSummary: any;
+    defaultChatUnchanged: boolean;
+    migrationPermission: boolean;
+    runtimeExecutionPerformed: boolean;
+    modelCallPerformed: boolean;
+    toolCallPerformed: boolean;
+    businessWritesPerformed: boolean;
+    blockers: string[];
+  };
+  defaultChatUnchanged: boolean;
+  migrationPermission: boolean;
+  readOnly: boolean;
+  runtimeExecutionPerformed: boolean;
+  modelCallPerformed: boolean;
+  toolCallPerformed: boolean;
+  businessWritesPerformed: boolean;
+  metadataSafe: boolean;
+  blockers: string[];
+}
+
 export async function listSkills(): Promise<SkillManifest[]> {
   return safeInvoke<SkillManifest[]>("list_skills");
+}
+
+export async function getSkillRuntimeStatus(): Promise<SkillRuntimeStatusReport> {
+  return safeInvoke<SkillRuntimeStatusReport>("get_skill_runtime_status");
 }
 
 export async function runSkill(skillId: string, input: any): Promise<SkillRunResponse> {
@@ -2225,7 +2294,8 @@ export type ProposalSource =
   | "plugin"
   | "manual"
   | "chat_conversation"
-  | "proactive_agent";
+  | "proactive_agent"
+  | "planning_session";
 
 export interface AgentProposal {
   id: string;

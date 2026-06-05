@@ -15,7 +15,7 @@ import {
   ShieldCheck,
   Zap,
 } from "lucide-react";
-import type { SystemDiagnostics } from "../tauri";
+import type { SkillManifest, SystemDiagnostics } from "../tauri";
 import {
   createPlanExecuteSession,
   executePlanExecuteStep,
@@ -45,6 +45,13 @@ interface WorkspaceStats {
   chatSessions: number;
 }
 
+function isExecutableBuiltInSkill(skill: SkillManifest): boolean {
+  return (
+    (skill.sourceKind ?? "built_in") === "built_in" &&
+    (skill.executionStatus ?? "executable_built_in") === "executable_built_in"
+  );
+}
+
 export default function WorkspaceOverview() {
   const [stats, setStats] = useState<WorkspaceStats>({
     pendingProposals: 0,
@@ -58,7 +65,7 @@ export default function WorkspaceOverview() {
     chatSessions: 0,
   });
   const [diagnostics, setDiagnostics] = useState<SystemDiagnostics | null>(null);
-  const [skills, setSkills] = useState<{ id: string; name: string; description: string }[]>([]);
+  const [skills, setSkills] = useState<SkillManifest[]>([]);
   const [skillMessage, setSkillMessage] = useState<string | null>(null);
   const [planSession, setPlanSession] = useState<PlanExecuteSession | null>(null);
   const [planMessage, setPlanMessage] = useState<string | null>(null);
@@ -87,7 +94,7 @@ export default function WorkspaceOverview() {
         ]);
 
       setDiagnostics(diag);
-      setSkills(skillList.slice(0, 3));
+      setSkills(skillList.filter(isExecutableBuiltInSkill).slice(0, 3));
       setPlanSession(current => current ?? planSessions[0] ?? null);
 
       const pendingCount = proposals.filter((p: any) => p.status === "pending").length;

@@ -106,8 +106,8 @@ use commands::diagnostics::{
 };
 use commands::execution::{
     check_tool_permission, disable_plugin, enable_plugin, get_skill_run_status,
-    grant_tool_permission, list_plugins, list_skills, list_tool_permissions, reload_plugins,
-    revoke_tool_permission, run_skill,
+    get_skill_runtime_status, grant_tool_permission, list_plugins, list_skills,
+    list_tool_permissions, reload_plugins, revoke_tool_permission, run_skill,
 };
 use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
@@ -3464,6 +3464,7 @@ pub fn run() {
             revoke_tool_permission,
             check_tool_permission,
             list_skills,
+            get_skill_runtime_status,
             run_skill,
             get_skill_run_status,
             list_plugins,
@@ -6358,6 +6359,11 @@ mod hs_runtime_tests {
             "LowEnergySupportGoldenPathReport",
             "PreferenceCorrectionGoldenPathInput",
             "PreferenceCorrectionGoldenPathReport",
+            "get_skill_runtime_status",
+            "get_skill_runtime_status_with_state",
+            "run_skill",
+            "SkillRuntimeStatusReport",
+            "SkillRuntimeReadinessReport",
         ];
 
         for forbidden in forbidden_command_surfaces {

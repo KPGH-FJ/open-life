@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
 > Last updated: 2026-06-05
-> Status: W149 Backend Completion Goal 8 complete
+> Status: W150-W158 Skill Runtime Beta Maturity complete; default Chat remains `legacy_stream`
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,7 @@ route text.
 
 ## Current Position
 
-Current latest status is **W149 Backend Completion Goal 8 complete**.
+Current latest status is **W150-W158 Skill Runtime Beta Maturity complete**.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -531,7 +531,7 @@ When old plans conflict, use this order:
 1. `AGENTS.md`
 2. `plans/README.md`
 3. `plans/openlife_lifemodel_governed_agent_runtime.md`
-4. This W1-W149 progress index
+4. This W1-W158 progress index
 5. Historical/reference plans
 
 If a historical paragraph says a readiness, approval, draft, preview, or gate
@@ -550,7 +550,7 @@ permission.
 - `Default Chat impact`: whether the stage may change ordinary default Chat
   behavior. `No` means no routing change and no migration permission.
 
-## W1-W149 Structured Index
+## W1-W158 Structured Index
 
 | Stage | Name | Status | Command/surface type | Safety | Default Chat impact | Next dependency |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -702,7 +702,8 @@ permission.
 | W146 | Preference Correction Golden Path | Done | Pure core `run_preference_correction_golden_path` | Proves rejection/edit outcomes create negative/corrective evidence and deterministically suppress or change future behavior; no Tauri command, UI, ordinary send/stream replacement, runtime executor, model call, real tool call, or durable LifeModel/Memory/external provider write is added | No; ordinary Chat must not call W144-W146 helpers or treat golden path ready as migration permission | W147 |
 | W147 | UI Read Model Contract Freeze | Done | Pure core `backend_contract_freeze.rs` read-model wrappers | Freezes metadata-safe contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview; payloads contain ids/status/counts/paths/digests/booleans only and omit raw prompt/user/assistant/memory/LifeModel/tool/guidance content | No; no command/frontend/runtime/model/tool/store/default Chat effect | W148 |
 | W148 | Final Backend Completion Gate | Done | Pure core `evaluate_final_backend_completion_gate` | Metadata-safe read-only final gate report proves or lists blockers for LifeModel Maturity, Runtime Driven, Governance/Privacy, and UI Read Model gates; explicitly reports default Chat isolation, proposal-first boundaries, raw-content exclusion, LocalOnly privacy, tool governance, golden path coverage, remaining Beta blockers, and zero side-effect counts | No; not migration permission and ordinary Chat must not call it | W149 |
-| W149 | Docs / Progress / Verification Sync | Done | Docs/progress/index sync | `AGENTS.md`, `README.md`, `plans/README.md`, backend completion spec, runtime program, and this progress index mark W149 complete and make stale Goal 8-next/default-Chat-migration references defer to the updated authority docs | No; docs/status only | Future Skill Runtime, product surface design, or separately reviewed default Chat route migration Goal |
+| W149 | Docs / Progress / Verification Sync | Done | Docs/progress/index sync | `AGENTS.md`, `README.md`, `plans/README.md`, backend completion spec, runtime program, and this progress index mark W149 complete and make stale Goal 8-next/default-Chat-migration references defer to the updated authority docs | No; docs/status only | W150-W158 |
+| W150-W158 | Skill Runtime Beta Maturity | Done | Core Skill Runtime contracts, `run_skill`, non-default `get_skill_runtime_status`, Runs/Review trace surfaces | Built-in skill readiness descriptors, bounded metadata-safe context assembly, HS privacy/model-route governance, fail-soft output normalization, allowlisted proposal candidate governance, plugin declarative-only boundary, read-only status report, metadata-safe AgentRun trace, generated proposal linkage, frontend mock/wrapper support, and docs/progress sync are complete | No; ordinary send/stream stay `legacy_stream`, ordinary Chat must not call Skill Runtime readiness/status/run helpers, status is read-only, skills create Review Center proposals only, and Skill Runtime readiness/status is not migration permission | Future pre-UI product surface design or separately reviewed default Chat route migration Goal |
 
 ## Folded Boundary Summary
 
