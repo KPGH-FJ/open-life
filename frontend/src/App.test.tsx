@@ -301,7 +301,7 @@ describe("App onboarding", () => {
     ["/companion", "陪伴", "聊天就绪"],
     ["/today", "今日", "今日驾驶舱"],
     ["/life-model", "Life Model", "人生模型构建"],
-    ["/mailbox", "邮箱", "Review Center"],
+    ["/mailbox", "邮箱", "mailbox-page"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
@@ -314,7 +314,27 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    expect(await screen.findByText(expectedText)).toBeInTheDocument();
+    if (expectedText === "mailbox-page") {
+      expect(await screen.findByTestId(expectedText)).toBeInTheDocument();
+    } else {
+      expect(await screen.findByText(expectedText)).toBeInTheDocument();
+    }
+  });
+
+  it("keeps /review on the legacy ProposalReviewPage route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/review"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(screen.queryByTestId("mailbox-page")).not.toBeInTheDocument();
   });
 
   it("keeps Settings reachable as a secondary route", async () => {

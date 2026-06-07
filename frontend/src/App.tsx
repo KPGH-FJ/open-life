@@ -17,6 +17,7 @@ const DashboardPage = React.lazy(() => import("./pages/DashboardPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
 const ProposalReviewPage = React.lazy(() => import("./pages/ProposalReviewPage"));
+const MailboxPage = React.lazy(() => import("./pages/MailboxPage"));
 const RunsPage = React.lazy(() => import("./pages/RunsPage"));
 const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
 const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
@@ -182,7 +183,7 @@ function App() {
               <Route path={productRoutePath("陪伴")} element={<CompanionPage />} />
               <Route path={productRoutePath("今日")} element={<DashboardPage />} />
               <Route path={productRoutePath("Life Model")} element={<BuilderPage />} />
-              <Route path={productRoutePath("邮箱")} element={<ProposalReviewPage />} />
+              <Route path={productRoutePath("邮箱")} element={<MailboxPage />} />
               <Route path="/" element={<DashboardPage />} />
               <Route path="/workspace" element={<DashboardPage />} />
               {/* Agent: Chat + Runs */}
