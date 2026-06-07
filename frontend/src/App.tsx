@@ -145,6 +145,10 @@ class ErrorBoundary extends Component<
   }
 }
 
+function isNativeBackendUnavailable(error: unknown): boolean {
+  return String(error).includes("当前不在 OpenLife 桌面应用环境中");
+}
+
 function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [wizardReady, setWizardReady] = useState(false);
@@ -156,8 +160,8 @@ function App() {
         setShowWizard(!done);
         setWizardReady(true);
       })
-      .catch(() => {
-        setShowWizard(true);
+      .catch(error => {
+        setShowWizard(!isNativeBackendUnavailable(error));
         setWizardReady(true);
       });
   }, []);

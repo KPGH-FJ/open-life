@@ -2325,20 +2325,24 @@ export default function ChatPage({
                       >
                         <Target size={12} /> 拆成目标
                       </button>
-                      <button
-                        onClick={() => handleSaveAsDailyGoal(m.content)}
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                        title="将回复首句保存为今日目标"
-                      >
-                        <CheckCircle2 size={12} /> 设为今日目标
-                      </button>
-                      <button
-                        onClick={() => handleIndexMemory(m.content)}
-                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
-                        title="将这条回复加入长期记忆"
-                      >
-                        <Sparkles size={12} /> 加入记忆
-                      </button>
+                      {!companionMode && (
+                        <>
+                          <button
+                            onClick={() => handleSaveAsDailyGoal(m.content)}
+                            className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                            title="将回复首句保存为今日目标"
+                          >
+                            <CheckCircle2 size={12} /> 设为今日目标
+                          </button>
+                          <button
+                            onClick={() => handleIndexMemory(m.content)}
+                            className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-gray-600 hover:bg-gray-50"
+                            title="将这条回复加入长期记忆"
+                          >
+                            <Sparkles size={12} /> 加入记忆
+                          </button>
+                        </>
+                      )}
                     </div>
                     <div className="flex items-center justify-end gap-2">
                       <button

@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { useState } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
+import { useRef, useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import type { LucideIcon } from "lucide-react";
 import {
@@ -68,7 +68,7 @@ function isProductRouteActive(label: ProductRouteLabel, pathname: string): boole
 function secondaryLinkClass({ isActive }: { isActive: boolean }): string {
   return [
     "inline-flex h-9 items-center gap-2 rounded-md px-3 text-sm font-medium transition",
-    "border border-transparent",
+    "border border-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20",
     isActive
       ? "bg-stone-900 text-white shadow-sm"
       : "text-stone-700 hover:border-stone-200 hover:bg-white",
@@ -95,7 +95,7 @@ export function MainTabs() {
               aria-current={active ? "page" : undefined}
               className={[
                 "inline-flex h-10 min-w-0 items-center justify-center gap-2 rounded-md px-2",
-                "text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-stone-900/20",
+                "text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20",
                 active
                   ? "bg-stone-900 text-white shadow-sm"
                   : "text-stone-600 hover:bg-stone-100 hover:text-stone-950",
@@ -113,6 +113,52 @@ export function MainTabs() {
 
 export function SecondaryToolsMenu() {
   const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const firstMenuItemRef = useRef<HTMLAnchorElement | null>(null);
+
+  const closeMenu = (restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) {
+      window.setTimeout(() => buttonRef.current?.focus(), 0);
+    }
+  };
+
+  const focusFirstMenuItem = () => {
+    setOpen(true);
+    window.setTimeout(() => firstMenuItemRef.current?.focus(), 0);
+  };
+
+  const handleButtonKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === "Escape" && open) {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusFirstMenuItem();
+    }
+  };
+
+  const handleMenuKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+      return;
+    }
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLAnchorElement>("a[href]"));
+    if (!items.length) return;
+    event.preventDefault();
+    const currentIndex = items.indexOf(document.activeElement as HTMLAnchorElement);
+    const fallbackIndex = event.key === "ArrowDown" ? 0 : items.length - 1;
+    const nextIndex =
+      currentIndex === -1
+        ? fallbackIndex
+        : (currentIndex + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+    items[nextIndex]?.focus();
+  };
 
   return (
     <nav aria-label="Secondary tools" className="relative flex items-center gap-1.5">
@@ -126,15 +172,18 @@ export function SecondaryToolsMenu() {
         );
       })}
       <button
+        ref={buttonRef}
         type="button"
         aria-label="二级入口"
         aria-expanded={open}
         aria-controls="secondary-tools-menu"
         title="二级入口"
         onClick={() => setOpen(value => !value)}
+        onKeyDown={handleButtonKeyDown}
         className={[
           "inline-flex h-9 w-9 items-center justify-center rounded-md border border-transparent",
           "text-stone-700 transition hover:border-stone-200 hover:bg-white",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20",
           open ? "bg-white shadow-sm" : "",
         ].join(" ")}
       >
@@ -143,18 +192,21 @@ export function SecondaryToolsMenu() {
       {open && (
         <div
           id="secondary-tools-menu"
+          onKeyDown={handleMenuKeyDown}
           className="absolute right-0 top-11 z-30 min-w-[190px] rounded-lg border border-stone-200 bg-white p-1.5 shadow-xl"
         >
-          {SECONDARY_MENU_TOOLS.map(item => {
+          {SECONDARY_MENU_TOOLS.map((item, index) => {
             const Icon = item.icon;
             return (
               <NavLink
                 key={item.path}
+                ref={index === 0 ? firstMenuItemRef : undefined}
                 to={item.path}
                 onClick={() => setOpen(false)}
                 className={({ isActive }) =>
                   [
                     "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-stone-900/20",
                     isActive
                       ? "bg-stone-900 text-white"
                       : "text-stone-700 hover:bg-stone-100 hover:text-stone-950",
@@ -179,7 +231,7 @@ export default function ProductShell({
   safeModeReason,
 }: ProductShellProps) {
   return (
-    <div className="h-screen min-h-0 bg-[#f5f6f2] text-stone-950">
+    <div className="h-screen min-h-0 overflow-hidden bg-[#f5f6f2] text-stone-950">
       <div className="flex h-full min-h-0 flex-col">
         <header className="shrink-0 border-b border-stone-200 bg-[#fcfcf8]/95 px-4 py-3">
           <div className="mx-auto flex max-w-[1500px] flex-wrap items-center gap-3 lg:flex-nowrap">

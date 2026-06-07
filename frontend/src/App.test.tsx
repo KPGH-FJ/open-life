@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import App from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   AGENT_STAGE_ASSET_ROOT,
   PRIMARY_PRODUCT_ROUTES,
@@ -207,6 +210,33 @@ describe("App onboarding", () => {
     expect(screen.getByText("查看试用完成度")).toBeInTheDocument();
   });
 
+  it("does not show onboarding over no-backend product route errors", async () => {
+    const noBackendError = new Error(
+      "当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。"
+    );
+    vi.mocked(invoke).mockImplementation((cmd: string) => {
+      if (
+        cmd === "has_completed_onboarding" ||
+        cmd === "get_system_diagnostics" ||
+        cmd === "list_proposals" ||
+        cmd === "get_config"
+      ) {
+        return Promise.reject(noBackendError);
+      }
+      return Promise.resolve({});
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/mailbox"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
+    expect(await screen.findByText(/当前不在 OpenLife 桌面应用环境中/)).toBeInTheDocument();
+    expect(screen.queryByText("欢迎使用 OpenLife")).not.toBeInTheDocument();
+  });
+
   it("declares the W159 product route and label contract", () => {
     expect(PRIMARY_PRODUCT_ROUTES).toEqual([
       { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
@@ -260,6 +290,64 @@ describe("App onboarding", () => {
 
     for (const label of ["MCP", "A2A", "Metrics", "Versions", "Calibration"]) {
       expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("lets keyboard users open and close the secondary tools menu", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    await screen.findByRole("link", { name: "陪伴" });
+    const menuButton = screen.getByRole("button", { name: /二级入口/ });
+    menuButton.focus();
+    expect(menuButton).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("link", { name: "MCP" })).toBeInTheDocument();
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("link", { name: "MCP" })).not.toBeInTheDocument();
+    });
+    expect(menuButton).toHaveFocus();
+  });
+
+  it("keeps W166 product surface files free of disabled backend wrappers", () => {
+    const productSurfaceFiles = [
+      "src/App.tsx",
+      "src/components/ProductShell.tsx",
+      "src/components/AgentStage.tsx",
+      "src/pages/CompanionPage.tsx",
+      "src/pages/TodayPage.tsx",
+      "src/pages/LifeModelPage.tsx",
+      "src/pages/MailboxPage.tsx",
+    ];
+    const forbiddenWrappers = [
+      "saveLifeModel",
+      "builderApplySignals",
+      "batchAcceptLowRiskProposals",
+      "runSkill",
+      "getSkillRuntimeStatus",
+      "checkRuntimeMigrationGate",
+      "runMultiStrategyAgentPreview",
+    ];
+
+    for (const filePath of productSurfaceFiles) {
+      const source = readFileSync(join(process.cwd(), filePath), "utf8");
+      for (const forbiddenWrapper of forbiddenWrappers) {
+        expect(source, `${filePath} must not import ${forbiddenWrapper}`).not.toMatch(
+          new RegExp(`\\b${forbiddenWrapper}\\b`)
+        );
+      }
     }
   });
 

@@ -394,9 +394,9 @@ export default function MailboxPage() {
     <section
       data-testid="mailbox-page"
       aria-label="邮箱"
-      className="h-full min-h-0 overflow-hidden bg-[#f5f6f2] px-3 py-3 sm:px-4"
+      className="h-full min-h-0 overflow-hidden overflow-x-hidden bg-[#f5f6f2] px-3 py-3 sm:px-4"
     >
-      <div className="mx-auto flex h-full min-h-0 max-w-[1500px] flex-col gap-3">
+      <div className="mx-auto flex h-full min-h-0 w-full max-w-[1500px] flex-col gap-3">
         <div className="flex shrink-0 items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-stone-950 text-white shadow-sm">

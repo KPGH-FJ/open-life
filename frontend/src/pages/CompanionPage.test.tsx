@@ -169,4 +169,17 @@ describe("CompanionPage", () => {
       expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "privacy");
     });
   });
+
+  it("does not expose direct-write assistant quick actions on the product companion surface", async () => {
+    render(
+      <BrowserRouter>
+        <CompanionPage />
+      </BrowserRouter>
+    );
+
+    expect(await screen.findByText("你好！我是 OpenLife。")).toBeInTheDocument();
+    for (const label of ["设为今日目标", "加入记忆"]) {
+      expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
+    }
+  });
 });

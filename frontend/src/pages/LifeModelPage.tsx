@@ -587,8 +587,11 @@ export default function LifeModelPage() {
     : "待构建";
 
   return (
-    <div data-testid="life-model-page" className="h-full overflow-auto bg-[#f5f6f2]">
-      <div className="mx-auto flex max-w-5xl flex-col gap-5 px-4 py-5 lg:px-6">
+    <div
+      data-testid="life-model-page"
+      className="h-full overflow-auto overflow-x-hidden bg-[#f5f6f2]"
+    >
+      <div className="mx-auto flex w-full max-w-[1500px] flex-col gap-5 px-4 py-5 lg:px-6">
         <header className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
