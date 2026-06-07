@@ -263,8 +263,42 @@ describe("App onboarding", () => {
     }
   });
 
+  it("renders /companion as the W162 companion surface with AgentStage", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("companion-page")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
+    expect(screen.getByRole("status", { name: /OpenLife Agent 状态/ })).toBeInTheDocument();
+  });
+
+  it.each(["/chat", "/agent"])("keeps %s on the legacy ChatPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByTestId("chat-page")).toBeInTheDocument();
+    expect(screen.queryByTestId("companion-page")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("agent-stage")).not.toBeInTheDocument();
+  });
+
   it.each([
-    ["/companion", "陪伴", "陪跑现场"],
+    ["/companion", "陪伴", "聊天就绪"],
     ["/today", "今日", "今日驾驶舱"],
     ["/life-model", "Life Model", "人生模型构建"],
     ["/mailbox", "邮箱", "Review Center"],

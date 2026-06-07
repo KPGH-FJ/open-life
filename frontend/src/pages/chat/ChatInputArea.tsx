@@ -8,6 +8,7 @@ interface ChatInputAreaProps {
   streamInterrupted: boolean;
   diagnostics: SystemDiagnostics | null;
   onInputChange: (value: string) => void;
+  onComposerFocus?: () => void;
   onSend: () => void;
   onContinueStream: () => void;
   onRetryLastMessage: () => void;
@@ -64,6 +65,7 @@ export default function ChatInputArea({
   streamInterrupted,
   diagnostics,
   onInputChange,
+  onComposerFocus,
   onSend,
   onContinueStream,
   onRetryLastMessage,
@@ -146,6 +148,7 @@ export default function ChatInputArea({
           <textarea
             value={input}
             onChange={e => onInputChange(e.target.value)}
+            onFocus={onComposerFocus}
             onKeyDown={e => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();

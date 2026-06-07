@@ -71,6 +71,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReasoningTracePanel from "../components/ReasoningTracePanel";
 import ToolCallCard from "../components/ToolCallCard";
 import AgentStateIndicator from "../components/AgentStateIndicator";
+import type { AgentStageState } from "../components/AgentStage";
 import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 import ChatSidebar from "./chat/ChatSidebar";
 import ChatInputArea from "./chat/ChatInputArea";
@@ -255,6 +256,29 @@ function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
 }
 
+const PLANNING_STAGE_PATTERN =
+  /(规划|计划|安排|今日|今天|目标|日程|下一步|拆解|里程碑|weekly|plan|goal|schedule)/i;
+const MEMORY_STAGE_PATTERN = /(记忆|人生模型|life\s*model|lifemodel|加入记忆|依据|回忆|memory)/i;
+
+function inferStageFromText(text: string): AgentStageState | null {
+  if (!text.trim()) return null;
+  if (MEMORY_STAGE_PATTERN.test(text)) return "memory";
+  if (PLANNING_STAGE_PATTERN.test(text)) return "planning";
+  return null;
+}
+
+function inferStageFromToolCalls(toolCalls: ToolCallResult[]): AgentStageState | null {
+  if (toolCalls.some(call => call.requires_confirmation || call.permission_level === "high")) {
+    return "privacy";
+  }
+  return null;
+}
+
+export type ChatPageProps = {
+  companionMode?: boolean;
+  onCompanionStageChange?: (state: AgentStageState) => void;
+};
+
 function readablePreviewError(error: unknown): string {
   if (typeof error === "string") return error;
   if (error && typeof error === "object") {
@@ -306,7 +330,10 @@ function hasPromotablePilotResponse(
   return result.payloadKind !== "blocked" && result.governanceDecisionKind !== "block";
 }
 
-export default function ChatPage() {
+export default function ChatPage({
+  companionMode = false,
+  onCompanionStageChange,
+}: ChatPageProps = {}) {
   const location = useLocation();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string>("default");
@@ -375,6 +402,13 @@ export default function ChatPage() {
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
   const savedControlledPilotPromotionKeysRef = useRef<Record<string, boolean>>({});
   const inFlightControlledPilotPromotionKeysRef = useRef<Set<string>>(new Set());
+
+  const emitCompanionStage = useCallback(
+    (state: AgentStageState) => {
+      onCompanionStageChange?.(state);
+    },
+    [onCompanionStageChange]
+  );
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -449,6 +483,43 @@ export default function ChatPage() {
   useEffect(() => {
     diagnosticsRef.current = diagnostics;
   }, [diagnostics]);
+
+  useEffect(() => {
+    if (diagnostics && isSafeMode(diagnostics)) {
+      emitCompanionStage("privacy");
+    }
+  }, [diagnostics, emitCompanionStage]);
+
+  useEffect(() => {
+    if (pendingProposals.length > 0) {
+      emitCompanionStage("review");
+    }
+  }, [pendingProposals.length, emitCompanionStage]);
+
+  useEffect(() => {
+    const toolStage = inferStageFromToolCalls(toolCalls);
+    if (toolStage) {
+      emitCompanionStage(toolStage);
+    }
+  }, [toolCalls, emitCompanionStage]);
+
+  useEffect(() => {
+    if (currentRun?.status === "failed") {
+      emitCompanionStage("error");
+      return;
+    }
+    if (currentRun?.status === "waiting_permission") {
+      emitCompanionStage("privacy");
+      return;
+    }
+    if ((currentRun?.generatedProposals?.length ?? 0) > 0) {
+      emitCompanionStage("review");
+      return;
+    }
+    if (currentRun?.status === "running") {
+      emitCompanionStage("sorting");
+    }
+  }, [currentRun, emitCompanionStage]);
 
   useEffect(() => {
     (async () => {
@@ -592,6 +663,10 @@ export default function ChatPage() {
       );
       unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
+          const nextStage =
+            inferStageFromToolCalls(event.payload.tool_calls ?? []) ??
+            inferStageFromText(event.payload.reply) ??
+            "idle";
           flushStreaming();
           setMessages(prev => [
             ...prev,
@@ -608,6 +683,7 @@ export default function ChatPage() {
             }))
           );
           setStreamInterrupted(false);
+          emitCompanionStage(nextStage);
           await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           refreshAgentRuns(event.payload.session_id);
           logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
@@ -629,6 +705,7 @@ export default function ChatPage() {
             setStreamingReply("");
             setSending(false);
             setStreamInterrupted(true);
+            emitCompanionStage("error");
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
             refreshAgentRuns(event.payload.session_id);
           }
@@ -643,7 +720,7 @@ export default function ChatPage() {
       if (unlistenDone) unlistenDone();
       if (unlistenError) unlistenError();
     };
-  }, [currentSessionId]);
+  }, [currentSessionId, emitCompanionStage]);
 
   const togglePreferLocal = async () => {
     const next = !preferLocal;
@@ -844,6 +921,7 @@ export default function ChatPage() {
   const handleSend = useCallback(async () => {
     if (!input.trim() || sending) return;
     if (!currentSessionId || typeof currentSessionId !== "string") {
+      emitCompanionStage("error");
       setMessages(prev => [
         ...prev,
         { role: "assistant", content: "错误: 当前会话 ID 无效，请刷新页面或切换会话后重试。" },
@@ -872,6 +950,7 @@ export default function ChatPage() {
     }
 
     if (diagnostics && !diagnostics.chat_ready) {
+      emitCompanionStage("error");
       const assistantMsg: ChatMessage = {
         role: "assistant",
         content: formatChatRuntimeError("chat not ready", diagnostics),
@@ -888,6 +967,7 @@ export default function ChatPage() {
     setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
+    emitCompanionStage("sorting");
 
     try {
       // The streaming backend persists the user message before model execution.
@@ -904,8 +984,17 @@ export default function ChatPage() {
       }
       setStreamingReply("");
       setSending(false);
+      emitCompanionStage("error");
     }
-  }, [input, sending, currentSessionId, messages, diagnostics, tryHandleQuickCommand]);
+  }, [
+    input,
+    sending,
+    currentSessionId,
+    messages,
+    diagnostics,
+    tryHandleQuickCommand,
+    emitCompanionStage,
+  ]);
 
   const retryLastUserMessage = useCallback(() => {
     const last =
@@ -928,6 +1017,7 @@ export default function ChatPage() {
     setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
+    emitCompanionStage("sorting");
     try {
       await startStreamMessage(currentSessionId, retryMessages);
     } catch (e) {
@@ -941,8 +1031,9 @@ export default function ChatPage() {
       }
       setStreamingReply("");
       setSending(false);
+      emitCompanionStage("error");
     }
-  }, [currentSessionId, messages, sending]);
+  }, [currentSessionId, messages, sending, emitCompanionStage]);
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const governedPreviewSummaryEntries = useMemo(
@@ -1071,9 +1162,13 @@ export default function ChatPage() {
     },
   ];
 
-  const fillPrompt = useCallback((prompt: string) => {
-    setInput(prompt);
-  }, []);
+  const fillPrompt = useCallback(
+    (prompt: string) => {
+      setInput(prompt);
+      emitCompanionStage(inferStageFromText(prompt) ?? "listening");
+    },
+    [emitCompanionStage]
+  );
 
   const selectChatMode = (mode: string) => {
     setChatMode(mode);
@@ -1081,8 +1176,10 @@ export default function ChatPage() {
     if (found) {
       if (mode === "free") {
         setInput("");
+        emitCompanionStage("listening");
       } else {
         setInput(found.prompt);
+        emitCompanionStage(inferStageFromText(found.prompt) ?? "listening");
       }
     }
   };
@@ -1306,6 +1403,7 @@ export default function ChatPage() {
 
   const handleIndexMemory = useCallback(
     async (content: string) => {
+      emitCompanionStage(isSafeMode(diagnostics) ? "privacy" : "memory");
       if (isSafeMode(diagnostics)) {
         setMessages(prev => [
           ...prev,
@@ -1322,7 +1420,15 @@ export default function ChatPage() {
         console.error("加入记忆失败", e);
       }
     },
-    [diagnostics, currentSessionId]
+    [diagnostics, currentSessionId, emitCompanionStage]
+  );
+
+  const handleInputChange = useCallback(
+    (value: string) => {
+      setInput(value);
+      emitCompanionStage(inferStageFromText(value) ?? "listening");
+    },
+    [emitCompanionStage]
   );
 
   const buildAssistantActionPrompt = useCallback(
@@ -1356,7 +1462,10 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="h-full flex bg-white">
+    <div
+      data-testid={companionMode ? "companion-chat-runtime" : "chat-page"}
+      className={classNames("h-full flex", companionMode ? "bg-transparent" : "bg-white")}
+    >
       <ChatSidebar
         sessions={sessions}
         currentSessionId={currentSessionId}
@@ -1916,7 +2025,7 @@ export default function ChatPage() {
           </div>
         </div>
         <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
-          {!loadingHistory && (
+          {!companionMode && !loadingHistory && (
             <div className="rounded-3xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">
                 <div className="flex-1">
@@ -2319,7 +2428,8 @@ export default function ChatPage() {
           sending={sending}
           streamInterrupted={streamInterrupted}
           diagnostics={diagnostics}
-          onInputChange={setInput}
+          onInputChange={handleInputChange}
+          onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}

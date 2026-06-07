@@ -7,6 +7,7 @@ import ProductShell from "./components/ProductShell";
 // Lazy load page components for code splitting
 const LifeMapPage = React.lazy(() => import("./pages/LifeMapPage"));
 const ChatPage = React.lazy(() => import("./pages/ChatPage"));
+const CompanionPage = React.lazy(() => import("./pages/CompanionPage"));
 const VersionControl = React.lazy(() => import("./pages/VersionControl"));
 const MemorySearch = React.lazy(() => import("./pages/MemorySearch"));
 const A2APage = React.lazy(() => import("./pages/A2APage"));
@@ -178,7 +179,7 @@ function App() {
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
               {/* W159 product route aliases; ProductShell and replacement pages start in W160+. */}
-              <Route path={productRoutePath("陪伴")} element={<ChatPage />} />
+              <Route path={productRoutePath("陪伴")} element={<CompanionPage />} />
               <Route path={productRoutePath("今日")} element={<DashboardPage />} />
               <Route path={productRoutePath("Life Model")} element={<BuilderPage />} />
               <Route path={productRoutePath("邮箱")} element={<ProposalReviewPage />} />
