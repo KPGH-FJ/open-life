@@ -299,7 +299,7 @@ describe("App onboarding", () => {
 
   it.each([
     ["/companion", "陪伴", "聊天就绪"],
-    ["/today", "今日", "今日驾驶舱"],
+    ["/today", "今日", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
     ["/mailbox", "邮箱", "mailbox-page"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
@@ -318,6 +318,43 @@ describe("App onboarding", () => {
       expect(await screen.findByTestId(expectedText)).toBeInTheDocument();
     } else {
       expect(await screen.findByText(expectedText)).toBeInTheDocument();
+    }
+  });
+
+  it.each(["/", "/workspace"])("keeps %s on the legacy DashboardPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("仪表盘")).toBeInTheDocument();
+    expect(screen.queryByTestId("today-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps the completed product entries on their product pages", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    for (const [path, testId] of [
+      ["/companion", "companion-page"],
+      ["/life-model", "life-model-page"],
+      ["/mailbox", "mailbox-page"],
+    ] as const) {
+      const { unmount } = render(
+        <MemoryRouter initialEntries={[path]}>
+          <App />
+        </MemoryRouter>
+      );
+      expect(await screen.findByTestId(testId)).toBeInTheDocument();
+      unmount();
     }
   });
 
