@@ -49,7 +49,10 @@ as reference only.
 14. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-15. Historical/reference documents.
+15. Current product-surface rewrite entry:
+   - `plans/frontend_product_shell_rewrite_goal_spec.md`
+   - `plans/frontend_product_shell_rewrite_plan.md`
+16. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position

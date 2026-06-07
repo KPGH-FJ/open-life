@@ -4,6 +4,11 @@ import { MemoryRouter } from "react-router-dom";
 import App from "./App";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
+import {
+  AGENT_STAGE_ASSET_ROOT,
+  PRIMARY_PRODUCT_ROUTES,
+  RETAINED_LEGACY_ROUTES,
+} from "./productShellContract";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -200,5 +205,81 @@ describe("App onboarding", () => {
 
     expect(await screen.findByText(/Beta 试用准备中/)).toBeInTheDocument();
     expect(screen.getByText("查看试用完成度")).toBeInTheDocument();
+  });
+
+  it("declares the W159 product route and label contract", () => {
+    expect(PRIMARY_PRODUCT_ROUTES).toEqual([
+      { label: "陪伴", path: "/companion", legacyAlias: "/chat" },
+      { label: "今日", path: "/today", legacyAlias: "/" },
+      { label: "Life Model", path: "/life-model", legacyAlias: "/builder" },
+      { label: "邮箱", path: "/mailbox", legacyAlias: "/review" },
+    ]);
+    expect(RETAINED_LEGACY_ROUTES).toEqual([
+      "/chat",
+      "/agent",
+      "/review",
+      "/builder",
+      "/life",
+      "/map",
+      "/memory",
+      "/runs",
+      "/settings",
+      "/mcp",
+      "/a2a",
+      "/metrics",
+      "/versions",
+      "/calibration",
+    ]);
+    expect(AGENT_STAGE_ASSET_ROOT).toBe("/assets/agent-stage");
+  });
+
+  it.each([
+    ["/companion", "陪伴", "陪跑现场"],
+    ["/today", "今日", "今日驾驶舱"],
+    ["/life-model", "Life Model", "人生模型构建"],
+    ["/mailbox", "邮箱", "Review Center"],
+  ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText(expectedText)).toBeInTheDocument();
+  });
+
+  it("keeps Settings reachable as a secondary route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("试用控制台")).toBeInTheDocument();
+  });
+
+  it("keeps Runs reachable as a secondary route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/runs"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByRole("heading", { name: "Runs" })).toBeInTheDocument();
   });
 });

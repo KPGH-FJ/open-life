@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
 import type { SystemDiagnostics } from "../tauri";
+import { FORBIDDEN_ORDINARY_CHAT_COMMANDS } from "@/test/ordinaryChatForbiddenCommands";
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
@@ -493,7 +494,7 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
-  it("keeps Send on the existing chat stream path without calling governed preview or gate check", async () => {
+  it("keeps Send on the existing chat stream path without calling forbidden governed commands", async () => {
     render(
       <BrowserRouter>
         <ChatPage />
@@ -515,198 +516,12 @@ describe("ChatPage", () => {
       );
     });
 
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_multi_strategy_agent_preview")
-    ).toBe(false);
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "check_runtime_migration_gate")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_pilot_eligibility")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "record_controlled_pilot_promotion_evidence")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_controlled_pilot_promotion_readiness")
-    ).toBe(false);
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "draft_controlled_chat_migration_plan")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "record_controlled_chat_migration_review_decision")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_controlled_chat_migration_review_decision_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_migration_implementation_gate")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "run_controlled_chat_migration_shadow_run")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "record_controlled_chat_migration_shadow_review_decision"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_controlled_chat_migration_shadow_review_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_controlled_chat_cutover_readiness")
-    ).toBe(false);
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_controlled_chat_cutover_candidate")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "record_controlled_chat_cutover_candidate_review_decision"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_controlled_chat_cutover_candidate_review_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "check_controlled_chat_cutover_candidate_promotion_readiness"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_default_chat_runtime_boundary_status")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "draft_default_chat_adapter_activation_plan")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "record_default_chat_adapter_activation_review_decision"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_activation_review_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "check_default_chat_adapter_activation_implementation_gate"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_routing_status")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_default_chat_adapter_contract_harness")
-    ).toBe(false);
-    expect(
-      vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "run_default_chat_adapter_dry_run")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "record_default_chat_adapter_dry_run_review_decision")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_dry_run_review_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "check_default_chat_adapter_implementation_readiness")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "run_default_chat_adapter_controlled_preview")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "record_default_chat_adapter_controlled_preview_review_decision"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "get_default_chat_adapter_controlled_preview_review_summary"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "check_default_chat_adapter_controlled_preview_approval_readiness"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "draft_default_chat_adapter_cutover_implementation_plan"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "record_default_chat_adapter_cutover_plan_review_decision"
-        )
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(([cmd]) => cmd === "get_default_chat_adapter_cutover_plan_review_summary")
-    ).toBe(false);
-    expect(
-      vi
-        .mocked(invoke)
-        .mock.calls.some(
-          ([cmd]) => cmd === "check_default_chat_adapter_cutover_plan_approval_readiness"
-        )
-    ).toBe(false);
+    for (const forbiddenCommand of FORBIDDEN_ORDINARY_CHAT_COMMANDS) {
+      expect(
+        vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === forbiddenCommand),
+        `${forbiddenCommand} must not be called by ordinary Send`
+      ).toBe(false);
+    }
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {

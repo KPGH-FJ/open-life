@@ -20,6 +20,7 @@ const RunsPage = React.lazy(() => import("./pages/RunsPage"));
 const AgentRunDetail = React.lazy(() => import("./pages/AgentRunDetail"));
 const MetricsPage = React.lazy(() => import("./pages/MetricsPage"));
 import { getSystemDiagnostics, hasCompletedOnboarding, type SystemDiagnostics } from "./tauri";
+import { productRoutePath } from "./productShellContract";
 import { getSafeModeReason, isSafeMode } from "./utils/safeMode";
 import { initPerformanceMonitoring } from "./utils/performance";
 
@@ -273,6 +274,11 @@ function App() {
         <ErrorBoundary>
           <Suspense fallback={<LoadingSpinner text="加载中..." />}>
             <Routes>
+              {/* W159 product route aliases; ProductShell and replacement pages start in W160+. */}
+              <Route path={productRoutePath("陪伴")} element={<ChatPage />} />
+              <Route path={productRoutePath("今日")} element={<DashboardPage />} />
+              <Route path={productRoutePath("Life Model")} element={<BuilderPage />} />
+              <Route path={productRoutePath("邮箱")} element={<ProposalReviewPage />} />
               <Route path="/" element={<DashboardPage />} />
               <Route path="/workspace" element={<DashboardPage />} />
               {/* Agent: Chat + Runs */}
