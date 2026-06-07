@@ -13,6 +13,7 @@ const MemorySearch = React.lazy(() => import("./pages/MemorySearch"));
 const A2APage = React.lazy(() => import("./pages/A2APage"));
 const McpPage = React.lazy(() => import("./pages/McpPage"));
 const BuilderPage = React.lazy(() => import("./pages/BuilderPage"));
+const LifeModelPage = React.lazy(() => import("./pages/LifeModelPage"));
 const DashboardPage = React.lazy(() => import("./pages/DashboardPage"));
 const SettingsPage = React.lazy(() => import("./pages/SettingsPage"));
 const CalibrationPage = React.lazy(() => import("./pages/CalibrationPage"));
@@ -182,7 +183,7 @@ function App() {
               {/* W159 product route aliases; ProductShell and replacement pages start in W160+. */}
               <Route path={productRoutePath("陪伴")} element={<CompanionPage />} />
               <Route path={productRoutePath("今日")} element={<DashboardPage />} />
-              <Route path={productRoutePath("Life Model")} element={<BuilderPage />} />
+              <Route path={productRoutePath("Life Model")} element={<LifeModelPage />} />
               <Route path={productRoutePath("邮箱")} element={<MailboxPage />} />
               <Route path="/" element={<DashboardPage />} />
               <Route path="/workspace" element={<DashboardPage />} />

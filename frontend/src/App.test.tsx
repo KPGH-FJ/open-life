@@ -300,7 +300,7 @@ describe("App onboarding", () => {
   it.each([
     ["/companion", "陪伴", "聊天就绪"],
     ["/today", "今日", "今日驾驶舱"],
-    ["/life-model", "Life Model", "人生模型构建"],
+    ["/life-model", "Life Model", "life-model-page"],
     ["/mailbox", "邮箱", "mailbox-page"],
   ])("renders the %s product entry for %s", async (path, _label, expectedText) => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
@@ -314,11 +314,43 @@ describe("App onboarding", () => {
       </MemoryRouter>
     );
 
-    if (expectedText === "mailbox-page") {
+    if (expectedText.endsWith("-page")) {
       expect(await screen.findByTestId(expectedText)).toBeInTheDocument();
     } else {
       expect(await screen.findByText(expectedText)).toBeInTheDocument();
     }
+  });
+
+  it.each(["/builder", "/life"])("keeps %s on the legacy BuilderPage route", async path => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("人生模型构建")).toBeInTheDocument();
+    expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
+  });
+
+  it("keeps /memory on the legacy MemorySearch route", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/memory"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("语义检索记忆")).toBeInTheDocument();
+    expect(screen.queryByTestId("life-model-page")).not.toBeInTheDocument();
   });
 
   it("keeps /review on the legacy ProposalReviewPage route", async () => {
