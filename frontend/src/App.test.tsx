@@ -233,6 +233,36 @@ describe("App onboarding", () => {
     expect(AGENT_STAGE_ASSET_ROOT).toBe("/assets/agent-stage");
   });
 
+  it("renders W160 product tabs with an active companion tab and secondary tools", async () => {
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "has_completed_onboarding") return Promise.resolve(true);
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <App />
+      </MemoryRouter>
+    );
+
+    for (const route of PRIMARY_PRODUCT_ROUTES) {
+      expect(await screen.findByRole("link", { name: route.label })).toHaveAttribute(
+        "href",
+        route.path
+      );
+    }
+
+    expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute("href", "/runs");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
+
+    fireEvent.click(screen.getByRole("button", { name: /二级入口/ }));
+
+    for (const label of ["MCP", "A2A", "Metrics", "Versions", "Calibration"]) {
+      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    }
+  });
+
   it.each([
     ["/companion", "陪伴", "陪跑现场"],
     ["/today", "今日", "今日驾驶舱"],
