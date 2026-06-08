@@ -29,28 +29,28 @@ type FolderId = "pending" | "accepted" | "archived" | "needs_edit";
 type QuickAction = "accept" | "reject" | "postpone";
 
 const FOLDERS: Array<{ id: FolderId; label: string; icon: typeof Inbox }> = [
-  { id: "pending", label: "待处理", icon: Inbox },
-  { id: "accepted", label: "已接受", icon: Check },
-  { id: "archived", label: "已拒绝/已归档", icon: Archive },
-  { id: "needs_edit", label: "需要修改", icon: Edit2 },
+  { id: "pending", label: "收件箱", icon: Inbox },
+  { id: "accepted", label: "已同意", icon: Check },
+  { id: "archived", label: "已处理", icon: Archive },
+  { id: "needs_edit", label: "草稿修改", icon: Edit2 },
 ];
 
 const TYPE_LABELS: Record<string, string> = {
-  life_model_update: "Life Model update",
-  goal_update: "Goal update",
-  state_update: "State update",
-  preference_update: "Preference update",
-  capability_update: "Capability update",
-  memory_write: "Memory write",
-  memory_archive: "Memory archive",
-  tool_permission: "Tool permission",
-  plugin_permission: "Plugin permission",
-  schedule_checkin: "Schedule check-in",
-  scheduled_task: "Scheduled task",
-  external_write_action: "External write",
-  model_policy_change: "Model policy",
-  data_export: "Data export",
-  unsupported: "Unsupported proposal",
+  life_model_update: "Life Model 调整",
+  goal_update: "目标更新",
+  state_update: "状态更新",
+  preference_update: "偏好记录",
+  capability_update: "能力更新",
+  memory_write: "记住偏好",
+  memory_archive: "整理记忆",
+  tool_permission: "外部操作确认",
+  plugin_permission: "外部操作确认",
+  schedule_checkin: "提醒确认",
+  scheduled_task: "外部操作确认",
+  external_write_action: "外部操作确认",
+  model_policy_change: "模型策略确认",
+  data_export: "外部操作确认",
+  unsupported: "暂不支持的确认",
 };
 
 function isUnsupportedType(type: string): boolean {
@@ -64,7 +64,20 @@ function typeLabel(type: string): string {
 }
 
 function proposalSubject(proposal: AgentProposal): string {
-  return `${typeLabel(proposal.proposalType)} · ${proposal.affectedPath || "未指定路径"}`;
+  if (proposal.proposalType === "goal_update") return "OpenLife 想更新一个目标";
+  if (proposal.proposalType === "memory_write" || proposal.proposalType === "preference_update") {
+    return "OpenLife 想记住一条偏好";
+  }
+  if (
+    proposal.proposalType === "tool_permission" ||
+    proposal.proposalType === "plugin_permission" ||
+    proposal.proposalType === "scheduled_task" ||
+    proposal.proposalType === "external_write_action" ||
+    proposal.proposalType === "data_export"
+  ) {
+    return "OpenLife 需要你确认一次外部操作";
+  }
+  return "OpenLife 想调整 Life Model";
 }
 
 function folderMatches(proposal: AgentProposal, folder: FolderId): boolean {
@@ -76,38 +89,34 @@ function folderMatches(proposal: AgentProposal, folder: FolderId): boolean {
   return proposal.status === "edited";
 }
 
-function senderFor(proposal: AgentProposal): string {
-  if (proposal.proposalType.includes("memory")) return "Memory";
-  if (
-    proposal.proposalType.includes("tool") ||
-    proposal.proposalType.includes("plugin") ||
-    proposal.proposalType === "scheduled_task" ||
-    proposal.proposalType === "external_write_action" ||
-    proposal.proposalType === "data_export" ||
-    proposal.proposalType === "model_policy_change"
-  ) {
-    return "Tool";
-  }
-  if (
-    proposal.source === "skill_runtime" ||
-    proposal.source === "chat_conversation" ||
-    proposal.source === "planning_session" ||
-    proposal.source === "proactive_agent"
-  ) {
-    return "Agent";
-  }
-  if (
-    proposal.proposalType === "life_model_update" ||
-    proposal.proposalType === "goal_update" ||
-    proposal.proposalType === "state_update" ||
-    proposal.proposalType === "preference_update" ||
-    proposal.proposalType === "capability_update" ||
-    proposal.source === "builder_review" ||
-    proposal.source === "calibration_run"
-  ) {
-    return "Life Model";
-  }
+function senderFor(_proposal: AgentProposal): string {
   return "OpenLife";
+}
+
+function sourceLabel(source: string): string {
+  const labels: Record<string, string> = {
+    builder_review: "构建",
+    calibration_run: "校准",
+    feedback_evolution: "反馈",
+    memory_governance: "记忆整理",
+    skill_runtime: "技能候选",
+    plugin: "插件",
+    manual: "手动调整",
+    chat_conversation: "对话",
+    proactive_agent: "OpenLife 主动提醒",
+    planning_session: "规划",
+  };
+  return labels[source] ?? "OpenLife";
+}
+
+function impactLabel(risk: AgentProposal["riskLevel"]): string {
+  const labels: Record<AgentProposal["riskLevel"], string> = {
+    low: "低",
+    medium: "中",
+    high: "高",
+    critical: "严重",
+  };
+  return labels[risk] ?? String(risk);
 }
 
 function riskClass(risk: AgentProposal["riskLevel"]): string {
@@ -193,14 +202,14 @@ function actionBlockedReason(
   safeModeActive: boolean,
   safePaths: string[]
 ): string | null {
-  if (safeModeActive) return "Safe Mode 下无法应用或编辑 Proposal。";
-  if (proposal.status !== "pending") return "只有 pending Proposal 可以被应用。";
+  if (safeModeActive) return "Safe Mode 下无法同意或编辑。";
+  if (proposal.status !== "pending") return "只有收件箱里的待回复内容可以同意。";
   if (isUnsupportedType(proposal.proposalType)) {
-    return "该 Proposal 类型当前尚未接入应用器，不能接受。";
+    return "这类确认当前尚未接入应用器，不能同意。";
   }
   const path = externalWritePath(proposal);
   if (proposal.proposalType === "external_write_action" && !isPathInSafePaths(path, safePaths)) {
-    return "目标路径不在 Safe Paths 内，不能应用。";
+    return "目标路径不在 Safe Paths 内，不能同意。";
   }
   return null;
 }
@@ -219,19 +228,19 @@ function appliedNotice(proposal: AgentProposal): string {
     proposal.proposalType === "model_policy_change" ||
     proposal.proposalType === "data_export"
   ) {
-    return `已处理 Proposal：${proposal.affectedPath}`;
+    return `已处理确认：${proposal.affectedPath}`;
   }
   return `已应用到人生模型：${proposal.affectedPath}`;
 }
 
 function statusLabel(status: ProposalStatus): string {
   const labels: Record<ProposalStatus, string> = {
-    pending: "pending",
-    accepted: "accepted",
-    rejected: "rejected",
-    edited: "edited",
-    postponed: "postponed",
-    expired: "expired",
+    pending: "待回复",
+    accepted: "已同意",
+    rejected: "不同意",
+    edited: "已修改",
+    postponed: "稍后再说",
+    expired: "已处理",
   };
   return labels[status];
 }
@@ -265,7 +274,7 @@ export default function MailboxPage() {
       setDiagnostics(diag);
       setSafePaths((config as AppConfig | null)?.system?.safe_paths ?? []);
     } catch (err) {
-      setError(`加载 Proposal 失败：${String(err)}`);
+      setError(`加载邮箱失败：${String(err)}`);
     } finally {
       setLoading(false);
     }
@@ -323,10 +332,10 @@ export default function MailboxPage() {
         setNotice(appliedNotice(proposal));
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
-        setNotice(`已拒绝：${proposal.affectedPath}`);
+        setNotice(`已不同意：${proposal.affectedPath}`);
       } else {
         await postponeProposal(proposal.id);
-        setNotice(`已稍后处理：${proposal.affectedPath}`);
+        setNotice(`已标记稍后再说：${proposal.affectedPath}`);
       }
       await load();
     } catch (err) {
@@ -336,9 +345,9 @@ export default function MailboxPage() {
       } else if (message.includes("无法转换")) {
         setError(`应用失败：值类型与字段 "${proposal.affectedPath}" 不匹配。`);
       } else if (message.includes("尚未接入应用器") || message.includes("not supported")) {
-        setError("应用失败：该 Proposal 类型在当前版本中尚未支持。Proposal 将保持 pending 状态。");
+        setError("处理失败：这类确认在当前版本中尚未支持，会继续留在收件箱。");
       } else {
-        setError(`处理 Proposal 失败：${message}`);
+        setError(`处理失败：${message}`);
       }
     } finally {
       setActingId(null);
@@ -359,7 +368,7 @@ export default function MailboxPage() {
 
   const saveEdit = async (proposal: AgentProposal) => {
     if (safeModeActive) {
-      setError("Safe Mode 下无法应用或编辑 Proposal。");
+      setError("Safe Mode 下无法同意或编辑。");
       return;
     }
 
@@ -404,7 +413,7 @@ export default function MailboxPage() {
             </div>
             <h2 className="text-xl font-bold tracking-normal text-stone-950">邮箱</h2>
             <span className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-xs text-stone-600">
-              {folderCounts.pending} pending
+              待回复 {folderCounts.pending}
             </span>
           </div>
           <button
@@ -421,7 +430,7 @@ export default function MailboxPage() {
           <div className="shrink-0 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
             <div className="font-semibold">系统处于 Safe Mode</div>
             <div className="mt-1 text-xs text-amber-800">
-              {safeModeReason} 当前仅可查看、拒绝或稍后处理 Proposal，无法接受或编辑。
+              {safeModeReason} 当前仅可查看、不同意或稍后再说，无法同意或编辑。
             </div>
           </div>
         )}
@@ -477,12 +486,12 @@ export default function MailboxPage() {
 
             <div className="min-h-0 flex-1 overflow-auto">
               {loading ? (
-                <div className="p-4 text-sm text-stone-500">正在加载 Proposal...</div>
+                <div className="p-4 text-sm text-stone-500">正在加载邮件...</div>
               ) : visibleProposals.length === 0 ? (
                 <div className="flex h-full min-h-[260px] flex-col items-center justify-center p-8 text-center">
                   <Inbox size={36} className="text-stone-300" aria-hidden="true" />
                   <div className="mt-3 text-sm font-semibold text-stone-800">没有邮件</div>
-                  <div className="mt-1 text-xs text-stone-500">当前文件夹没有 Proposal。</div>
+                  <div className="mt-1 text-xs text-stone-500">当前文件夹没有待确认内容。</div>
                 </div>
               ) : (
                 <div className="divide-y divide-stone-100">
@@ -518,7 +527,7 @@ export default function MailboxPage() {
                               proposal.riskLevel
                             )}`}
                           >
-                            {proposal.riskLevel}
+                            影响：{impactLabel(proposal.riskLevel)}
                           </span>
                         </div>
                         <div className="mt-1 line-clamp-2 text-xs leading-5 text-stone-500">
@@ -534,7 +543,7 @@ export default function MailboxPage() {
                           </span>
                           {isUnsupportedType(proposal.proposalType) && (
                             <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-800">
-                              暂不支持
+                              暂不支持同意
                             </span>
                           )}
                         </div>
@@ -555,11 +564,11 @@ export default function MailboxPage() {
                 <header className="border-b border-stone-100 px-5 py-4">
                   <div className="flex flex-wrap items-center gap-2 text-xs text-stone-500">
                     <span className="font-semibold text-stone-950">{senderFor(selectedProposal)}</span>
-                    <span>to You</span>
+                    <span>给你</span>
                     <span>{formatDate(selectedProposal.createdAt)}</span>
                   </div>
                   <h3 className="mt-2 text-lg font-bold tracking-normal text-stone-950">
-                    主题：{proposalSubject(selectedProposal)}
+                    {proposalSubject(selectedProposal)}
                   </h3>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span
@@ -567,17 +576,17 @@ export default function MailboxPage() {
                         selectedProposal.riskLevel
                       )}`}
                     >
-                      risk {selectedProposal.riskLevel}
+                      影响：{impactLabel(selectedProposal.riskLevel)}
                     </span>
                     <span
                       className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${statusClass(
                         selectedProposal.status
                       )}`}
                     >
-                      status {statusLabel(selectedProposal.status)}
+                      状态：{statusLabel(selectedProposal.status)}
                     </span>
                     <span className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
-                      confidence {Math.round(selectedProposal.confidence * 100)}%
+                      把握：{Math.round(selectedProposal.confidence * 100)}%
                     </span>
                   </div>
                 </header>
@@ -585,20 +594,30 @@ export default function MailboxPage() {
                 <div className="space-y-4 px-5 py-4">
                   <section>
                     <div className="text-xs font-semibold uppercase tracking-normal text-stone-400">
-                      reason
+                      OpenLife 想做什么
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-stone-800">
+                      {proposalSubject(selectedProposal)}
+                    </p>
+                  </section>
+
+                  <section>
+                    <div className="text-xs font-semibold uppercase tracking-normal text-stone-400">
+                      为什么问你
                     </div>
                     <p className="mt-2 text-sm leading-6 text-stone-800">{selectedProposal.reason}</p>
                   </section>
 
                   <section className="rounded-lg border border-stone-200 bg-stone-50 p-4">
                     <div className="text-xs font-semibold uppercase tracking-normal text-stone-500">
-                      impact / boundary
+                      会影响哪里
                     </div>
                     <div className="mt-3 grid gap-2 text-sm text-stone-700 md:grid-cols-2">
-                      <div>目标：{selectedProposal.affectedPath}</div>
+                      <div>位置：{selectedProposal.affectedPath}</div>
+                      <div>类型：{typeLabel(selectedProposal.proposalType)}</div>
                       <div>变更摘要：{metadataValueSummary(selectedProposal.after)}</div>
-                      <div>来源：{selectedProposal.source}</div>
-                      <div>状态：{selectedProposal.status}</div>
+                      <div>来源：{sourceLabel(selectedProposal.source)}</div>
+                      <div>状态：{statusLabel(selectedProposal.status)}</div>
                       {selectedProposal.sourceDetail && (
                         <div className="md:col-span-2">
                           来源详情：{metadataValueSummary(selectedProposal.sourceDetail)}
@@ -613,7 +632,7 @@ export default function MailboxPage() {
 
                     {selectedProposal.proposalType === "external_write_action" && (
                       <div className="mt-3 rounded-md border border-stone-200 bg-white p-3 text-xs text-stone-600">
-                        <div className="font-semibold text-stone-700">External write boundary</div>
+                        <div className="font-semibold text-stone-700">外部操作边界</div>
                         <div className="mt-2 grid gap-1.5 md:grid-cols-2">
                           <div>路径：{selectedProposal.after?.path || "未提供"}</div>
                           <div>操作：{selectedProposal.after?.operation || "unknown"}</div>
@@ -631,7 +650,7 @@ export default function MailboxPage() {
                           </div>
                           {selectedProposal.after?.content_hash && (
                             <div className="md:col-span-2">
-                              digest {shortDigest(selectedProposal.after.content_hash)}
+                              摘要 {shortDigest(selectedProposal.after.content_hash)}
                             </div>
                           )}
                         </div>
@@ -645,8 +664,8 @@ export default function MailboxPage() {
                       <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                         <AlertTriangle size={14} className="mt-0.5 shrink-0" aria-hidden="true" />
                         <span>
-                          该 Proposal 仍必须通过确认中心处理；不支持的类型和 Safe Paths
-                          之外的写入不会被接受。
+                          这封信仍必须由你确认；暂不支持的类型和 Safe Paths
+                          之外的写入不会被同意。
                         </span>
                       </div>
                     )}
@@ -655,7 +674,7 @@ export default function MailboxPage() {
                   <section className="rounded-lg border border-sky-100 bg-sky-50 p-4">
                     <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-normal text-sky-800">
                       <ShieldCheck size={14} aria-hidden="true" />
-                      metadata-safe evidence
+                      依据摘要
                     </div>
                     {selectedProposal.whyOpenLifeThinksThis && (
                       <p className="mt-2 text-sm leading-6 text-sky-950">
@@ -670,12 +689,12 @@ export default function MailboxPage() {
                             <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-stone-500">
                               {summary.sourceAssetIds?.slice(0, 3).map(sourceId => (
                                 <span key={sourceId} className="rounded bg-stone-100 px-2 py-0.5">
-                                  source {sourceId}
+                                  来源 {sourceId}
                                 </span>
                               ))}
                               {shortDigest(summary.contentDigest) && (
                                 <span className="rounded bg-stone-100 px-2 py-0.5 font-mono">
-                                  digest {shortDigest(summary.contentDigest)}
+                                  摘要 {shortDigest(summary.contentDigest)}
                                 </span>
                               )}
                             </div>
@@ -699,14 +718,14 @@ export default function MailboxPage() {
                       (selectedProposal.evidenceSummaries?.length ?? 0) === 0 &&
                       (selectedProposal.behaviorChecks?.length ?? 0) === 0 && (
                         <div className="mt-2 text-sm text-sky-900">
-                          暂无可展示的 metadata-safe evidence summary。
+                          暂无可展示的依据摘要。
                         </div>
                       )}
                   </section>
 
                   <section className="rounded-lg border border-stone-200 p-4">
                     <div className="text-xs font-semibold uppercase tracking-normal text-stone-500">
-                      quick replies
+                      你的回复
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
@@ -720,11 +739,7 @@ export default function MailboxPage() {
                         className="inline-flex h-9 items-center gap-1.5 rounded-md bg-stone-900 px-3 text-sm font-medium text-white hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Check size={15} aria-hidden="true" />
-                        {safeModeActive
-                          ? "接受（Safe Mode）"
-                          : isUnsupportedType(selectedProposal.proposalType)
-                            ? "暂不支持"
-                            : "接受"}
+                        同意
                       </button>
                       <button
                         type="button"
@@ -733,7 +748,7 @@ export default function MailboxPage() {
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-rose-200 bg-white px-3 text-sm font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                       >
                         <X size={15} aria-hidden="true" />
-                        拒绝
+                        不同意
                       </button>
                       <button
                         type="button"
@@ -742,7 +757,7 @@ export default function MailboxPage() {
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
                       >
                         <Clock size={15} aria-hidden="true" />
-                        稍后
+                        稍后再说
                       </button>
                       <button
                         type="button"
@@ -751,14 +766,14 @@ export default function MailboxPage() {
                         className="inline-flex h-9 items-center gap-1.5 rounded-md border border-stone-200 bg-white px-3 text-sm font-medium text-stone-700 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         <Edit2 size={15} aria-hidden="true" />
-                        {safeModeActive ? "修改（Safe Mode）" : "修改"}
+                        改一下
                       </button>
                     </div>
 
                     {editingId === selectedProposal.id && (
                       <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3">
                         <label className="text-xs font-medium text-amber-900" htmlFor="mailbox-edit-after">
-                          新 after 值
+                          你想改成什么
                         </label>
                         <textarea
                           id="mailbox-edit-after"
@@ -766,7 +781,7 @@ export default function MailboxPage() {
                           onChange={event => setEditValue(event.target.value)}
                           rows={5}
                           className="mt-2 w-full rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 text-stone-800 outline-none focus:border-amber-500"
-                          placeholder="输入 JSON 或文本。原始 payload 不会在这里自动展开。"
+                          placeholder="输入 JSON 或文本。原始内容不会在这里自动展开。"
                         />
                         <div className="mt-2 flex gap-2">
                           <button
@@ -775,7 +790,7 @@ export default function MailboxPage() {
                             disabled={actingId === selectedProposal.id || editValue.trim().length === 0}
                             className="rounded-md bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
                           >
-                            保存修改
+                            保存
                           </button>
                           <button
                             type="button"
@@ -794,7 +809,7 @@ export default function MailboxPage() {
               <div className="flex h-full min-h-[420px] flex-col items-center justify-center p-8 text-center">
                 <Inbox size={42} className="text-stone-300" aria-hidden="true" />
                 <div className="mt-4 text-base font-semibold text-stone-800">选择一封邮件</div>
-                <div className="mt-1 text-sm text-stone-500">左侧列表中没有可阅读的 Proposal。</div>
+                <div className="mt-1 text-sm text-stone-500">左侧列表中没有可阅读的邮件。</div>
               </div>
             )}
           </main>

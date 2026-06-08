@@ -119,7 +119,10 @@ describe("LifeModelPage", () => {
     expect(await screen.findByTestId("life-model-page")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Life Model" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "构建" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByText("构建状态")).toBeInTheDocument();
+    expect(screen.getAllByText("构建状态").length).toBeGreaterThan(0);
+    expect(screen.getByText("快速构建")).toBeInTheDocument();
+    expect(screen.getByText("对话构建")).toBeInTheDocument();
+    expect(screen.getByText("从已有内容整理")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "概览" }));
     expect(screen.getByRole("tab", { name: "概览" })).toHaveAttribute("aria-selected", "true");
@@ -186,14 +189,29 @@ describe("LifeModelPage", () => {
   it("keeps builder, memory, and mailbox reachable", async () => {
     renderPage();
 
-    expect(await screen.findByRole("link", { name: "打开 Builder" })).toHaveAttribute(
+    expect(await screen.findByRole("link", { name: "开始快速构建" })).toHaveAttribute(
       "href",
       "/builder"
     );
+    expect(screen.getByRole("link", { name: "开始对话构建" })).toHaveAttribute(
+      "href",
+      "/builder"
+    );
+    expect(screen.getByRole("button", { name: "暂不可用" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("tab", { name: "依据" }));
     expect(screen.getByRole("link", { name: "查看记忆" })).toHaveAttribute("href", "/memory");
     expect(screen.getByRole("link", { name: "打开邮箱" })).toHaveAttribute("href", "/mailbox");
+  });
+
+  it("uses product language instead of engineering readiness/proposal labels in the build tab", async () => {
+    renderPage();
+
+    expect((await screen.findAllByText("构建状态")).length).toBeGreaterThan(0);
+    expect(screen.getByText("构建产生候选，邮箱确认后才会更新 Life Model。")).toBeInTheDocument();
+    expect(screen.queryByText("Builder readiness")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Builder review/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/proposal/i)).not.toBeInTheDocument();
   });
 
   it("does not show direct-write actions in Safe Mode", async () => {
@@ -215,7 +233,7 @@ describe("LifeModelPage", () => {
     for (const label of ["保存模型", "应用更改", "直接写入", "批量接受", "接受全部"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
-    expect(screen.getByRole("link", { name: "打开 Builder" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "开始快速构建" })).toBeInTheDocument();
   });
 
   it("does not import write, migration, governed preview, or Skill Runtime wrappers", () => {

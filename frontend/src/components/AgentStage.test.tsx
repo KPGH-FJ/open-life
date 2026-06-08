@@ -3,13 +3,13 @@ import { describe, expect, it } from "vitest";
 import AgentStage, { AGENT_STAGE_STATES, type AgentStageState } from "./AgentStage";
 
 const expectedLabels: Record<AgentStageState, string> = {
-  idle: "在场",
+  idle: "安静待命",
   listening: "正在听",
   sorting: "整理中",
-  memory: "查看依据",
-  planning: "形成下一步",
-  review: "等待确认",
-  privacy: "边界保护",
+  memory: "翻看记忆",
+  planning: "规划下一步",
+  review: "有信等你回",
+  privacy: "边界开启",
   error: "需要修复",
 };
 
@@ -31,8 +31,17 @@ describe("AgentStage", () => {
 
     const status = screen.getByRole("status", { name: /OpenLife Agent 状态/ });
     expect(status).toHaveAttribute("aria-live", "polite");
-    expect(within(status).getByText("形成下一步")).toBeInTheDocument();
+    expect(within(status).getByText("规划下一步")).toBeInTheDocument();
     expect(within(status).getByText(/压缩成一小步可执行的路径/)).toBeInTheDocument();
+  });
+
+  it("uses the cat yarn image as the visual figure", () => {
+    render(<AgentStage state="idle" />);
+
+    expect(screen.getByTestId("agent-stage-figure")).toHaveAttribute(
+      "src",
+      expect.stringContaining("cat-yarn.png")
+    );
   });
 
   it("does not render raw prompt, memory, LifeModel, or tool payload fields", () => {
@@ -52,14 +61,12 @@ describe("AgentStage", () => {
     expect(screen.queryByText(/filesystem write/i)).not.toBeInTheDocument();
   });
 
-  it("includes reduced-motion safeguards on animated stage elements", () => {
-    render(<AgentStage state="listening" />);
+  it("keeps the visual figure static without animation utility classes", () => {
+    render(<AgentStage state="review" />);
 
-    const animatedElements = screen.getAllByTestId("agent-stage-motion");
-    expect(animatedElements.length).toBeGreaterThan(0);
-    for (const element of animatedElements) {
-      expect(element.className).toContain("motion-reduce:animate-none");
-      expect(element.className).toContain("motion-reduce:transition-none");
-    }
+    const figure = screen.getByTestId("agent-stage-figure");
+    expect(figure.className).not.toContain("animate-");
+    expect(figure.className).not.toContain("transition");
+    expect(screen.queryByTestId("agent-stage-motion")).not.toBeInTheDocument();
   });
 });

@@ -41,7 +41,7 @@ describe("CompanionPage", () => {
     expect(await screen.findByPlaceholderText(/输入消息/)).toBeInTheDocument();
   });
 
-  it("moves AgentStage into listening when the composer receives focus", async () => {
+  it("keeps AgentStage static when the composer receives focus", async () => {
     render(
       <BrowserRouter>
         <CompanionPage />
@@ -52,11 +52,11 @@ describe("CompanionPage", () => {
     fireEvent.focus(textarea);
 
     await waitFor(() => {
-      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "listening");
+      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
     });
   });
 
-  it("keeps ordinary Send on startStreamMessage and moves AgentStage into sorting", async () => {
+  it("keeps ordinary Send on startStreamMessage without animating AgentStage state", async () => {
     render(
       <BrowserRouter>
         <CompanionPage />
@@ -64,7 +64,7 @@ describe("CompanionPage", () => {
     );
 
     const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
+    await screen.findByText("在线");
     fireEvent.change(textarea, { target: { value: "默认发送仍然走普通聊天" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
@@ -77,7 +77,7 @@ describe("CompanionPage", () => {
         })
       );
     });
-    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "sorting");
+    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
 
     for (const forbiddenCommand of FORBIDDEN_ORDINARY_CHAT_COMMANDS) {
       expect(
@@ -87,7 +87,7 @@ describe("CompanionPage", () => {
     }
   });
 
-  it("moves AgentStage into error when the ordinary stream send fails", async () => {
+  it("keeps AgentStage static when the ordinary stream send fails", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "start_stream_message") {
         return Promise.reject(new Error("DeepSeek error 401: invalid API Key"));
@@ -102,16 +102,16 @@ describe("CompanionPage", () => {
     );
 
     const textarea = await screen.findByPlaceholderText(/输入消息/);
-    await screen.findByText("聊天就绪");
+    await screen.findByText("在线");
     fireEvent.change(textarea, { target: { value: "测试错误路径" } });
     fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
 
-    expect(await screen.findByText(/DeepSeek 鉴权失败/)).toBeInTheDocument();
-    expect(screen.getByText(/去设置页查看“试用就绪检查”/)).toBeInTheDocument();
-    expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "error");
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
+    });
   });
 
-  it("moves AgentStage into review when pending proposals are visible", async () => {
+  it("keeps AgentStage static when pending proposals are visible", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_pending_proposals") {
         return Promise.resolve([
@@ -138,13 +138,13 @@ describe("CompanionPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText(/1 个待处理提案/)).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "review");
+      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
     });
+    expect(screen.queryByText("有信等你回")).not.toBeInTheDocument();
   });
 
-  it("moves AgentStage into privacy when Safe Mode is active", async () => {
+  it("keeps AgentStage static when Safe Mode is active", async () => {
     vi.mocked(invoke).mockImplementation(async (cmd: string, args?: Record<string, any>) => {
       if (cmd === "get_system_diagnostics") {
         const base = (await mockInvoke(cmd, args)) as Record<string, any>;
@@ -164,10 +164,24 @@ describe("CompanionPage", () => {
       </BrowserRouter>
     );
 
-    expect(await screen.findByText(/Safe Mode：/)).toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "privacy");
+      expect(screen.getByTestId("agent-stage")).toHaveAttribute("data-state", "idle");
     });
+    expect(screen.queryByText("边界开启")).not.toBeInTheDocument();
+  });
+
+  it("does not render left-stage shortcut actions below the visual", async () => {
+    render(
+      <BrowserRouter>
+        <CompanionPage />
+      </BrowserRouter>
+    );
+
+    await screen.findByTestId("agent-stage");
+    expect(screen.queryByRole("navigation", { name: "陪伴快捷动作" })).not.toBeInTheDocument();
+    for (const label of ["整理今天", "看看记忆", "低压力计划", "处理待确认"]) {
+      expect(screen.queryByRole("link", { name: label })).not.toBeInTheDocument();
+    }
   });
 
   it("does not expose direct-write assistant quick actions on the product companion surface", async () => {

@@ -167,27 +167,38 @@ describe("MailboxPage", () => {
 
     expect(await screen.findByTestId("mailbox-page")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "邮箱" })).toBeInTheDocument();
-    expect(screen.getByText("待处理")).toBeInTheDocument();
-    expect(screen.getAllByText("Life Model").length).toBeGreaterThan(0);
-    expect(screen.getByText("Goal update · goals.short_term[0].name")).toBeInTheDocument();
-    expect(screen.getByText("Plugin permission · plugins.demo.write")).toBeInTheDocument();
+    expect(screen.getByText("收件箱")).toBeInTheDocument();
+    expect(screen.getByText("已同意")).toBeInTheDocument();
+    expect(screen.getByText("已处理")).toBeInTheDocument();
+    expect(screen.getByText("草稿修改")).toBeInTheDocument();
+    expect(screen.getAllByText("OpenLife").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("OpenLife 想更新一个目标").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("OpenLife 需要你确认一次外部操作").length).toBeGreaterThan(0);
   });
 
   it("selects rows and renders the selected proposal reader", async () => {
     render(<MailboxPage />);
 
-    expect(await screen.findByText("Goal update · goals.short_term[0].name")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Plugin permission · plugins.demo.write/ }));
+    expect((await screen.findAllByText("OpenLife 想更新一个目标")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /OpenLife 需要你确认一次外部操作/ }));
 
-    expect(screen.getByTestId("mail-reader")).toHaveTextContent("Tool");
-    expect(screen.getByText("Plugin permission · plugins.demo.write")).toBeInTheDocument();
+    expect(screen.getByTestId("mail-reader")).toHaveTextContent("OpenLife");
+    expect(screen.getAllByText("OpenLife 需要你确认一次外部操作").length).toBeGreaterThan(0);
     expect(screen.getByTestId("mail-reader")).toHaveTextContent("插件请求获得写权限。");
-    expect(screen.getByText(/目标：plugins\.demo\.write/)).toBeInTheDocument();
+    expect(screen.getByText(/会影响哪里/)).toBeInTheDocument();
+    expect(screen.getByText(/plugins\.demo\.write/)).toBeInTheDocument();
   });
 
-  it("shows reason, impact, and metadata-safe evidence in the reader", async () => {
+  it("shows human reader sections with impact, confidence, and evidence summary", async () => {
     render(<MailboxPage />);
 
+    expect(await screen.findByText("OpenLife 想做什么")).toBeInTheDocument();
+    expect(screen.getByText("为什么问你")).toBeInTheDocument();
+    expect(screen.getByText("会影响哪里")).toBeInTheDocument();
+    expect(screen.getByText("依据摘要")).toBeInTheDocument();
+    expect(screen.getByText("你的回复")).toBeInTheDocument();
+    expect(screen.getAllByText(/影响：低/).length).toBeGreaterThan(0);
+    expect(screen.getByText(/把握：86%/)).toBeInTheDocument();
     expect(await screen.findByTestId("mail-reader")).toHaveTextContent(
       "Builder review produced a confirmed low-risk goal candidate."
     );
@@ -199,7 +210,7 @@ describe("MailboxPage", () => {
   it("accepts a low-risk proposal through the existing acceptProposal command", async () => {
     render(<MailboxPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "接受" }));
+    fireEvent.click(await screen.findByRole("button", { name: "同意" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -215,9 +226,9 @@ describe("MailboxPage", () => {
   it("does not allow unsupported proposal types to be accepted", async () => {
     render(<MailboxPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /Plugin permission · plugins.demo.write/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /OpenLife 需要你确认一次外部操作/ }));
 
-    const unsupportedAccept = await screen.findByRole("button", { name: "暂不支持" });
+    const unsupportedAccept = await screen.findByRole("button", { name: "同意" });
     expect(unsupportedAccept).toBeDisabled();
     fireEvent.click(unsupportedAccept);
 
@@ -231,7 +242,7 @@ describe("MailboxPage", () => {
   it("rejects through an existing quick reply command", async () => {
     render(<MailboxPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "拒绝" }));
+    fireEvent.click(await screen.findByRole("button", { name: "不同意" }));
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith(
@@ -244,14 +255,33 @@ describe("MailboxPage", () => {
     });
   });
 
+  it("postpones and starts edits through existing quick reply commands", async () => {
+    render(<MailboxPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "稍后再说" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "postpone_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-low-1",
+          proposal_id: "proposal-low-1",
+        })
+      );
+    });
+
+    fireEvent.click(await screen.findByRole("button", { name: "改一下" }));
+    expect(await screen.findByLabelText("你想改成什么")).toBeInTheDocument();
+  });
+
   it("keeps Safe Mode protection on accept and edit quick replies", async () => {
     mockProposals([lowRiskProposal], true);
 
     render(<MailboxPage />);
 
     expect(await screen.findByText("系统处于 Safe Mode")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "接受（Safe Mode）" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "修改（Safe Mode）" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "同意" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "改一下" })).toBeDisabled();
 
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "accept_proposal")).toBe(false);
     expect(vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === "edit_proposal")).toBe(false);

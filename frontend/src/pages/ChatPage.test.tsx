@@ -494,6 +494,54 @@ describe("ChatPage", () => {
     expect(saveCalls).toHaveLength(0);
   });
 
+  it("ignores duplicate stream completion events for the same run", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "今天星期几" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: "session-1",
+          session_id: "session-1",
+        })
+      );
+    });
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    const donePayload = {
+      session_id: "session-1",
+      run_id: "run-duplicate-done",
+      reply: "今天是星期一。",
+      reasoning_trace: null,
+      tool_calls: [],
+    };
+
+    await act(async () => {
+      await doneHandler?.({ payload: donePayload });
+      await doneHandler?.({ payload: donePayload });
+      await Promise.resolve();
+    });
+
+    expect(screen.getAllByText("今天是星期一。")).toHaveLength(1);
+  });
+
   it("keeps Send on the existing chat stream path without calling forbidden governed commands", async () => {
     render(
       <BrowserRouter>
@@ -522,6 +570,91 @@ describe("ChatPage", () => {
         `${forbiddenCommand} must not be called by ordinary Send`
       ).toBe(false);
     }
+  });
+
+  it("shows lightweight trust status and run evidence in companion mode only", async () => {
+    const companionRun = {
+      id: "run-chat-1",
+      taskId: "task-chat-1",
+      sessionId: "session-1",
+      status: "completed",
+      kind: "conversation",
+      generatedProposals: ["proposal-1"],
+      actions: [],
+      observations: [],
+      contextSummary: {
+        lifeModelEmpty: false,
+        includedLifeModelSections: ["goals", "preferences"],
+        memoryHitCount: 3,
+        memorySources: ["vector"],
+        usedToolsPrompt: false,
+        redactionApplied: false,
+        redactionLevel: "none",
+      },
+      modelRoute: {
+        provider: "Ollama",
+        model: "llama3:latest",
+        routeType: "local",
+        preferLocal: true,
+        localModel: "llama3",
+        reason: "local preferred",
+        privacyLevel: "low",
+        retryCount: 0,
+      },
+      startedAt: "2026-06-08T00:00:00.000Z",
+    };
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_chat_history") {
+        return Promise.resolve([
+          { role: "user", content: "今天怎么安排？" },
+          { role: "assistant", content: "先做最小的一步。", run_id: "run-chat-1" },
+        ]);
+      }
+      if (cmd === "list_agent_runs_for_session") {
+        return Promise.resolve([companionRun]);
+      }
+      if (cmd === "get_pending_proposals") {
+        return Promise.resolve([
+          {
+            id: "proposal-1",
+            proposalType: "life_model_update",
+            source: "chat_conversation",
+            affectedPath: "goals.daily",
+            after: {},
+            reason: "需要确认",
+            confidence: 0.8,
+            riskLevel: "low",
+            status: "pending",
+            createdAt: "2026-06-08T00:00:00.000Z",
+          },
+        ]);
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/companion"]}>
+        <ChatPage companionMode />
+      </MemoryRouter>
+    );
+
+    expect(await screen.findByText("本地优先")).toBeInTheDocument();
+    expect(screen.getByText("Life Model 已加载")).toBeInTheDocument();
+    expect(screen.getByText("有信等你回 1")).toBeInTheDocument();
+    expect(await screen.findByText("先做最小的一步。")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看依据" }));
+
+    expect(screen.getByText("使用 Life Model：是")).toBeInTheDocument();
+    expect(screen.getByText("参考记忆：3 条")).toBeInTheDocument();
+    expect(screen.getByText("模型路线：本地 / Ollama / llama3:latest")).toBeInTheDocument();
+    expect(screen.getByText("产生待确认：是")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "查看完整记录" })).toHaveAttribute(
+      "href",
+      "/runs/run-chat-1"
+    );
+    expect(screen.queryByText("工具调用")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ReasoningTrace/i)).not.toBeInTheDocument();
   });
 
   it("runs governed preview explicitly with write-disabled budget and keeps it out of chat messages", async () => {

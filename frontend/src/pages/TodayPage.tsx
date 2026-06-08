@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowRight, CalendarDays, CheckCircle2, Clock3, Inbox, ShieldCheck } from "lucide-react";
-import type { DailyGoal, StateAlert } from "../types";
+import type { DailyGoal } from "../types";
 import {
-  countMemoryChunks,
   getDailyGoals,
   getPendingProposals,
-  getStateAlerts,
   getSystemDiagnostics,
   type AgentProposal,
   type SystemDiagnostics,
@@ -16,8 +14,6 @@ import { getSafeModeReason, isSafeMode } from "../utils/safeMode";
 type TodayPageState = {
   diagnostics: SystemDiagnostics | null;
   dailyGoals: DailyGoal[];
-  stateAlerts: StateAlert[];
-  memoryCount: number | null;
   pendingProposals: AgentProposal[];
   loading: boolean;
   error: string;
@@ -26,8 +22,6 @@ type TodayPageState = {
 const INITIAL_STATE: TodayPageState = {
   diagnostics: null,
   dailyGoals: [],
-  stateAlerts: [],
-  memoryCount: null,
   pendingProposals: [],
   loading: true,
   error: "",
@@ -63,18 +57,6 @@ function nextStepFor(goal: DailyGoal | null): string {
   return `从「${goal.name}」开始，先做 10 分钟。`;
 }
 
-function chatStatusLabel(diagnostics: SystemDiagnostics | null): string {
-  if (!diagnostics) return "状态读取中";
-  return diagnostics.chat_ready ? "对话就绪" : "对话待修复";
-}
-
-function modelRouteLabel(diagnostics: SystemDiagnostics | null): string {
-  if (!diagnostics) return "状态读取中";
-  if (diagnostics.prefer_local_model) return "本地优先";
-  if (diagnostics.cloud_api_configured || diagnostics.cloud_api_validated) return "云端可用";
-  return "对话待配置";
-}
-
 export default function TodayPage() {
   const [state, setState] = useState<TodayPageState>(INITIAL_STATE);
 
@@ -84,21 +66,16 @@ export default function TodayPage() {
     async function loadToday() {
       setState(current => ({ ...current, loading: true, error: "" }));
       try {
-        const [diagnostics, dailyGoals, stateAlerts, memoryCount, pendingProposals] =
-          await Promise.all([
-            getSystemDiagnostics().catch(() => null),
-            getDailyGoals().catch(() => []),
-            getStateAlerts().catch(() => []),
-            countMemoryChunks().catch(() => null),
-            getPendingProposals(10).catch(() => []),
-          ]);
+        const [diagnostics, dailyGoals, pendingProposals] = await Promise.all([
+          getSystemDiagnostics().catch(() => null),
+          getDailyGoals().catch(() => []),
+          getPendingProposals(10).catch(() => []),
+        ]);
 
         if (cancelled) return;
         setState({
           diagnostics,
           dailyGoals,
-          stateAlerts,
-          memoryCount,
           pendingProposals,
           loading: false,
           error: "",
@@ -123,11 +100,8 @@ export default function TodayPage() {
   const safeMode = isSafeMode(state.diagnostics);
   const safeModeReason = getSafeModeReason(state.diagnostics);
   const primaryGoal = useMemo(() => choosePrimaryGoal(state.dailyGoals), [state.dailyGoals]);
-  const completedCount = state.dailyGoals.filter(goal => goal.done).length;
   const pendingCount =
     state.pendingProposals.length || state.diagnostics?.pending_proposal_count || 0;
-  const memoryCount = state.memoryCount ?? state.diagnostics?.memory_chunk_count ?? 0;
-  const mainAlert = state.stateAlerts[0] ?? null;
 
   return (
     <div data-testid="today-page" className="h-full overflow-auto overflow-x-hidden bg-[#f5f6f2]">
@@ -139,13 +113,8 @@ export default function TodayPage() {
               <h1 className="text-xl font-semibold tracking-normal text-stone-950">今日</h1>
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
-              <StatusChip label={modelRouteLabel(state.diagnostics)} />
               <StatusChip label={`待确认 ${pendingCount}`} />
-              {safeMode ? (
-                <StatusChip label="Safe Mode" tone="warn" />
-              ) : (
-                <StatusChip label={chatStatusLabel(state.diagnostics)} />
-              )}
+              {safeMode && <StatusChip label="Safe Mode" tone="warn" />}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -153,7 +122,7 @@ export default function TodayPage() {
               to="/companion"
               className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
             >
-              去陪伴
+              和 OpenLife 说一下现在的状态
               <ArrowRight size={15} aria-hidden="true" />
             </Link>
             <Link
@@ -210,7 +179,7 @@ export default function TodayPage() {
             </div>
           ) : (
             <div className="px-4 py-8 text-center">
-              <h2 className="text-sm font-semibold text-stone-950">今天还没有目标</h2>
+              <h2 className="text-sm font-semibold text-stone-950">今天还没有定下来</h2>
               <p className="mx-auto mt-1 max-w-md text-sm text-stone-600">
                 可以先从一次对话开始，把今天最小的一步定下来。
               </p>
@@ -218,7 +187,7 @@ export default function TodayPage() {
                 to="/companion"
                 className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
               >
-                去陪伴
+                和 OpenLife 说一下现在的状态
                 <ArrowRight size={15} aria-hidden="true" />
               </Link>
             </div>
@@ -234,70 +203,29 @@ export default function TodayPage() {
                 to="/companion"
                 className="text-sm font-semibold text-stone-700 underline-offset-4 hover:underline"
               >
-                去陪伴
+                和 OpenLife 说一下现在的状态
               </Link>
             </div>
           )}
         </section>
 
-        <section className="rounded-lg border border-stone-200 bg-white">
-          <div className="border-b border-stone-100 px-4 py-3">
-            <h2 className="text-sm font-semibold text-stone-950">轻量状态</h2>
-          </div>
-          <div className="divide-y divide-stone-100">
-            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[180px_1fr]">
-              <div className="text-xs font-medium text-stone-500">每日目标</div>
-              <div className="text-sm text-stone-800">
-                {completedCount}/{state.dailyGoals.length} 已完成
+        <section className="rounded-lg border border-stone-200 bg-white px-4 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-semibold text-stone-950">待确认入口</div>
+              <div className="mt-1 text-sm text-stone-600">
+                {pendingCount > 0 ? `${pendingCount} 封信等你回复。` : "现在没有需要处理的信。"}
               </div>
             </div>
-            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[180px_1fr]">
-              <div className="text-xs font-medium text-stone-500">待确认</div>
-              <div className="flex flex-wrap items-center gap-2 text-sm text-stone-800">
-                <span>{pendingCount} 项</span>
-                {pendingCount > 0 && (
-                  <Link
-                    to="/mailbox"
-                    className="font-semibold text-stone-700 underline-offset-4 hover:underline"
-                  >
-                    查看邮箱
-                  </Link>
-                )}
-              </div>
-            </div>
-            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[180px_1fr]">
-              <div className="text-xs font-medium text-stone-500">Life Model</div>
-              <div className="text-sm text-stone-800">
-                {state.diagnostics?.life_model_ready ? "可用" : "待构建"}
-              </div>
-            </div>
-            <div className="grid gap-1 px-4 py-3 sm:grid-cols-[180px_1fr]">
-              <div className="text-xs font-medium text-stone-500">记忆</div>
-              <div className="text-sm text-stone-800">{memoryCount} 条</div>
-            </div>
-            {mainAlert && (
-              <div className="grid gap-1 px-4 py-3 sm:grid-cols-[180px_1fr]">
-                <div className="text-xs font-medium text-stone-500">状态提醒</div>
-                <div className="text-sm text-stone-800">{mainAlert.message}</div>
-              </div>
-            )}
+            <Link
+              to="/mailbox"
+              className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
+            >
+              查看邮箱
+              <Inbox size={15} aria-hidden="true" />
+            </Link>
           </div>
         </section>
-
-        <div className="flex flex-wrap gap-2 pb-8">
-          <Link
-            to="/workspace"
-            className="inline-flex h-9 items-center justify-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
-          >
-            旧工作台
-          </Link>
-          <Link
-            to="/life-model"
-            className="inline-flex h-9 items-center justify-center rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
-          >
-            Life Model
-          </Link>
-        </div>
       </div>
     </div>
   );

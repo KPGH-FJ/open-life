@@ -123,20 +123,16 @@ describe("TodayPage", () => {
     expect(screen.getByText(/从「早起」开始/)).toBeInTheDocument();
   });
 
-  it("calls existing read-only wrappers for diagnostics, daily goals, state, memory, and proposals", async () => {
+  it("calls only the lightweight wrappers needed for daily focus and pending confirmations", async () => {
     renderPage();
 
     await waitFor(() => {
       const calledCommands = vi.mocked(invoke).mock.calls.map(([command]) => command);
-      for (const command of [
-        "get_system_diagnostics",
-        "get_daily_goals",
-        "get_state_alerts",
-        "count_memory_chunks",
-        "get_pending_proposals",
-      ]) {
+      for (const command of ["get_system_diagnostics", "get_daily_goals", "get_pending_proposals"]) {
         expect(calledCommands).toContain(command);
       }
+      expect(calledCommands).not.toContain("count_memory_chunks");
+      expect(calledCommands).not.toContain("get_state_alerts");
     });
   });
 
@@ -150,8 +146,8 @@ describe("TodayPage", () => {
 
     renderPage();
 
-    expect(await screen.findByText("今天还没有目标")).toBeInTheDocument();
-    expect(screen.getAllByRole("link", { name: "去陪伴" })[0]).toHaveAttribute(
+    expect(await screen.findByText("今天还没有定下来")).toBeInTheDocument();
+    expect(screen.getAllByRole("link", { name: "和 OpenLife 说一下现在的状态" })[0]).toHaveAttribute(
       "href",
       "/companion"
     );
@@ -165,7 +161,7 @@ describe("TodayPage", () => {
       "href",
       "/mailbox"
     );
-    for (const label of ["接受", "拒绝", "批量接受", "接受全部"]) {
+    for (const label of ["同意", "不同意", "接受", "拒绝", "批量接受", "接受全部"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
   });
@@ -189,7 +185,16 @@ describe("TodayPage", () => {
     for (const label of ["完成", "保存", "添加目标", "记录状态", "批量接受", "接受全部"]) {
       expect(screen.queryByRole("button", { name: label })).not.toBeInTheDocument();
     }
-    expect(screen.getAllByRole("link", { name: "去陪伴" })[0]).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "和 OpenLife 说一下现在的状态" })).toBeInTheDocument();
+  });
+
+  it("does not render dashboard-style status stats on Today", async () => {
+    renderPage();
+
+    expect(await screen.findByTestId("today-page")).toBeInTheDocument();
+    for (const hiddenText of ["记忆条数", "记忆", "旧工作台", "本地优先", "Life Model 可用"]) {
+      expect(screen.queryByText(hiddenText)).not.toBeInTheDocument();
+    }
   });
 
   it("does not render raw LifeModel, memory, or proposal payloads", async () => {

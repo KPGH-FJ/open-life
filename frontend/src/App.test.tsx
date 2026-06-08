@@ -263,7 +263,7 @@ describe("App onboarding", () => {
     expect(AGENT_STAGE_ASSET_ROOT).toBe("/assets/agent-stage");
   });
 
-  it("renders W160 product tabs with an active companion tab and secondary tools", async () => {
+  it("renders product tabs with an active companion tab and a restrained secondary tools menu", async () => {
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
       if (cmd === "has_completed_onboarding") return Promise.resolve(true);
       return mockInvoke(cmd, args);
@@ -283,13 +283,20 @@ describe("App onboarding", () => {
     }
 
     expect(screen.getByRole("link", { name: "陪伴" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("link", { name: "Runs" })).toHaveAttribute("href", "/runs");
-    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute("href", "/settings");
+    expect(screen.queryByRole("link", { name: "Runs" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /二级入口/ }));
+    fireEvent.click(screen.getByRole("button", { name: "更多" }));
 
-    for (const label of ["MCP", "A2A", "Metrics", "Versions", "Calibration"]) {
-      expect(screen.getByRole("link", { name: label })).toBeInTheDocument();
+    for (const [label, path] of [
+      ["Runs", "/runs"],
+      ["设置", "/settings"],
+      ["MCP", "/mcp"],
+      ["A2A", "/a2a"],
+      ["版本", "/versions"],
+      ["Metrics", "/metrics"],
+      ["Calibration", "/calibration"],
+    ] as const) {
+      expect(screen.getByRole("link", { name: label })).toHaveAttribute("href", path);
     }
   });
 
@@ -307,7 +314,7 @@ describe("App onboarding", () => {
     );
 
     await screen.findByRole("link", { name: "陪伴" });
-    const menuButton = screen.getByRole("button", { name: /二级入口/ });
+    const menuButton = screen.getByRole("button", { name: "更多" });
     menuButton.focus();
     expect(menuButton).toHaveFocus();
 
@@ -386,7 +393,7 @@ describe("App onboarding", () => {
   });
 
   it.each([
-    ["/companion", "陪伴", "聊天就绪"],
+    ["/companion", "陪伴", "在线"],
     ["/today", "今日", "today-page"],
     ["/life-model", "Life Model", "life-model-page"],
     ["/mailbox", "邮箱", "mailbox-page"],

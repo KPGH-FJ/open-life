@@ -91,8 +91,9 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
       status: "检测中",
       tone: "warning",
       detail: "正在读取本地模型、云端 API 和人生模型状态。",
-    };
-  }
+  };
+}
+
   if (diagnostics.chat_ready) {
     const backend = diagnostics.ollama_online
       ? `本地模型 ${diagnostics.resolved_local_model || diagnostics.local_model}`
@@ -124,6 +125,54 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
   return { status: "需要检查", tone: "warning", detail: "部分运行状态异常，请查看设置页诊断。" };
 }
 
+function companionRouteStatus(diagnostics: SystemDiagnostics | null): string {
+  if (!diagnostics) return "状态读取中";
+  if (diagnostics.chat_ready && diagnostics.prefer_local_model && diagnostics.ollama_online) {
+    return "本地优先";
+  }
+  if (
+    diagnostics.chat_ready &&
+    (diagnostics.cloud_api_configured || diagnostics.cloud_api_validated)
+  ) {
+    return "云端可用";
+  }
+  return "需要配置";
+}
+
+function companionLifeModelStatus(diagnostics: SystemDiagnostics | null): string {
+  if (!diagnostics) return "Life Model 检查中";
+  return diagnostics.life_model_ready && !diagnostics.model_empty
+    ? "Life Model 已加载"
+    : "Life Model 待构建";
+}
+
+function companionPendingStatus(
+  diagnostics: SystemDiagnostics | null,
+  pendingProposals: AgentProposal[]
+): string {
+  const count = pendingProposals.length || diagnostics?.pending_proposal_count || 0;
+  return count > 0 ? `有信等你回 ${count}` : "没有待回复的信";
+}
+
+function companionModelRouteSummary(run: AgentRun | null): string {
+  if (!run?.modelRoute) return "模型路线：未读取";
+  const route = run.modelRoute;
+  const routeLabel =
+    route.routeType === "local" || route.preferLocal ? "本地" : route.provider ? "云端" : "未读取";
+  return `模型路线：${routeLabel} / ${route.provider || "unknown"} / ${route.model || "unknown"}`;
+}
+
+function companionRunSummary(run: AgentRun | null): string[] {
+  const context = run?.contextSummary;
+  const proposalCount = run?.generatedProposals?.length ?? 0;
+  return [
+    `使用 Life Model：${context ? (context.lifeModelEmpty ? "否" : "是") : "未读取"}`,
+    `参考记忆：${context?.memoryHitCount ?? 0} 条`,
+    companionModelRouteSummary(run),
+    `产生待确认：${proposalCount > 0 ? "是" : "否"}`,
+  ];
+}
+
 function getFixSuggestion(
   diagnostics: SystemDiagnostics | null
 ): { text: string; action: string; link: string } | null {
@@ -145,8 +194,8 @@ function getFixSuggestion(
   if (diagnostics.model_empty) {
     if ((diagnostics.pending_builder_review_sessions ?? 0) > 0) {
       return {
-        text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个待确认的 Builder Review。`,
-        action: "回 Builder 审阅",
+        text: `人生模型还没有真正写入，但你有 ${diagnostics.pending_builder_review_sessions} 个构建内容待确认。`,
+        action: "回构建页查看",
         link: "/builder",
       };
     }
@@ -391,12 +440,14 @@ export default function ChatPage({
   const [savedControlledPilotPromotionKeys, setSavedControlledPilotPromotionKeys] = useState<
     Record<string, boolean>
   >({});
+  const [openEvidenceRunId, setOpenEvidenceRunId] = useState<string | null>(null);
 
   // Throttle streaming updates to reduce React re-render pressure
   const streamingBufferRef = useRef("");
   const streamingRafRef = useRef<number | null>(null);
   const diagnosticsRef = useRef<SystemDiagnostics | null>(null);
   const streamErrorHandledRef = useRef(false);
+  const handledStreamDoneKeysRef = useRef<Set<string>>(new Set());
   const lastUserMessageRef = useRef<ChatMessage | null>(null);
   const currentSessionIdRef = useRef<string>(currentSessionId);
   const promotedControlledPilotKeysRef = useRef<Record<string, boolean>>({});
@@ -663,15 +714,33 @@ export default function ChatPage({
       );
       unlistenDone = await listen<StreamMessageDonePayload>("stream-message-done", async event => {
         if (event.payload.session_id === currentSessionId) {
+          const doneKey = `${event.payload.session_id}:${event.payload.run_id}`;
+          if (handledStreamDoneKeysRef.current.has(doneKey)) {
+            return;
+          }
+          handledStreamDoneKeysRef.current.add(doneKey);
+          if (handledStreamDoneKeysRef.current.size > 100) {
+            const oldestKey = handledStreamDoneKeysRef.current.values().next().value;
+            if (oldestKey) handledStreamDoneKeysRef.current.delete(oldestKey);
+          }
           const nextStage =
             inferStageFromToolCalls(event.payload.tool_calls ?? []) ??
             inferStageFromText(event.payload.reply) ??
             "idle";
           flushStreaming();
-          setMessages(prev => [
-            ...prev,
-            { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },
-          ]);
+          setMessages(prev => {
+            if (
+              prev.some(
+                message => message.role === "assistant" && message.run_id === event.payload.run_id
+              )
+            ) {
+              return prev;
+            }
+            return [
+              ...prev,
+              { role: "assistant", content: event.payload.reply, run_id: event.payload.run_id },
+            ];
+          });
           setStreamingReply("");
           setSending(false);
           setReasoningTrace(event.payload.reasoning_trace ?? null);
@@ -1466,65 +1535,101 @@ export default function ChatPage({
       data-testid={companionMode ? "companion-chat-runtime" : "chat-page"}
       className={classNames("h-full flex", companionMode ? "bg-transparent" : "bg-white")}
     >
-      <ChatSidebar
-        sessions={sessions}
-        currentSessionId={currentSessionId}
-        editingId={editingId}
-        editingTitle={editingTitle}
-        onSelectSession={setCurrentSessionId}
-        onNewSession={handleNewSession}
-        onStartEditTitle={startEditTitle}
-        onCommitEditTitle={commitEditTitle}
-        onCancelEditTitle={() => {
-          setEditingId(null);
-          setEditingTitle("");
-        }}
-        onEditTitleChange={setEditingTitle}
-        onDeleteSession={handleDeleteSession}
-      />
+      {!companionMode && (
+        <ChatSidebar
+          sessions={sessions}
+          currentSessionId={currentSessionId}
+          editingId={editingId}
+          editingTitle={editingTitle}
+          onSelectSession={setCurrentSessionId}
+          onNewSession={handleNewSession}
+          onStartEditTitle={startEditTitle}
+          onCommitEditTitle={commitEditTitle}
+          onCancelEditTitle={() => {
+            setEditingId(null);
+            setEditingTitle("");
+          }}
+          onEditTitleChange={setEditingTitle}
+          onDeleteSession={handleDeleteSession}
+        />
+      )}
 
       {/* Chat area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="border-b px-6 py-2 flex items-center justify-between bg-gray-50 gap-3">
-          <div className={`text-sm border rounded-lg px-3 py-2 flex-1 ${readinessClass}`}>
-            <div className="flex items-center gap-2">
-              <span className="font-medium">{readiness.status}</span>
-              {readiness.betaReady === true && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
-                  Beta 就绪
-                </span>
-              )}
-              {readiness.betaReady === false && readiness.tone === "ready" && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
-                  Beta 待完善
-                </span>
-              )}
-            </div>
-            <div className="text-xs mt-0.5">
-              {readiness.detail}
-              {diagnostics && (
-                <span className="ml-2">
-                  本地：{diagnostics.resolved_local_model || diagnostics.local_model} · 云端 API：
-                  {diagnostics.cloud_api_configured ? "已配置" : "未配置"}
-                </span>
-              )}
-              <Link to="/settings" className="ml-2 underline font-medium">
-                去设置页检查
-              </Link>
+      <div className="flex min-w-0 flex-1 flex-col">
+        {companionMode ? (
+          <div className="flex min-h-[88px] shrink-0 items-center border-b border-stone-200 bg-[#fffefa] px-6 py-4">
+            <div className="min-w-0">
+              <div className="flex items-center gap-3">
+              <div
+                aria-hidden="true"
+                className="flex h-11 w-11 items-center justify-center rounded-lg bg-stone-900 text-base font-bold text-white"
+              >
+                O
+              </div>
+              <div>
+                <div className="text-base font-semibold leading-5 text-stone-950">OpenLife</div>
+                <div className="mt-1 text-sm font-medium leading-4 text-stone-500">在线</div>
+              </div>
+              </div>
+              <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium text-stone-600">
+                {[companionRouteStatus(diagnostics), companionLifeModelStatus(diagnostics), companionPendingStatus(diagnostics, pendingProposals)].map(
+                  label => (
+                    <span
+                      key={label}
+                      className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2"
+                    >
+                      {label}
+                    </span>
+                  )
+                )}
+              </div>
             </div>
           </div>
-          <button
-            onClick={togglePreferLocal}
-            className={`text-xs px-3 py-1 rounded-full border transition ${
-              preferLocal
-                ? "bg-indigo-50 border-indigo-200 text-indigo-700"
-                : "bg-white border-gray-200 text-gray-600"
-            }`}
-          >
-            {preferLocal ? "优先本地模型" : "优先云端模型"}
-          </button>
-        </div>
-        {diagnostics && isSafeMode(diagnostics) && (
+        ) : (
+          <>
+            <div className="border-b px-6 py-2 flex items-center justify-between bg-gray-50 gap-3">
+              <div className={`text-sm border rounded-lg px-3 py-2 flex-1 ${readinessClass}`}>
+                <div className="flex items-center gap-2">
+                  <span className="font-medium">{readiness.status}</span>
+                  {readiness.betaReady === true && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700 font-medium">
+                      Beta 就绪
+                    </span>
+                  )}
+                  {readiness.betaReady === false && readiness.tone === "ready" && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
+                      Beta 待完善
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs mt-0.5">
+                  {readiness.detail}
+                  {diagnostics && (
+                    <span className="ml-2">
+                      本地：{diagnostics.resolved_local_model || diagnostics.local_model} · 云端
+                      API：
+                      {diagnostics.cloud_api_configured ? "已配置" : "未配置"}
+                    </span>
+                  )}
+                  <Link to="/settings" className="ml-2 underline font-medium">
+                    去设置页检查
+                  </Link>
+                </div>
+              </div>
+              <button
+                onClick={togglePreferLocal}
+                className={`text-xs px-3 py-1 rounded-full border transition ${
+                  preferLocal
+                    ? "bg-indigo-50 border-indigo-200 text-indigo-700"
+                    : "bg-white border-gray-200 text-gray-600"
+                }`}
+              >
+                {preferLocal ? "优先本地模型" : "优先云端模型"}
+              </button>
+            </div>
+          </>
+        )}
+        {!companionMode && diagnostics && isSafeMode(diagnostics) && (
           <div className="border-b border-amber-200 bg-amber-50 px-6 py-2">
             <div className="max-w-3xl text-xs text-amber-800 flex flex-wrap items-center justify-between gap-2">
               <div>
@@ -1539,25 +1644,25 @@ export default function ChatPage({
           </div>
         )}
         {/* Pending Proposals Alert */}
-        {pendingProposals.length > 0 && (
+        {!companionMode && pendingProposals.length > 0 && (
           <div className="border-b border-indigo-100 bg-indigo-50 px-6 py-2">
             <div className="max-w-3xl text-xs text-indigo-800 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <ShieldCheck size={14} />
-                <span className="font-medium">{pendingProposals.length} 个待处理提案</span>
+                <span className="font-medium">{pendingProposals.length} 个待确认</span>
                 <span className="text-indigo-600">
                   （{pendingProposals[0].affectedPath || pendingProposals[0].proposalType}）
                 </span>
               </div>
-              <Link to="/review" className="underline font-medium">
-                去 Review Center 确认
+              <Link to="/mailbox" className="underline font-medium">
+                去邮箱确认
               </Link>
             </div>
           </div>
         )}
 
         {/* Chat mode selector */}
-        <div className="border-b px-6 py-2 bg-white">
+        <div className={companionMode ? "hidden" : "border-b bg-white px-6 py-2"}>
           <div className="flex items-center gap-2 overflow-x-auto">
             {chatModes.map(m => (
               <button
@@ -1575,7 +1680,11 @@ export default function ChatPage({
             ))}
           </div>
         </div>
-        <div className="border-b border-amber-100 bg-amber-50/60 px-6 py-2">
+        <div
+          className={
+            companionMode ? "hidden" : "border-b border-amber-100 bg-amber-50/60 px-6 py-2"
+          }
+        >
           <div className="max-w-4xl space-y-3">
             <button
               type="button"
@@ -2024,7 +2133,13 @@ export default function ChatPage({
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
+        <div
+          className={
+            companionMode
+              ? "flex-1 space-y-7 overflow-auto bg-[#fffefa] px-6 py-8"
+              : "flex-1 space-y-4 overflow-auto px-6 py-4"
+          }
+        >
           {!companionMode && !loadingHistory && (
             <div className="rounded-3xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
               <div className="flex flex-col gap-4 xl:flex-row xl:items-stretch">
@@ -2114,7 +2229,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {reasoningTrace && (
+          {!companionMode && reasoningTrace && (
             <div className="flex justify-start">
               <ReasoningTracePanel
                 trace={reasoningTrace}
@@ -2123,7 +2238,7 @@ export default function ChatPage({
               />
             </div>
           )}
-          {toolCalls.length > 0 && (
+          {!companionMode && toolCalls.length > 0 && (
             <div className="flex justify-start">
               <div className="max-w-2xl px-4 py-3 rounded-xl text-sm bg-gray-50 text-gray-900 border border-gray-200 w-full">
                 <button
@@ -2154,7 +2269,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {!loadingHistory && messages.length <= 1 && !sending && (
+          {!companionMode && !loadingHistory && messages.length <= 1 && !sending && (
             <div className="flex justify-start">
               <div className="max-w-3xl w-full rounded-2xl border border-stone-200 bg-[#fbf7ef] p-5 shadow-sm">
                 <div className="text-sm font-semibold text-stone-900">不知道从哪一句开始？</div>
@@ -2178,7 +2293,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {showGuide && getModelEmptyState(model, diagnostics) && (
+          {!companionMode && showGuide && getModelEmptyState(model, diagnostics) && (
             <div className="flex justify-start">
               <div className="max-w-2xl w-full bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-100 rounded-xl p-4 text-sm relative">
                 <button
@@ -2222,16 +2337,66 @@ export default function ChatPage({
             </div>
           )}
           {messages.map((m, i) => (
-            <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
+            <div
+              key={i}
+              className={classNames(
+                "flex",
+                m.role === "user" ? "justify-end" : "justify-start",
+                companionMode && "items-start gap-3"
+              )}
+            >
+              {companionMode && m.role === "assistant" && (
+                <div
+                  aria-hidden="true"
+                  className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-900 text-sm font-bold text-white"
+                >
+                  O
+                </div>
+              )}
               <div
-                className={`max-w-2xl px-4 py-3 rounded-xl text-sm ${
-                  m.role === "user"
-                    ? "bg-indigo-600 text-white rounded-br-none"
-                    : "bg-gray-100 text-gray-800 rounded-bl-none"
-                }`}
+                className={classNames(
+                  "max-w-2xl rounded-xl px-4 py-3 text-sm",
+                  companionMode
+                    ? m.role === "user"
+                      ? "rounded-tr-none bg-stone-900 text-white"
+                      : "rounded-tl-none border border-stone-200 bg-white text-stone-900"
+                    : m.role === "user"
+                      ? "rounded-br-none bg-indigo-600 text-white"
+                      : "rounded-bl-none bg-gray-100 text-gray-800"
+                )}
               >
                 <div className="whitespace-pre-wrap">{m.content}</div>
-                {m.role === "assistant" && (
+                {m.role === "assistant" && companionMode && m.run_id && (
+                  <div className="mt-3 border-t border-stone-100 pt-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setOpenEvidenceRunId(current =>
+                          current === m.run_id ? null : (m.run_id ?? null)
+                        )
+                      }
+                      className="text-xs font-semibold text-stone-600 underline-offset-4 hover:text-stone-950 hover:underline"
+                    >
+                      查看依据
+                    </button>
+                    {openEvidenceRunId === m.run_id && (
+                      <div className="mt-2 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-700">
+                        {companionRunSummary(
+                          currentRun && currentRun.id === m.run_id ? currentRun : null
+                        ).map(line => (
+                          <div key={line}>{line}</div>
+                        ))}
+                        <Link
+                          to={`/runs/${m.run_id}`}
+                          className="mt-2 inline-flex font-semibold text-stone-900 underline-offset-4 hover:underline"
+                        >
+                          查看完整记录
+                        </Link>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {m.role === "assistant" && !companionMode && (
                   <div className="mt-3 space-y-2">
                     {(() => {
                       const runMatches = m.run_id && currentRun && currentRun.id === m.run_id;
@@ -2247,7 +2412,7 @@ export default function ChatPage({
                               {run.modelRoute?.preferLocal && " (local)"}
                             </span>
                             <span>{run.actions?.length || 0} 工具</span>
-                            <span>{run.generatedProposals?.length || 0} 提案</span>
+                            <span>{run.generatedProposals?.length || 0} 待确认</span>
                             {run.modelRoute?.fallbackReason && (
                               <span className="text-amber-500">fallback</span>
                             )}
@@ -2371,6 +2536,14 @@ export default function ChatPage({
                   </div>
                 )}
               </div>
+              {companionMode && m.role === "user" && (
+                <div
+                  aria-hidden="true"
+                  className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-stone-100 text-sm font-semibold text-stone-700"
+                >
+                  你
+                </div>
+              )}
             </div>
           ))}
           {sending && streamingReply && (
@@ -2394,7 +2567,7 @@ export default function ChatPage({
               </div>
             </div>
           )}
-          {currentRun && (
+          {!companionMode && currentRun && (
             <div className="px-4 py-2">
               <div className="text-xs text-gray-400 space-y-1">
                 <div className="flex items-center gap-2">
@@ -2438,6 +2611,7 @@ export default function ChatPage({
           onContinueStream={handleContinueStream}
           onRetryLastMessage={retryLastUserMessage}
           getFixSuggestion={getFixSuggestion}
+          companionMode={companionMode}
         />
       </div>
     </div>

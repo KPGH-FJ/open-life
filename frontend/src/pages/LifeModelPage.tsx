@@ -118,18 +118,18 @@ function formatUpdatedAt(value: string | undefined): string {
 
 function sourceLabel(source: string): string {
   const labels: Record<string, string> = {
-    builder_review: "Builder review",
+    builder_review: "构建",
     calibration_run: "校准",
     feedback_evolution: "反馈",
     memory_governance: "记忆治理",
-    skill_runtime: "技能提案",
-    plugin: "插件提案",
+    skill_runtime: "技能候选",
+    plugin: "插件确认",
     manual: "手动调整",
     chat_conversation: "对话",
-    proactive_agent: "主动 Agent",
+    proactive_agent: "OpenLife 主动提醒",
     planning_session: "规划",
   };
-  return labels[source] ?? "Proposal";
+  return labels[source] ?? "待确认";
 }
 
 function proposalTypeLabel(type: string): string {
@@ -294,22 +294,57 @@ function BuildSection({
         <div>
           <h2 className="text-sm font-semibold text-stone-950">构建状态</h2>
           <p className="mt-1 text-sm text-stone-600">
-            旧 Builder 保留完整构建流程；模型更新仍进入邮箱确认。
+            构建产生候选，邮箱确认后才会更新 Life Model。
           </p>
         </div>
-        <Link
-          to="/builder"
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
-        >
-          打开 Builder
-          <ArrowRight size={15} aria-hidden="true" />
-        </Link>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-3">
+        <div className="rounded-lg border border-stone-200 bg-white p-4">
+          <div className="text-base font-semibold text-stone-950">快速构建</div>
+          <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">
+            少量问题，先形成可用轮廓。
+          </p>
+          <Link
+            to="/builder"
+            className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md bg-stone-900 px-3 text-sm font-semibold text-white hover:bg-stone-800"
+          >
+            开始快速构建
+            <ArrowRight size={15} aria-hidden="true" />
+          </Link>
+        </div>
+        <div className="rounded-lg border border-stone-200 bg-white p-4">
+          <div className="text-base font-semibold text-stone-950">对话构建</div>
+          <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">
+            像聊天一样慢慢补全。
+          </p>
+          <Link
+            to="/builder"
+            className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-md border border-stone-300 bg-white px-3 text-sm font-semibold text-stone-800 hover:bg-stone-50"
+          >
+            开始对话构建
+            <ArrowRight size={15} aria-hidden="true" />
+          </Link>
+        </div>
+        <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+          <div className="text-base font-semibold text-stone-950">从已有内容整理</div>
+          <p className="mt-2 min-h-10 text-sm leading-5 text-stone-600">
+            从记忆、历史或文本整理候选项。
+          </p>
+          <button
+            type="button"
+            disabled
+            className="mt-4 inline-flex h-9 items-center justify-center rounded-md border border-stone-200 bg-white px-3 text-sm font-semibold text-stone-400"
+          >
+            暂不可用
+          </button>
+        </div>
       </div>
 
       <div className="rounded-lg border border-stone-200 bg-white">
         <div className="grid gap-0 divide-y divide-stone-100 md:grid-cols-3 md:divide-x md:divide-y-0">
           <div className="p-4">
-            <div className="text-xs font-medium text-stone-500">Builder readiness</div>
+            <div className="text-xs font-medium text-stone-500">构建状态</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{readinessLabel(overall)}</div>
             <div className="mt-1 text-xs text-stone-500">{formatPercent(overall)}</div>
           </div>
@@ -317,7 +352,7 @@ function BuildSection({
             <div className="text-xs font-medium text-stone-500">未完成会话</div>
             <div className="mt-1 text-lg font-semibold text-stone-950">{unfinishedCount}</div>
             <div className="mt-1 text-xs text-stone-500">
-              {reviewReadyCount > 0 ? `${reviewReadyCount} 个已到 review` : "可从 Builder 继续"}
+              {reviewReadyCount > 0 ? `${reviewReadyCount} 个已可确认` : "可继续构建"}
             </div>
           </div>
           <div className="p-4">
@@ -331,7 +366,7 @@ function BuildSection({
       {builderReviewCount > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
           <div>
-            <div className="text-sm font-semibold text-amber-950">有 Builder review 等待确认</div>
+            <div className="text-sm font-semibold text-amber-950">有构建内容等待确认</div>
             <div className="mt-0.5 text-xs text-amber-800">
               这里不直接应用更新；请在邮箱中逐项处理。
             </div>
@@ -445,7 +480,7 @@ function EvidenceSection({
         <div>
           <h2 className="text-sm font-semibold text-stone-950">依据层</h2>
           <p className="mt-1 text-sm text-stone-600">
-            记忆和待确认 proposal 只在这里作为低信息量摘要出现。
+            记忆和待确认内容只在这里作为低信息量摘要出现。
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -483,7 +518,7 @@ function EvidenceSection({
           <div className="p-4">
             <div className="text-xs font-medium text-stone-500">最近依据来源</div>
             <div className="mt-1 text-sm font-semibold text-stone-950">{recentSources}</div>
-            <div className="mt-1 text-xs text-stone-500">不显示原始 payload</div>
+            <div className="mt-1 text-xs text-stone-500">不显示原始内容</div>
           </div>
         </div>
       </div>
@@ -503,7 +538,7 @@ function EvidenceSection({
                   {proposalTypeLabel(proposal.proposalType)}
                 </div>
                 <div className="mt-0.5 text-xs text-stone-500">
-                  {sourceLabel(proposal.source)} · {proposal.riskLevel}
+                  {sourceLabel(proposal.source)} · 影响 {proposal.riskLevel}
                 </div>
               </div>
               <Link
@@ -607,7 +642,7 @@ export default function LifeModelPage() {
           <div className="flex items-center gap-2 rounded-lg border border-stone-200 bg-white px-3 py-2">
             <CheckCircle2 size={16} aria-hidden="true" className="text-emerald-700" />
             <div>
-              <div className="text-xs font-medium text-stone-500">Readiness</div>
+              <div className="text-xs font-medium text-stone-500">状态</div>
               <div className="text-sm font-semibold text-stone-950">{readinessLabel(overall)}</div>
             </div>
           </div>
