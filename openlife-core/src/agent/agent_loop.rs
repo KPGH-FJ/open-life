@@ -195,6 +195,7 @@ pub struct AgentLoop {
     action_executor: ActionExecutor,
     scheduler: InferenceScheduler,
     config: AgentLoopConfig,
+    scripted_replies: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
 }
 
 impl AgentLoop {
@@ -209,7 +210,26 @@ impl AgentLoop {
             action_executor,
             scheduler,
             config,
+            scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
         }
+    }
+
+    pub(crate) fn with_scripted_replies(self, replies: Vec<String>) -> Self {
+        Self {
+            scripted_replies: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::from(replies),
+            )),
+            ..self
+        }
+    }
+
+    fn next_scripted_reply(&self) -> Option<String> {
+        self.scripted_replies
+            .lock()
+            .ok()
+            .and_then(|mut replies| replies.pop_front())
     }
 
     fn emit_status(
@@ -542,6 +562,7 @@ impl AgentLoop {
             network_policy: action_ctx.network_policy,
             hs_runtime_packet,
             calendar_ics_paths: action_ctx.calendar_ics_paths,
+            web_search_fixture_output: action_ctx.web_search_fixture_output,
         };
         let actx = AgentLoopContext {
             task: &input.task,
@@ -810,6 +831,13 @@ impl AgentLoop {
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
 
+        if let Some(reply) = self.next_scripted_reply() {
+            return Ok(GeneratedAgentResponse {
+                runtime_output,
+                reply,
+            });
+        }
+
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
         } else {
@@ -863,6 +891,14 @@ impl AgentLoop {
             )
             .await
             .map_err(|e| anyhow::anyhow!("runtime execution failed: {}", e))?;
+
+        if let Some(reply) = self.next_scripted_reply() {
+            callback.on_chunk(&reply, 0, "generating").await;
+            return Ok(GeneratedAgentResponse {
+                runtime_output,
+                reply,
+            });
+        }
 
         let tools_prompt = if actx.tools_prompt.trim().is_empty() {
             None
@@ -1062,11 +1098,15 @@ impl AgentLoop {
                     }
                     "mcp_tool".to_string()
                 });
+            let input = match action_type.as_str() {
+                "memory_search" | "session_search" => args.clone(),
+                _ => serde_json::json!({ "arguments": args }),
+            };
 
             requests.push(AgentActionRequest {
                 action_type,
                 target: name.to_string(),
-                input: serde_json::json!({ "arguments": args }),
+                input,
                 source_run_id: Some(run.id.clone()),
                 step_index: *tool_call_count + idx as u32,
             });
@@ -1592,6 +1632,7 @@ mod tests {
                 proposal_store: None,
                 agent_run_store: None,
                 network_policy: None,
+                web_search_fixture_output: None,
                 hs_runtime_packet: None,
                 calendar_ics_paths: &[],
             }

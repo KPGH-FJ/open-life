@@ -78,6 +78,13 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         plan_execute_session_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
         ))),
+        main_chat_agent_session_store: Some(Arc::new(Mutex::new(
+            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
+                .unwrap(),
+        ))),
+        main_chat_action_queue_store: Some(Arc::new(Mutex::new(
+            openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory().unwrap(),
+        ))),
         patch_store: Some(Arc::new(Mutex::new(
             openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
         ))),
@@ -98,6 +105,7 @@ pub(crate) fn test_app_state() -> Arc<AppState> {
         startup_warnings: vec![],
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+        web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     })
 }

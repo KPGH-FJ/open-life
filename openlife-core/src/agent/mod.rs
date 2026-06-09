@@ -10,6 +10,7 @@ pub mod governor;
 pub mod heuristic_store;
 pub mod hs_selector;
 pub mod lifemodel_backend_completion;
+pub mod main_chat_agent_v1;
 pub mod maturation;
 mod maturation_domain;
 pub mod memory_service;

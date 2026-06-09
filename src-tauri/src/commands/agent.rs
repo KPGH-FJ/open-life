@@ -195,6 +195,7 @@ pub async fn replay_agent_action(
         agent_run_store: agent_run_store_guard.as_deref(),
         network_policy: Some(&network_policy),
         hs_runtime_packet: None,
+        web_search_fixture_output: None,
     };
 
     let request = openlife_core::agent::AgentActionRequest {

@@ -307,6 +307,14 @@ impl super::ActionExecutor {
                     });
                 }
 
+                if let Some(fixture_output) = ctx.web_search_fixture_output {
+                    return Ok(ToolCallInternalResult {
+                        success: true,
+                        output: Some(fixture_output.to_string()),
+                        error: None,
+                    });
+                }
+
                 search_web_on_worker_thread(query, max_results)
             }
             "mcp.call_tool" => {

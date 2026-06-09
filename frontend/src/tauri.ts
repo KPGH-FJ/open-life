@@ -461,6 +461,9 @@ export interface SendMessageResult {
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
   run_id?: string;
+  agent_ingress?: MainChatAgentIngressDecision;
+  execution_transcript?: MainChatExecutionTranscriptEntry[];
+  legacy_fallback_used?: boolean;
 }
 
 export interface StreamMessageStartPayload {
@@ -468,6 +471,9 @@ export interface StreamMessageStartPayload {
   run_id: string;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
+  agent_ingress?: MainChatAgentIngressDecision;
+  execution_transcript?: MainChatExecutionTranscriptEntry[];
+  legacy_fallback_used?: boolean;
 }
 
 export interface StreamMessageDonePayload {
@@ -476,6 +482,183 @@ export interface StreamMessageDonePayload {
   reply: string;
   reasoning_trace: ReasoningTrace;
   tool_calls: ToolCallResult[];
+  agent_ingress?: MainChatAgentIngressDecision;
+  execution_transcript?: MainChatExecutionTranscriptEntry[];
+  legacy_fallback_used?: boolean;
+}
+
+export type MainChatAgentStrategy =
+  | "direct_answer"
+  | "react_tool_execution"
+  | "plan_execute"
+  | "memory_proposal"
+  | "life_model_proposal"
+  | "review_maturation"
+  | "blocked_confirmation";
+
+export interface MainChatPrivacyRiskSummary {
+  riskLevel: string;
+  privacyClass: string;
+  policyReasonCode: string;
+  localOnlyRequired: boolean;
+  writeLike: boolean;
+  externalWriteLike: boolean;
+}
+
+export interface MainChatAgentIngressDecision {
+  requestId: string;
+  sourceSessionId: string;
+  taskKind: string;
+  selectedStrategy: MainChatAgentStrategy;
+  confidence: number;
+  reasonSummary: string;
+  fallbackEligible: boolean;
+  privacyRisk: MainChatPrivacyRiskSummary;
+  agentTaskSessionId?: string;
+}
+
+export type MainChatExecutionTranscriptKind =
+  | "user_input"
+  | "route_decision"
+  | "plan"
+  | "action"
+  | "observation"
+  | "follow_up"
+  | "permission_request"
+  | "proposal_request"
+  | "error"
+  | "retry"
+  | "final_result"
+  | "fallback";
+
+export interface MainChatExecutionTranscriptEntry {
+  id: string;
+  sessionId: string;
+  kind: MainChatExecutionTranscriptKind;
+  summary: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export type MainChatAgentTaskStatus =
+  | "running"
+  | "waiting_permission"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type MainChatExecutionQueueStatus =
+  | "planned"
+  | "pending_permission"
+  | "executing"
+  | "observed"
+  | "failed"
+  | "retrying"
+  | "cancelled"
+  | "completed";
+
+export interface MainChatExecutionAction {
+  actionType: string;
+  description: string;
+}
+
+export interface MainChatExecutionPolicyDecision {
+  level: string;
+  reasonCode: string;
+  executionAllowed: boolean;
+  requiresConfirmation: boolean;
+  requiresProposal: boolean;
+  requiresBlocker: boolean;
+  silentWriteAllowed: boolean;
+}
+
+export interface MainChatQueuedExecutionAction {
+  id: string;
+  sessionId: string;
+  action: MainChatExecutionAction;
+  policy: MainChatExecutionPolicyDecision;
+  status: MainChatExecutionQueueStatus;
+  attempts: number;
+  observationMetadata?: Record<string, unknown>;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MainChatAgentTaskSession {
+  id: string;
+  chatSessionId: string;
+  userGoal: string;
+  selectedStrategy: MainChatAgentStrategy;
+  status: MainChatAgentTaskStatus;
+  currentPlanSummary?: string;
+  actionQueueIds: string[];
+  pendingBlockers: string[];
+  contextSnapshotRefs: string[];
+  createdAt: string;
+  updatedAt: string;
+  finalSummary?: string;
+}
+
+export interface MainChatAgentTaskState {
+  session?: MainChatAgentTaskSession | null;
+  actions: MainChatQueuedExecutionAction[];
+  transcript: MainChatExecutionTranscriptEntry[];
+  pendingApprovalCount: number;
+  activeToolCount: number;
+  canResume: boolean;
+  canCancel: boolean;
+  canRetry: boolean;
+}
+
+export interface MainChatRuntimeEvalReport {
+  totalCases: number;
+  runtimeExecutedCaseCount: number;
+  deterministicStubCaseCount: number;
+  passedCases: number;
+  failedCases: number;
+  silentWriteCount: number;
+  finalCompletionReady: boolean;
+  finalCompletionBlockers: string[];
+  failures: unknown[];
+  [key: string]: unknown;
+}
+
+export interface MainChatAgentExecutionV1AcceptanceReport {
+  ready: boolean;
+  status: string;
+  blockers: string[];
+  requiredEvidence: string[];
+  runtimeGateReady: boolean;
+  commandSurfaceGateReady: boolean;
+  liveProviderGateReady: boolean;
+  directWritesExecuted: boolean;
+}
+
+export interface MainChatLiveProviderEvalPreflightReport {
+  ready: boolean;
+  status: string;
+  provider: string;
+  blockers: string[];
+  requiredEvidence: string[];
+  liveProviderInvocationAllowed: boolean;
+  modelInvoked: boolean;
+  directWritesExecuted: boolean;
+}
+
+export interface MainChatAgentExecutionV1EvalGateReport {
+  reportKind: "main_chat_agent_execution_v1_eval_gate";
+  runtimeEval: MainChatRuntimeEvalReport;
+  acceptance: MainChatAgentExecutionV1AcceptanceReport;
+  liveProviderPreflight: MainChatLiveProviderEvalPreflightReport;
+  commandSurfaceGateExecuted: boolean;
+  liveProviderAttempted: boolean;
+  migrationPermission: boolean;
+  metadataSafe: boolean;
+  noExternalProviderInvocation: boolean;
+  noAppStoreWrites: boolean;
+  metadataSafeSummary: Record<string, unknown>;
 }
 
 export async function sendMessageV2(
@@ -483,6 +666,45 @@ export async function sendMessageV2(
   messages: ChatMessage[]
 ): Promise<SendMessageResult> {
   return safeInvoke<SendMessageResult>("send_message", { ...sessionArgs(sessionId), messages });
+}
+
+export async function getMainChatAgentTaskState(
+  taskSessionId: string
+): Promise<MainChatAgentTaskState> {
+  return safeInvoke<MainChatAgentTaskState>("get_main_chat_agent_task_state", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
+export async function resumeMainChatAgentTask(
+  taskSessionId: string
+): Promise<MainChatAgentTaskState> {
+  return safeInvoke<MainChatAgentTaskState>("resume_main_chat_agent_task", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
+export async function cancelMainChatAgentTask(
+  taskSessionId: string
+): Promise<MainChatAgentTaskState> {
+  return safeInvoke<MainChatAgentTaskState>("cancel_main_chat_agent_task", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
+}
+
+export async function retryMainChatAgentAction(
+  taskSessionId: string,
+  actionId: string
+): Promise<MainChatAgentTaskState> {
+  return safeInvoke<MainChatAgentTaskState>("retry_main_chat_agent_action", {
+    taskSessionId,
+    task_session_id: taskSessionId,
+    actionId,
+    action_id: actionId,
+  });
 }
 
 export async function runMultiStrategyAgentPreview(
@@ -497,6 +719,12 @@ export async function getRuntimeStrategyRegistryStatus(): Promise<MultiStrategyR
 
 export async function getReactBetaExecutionStatus(): Promise<ReactBetaExecutionStatusReport> {
   return safeInvoke<ReactBetaExecutionStatusReport>("get_react_beta_execution_status");
+}
+
+export async function runMainChatAgentExecutionV1EvalGate(): Promise<MainChatAgentExecutionV1EvalGateReport> {
+  return safeInvoke<MainChatAgentExecutionV1EvalGateReport>(
+    "run_main_chat_agent_execution_v1_eval_gate"
+  );
 }
 
 export async function createPlanExecuteSession(

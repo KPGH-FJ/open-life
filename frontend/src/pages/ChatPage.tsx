@@ -20,6 +20,9 @@ import {
   CheckCircle2,
   ShieldCheck,
   XCircle,
+  RotateCw,
+  Ban,
+  Play,
 } from "lucide-react";
 import type { ChatMessage, LifeModel } from "../types";
 import LoadingSpinner from "../components/LoadingSpinner";
@@ -49,6 +52,10 @@ import {
   runMultiStrategyAgentPreview,
   checkControlledChatPilotEligibility,
   recordControlledPilotPromotionEvidence,
+  getMainChatAgentTaskState,
+  resumeMainChatAgentTask,
+  cancelMainChatAgentTask,
+  retryMainChatAgentAction,
 } from "../tauri";
 import type {
   AgentRun,
@@ -59,6 +66,9 @@ import type {
   StreamMessageStartPayload,
   SystemDiagnostics,
   ToolCallResult,
+  MainChatAgentIngressDecision,
+  MainChatExecutionTranscriptEntry,
+  MainChatAgentTaskState,
 } from "../tauri";
 import type {
   ControlledPilotPromotionEvidenceInput,
@@ -91,8 +101,8 @@ function buildReadinessSummary(diagnostics: SystemDiagnostics | null): {
       status: "检测中",
       tone: "warning",
       detail: "正在读取本地模型、云端 API 和人生模型状态。",
-  };
-}
+    };
+  }
 
   if (diagnostics.chat_ready) {
     const backend = diagnostics.ollama_online
@@ -305,6 +315,81 @@ function classNames(...classes: (string | false | undefined)[]) {
   return classes.filter(Boolean).join(" ");
 }
 
+function formatMainChatStrategy(
+  strategy: MainChatAgentIngressDecision["selectedStrategy"]
+): string {
+  switch (strategy) {
+    case "direct_answer":
+      return "Direct";
+    case "react_tool_execution":
+      return "ReAct";
+    case "plan_execute":
+      return "Plan";
+    case "memory_proposal":
+      return "Memory";
+    case "life_model_proposal":
+      return "LifeModel";
+    case "review_maturation":
+      return "Review";
+    case "blocked_confirmation":
+      return "Blocked";
+    default:
+      return strategy;
+  }
+}
+
+function formatTranscriptKind(kind: MainChatExecutionTranscriptEntry["kind"]): string {
+  switch (kind) {
+    case "route_decision":
+      return "Route";
+    case "permission_request":
+      return "Permission";
+    case "proposal_request":
+      return "Proposal";
+    case "final_result":
+      return "Final";
+    case "follow_up":
+      return "Follow-up";
+    case "user_input":
+      return "Input";
+    default:
+      return kind.replace(/_/g, " ");
+  }
+}
+
+function formatMainChatMetadataEntries(metadata?: Record<string, unknown>): string[] {
+  if (!metadata) return [];
+  return Object.entries(metadata).flatMap(([key, value]) => {
+    if (value === undefined || value === null) return [];
+    if (["string", "number", "boolean"].includes(typeof value)) {
+      return [`${key}: ${String(value)}`];
+    }
+    if (Array.isArray(value)) {
+      return [`${key}: ${value.length} items`];
+    }
+    return [`${key}: ${typeof value}`];
+  });
+}
+
+function mainChatActionStatusClass(status: string): string {
+  switch (status) {
+    case "observed":
+    case "completed":
+      return "border-emerald-200 bg-emerald-50 text-emerald-800";
+    case "failed":
+      return "border-rose-200 bg-rose-50 text-rose-800";
+    case "pending_permission":
+      return "border-amber-200 bg-amber-50 text-amber-800";
+    case "executing":
+    case "retrying":
+      return "border-blue-200 bg-blue-50 text-blue-800";
+    case "cancelled":
+      return "border-stone-300 bg-stone-100 text-stone-500";
+    default:
+      return "border-stone-200 bg-white text-stone-700";
+  }
+}
+
 const PLANNING_STAGE_PATTERN =
   /(规划|计划|安排|今日|今天|目标|日程|下一步|拆解|里程碑|weekly|plan|goal|schedule)/i;
 const MEMORY_STAGE_PATTERN = /(记忆|人生模型|life\s*model|lifemodel|加入记忆|依据|回忆|memory)/i;
@@ -406,6 +491,16 @@ export default function ChatPage({
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const [streamInterrupted, setStreamInterrupted] = useState(false);
   const [currentRun, setCurrentRun] = useState<AgentRun | null>(null);
+  const [currentAgentIngress, setCurrentAgentIngress] =
+    useState<MainChatAgentIngressDecision | null>(null);
+  const [currentExecutionTranscript, setCurrentExecutionTranscript] = useState<
+    MainChatExecutionTranscriptEntry[]
+  >([]);
+  const [currentAgentTaskState, setCurrentAgentTaskState] = useState<MainChatAgentTaskState | null>(
+    null
+  );
+  const [agentTaskControlBusy, setAgentTaskControlBusy] = useState(false);
+  const [legacyFallbackUsed, setLegacyFallbackUsed] = useState(false);
   const [pendingProposals, setPendingProposals] = useState<AgentProposal[]>([]);
   const [feedbackGiven, setFeedbackGiven] = useState<Record<number, "up" | "down">>({});
   const [governedPreviewOpen, setGovernedPreviewOpen] = useState(false);
@@ -496,6 +591,29 @@ export default function ChatPage({
     } catch {
       if (currentSessionIdRef.current === sessionId) {
         setCurrentRun(null);
+      }
+    }
+  };
+
+  const loadMainChatTaskState = async (
+    taskSessionId: string | undefined,
+    sourceSessionId = currentSessionIdRef.current
+  ) => {
+    if (!taskSessionId) {
+      setCurrentAgentTaskState(null);
+      return;
+    }
+    try {
+      const state = await getMainChatAgentTaskState(taskSessionId);
+      if (currentSessionIdRef.current === sourceSessionId) {
+        setCurrentAgentTaskState(state);
+        if (state.transcript?.length) {
+          setCurrentExecutionTranscript(state.transcript);
+        }
+      }
+    } catch {
+      if (currentSessionIdRef.current === sourceSessionId) {
+        setCurrentAgentTaskState(null);
       }
     }
   };
@@ -699,6 +817,13 @@ export default function ChatPage({
                 run_id: event.payload.run_id,
               }))
             );
+            setCurrentAgentIngress(event.payload.agent_ingress ?? null);
+            setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
+            setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
+            await loadMainChatTaskState(
+              event.payload.agent_ingress?.agentTaskSessionId,
+              event.payload.session_id
+            );
             await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           }
         }
@@ -751,8 +876,15 @@ export default function ChatPage({
               run_id: event.payload.run_id,
             }))
           );
+          setCurrentAgentIngress(event.payload.agent_ingress ?? null);
+          setCurrentExecutionTranscript(event.payload.execution_transcript ?? []);
+          setLegacyFallbackUsed(Boolean(event.payload.legacy_fallback_used));
           setStreamInterrupted(false);
           emitCompanionStage(nextStage);
+          await loadMainChatTaskState(
+            event.payload.agent_ingress?.agentTaskSessionId,
+            event.payload.session_id
+          );
           await loadAgentRunForSession(event.payload.run_id, event.payload.session_id);
           refreshAgentRuns(event.payload.session_id);
           logAnalyticsEvent("send_message", currentSessionId, undefined).catch(() => {});
@@ -1036,6 +1168,10 @@ export default function ChatPage({
     setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
+    setCurrentAgentIngress(null);
+    setCurrentExecutionTranscript([]);
+    setCurrentAgentTaskState(null);
+    setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
 
     try {
@@ -1086,6 +1222,10 @@ export default function ChatPage({
     setReasoningTrace(null);
     setToolCalls([]);
     setShowToolCalls(false);
+    setCurrentAgentIngress(null);
+    setCurrentExecutionTranscript([]);
+    setCurrentAgentTaskState(null);
+    setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
     try {
       await startStreamMessage(currentSessionId, retryMessages);
@@ -1103,6 +1243,50 @@ export default function ChatPage({
       emitCompanionStage("error");
     }
   }, [currentSessionId, messages, sending, emitCompanionStage]);
+
+  const handleResumeMainChatTask = useCallback(async () => {
+    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
+    if (!taskSessionId || agentTaskControlBusy) return;
+    setAgentTaskControlBusy(true);
+    try {
+      const state = await resumeMainChatAgentTask(taskSessionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [agentTaskControlBusy, currentAgentIngress?.agentTaskSessionId]);
+
+  const handleCancelMainChatTask = useCallback(async () => {
+    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
+    if (!taskSessionId || agentTaskControlBusy) return;
+    setAgentTaskControlBusy(true);
+    try {
+      const state = await cancelMainChatAgentTask(taskSessionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [agentTaskControlBusy, currentAgentIngress?.agentTaskSessionId]);
+
+  const handleRetryMainChatAction = useCallback(async () => {
+    const taskSessionId = currentAgentIngress?.agentTaskSessionId;
+    const actionId = currentAgentTaskState?.actions.find(action => action.status === "failed")?.id;
+    if (!taskSessionId || !actionId || agentTaskControlBusy) return;
+    setAgentTaskControlBusy(true);
+    try {
+      const state = await retryMainChatAgentAction(taskSessionId, actionId);
+      setCurrentAgentTaskState(state);
+      setCurrentExecutionTranscript(state.transcript ?? []);
+    } finally {
+      setAgentTaskControlBusy(false);
+    }
+  }, [
+    agentTaskControlBusy,
+    currentAgentIngress?.agentTaskSessionId,
+    currentAgentTaskState?.actions,
+  ]);
 
   const readiness = useMemo(() => buildReadinessSummary(diagnostics), [diagnostics]);
   const governedPreviewSummaryEntries = useMemo(
@@ -1560,28 +1744,30 @@ export default function ChatPage({
           <div className="flex min-h-[88px] shrink-0 items-center border-b border-stone-200 bg-[#fffefa] px-6 py-4">
             <div className="min-w-0">
               <div className="flex items-center gap-3">
-              <div
-                aria-hidden="true"
-                className="flex h-11 w-11 items-center justify-center rounded-lg bg-stone-900 text-base font-bold text-white"
-              >
-                O
-              </div>
-              <div>
-                <div className="text-base font-semibold leading-5 text-stone-950">OpenLife</div>
-                <div className="mt-1 text-sm font-medium leading-4 text-stone-500">在线</div>
-              </div>
+                <div
+                  aria-hidden="true"
+                  className="flex h-11 w-11 items-center justify-center rounded-lg bg-stone-900 text-base font-bold text-white"
+                >
+                  O
+                </div>
+                <div>
+                  <div className="text-base font-semibold leading-5 text-stone-950">OpenLife</div>
+                  <div className="mt-1 text-sm font-medium leading-4 text-stone-500">在线</div>
+                </div>
               </div>
               <div className="mt-2 flex flex-wrap gap-2 text-xs font-medium text-stone-600">
-                {[companionRouteStatus(diagnostics), companionLifeModelStatus(diagnostics), companionPendingStatus(diagnostics, pendingProposals)].map(
-                  label => (
-                    <span
-                      key={label}
-                      className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2"
-                    >
-                      {label}
-                    </span>
-                  )
-                )}
+                {[
+                  companionRouteStatus(diagnostics),
+                  companionLifeModelStatus(diagnostics),
+                  companionPendingStatus(diagnostics, pendingProposals),
+                ].map(label => (
+                  <span
+                    key={label}
+                    className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2"
+                  >
+                    {label}
+                  </span>
+                ))}
               </div>
             </div>
           </div>
@@ -2564,6 +2750,235 @@ export default function ChatPage({
                   runId={currentRunId || undefined}
                   isActive={sending}
                 />
+              </div>
+            </div>
+          )}
+          {!companionMode && currentAgentIngress && (
+            <div className="px-4 py-2">
+              <div className="border-y border-stone-200 bg-stone-50/75 px-3 py-3 text-xs text-stone-700">
+                <div className="flex flex-wrap items-start gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="inline-flex h-6 items-center rounded-md bg-stone-900 px-2 font-semibold text-white">
+                        Execution task
+                      </span>
+                      <span className="inline-flex h-6 items-center rounded-md border border-stone-300 bg-white px-2 font-semibold text-stone-800">
+                        {formatMainChatStrategy(currentAgentIngress.selectedStrategy)}
+                      </span>
+                      <span className="font-medium">
+                        {currentAgentIngress.privacyRisk.riskLevel} risk
+                      </span>
+                      <span className="text-stone-500">
+                        {Math.round(currentAgentIngress.confidence * 100)}% confidence
+                      </span>
+                      {currentAgentIngress.agentTaskSessionId && (
+                        <span className="text-stone-500">
+                          Session {currentAgentIngress.agentTaskSessionId.slice(-8)}
+                        </span>
+                      )}
+                      {currentAgentTaskState?.session?.status && (
+                        <span className="inline-flex h-6 items-center rounded-md border border-stone-200 bg-white px-2 font-medium text-stone-700">
+                          {currentAgentTaskState.session.status.replace(/_/g, " ")}
+                        </span>
+                      )}
+                      {currentAgentTaskState && (
+                        <>
+                          <span className="text-stone-500">
+                            {currentAgentTaskState.activeToolCount} active
+                          </span>
+                          <span className="text-stone-500">
+                            {currentAgentTaskState.pendingApprovalCount} pending
+                          </span>
+                        </>
+                      )}
+                    </div>
+                    <div className="mt-2 grid gap-2 md:grid-cols-2">
+                      {currentAgentTaskState?.session?.userGoal && (
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                            Goal
+                          </div>
+                          <div className="truncate text-stone-900">
+                            {currentAgentTaskState.session.userGoal}
+                          </div>
+                        </div>
+                      )}
+                      {currentAgentTaskState?.session?.currentPlanSummary && (
+                        <div className="min-w-0">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                            Current plan
+                          </div>
+                          <div className="truncate text-stone-900">
+                            {currentAgentTaskState.session.currentPlanSummary}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {currentAgentTaskState && (
+                    <div className="ml-auto flex shrink-0 items-center gap-1">
+                      <button
+                        type="button"
+                        aria-label="Resume task"
+                        title="Resume task"
+                        disabled={!currentAgentTaskState.canResume || agentTaskControlBusy}
+                        onClick={handleResumeMainChatTask}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Play size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Retry failed action"
+                        title="Retry failed action"
+                        disabled={!currentAgentTaskState.canRetry || agentTaskControlBusy}
+                        onClick={handleRetryMainChatAction}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <RotateCw size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Cancel task"
+                        title="Cancel task"
+                        disabled={!currentAgentTaskState.canCancel || agentTaskControlBusy}
+                        onClick={handleCancelMainChatTask}
+                        className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-700 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        <Ban size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+                {legacyFallbackUsed && (
+                  <div className="mt-2 border-l-2 border-amber-400 bg-amber-50 px-2 py-1 text-amber-900">
+                    <span className="font-semibold">Fallback notice</span>: response used the
+                    visible legacy fallback path.
+                  </div>
+                )}
+                {currentAgentTaskState?.actions?.length ? (
+                  <div className="mt-3">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      Execution queue
+                    </div>
+                    <div className="divide-y divide-stone-200 border-y border-stone-200 bg-white/75">
+                      {currentAgentTaskState.actions.map(action => {
+                        const metadataEntries = formatMainChatMetadataEntries(
+                          action.observationMetadata
+                        );
+                        const needsReview =
+                          action.policy.requiresProposal || action.policy.requiresConfirmation;
+                        return (
+                          <div key={action.id} className="grid gap-2 py-2 md:grid-cols-[1fr_auto]">
+                            <div className="min-w-0 px-2">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-semibold text-stone-950">
+                                  {action.action.actionType}
+                                </span>
+                                <span
+                                  className={classNames(
+                                    "inline-flex h-5 items-center rounded-md border px-1.5 font-medium",
+                                    mainChatActionStatusClass(action.status)
+                                  )}
+                                >
+                                  {action.status.replace(/_/g, " ")}
+                                </span>
+                                <span className="text-stone-500">
+                                  {action.policy.reasonCode}
+                                </span>
+                                {action.policy.requiresProposal && (
+                                  <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
+                                    Proposal required
+                                  </span>
+                                )}
+                                {action.policy.requiresConfirmation && (
+                                  <span className="inline-flex h-5 items-center rounded-md border border-amber-200 bg-amber-50 px-1.5 font-medium text-amber-900">
+                                    Permission required
+                                  </span>
+                                )}
+                                {needsReview && (
+                                  <Link
+                                    to="/review"
+                                    state={{
+                                      mainChatTaskSessionId:
+                                        currentAgentTaskState?.session?.id ??
+                                        currentAgentIngress.agentTaskSessionId,
+                                      returnTo: "/chat",
+                                    }}
+                                    className="inline-flex h-5 items-center gap-1 rounded-md border border-stone-200 bg-white px-1.5 font-medium text-stone-800 hover:bg-stone-100"
+                                  >
+                                    <ExternalLink size={12} />
+                                    Open Review Center
+                                  </Link>
+                                )}
+                              </div>
+                              <div className="mt-1 text-stone-700">
+                                {action.action.description}
+                              </div>
+                              {metadataEntries.length > 0 && (
+                                <div className="mt-1 flex flex-wrap gap-1">
+                                  {metadataEntries.map(entry => (
+                                    <span
+                                      key={`${action.id}-${entry}`}
+                                      className="inline-flex h-5 items-center rounded-md bg-stone-100 px-1.5 text-stone-600"
+                                    >
+                                      {entry}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                              {action.error && (
+                                <div className="mt-1 text-rose-700">{action.error}</div>
+                              )}
+                            </div>
+                            <div className="px-2 text-right text-stone-500">
+                              attempt {action.attempts}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+                {currentAgentTaskState?.session?.pendingBlockers?.length ? (
+                  <div className="mt-3">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      Pending blockers
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      {currentAgentTaskState.session.pendingBlockers.map(blocker => (
+                        <span
+                          key={blocker}
+                          className="inline-flex h-6 items-center rounded-md border border-amber-200 bg-amber-50 px-2 font-medium text-amber-900"
+                        >
+                          {blocker}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {currentExecutionTranscript.length > 0 && (
+                  <div className="mt-3">
+                    <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-stone-500">
+                      Transcript
+                    </div>
+                    <div className="grid gap-1 sm:grid-cols-2">
+                      {currentExecutionTranscript.slice(-4).map(entry => (
+                        <div
+                          key={entry.id}
+                          className="min-w-0 border-l border-stone-300 bg-white/70 px-2 py-1"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="shrink-0 font-semibold text-stone-900">
+                              {formatTranscriptKind(entry.kind)}
+                            </span>
+                            <span className="truncate text-stone-600">{entry.summary}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

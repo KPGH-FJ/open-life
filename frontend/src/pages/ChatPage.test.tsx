@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react";
-import { BrowserRouter, MemoryRouter, useLocation } from "react-router-dom";
+import { BrowserRouter, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import ChatPage from "./ChatPage";
+import ProposalReviewPage from "./ProposalReviewPage";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mockInvoke, mockLifeModel } from "@/test/mocks/tauri";
@@ -540,6 +541,390 @@ describe("ChatPage", () => {
     });
 
     expect(screen.getAllByText("今天是星期一。")).toHaveLength(1);
+  });
+
+  it("renders main chat agent execution state as a task panel", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_main_chat_agent_task_state") {
+        return Promise.resolve({
+          session: {
+            id: args?.taskSessionId ?? "mainchat-task-ui-1",
+            chatSessionId: "session-1",
+            userGoal: "Prepare a low energy weekly plan",
+            selectedStrategy: "react_tool_execution",
+            status: "waiting_permission",
+            currentPlanSummary: "Search planning memory, then ask before creating tasks.",
+            actionQueueIds: ["action-memory-1", "action-write-1"],
+            pendingBlockers: ["resumeBlockedByPendingPermission"],
+            contextSnapshotRefs: ["ctx_weekly_digest"],
+            createdAt: "2026-06-08T00:00:00.000Z",
+            updatedAt: "2026-06-08T00:00:01.000Z",
+            finalSummary: undefined,
+          },
+          actions: [
+            {
+              id: "action-memory-1",
+              sessionId: "mainchat-task-ui-1",
+              action: {
+                actionType: "memory.search",
+                description: "Search accepted planning memory",
+              },
+              policy: {
+                level: "low",
+                reasonCode: "read_only_memory",
+                executionAllowed: true,
+                requiresConfirmation: false,
+                requiresProposal: false,
+                requiresBlocker: false,
+                silentWriteAllowed: false,
+              },
+              status: "observed",
+              attempts: 1,
+              observationMetadata: { matchedCount: 2, directWritesExecuted: false },
+              createdAt: "2026-06-08T00:00:00.000Z",
+              updatedAt: "2026-06-08T00:00:01.000Z",
+            },
+            {
+              id: "action-write-1",
+              sessionId: "mainchat-task-ui-1",
+              action: {
+                actionType: "review_center.propose_scheduled_task",
+                description: "Create reviewable weekly task proposal",
+              },
+              policy: {
+                level: "medium",
+                reasonCode: "proposal_first_write",
+                executionAllowed: false,
+                requiresConfirmation: true,
+                requiresProposal: true,
+                requiresBlocker: true,
+                silentWriteAllowed: false,
+              },
+              status: "failed",
+              attempts: 1,
+              error: "Proposal store unavailable",
+              createdAt: "2026-06-08T00:00:00.000Z",
+              updatedAt: "2026-06-08T00:00:01.000Z",
+            },
+          ],
+          transcript: [
+            {
+              id: "tx-plan-1",
+              sessionId: "mainchat-task-ui-1",
+              kind: "plan",
+              summary: "Use read-only memory before proposing any write.",
+              createdAt: "2026-06-08T00:00:00.000Z",
+            },
+            {
+              id: "tx-permission-1",
+              sessionId: "mainchat-task-ui-1",
+              kind: "permission_request",
+              summary: "Waiting for explicit approval before write-like task creation.",
+              metadata: { pendingPermissionCount: 1 },
+              createdAt: "2026-06-08T00:00:01.000Z",
+            },
+          ],
+          pendingApprovalCount: 1,
+          activeToolCount: 1,
+          canResume: true,
+          canCancel: true,
+          canRetry: true,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Plan my week with low energy constraints" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          sessionId: expect.any(String),
+        })
+      );
+    });
+    const streamCall = vi
+      .mocked(invoke)
+      .mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-mainchat-ui-1",
+          reply: "I found planning context and need approval before creating tasks.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-mainchat-ui-1",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.91,
+            reasonSummary: "Needs read-only memory and a proposal-first task.",
+            fallbackEligible: true,
+            privacyRisk: {
+              riskLevel: "medium",
+              privacyClass: "user_state",
+              policyReasonCode: "proposal_first",
+              localOnlyRequired: true,
+              writeLike: true,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "mainchat-task-ui-1",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: true,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(await screen.findByText("Execution task")).toBeInTheDocument();
+    expect(screen.getByText("Goal")).toBeInTheDocument();
+    expect(screen.getByText("Prepare a low energy weekly plan")).toBeInTheDocument();
+    expect(screen.getByText("Current plan")).toBeInTheDocument();
+    expect(screen.getByText("Search planning memory, then ask before creating tasks.")).toBeInTheDocument();
+    expect(screen.getByText("Execution queue")).toBeInTheDocument();
+    expect(screen.getByText("memory.search")).toBeInTheDocument();
+    expect(screen.getByText("Search accepted planning memory")).toBeInTheDocument();
+    expect(screen.getByText("matchedCount: 2")).toBeInTheDocument();
+    expect(screen.getByText("directWritesExecuted: false")).toBeInTheDocument();
+    expect(screen.getByText("review_center.propose_scheduled_task")).toBeInTheDocument();
+    expect(screen.getByText("Proposal store unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Proposal required")).toBeInTheDocument();
+    expect(screen.getByText("Permission required")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Open Review Center" })).toHaveAttribute(
+      "href",
+      "/review"
+    );
+    expect(screen.getByText("Pending blockers")).toBeInTheDocument();
+    expect(screen.getByText("resumeBlockedByPendingPermission")).toBeInTheDocument();
+    expect(screen.getByText(/Fallback notice/)).toBeInTheDocument();
+    expect(screen.getByText(/visible legacy fallback/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Resume task" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry failed action" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Cancel task" })).toBeEnabled();
+  });
+
+  it("carries proposal review approval back to the blocked main chat task", async () => {
+    type StreamListener = (event: { payload: any }) => void | Promise<void>;
+    const listeners = new Map<string, StreamListener>();
+    let proposalAccepted = false;
+    vi.mocked(listen).mockImplementation((event, handler) => {
+      listeners.set(event, handler as StreamListener);
+      return Promise.resolve(() => {});
+    });
+    vi.mocked(invoke).mockImplementation((cmd: string, args?: Record<string, any>) => {
+      if (cmd === "get_main_chat_agent_task_state") {
+        return Promise.resolve({
+          session: {
+            id: "mainchat-task-review-1",
+            chatSessionId: "session-1",
+            userGoal: "Read a workspace file after permission approval",
+            selectedStrategy: "react_tool_execution",
+            status: proposalAccepted ? "running" : "waiting_permission",
+            currentPlanSummary: "Wait for tool permission, then resume file read.",
+            actionQueueIds: ["action-file-1"],
+            pendingBlockers: proposalAccepted ? [] : ["tool_permission_required"],
+            contextSnapshotRefs: ["ctx_file_permission"],
+            createdAt: "2026-06-08T00:00:00.000Z",
+            updatedAt: "2026-06-08T00:00:01.000Z",
+          },
+          actions: [
+            {
+              id: "action-file-1",
+              sessionId: "mainchat-task-review-1",
+              action: {
+                actionType: "file.read",
+                description: "Read the governed workspace file",
+              },
+              policy: {
+                level: "medium",
+                reasonCode: "tool_permission_required",
+                executionAllowed: false,
+                requiresConfirmation: true,
+                requiresProposal: true,
+                requiresBlocker: true,
+                silentWriteAllowed: false,
+              },
+              status: proposalAccepted ? "planned" : "pending_permission",
+              attempts: 1,
+              observationMetadata: { directWritesExecuted: false },
+              createdAt: "2026-06-08T00:00:00.000Z",
+              updatedAt: "2026-06-08T00:00:01.000Z",
+            },
+          ],
+          transcript: [],
+          pendingApprovalCount: proposalAccepted ? 0 : 1,
+          activeToolCount: 0,
+          canResume: true,
+          canCancel: true,
+          canRetry: false,
+        });
+      }
+      if (cmd === "get_pending_proposals" || cmd === "list_proposals") {
+        if (proposalAccepted) return Promise.resolve([]);
+        return Promise.resolve([
+          {
+            id: "proposal-tool-permission-1",
+            runId: "run-tool-permission-1",
+            proposalType: "tool_permission",
+            source: "chat_conversation",
+            sourceDetail: "mainchat-task-review-1",
+            affectedPath: "tools.permissions.file.read",
+            before: "",
+            after: {
+              tool_name: "file.read",
+              source: "builtin",
+              permission: "allow_once",
+              risk_level: "medium",
+            },
+            reason: "Main Chat requested permission before reading a workspace file.",
+            confidence: 0.86,
+            riskLevel: "medium",
+            status: "pending",
+            createdAt: "2026-06-08T00:00:00.000Z",
+            expiresAt: "2026-07-08T00:00:00.000Z",
+          },
+        ]);
+      }
+      if (cmd === "accept_proposal") {
+        proposalAccepted = true;
+        return Promise.resolve({ success: true });
+      }
+      if (cmd === "resume_main_chat_agent_task") {
+        return Promise.resolve({
+          session: {
+            id: args?.taskSessionId ?? "mainchat-task-review-1",
+            chatSessionId: "session-1",
+            userGoal: "Read a workspace file after permission approval",
+            selectedStrategy: "react_tool_execution",
+            status: "running",
+            currentPlanSummary: "Permission accepted; resume the file read.",
+            actionQueueIds: ["action-file-1"],
+            pendingBlockers: [],
+            contextSnapshotRefs: ["ctx_file_permission"],
+            createdAt: "2026-06-08T00:00:00.000Z",
+            updatedAt: "2026-06-08T00:00:02.000Z",
+          },
+          actions: [],
+          transcript: [],
+          pendingApprovalCount: 0,
+          activeToolCount: 0,
+          canResume: false,
+          canCancel: true,
+          canRetry: false,
+        });
+      }
+      return mockInvoke(cmd, args);
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/chat"]}>
+        <Routes>
+          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/review" element={<ProposalReviewPage />} />
+        </Routes>
+      </MemoryRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+    fireEvent.change(textarea, { target: { value: "Read AGENTS.md after approval" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({ sessionId: expect.any(String) })
+      );
+    });
+    const streamCall = vi
+      .mocked(invoke)
+      .mock.calls.find(([cmd]) => cmd === "start_stream_message");
+    const eventSessionId = (streamCall?.[1] as any)?.sessionId ?? "session-1";
+    const doneHandler = listeners.get("stream-message-done");
+    expect(doneHandler).toBeDefined();
+    await act(async () => {
+      await doneHandler?.({
+        payload: {
+          session_id: eventSessionId,
+          run_id: "run-review-flow-1",
+          reply: "I need permission before reading that file.",
+          reasoning_trace: null,
+          tool_calls: [],
+          agent_ingress: {
+            requestId: "req-review-flow-1",
+            sourceSessionId: "session-1",
+            taskKind: "conversation",
+            selectedStrategy: "react_tool_execution",
+            confidence: 0.88,
+            reasonSummary: "Permission required before file read.",
+            fallbackEligible: true,
+            privacyRisk: {
+              riskLevel: "medium",
+              privacyClass: "workspace",
+              policyReasonCode: "tool_permission_required",
+              localOnlyRequired: false,
+              writeLike: false,
+              externalWriteLike: false,
+            },
+            agentTaskSessionId: "mainchat-task-review-1",
+          },
+          execution_transcript: [],
+          legacy_fallback_used: false,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(await screen.findByRole("link", { name: "Open Review Center" }));
+
+    expect(await screen.findByText("Review Center")).toBeInTheDocument();
+    expect(await screen.findByText("tools.permissions.file.read")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("应用"));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "accept_proposal",
+        expect.objectContaining({
+          proposalId: "proposal-tool-permission-1",
+          proposal_id: "proposal-tool-permission-1",
+        })
+      );
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Resume Main Chat task" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "resume_main_chat_agent_task",
+        expect.objectContaining({
+          taskSessionId: "mainchat-task-review-1",
+          task_session_id: "mainchat-task-review-1",
+        })
+      );
+    });
+    expect(await screen.findByText(/Main Chat task resumed/)).toBeInTheDocument();
   });
 
   it("keeps Send on the existing chat stream path without calling forbidden governed commands", async () => {

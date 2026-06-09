@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import {
   AlertCircle,
   Check,
@@ -23,6 +23,7 @@ import {
   editProposal,
   getSystemDiagnostics,
   getConfig,
+  resumeMainChatAgentTask,
   type AgentProposal,
   type AppConfig,
 } from "../tauri";
@@ -75,12 +76,25 @@ const RISK_OPTIONS = [
   { value: "critical", label: "Critical" },
 ];
 
+type ReviewRouteState = {
+  mainChatTaskSessionId?: unknown;
+  returnTo?: unknown;
+};
+
 export default function ProposalReviewPage() {
+  const location = useLocation();
+  const routeState = location.state as ReviewRouteState | null;
+  const mainChatTaskSessionId =
+    typeof routeState?.mainChatTaskSessionId === "string"
+      ? routeState.mainChatTaskSessionId
+      : null;
   const [proposals, setProposals] = useState<AgentProposal[]>([]);
   const [loading, setLoading] = useState(true);
   const [actingId, setActingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [mainChatResumeTaskId, setMainChatResumeTaskId] = useState<string | null>(null);
+  const [mainChatResumeBusy, setMainChatResumeBusy] = useState(false);
   const [filterType, setFilterType] = useState("");
   const [filterRisk, setFilterRisk] = useState("");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -161,6 +175,12 @@ export default function ProposalReviewPage() {
     setActingId(proposal.id);
     setError(null);
     setNotice(null);
+    const linkedMainChatTaskId =
+      action === "accept" &&
+      mainChatTaskSessionId &&
+      proposal.sourceDetail === mainChatTaskSessionId
+        ? mainChatTaskSessionId
+        : null;
 
     // Prevent accepting unsupported proposal types
     if (action === "accept" && isUnsupportedType(proposal.proposalType)) {
@@ -175,6 +195,9 @@ export default function ProposalReviewPage() {
       if (action === "accept") {
         await acceptProposal(proposal.id);
         setNotice(appliedNotice(proposal));
+        if (linkedMainChatTaskId) {
+          setMainChatResumeTaskId(linkedMainChatTaskId);
+        }
       } else if (action === "reject") {
         await rejectProposal(proposal.id);
         setNotice(`已拒绝：${proposal.affectedPath}`);
@@ -196,6 +219,21 @@ export default function ProposalReviewPage() {
       }
     } finally {
       setActingId(null);
+    }
+  };
+
+  const handleResumeMainChatTask = async () => {
+    if (!mainChatResumeTaskId) return;
+    setMainChatResumeBusy(true);
+    setError(null);
+    try {
+      const state = await resumeMainChatAgentTask(mainChatResumeTaskId);
+      const status = state.session?.status?.replace(/_/g, " ") || "running";
+      setNotice(`Main Chat task resumed: ${status}`);
+    } catch (e) {
+      setError(`恢复 Main Chat task 失败：${String(e)}`);
+    } finally {
+      setMainChatResumeBusy(false);
     }
   };
 
@@ -311,6 +349,25 @@ export default function ProposalReviewPage() {
         {notice && (
           <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
             {notice}
+          </div>
+        )}
+        {mainChatResumeTaskId && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
+            <div>
+              <div className="font-medium text-stone-900">Main Chat task ready to resume</div>
+              <div className="mt-1 text-xs text-stone-500">
+                Session {mainChatResumeTaskId.slice(-8)}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Resume Main Chat task"
+              onClick={handleResumeMainChatTask}
+              disabled={mainChatResumeBusy}
+              className="inline-flex items-center gap-1.5 rounded-full bg-stone-900 px-4 py-2 text-xs font-medium text-amber-50 hover:bg-stone-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {mainChatResumeBusy ? "Resuming..." : "Resume Main Chat task"}
+            </button>
           </div>
         )}
         {error && (

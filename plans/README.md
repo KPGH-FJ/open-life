@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
-> Last updated: 2026-06-05
-> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; default Chat remains `legacy_stream`
+> Last updated: 2026-06-09
+> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; Main Chat Agent Execution v1 remediation in progress, not complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,51 +13,225 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/openlife_lifemodel_governed_agent_runtime.md`
+3. `plans/main_chat_agent_migration_v1_goal_spec.md`
+   - Active Main Chat Agent Execution v1 remediation spec / audit trail.
+     Ordinary Main Chat now enters AgentIngress and a governed task session,
+     ReActToolExecution now attempts the governed plan-guided AgentLoop before
+     single-step ActionExecutor-backed read fallback, AgentLoop results that do
+     not observe the planned action fall back instead of being treated as tool
+     completion, direct read parser input is aligned with the memory/session
+     executors, and a 100-case runtime harness now exercises the control plane.
+     Chat now renders an execution
+     task panel for goal/current plan/action queue/observations/blockers/
+     fallback/task controls, Review Center affordances, and a route-level
+     proposal accept / explicit task resume handoff. Accepted ToolPermission
+     proposal + explicit resume now has a narrow command-surface proof that
+     replays a pending read action through the governed executor. Command-surface tests cover
+     DirectAnswer send/stream AgentRun/task-session completion, L2 DirectAnswer scheduler/provider generation trace, send/stream governed file-read, send/stream PlanExecute draft, proposal-path send/stream, send/stream registered-MCP AgentLoop success, send/stream registered-MCP ToolPermission proposal, send/stream web AgentLoop blocker, send/stream fixture-backed web AgentLoop success, plus
+     send/stream web-policy and missing-MCP blocker
+     preservation. A 24-case send/stream command-surface eval gate now exercises
+     those paths through real Tauri mock IPC across DirectAnswer, scripted
+     provider generation, file read, PlanExecute draft, proposal, web blocker, web AgentLoop blocker, fixture-backed web AgentLoop success, missing MCP blocker,
+     registered MCP AgentLoop success, and registered MCP ToolPermission proposal with legacy fallback and silent write
+     counts at zero, and the runtime eval report now includes explicit
+     webPolicyBlocker/mcpMissingReadTarget blocker-state coverage,
+     webSuccessfulReadCoverage fixture-backed success coverage,
+     mcpRegisteredReadSuccess and mcpToolPermissionProposal coverage,
+     providerRoute/localOnlyProviderGuard
+     coverage, evalProviderGeneration/evalSchedulerGeneration coverage, and
+     webAgentLoop/mcpAgentLoop coverage. The core runtime eval report and
+     command-surface report also keep live-provider generation, combined
+     provider-backed web/MCP AgentLoop, split provider-backed web AgentLoop,
+     split provider-backed MCP AgentLoop, and provider/live
+     proposal-permission coverage at zero in normal CI, with
+     `finalCompletionReady=false` and named live-provider blockers including
+     the split web/MCP blocker names.
+     Core now also exposes a fail-closed Main Chat Agent Execution v1
+     acceptance gate that aggregates runtime, send/stream command-surface, and
+     live-provider evidence and rechecks key coverage so a spoofed ready flag
+     cannot satisfy final completion. Tauri focused coverage now runs the
+     real 24-case send/stream command-surface gate and feeds its output into
+     the core final acceptance gate, and live-provider harness reports now
+     aggregate into separate Direct generation, web AgentLoop, MCP AgentLoop,
+     and proposal-permission evidence, with harness scenario identity checked
+     before evidence is credited. Credited live-provider scenarios must also
+     have completed status, no blockers, and non-empty run/task/response trace
+     fields. Runtime and
+     command-surface reports now
+     expose split zero live-provider web/MCP AgentLoop coverage rather than
+     only a combined web-MCP field. Tauri now also has a single final
+     acceptance runner that runs the core 100-case runtime gate and 24-case
+     command-surface gate, then fails closed without live-provider opt-in.
+     The scripted AgentLoop eval hook is no longer core-test-only, so Tauri
+     sees the same memory/session/web/MCP AgentLoop proof when it invokes the
+     core runtime gate. Complete clean live harness evidence is explicitly
+     merged into runtime live coverage and command-surface final evidence; the
+     runner returns runtime/command-surface case counts, live-provider
+     attempted/report/ready/main-chat-invoked/model-invoked counts,
+     metadata-safe live-provider blockers, a direct-write flag, and the nested
+     core acceptance report; post-invocation live failures now also derive
+     scenario-specific blockers.
+     The explicit non-default `run_main_chat_agent_execution_v1_eval_gate`
+     Tauri command exposes the core 100-case runtime eval gate as a
+     metadata-safe, no-external-provider, no-app-store-write report with
+     `migrationPermission=false`; it includes a typed `liveProviderPreflight`
+     report plus current-config live-provider preflight blockers without
+     serializing keys or invoking the provider, lists split web and MCP live
+     evidence requirements, and remains blocked without command-surface and
+     live-provider evidence.
+     A metadata-safe live-provider eval preflight now fails closed unless an
+     operator explicitly opts into live eval with a cloud provider key, network
+     enabled, no scripted scheduler response, and no LocalOnly policy; this
+     preflight records blockers without invoking a model, can derive key
+     presence from AppConfig without serializing the key, has Tauri
+     command-state no-invocation blocker coverage, and is paired with ignored
+     opt-in Tauri harness paths that invoke ordinary `send_message` only when
+     the external-provider preflight is ready. A non-ignored local HTTP
+     OpenAI-compatible provider-client harness now permits the `local_test_http`
+     endpoint kind and proves ordinary `send_message` can run DirectAnswer
+     through the real scheduler/HTTP client path with response trace and no
+     silent writes; the acceptance evidence intentionally does not credit this
+     as external live-provider generation, and normal command-surface live
+     coverage remains zero. The ignored external paths cover DirectAnswer,
+     provider-backed ReAct web AgentLoop, registered MCP AgentLoop, and MCP
+     ToolPermission proposal evidence, including `liveProviderInvoked`,
+     AgentLoop action status, no single-step fallback, MCP target resolution /
+     ToolPermission proposal checks, and no silent writes. The ignored live
+     runs were not executed in this environment and do not count as
+     live-provider completion.
+     Final completion still requires live-provider-backed
+     generation eval coverage, broader provider-backed web/MCP AgentLoop and
+     manifest/permission coverage, and broader provider/live proposal-permission
+     proof.
+4. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
-4. `plans/lifemodel_governed_backend_completion_goal_spec.md`
+5. `plans/lifemodel_governed_backend_completion_goal_spec.md`
    - Completed Goal-mode master spec for the pre-UI LifeModel-governed
      backend kernel through W149.
-5. `plans/lifemodel_governed_runtime_progress.md`
+6. `plans/lifemodel_governed_runtime_progress.md`
    - Compact W1-W158 completion/status index. This is not a second roadmap.
-6. `plans/skill_runtime_goal_spec.md`
+7. `plans/skill_runtime_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for W150-W158 Skill Runtime
      Beta Maturity. This is not default Chat migration permission.
-7. `plans/react_beta_execution_hardening_goal_spec.md`
+8. `plans/react_beta_execution_hardening_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for ReAct Beta Execution
      Hardening W114-W123.
-8. `plans/runtime_strategy_maturity_goal_spec.md`
+9. `plans/runtime_strategy_maturity_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for RuntimeStrategy /
      Multi-Strategy Runtime Maturity W106-W113.
-9. `plans/plan_execute_product_vertical_goal_spec.md`
+10. `plans/plan_execute_product_vertical_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for the Plan-Execute Product
      Vertical W98-W105.
-10. `plans/legacy_direct_write_convergence_goal_spec.md`
+11. `plans/legacy_direct_write_convergence_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
-11. `plans/lifemodel_maturation_goal_plan.md`
+12. `plans/lifemodel_maturation_goal_plan.md`
    - Completed Goal-mode preparation/spec and audit trail for the W73-W78
      LifeModel Maturation proof slice after W72.
-12. Hard governance baselines:
+13. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-13. Scoped architecture/product baselines:
+14. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-14. Current execution helpers:
+15. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-15. Current product-surface rewrite entry:
+16. Current product-surface rewrite entry:
    - `plans/frontend_product_shell_rewrite_goal_spec.md`
    - `plans/frontend_product_shell_rewrite_plan.md`
-16. Historical/reference documents.
+17. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
 
-Current latest status is **W150-W158 Skill Runtime Beta Maturity complete**.
+Current latest status is **Main Chat Agent Execution v1 remediation in progress
+after W150-W158 Skill Runtime Beta Maturity**. Ordinary `send_message` and
+`start_stream_message` now enter `AgentIngress`, create/resume durable
+`AgentTaskSession` records, and can render `ExecutionTranscript` / action queue
+state in Chat through an execution task panel. `DirectAnswer` is now on a governed strategy path. Proposal /
+blocker, PlanExecute draft, ActionExecutor-backed memory/session/file read-only
+observation, retry/cancel/resume foundations, safe read automatic retry replay,
+permission-preserving resume, cancel queued-action stop proof, and
+non-replayable retry manual blockers exist.
+ReActToolExecution now attempts the governed plan-guided AgentLoop first, then
+fail-softs to a single-step ActionExecutor-backed read path for
+memory/session/file and web/MCP wrapper cases; AgentLoop results that do not
+observe the planned action are rejected for completion and use the fallback
+path, direct read parser input is aligned with the memory/session executors,
+there is eval-gated memory/session multi-step AgentLoop read/observe/follow-up
+proof plus web network-policy blocker, fixture-backed successful web read, and
+registered MCP AgentLoop proof, named
+registered read-only MCP tools resolve through manifest/permission checks while
+missing or non-read MCP targets block clearly, and web network-policy denial
+returns a governed blocker rather than a generic tool failure.
+Local-only, network, manifest, and permission blockers are preserved.
+Successful observations feed a governed follow-up synthesis
+step instead of being returned as raw observation echoes. A 100-case runtime eval
+harness now drives AgentIngress, session/transcript/action queue, follow-up,
+proposal/blocker, automatic retry replay, task controls, and separate
+memory/session/file/web/MCP/PlanExecute coverage metrics, plus formal
+ActionExecutor-backed observation coverage for deterministic read/blocker
+paths, explicit webPolicyBlocker/mcpMissingReadTarget blocker-state coverage,
+registered read-only MCP success coverage, mcpToolPermissionProposalCoverage
+for generic registered-MCP ToolPermission proposal creation,
+webAgentLoop/mcpAgentLoop coverage
+for scripted AgentLoop plus ActionExecutor observations,
+webSuccessfulReadCoverage for context-scoped fixture-backed web success, and
+multi-step AgentLoop coverage for memory/session and registered MCP read tasks.
+Tauri
+mock IPC command-surface tests now cover `send_message` and
+`start_stream_message` proposal-path execution, including waiting governed task
+state, a completed governed `proposal.create` queue action, and a pending Review
+Center proposal; they also cover send/stream registered-MCP AgentLoop success,
+send/stream registered-MCP ToolPermission proposal,
+send/stream web AgentLoop blocker, send/stream fixture-backed web AgentLoop
+success, and send/stream web network-policy blocker / missing MCP read-target
+blocker preservation as blocked governed task sessions.
+The 24-case `main_chat_command_surface_eval_gate_covers_send_stream_runtime_matrix`
+gate aggregates send/stream DirectAnswer, scripted provider generation,
+file read, PlanExecute draft, proposal, web blocker, web AgentLoop blocker, fixture-backed web AgentLoop
+success, missing MCP blocker, registered MCP AgentLoop success, and registered
+MCP ToolPermission proposal through real
+Tauri mock IPC, with no legacy fallback and no silent write observed. The core
+100-case runtime eval report and this command-surface gate both report
+`finalCompletionReady=false` with zero live-provider generation /
+web-MCP / proposal-permission coverage and named blockers until the ignored
+live-provider harnesses are actually executed.
+The core acceptance gate aggregates runtime, command-surface, and live-provider
+evidence, and rechecks coverage thresholds before it can report ready.
+Tauri focused coverage now proves the 24-case command-surface report is
+converted into that core acceptance evidence rather than remaining a parallel
+test-only surface.
+Live-provider harness report aggregation now keeps Direct generation, web
+AgentLoop, MCP AgentLoop, and proposal-permission evidence separate, so the
+final gate cannot satisfy provider-backed web/MCP coverage with only one of
+the two AgentLoop families.
+The runtime and command-surface reports also expose separate
+liveProviderWebAgentLoopCoverage and liveProviderMcpAgentLoopCoverage fields,
+both zero until the live harnesses actually run.
+The Tauri final acceptance runner now combines the core runtime gate,
+command-surface gate, and optional live harness evidence into one report; the
+default no-live path runs local gates and remains blocked. Complete clean live
+harness evidence is explicitly merged into runtime live coverage and
+command-surface final evidence before the core final acceptance gate is
+evaluated.
+ActionExecutor now maps missing MCP read targets to a governed blocked action
+instead of a generic failed tool call, can execute a registered read-only MCP
+target as a successful read observation, and can create a generic
+ToolPermission proposal for a registered MCP read target when policy requires
+review.
+The older deterministic 100-case suite is legacy scaffold coverage. This is
+still not final completion: the fixture-backed web success proof is not live
+provider-backed web completion, and the eval gate must expand to
+live-provider-backed generation, provider-backed web/MCP AgentLoop/manifest
+cases, and broader provider/live proposal-permission proof beyond the
+fail-closed live-provider preflight, local runtime/command-surface proposal
+gates, route-level UI handoff, and narrow accepted ToolPermission resume replay
+case.
+
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
 Builder/Calibration/Feedback legacy direct-write override paths. W93 converts
@@ -539,9 +713,18 @@ PatchStore source mapping, and W89 adds the metadata-safe source-specific
 application audit/readiness proof. Fallback proposal sources still require a
 separate policy decision before convergence can be marked complete.
 
-Hard current constraints:
+Current Main Chat Agent Execution v1 constraints:
 
-- default Chat remains `legacy_stream`.
+- ordinary Main Chat must enter `AgentIngress` before strategy execution.
+- legacy generation remains available only as a visible fallback.
+- do not claim Main Chat Agent v1 is complete until the real eval gate and all
+  required runtime/tool/UI checks pass.
+- no strategy may silently write durable LifeModel-HS truth, long-term Memory,
+  file/calendar/email/external/provider/plugin state, or dangerous shell state.
+- memory and LifeModel updates from Chat must create Review Center proposals.
+- external/sensitive writes must create blockers/confirmation requests.
+- bounded context may include workspace/materialized files only as task context;
+  those files cannot override privacy, model-route, or tool policy.
 - W19-W60 readiness/review/preview/gate outputs are not migration permission.
 - W61-W63 are整理阶段, not default Chat migration.
 - Ordinary `send_message` / `start_stream_message` must not call W19-W60
@@ -592,9 +775,9 @@ Hard current constraints:
   proposal PatchSource mapping helper.
 - Ordinary `send_message` / `start_stream_message` must not call the W89
   proposal PatchSource readiness helper.
-- Ordinary default Chat may call only the W49-W55 pure ordinary-entry guards /
-  preflight, and those guards may only fail closed while preserving
-  `legacy_stream`.
+- W49-W55 pure ordinary-entry guards / preflight are historical regression
+  context after Main Chat Agent v1; they do not authorize bypassing
+  AgentIngress or disabling the v1 policy/proposal/fallback gates.
 - W65-W72 backend-only descriptor/contract/harness/proof/gate/skeleton/binding work is metadata only
   and is not migration permission. W67 `harness_ready` only means the
   non-default invocation shape proof is safe; W68 `proof_ready` only means the
@@ -684,6 +867,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 | W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
+| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first, rejects no-planned-action AgentLoop results as incomplete tool execution, then falls back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, and broader provider/live proposal-permission proof remain required before completion |
 
 ## 4. Current Authoritative Entry Points
 
@@ -750,11 +934,12 @@ W36/W41/W44/W47/W59 review evidence, W28/W31/W40/W43 non-default run/preview
 commands, and W56 status commands are not migration permission. They are
 readiness, review, preview, draft, evidence, or status surfaces only.
 
-Default `Send`, ordinary `send_message`, and ordinary `start_stream_message`
-must remain on `legacy_stream`. They must not call W19-W60 command surfaces.
-The only allowed ordinary-entry adapter code is W49-W55 pure guard/preflight
-logic, which is read-only/pure, write-disabled, metadata-safe, side-effect-free,
-and fail-closed.
+For the historical W19-W72 pre-migration slices, default `Send`, ordinary
+`send_message`, and ordinary `start_stream_message` were required to remain on
+`legacy_stream` and not call W19-W60 command surfaces. In the active Main Chat
+Agent Execution v1 remediation, ordinary Chat now enters AgentIngress /
+governed task session scaffolding with visible legacy fallback; W19-W60
+readiness/status/preview surfaces still are not migration permission.
 
 W67 is backend-only non-default harness code, W68 is backend-only
 send-compatible proof code, W69 is backend-only stream-compatible boundary

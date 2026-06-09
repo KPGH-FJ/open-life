@@ -371,6 +371,128 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(mockStateHistory as T);
     case "list_chat_sessions":
       return Promise.resolve(mockChatSessions as T);
+    case "get_main_chat_agent_task_state":
+      return Promise.resolve({
+        session: {
+          id: _args?.taskSessionId ?? _args?.task_session_id ?? "mainchat_task_mock",
+          chatSessionId: "session-1",
+          userGoal: "mock goal",
+          selectedStrategy: "direct_answer",
+          status: "completed",
+          currentPlanSummary: undefined,
+          actionQueueIds: [],
+          pendingBlockers: [],
+          contextSnapshotRefs: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          finalSummary: "mock complete",
+        },
+        actions: [],
+        transcript: [],
+        pendingApprovalCount: 0,
+        activeToolCount: 0,
+        canResume: false,
+        canCancel: false,
+        canRetry: false,
+      } as T);
+    case "resume_main_chat_agent_task":
+    case "cancel_main_chat_agent_task":
+    case "retry_main_chat_agent_action":
+      return Promise.resolve({
+        session: null,
+        actions: [],
+        transcript: [],
+        pendingApprovalCount: 0,
+        activeToolCount: 0,
+        canResume: false,
+        canCancel: false,
+        canRetry: false,
+      } as T);
+    case "run_main_chat_agent_execution_v1_eval_gate":
+      return Promise.resolve({
+        reportKind: "main_chat_agent_execution_v1_eval_gate",
+        runtimeEval: {
+          totalCases: 100,
+          runtimeExecutedCaseCount: 100,
+          deterministicStubCaseCount: 0,
+          passedCases: 100,
+          failedCases: 0,
+          silentWriteCount: 0,
+          finalCompletionReady: false,
+          finalCompletionBlockers: [
+            "live_provider_generation_not_executed",
+            "provider_backed_web_mcp_agent_loop_not_executed",
+            "provider_live_proposal_permission_not_executed",
+          ],
+          failures: [],
+        },
+        acceptance: {
+          ready: false,
+          status: "blocked",
+          blockers: [
+            "command_surface_cases_below_24",
+            "live_provider_generation_not_executed",
+          ],
+          requiredEvidence: [
+            "core_100_case_runtime_eval",
+            "send_stream_command_surface_eval",
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          runtimeGateReady: false,
+          commandSurfaceGateReady: false,
+          liveProviderGateReady: false,
+          directWritesExecuted: false,
+        },
+        liveProviderPreflight: {
+          ready: false,
+          status: "blocked",
+          provider: "openai",
+          blockers: ["explicit_live_eval_required", "provider_api_key_missing"],
+          requiredEvidence: [
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          liveProviderInvocationAllowed: false,
+          modelInvoked: false,
+          directWritesExecuted: false,
+        },
+        commandSurfaceGateExecuted: false,
+        liveProviderAttempted: false,
+        migrationPermission: false,
+        metadataSafe: true,
+        noExternalProviderInvocation: true,
+        noAppStoreWrites: true,
+        metadataSafeSummary: {
+          reportKind: "main_chat_agent_execution_v1_eval_gate",
+          runtimeTotalCases: 100,
+          acceptanceReady: false,
+          liveProviderPreflightReady: false,
+          liveProviderPreflightStatus: "blocked",
+          liveProviderPreflightProvider: "openai",
+          liveProviderPreflightBlockers: [
+            "explicit_live_eval_required",
+            "provider_api_key_missing",
+          ],
+          liveProviderPreflightRequiredEvidence: [
+            "live_provider_generation",
+            "provider_backed_web_mcp_agent_loop",
+            "provider_backed_web_agent_loop",
+            "provider_backed_mcp_agent_loop",
+            "provider_live_proposal_permission",
+          ],
+          liveProviderPreflightInvocationAllowed: false,
+          liveProviderPreflightModelInvoked: false,
+          liveProviderPreflightDirectWritesExecuted: false,
+          metadataSafe: true,
+        },
+      } as T);
     case "list_mcp_servers":
       return Promise.resolve([
         {

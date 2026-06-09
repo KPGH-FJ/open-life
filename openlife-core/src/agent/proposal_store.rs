@@ -112,15 +112,38 @@ impl ProposalStore {
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         conn.execute(
             "UPDATE proposals SET
-                status = ?2,
-                after_json = ?3,
-                resolved_at = ?4
+                run_id = ?2,
+                proposal_type = ?3,
+                source = ?4,
+                source_detail = ?5,
+                affected_path = ?6,
+                before_json = ?7,
+                after_json = ?8,
+                reason = ?9,
+                confidence = ?10,
+                risk_level = ?11,
+                status = ?12,
+                resolved_at = ?13,
+                expires_at = ?14
             WHERE id = ?1",
             params![
                 proposal.id,
-                proposal.status.to_string(),
+                proposal.run_id.as_ref(),
+                proposal.proposal_type.to_string(),
+                proposal.source,
+                proposal.source_detail.as_ref(),
+                proposal.affected_path,
+                proposal
+                    .before
+                    .as_ref()
+                    .map(|b| serde_json::to_string(b).unwrap_or_default()),
                 serde_json::to_string(&proposal.after).unwrap_or_default(),
+                proposal.reason,
+                proposal.confidence,
+                proposal.risk_level.to_string(),
+                proposal.status.to_string(),
                 proposal.resolved_at.map(|t| t.to_rfc3339()),
+                proposal.expires_at.map(|t| t.to_rfc3339()),
             ],
         )?;
         Ok(())

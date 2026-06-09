@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { BrowserRouter } from "react-router-dom";
 import ProposalReviewPage from "./ProposalReviewPage";
 import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "@/test/mocks/tauri";
@@ -8,6 +9,14 @@ import type { AgentProposal } from "../tauri";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
+
+function renderProposalReviewPage() {
+  return render(
+    <BrowserRouter>
+      <ProposalReviewPage />
+    </BrowserRouter>
+  );
+}
 
 describe("ProposalReviewPage", () => {
   beforeEach(() => {
@@ -68,7 +77,7 @@ describe("ProposalReviewPage", () => {
   });
 
   it("renders pending proposals and accepts one", async () => {
-    render(<ProposalReviewPage />);
+    renderProposalReviewPage();
 
     expect(await screen.findByText("Review Center")).toBeInTheDocument();
     expect(await screen.findByText("identity.name")).toBeInTheDocument();
@@ -88,7 +97,7 @@ describe("ProposalReviewPage", () => {
   });
 
   it("renders concise evidence summaries without raw sensitive payloads", async () => {
-    render(<ProposalReviewPage />);
+    renderProposalReviewPage();
 
     expect(await screen.findByText("why OpenLife thinks this")).toBeInTheDocument();
     expect(screen.getByText("User approved this name during builder review.")).toBeInTheDocument();
@@ -121,7 +130,7 @@ describe("ProposalReviewPage", () => {
       return mockInvoke(cmd, args);
     });
 
-    render(<ProposalReviewPage />);
+    renderProposalReviewPage();
 
     expect(await screen.findByText("memory.candidates")).toBeInTheDocument();
     expect(screen.getByText("Skill")).toBeInTheDocument();

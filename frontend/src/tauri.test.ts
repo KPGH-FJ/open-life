@@ -50,6 +50,7 @@ import {
   runControlledChatCutoverCandidate,
   runControlledChatMigrationShadowRun,
   runMultiStrategyAgentPreview,
+  runMainChatAgentExecutionV1EvalGate,
   restoreArchivedChunks,
   restoreSnapshot,
   saveChatMessage,
@@ -390,6 +391,77 @@ describe("tauri command argument aliases", () => {
       }),
     });
     expect(result.runId).toBe("run-preview-1");
+  });
+
+  it("invokes Main Chat execution v1 eval gate as explicit non-default diagnostic", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reportKind: "main_chat_agent_execution_v1_eval_gate",
+      runtimeEval: {
+        totalCases: 100,
+        runtimeExecutedCaseCount: 100,
+        deterministicStubCaseCount: 0,
+        passedCases: 100,
+        failedCases: 0,
+        silentWriteCount: 0,
+        finalCompletionReady: false,
+        finalCompletionBlockers: ["live_provider_generation_not_executed"],
+        failures: [],
+      },
+      acceptance: {
+        ready: false,
+        status: "blocked",
+        blockers: ["command_surface_cases_below_24"],
+        requiredEvidence: [],
+        runtimeGateReady: true,
+        commandSurfaceGateReady: false,
+        liveProviderGateReady: false,
+        directWritesExecuted: false,
+      },
+      liveProviderPreflight: {
+        ready: false,
+        status: "blocked",
+        provider: "openai",
+        blockers: ["explicit_live_eval_required", "provider_api_key_missing"],
+        requiredEvidence: [
+          "live_provider_generation",
+          "provider_backed_web_mcp_agent_loop",
+          "provider_backed_web_agent_loop",
+          "provider_backed_mcp_agent_loop",
+          "provider_live_proposal_permission",
+        ],
+        liveProviderInvocationAllowed: false,
+        modelInvoked: false,
+        directWritesExecuted: false,
+      },
+      commandSurfaceGateExecuted: false,
+      liveProviderAttempted: false,
+      migrationPermission: false,
+      metadataSafe: true,
+      noExternalProviderInvocation: true,
+      noAppStoreWrites: true,
+      metadataSafeSummary: {
+        liveProviderPreflightBlockers: [
+          "explicit_live_eval_required",
+          "provider_api_key_missing",
+        ],
+        liveProviderPreflightModelInvoked: false,
+      },
+    });
+
+    const result = await runMainChatAgentExecutionV1EvalGate();
+
+    expect(invoke).toHaveBeenCalledWith("run_main_chat_agent_execution_v1_eval_gate", undefined);
+    expect(result.reportKind).toBe("main_chat_agent_execution_v1_eval_gate");
+    expect(result.migrationPermission).toBe(false);
+    expect(result.noExternalProviderInvocation).toBe(true);
+    expect(result.liveProviderPreflight.modelInvoked).toBe(false);
+    expect(result.liveProviderPreflight.requiredEvidence).toContain(
+      "provider_backed_web_agent_loop",
+    );
+    expect(result.liveProviderPreflight.requiredEvidence).toContain(
+      "provider_backed_mcp_agent_loop",
+    );
+    expect(result.metadataSafeSummary.liveProviderPreflightModelInvoked).toBe(false);
   });
 
   it("invokes runtime strategy registry status as explicit read-only diagnostic", async () => {

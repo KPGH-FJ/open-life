@@ -1,7 +1,7 @@
 # LifeModel-Governed Runtime Progress
 
-> Last updated: 2026-06-05
-> Status: W150-W158 Skill Runtime Beta Maturity complete; default Chat remains `legacy_stream`
+> Last updated: 2026-06-09
+> Status: W150-W158 Skill Runtime Beta Maturity complete; Main Chat Agent Execution v1 remediation in progress
 
 This file is the compact completion/status index for Agents entering the
 LifeModel-Governed Runtime work. It does not replace
@@ -11,7 +11,120 @@ route text.
 
 ## Current Position
 
-Current latest status is **W150-W158 Skill Runtime Beta Maturity complete**.
+Current latest status is **Main Chat Agent Execution v1 remediation in progress
+after W150-W158 Skill Runtime Beta Maturity**. Ordinary `send_message` /
+`start_stream_message` now enter AgentIngress and governed task sessions with
+execution transcript and action queue foundations. DirectAnswer, proposal /
+blocker, PlanExecute draft, ActionExecutor-backed memory/session/file read-only
+observation, and task control foundations exist. ReActToolExecution now attempts
+the governed plan-guided AgentLoop first, then fail-softs to a single-step
+ActionExecutor-backed read action path for memory/session/file and web/MCP
+wrapper cases. AgentLoop results that do not observe the planned action are
+rejected for completion and fall back to the ActionExecutor path. The AgentLoop
+parser preserves direct read executor input shape for memory/session search,
+and the runtime eval gate now exercises multi-step memory/session
+read/observe/follow-up, web network-policy blocker observation,
+context-scoped fixture-backed successful web read observation, and registered
+MCP success observation through AgentLoop and ActionExecutor.
+Successful observations feed governed follow-up synthesis.
+Named registered read-only MCP tools resolve through manifest / permission
+checks, while missing or non-read MCP targets block clearly.
+Web network-policy denial is now represented as a governed blocker rather than
+a generic execution failure, and ActionExecutor maps missing MCP read targets to
+governed blocked actions rather than generic failed tool calls while allowing
+registered read-only MCP targets to produce successful read observations through
+both ordinary send and stream command surfaces.
+Safe read failed action retries can now automatically replay through the
+governed executor, while non-replayable failed action retries become explicit
+manual replay blockers. Resume now preserves unresolved permission blockers
+instead of flipping the task to fake running. Cancel now cancels nonterminal
+queued actions instead of leaving runnable work behind. A 100-case runtime eval harness
+now exercises the Main Chat control plane, automatic retry replay,
+permission-preserving resume, task controls, and separate
+memory/session/file/web/MCP/PlanExecute coverage metrics, plus formal
+ActionExecutor-backed observation coverage for deterministic read/blocker
+paths, explicit webPolicyBlocker/mcpMissingReadTarget blocker-state coverage,
+webSuccessfulReadCoverage fixture-backed success coverage,
+registered read-only MCP success coverage, providerRoute/localOnlyProviderGuard
+coverage, evalProviderGeneration/evalSchedulerGeneration coverage, and
+webAgentLoop/mcpAgentLoop coverage plus multi-step AgentLoop coverage for
+memory/session and registered MCP read tasks.
+The 100-case runtime eval report also explicitly keeps live-provider
+generation / combined web-MCP / split web / split MCP / proposal-permission
+coverage at zero with `finalCompletionReady=false` and named live-provider
+blockers, including the split web/MCP blocker names, until the ignored
+live-provider harnesses are actually executed.
+The live-provider eval harness also has a non-ignored local HTTP
+OpenAI-compatible provider-client proof for DirectAnswer: `local_test_http`
+invokes ordinary `send_message` through the real scheduler/HTTP client path
+and validates response trace plus no silent writes, but the acceptance evidence
+does not credit it as external live-provider generation.
+Core now also has a fail-closed Main Chat Agent Execution v1 acceptance gate
+that aggregates runtime, send/stream command-surface, and live-provider
+evidence, and rechecks coverage thresholds instead of trusting a ready flag.
+An explicit non-default `run_main_chat_agent_execution_v1_eval_gate` Tauri
+command now exposes the core 100-case runtime eval gate as a metadata-safe,
+no-external-provider, no-app-store-write report with `migrationPermission=false`;
+it includes a typed `liveProviderPreflight` report plus current-config
+live-provider preflight blockers without serializing keys or invoking the
+provider, lists split web and MCP live evidence requirements, and remains
+blocked without command-surface and live-provider evidence.
+Tauri focused coverage now runs the real 24-case send/stream command-surface
+gate and feeds the result into that core final acceptance gate.
+Live-provider harness reports now aggregate into separate Direct generation,
+web AgentLoop, MCP AgentLoop, and proposal-permission evidence, and the final
+gate requires both web and MCP provider-backed AgentLoop proof with matching
+harness scenario identity, completed status, no blockers, and non-empty
+run/task/response trace fields.
+Runtime and command-surface reports now also expose separate zero
+liveProviderWebAgentLoopCoverage and liveProviderMcpAgentLoopCoverage fields.
+Tauri now has a single final acceptance runner that runs the core 100-case
+runtime gate plus the 24-case command-surface gate and then aggregates optional
+live-provider harness evidence; the default no-live path reports blocked, and
+the runner report exposes runtime/command-surface case counts,
+live-provider attempted/report/ready/main-chat-invoked/model-invoked counts,
+metadata-safe live-provider blockers, a direct-write flag, and the nested core
+acceptance report; post-invocation live failures now derive scenario-specific
+blockers. The scripted AgentLoop eval hook is no longer core-test-only,
+so Tauri sees the same memory/session/web/MCP AgentLoop proof when invoking the
+core runtime gate. Complete clean live harness evidence is explicitly merged
+into runtime live coverage and command-surface final evidence.
+Provider route coverage uses ModelRouter plus an HS LocalOnly packet to prove
+local-only cloud fallback removal without invoking a model. Eval provider
+generation coverage records a DirectAnswer final-generation transcript through
+`InferenceScheduler::generate` with prompt/context refs, provider/model route
+metadata, `modelInvoked=true`, `liveProviderInvoked=false`, and no tools or
+writes. Tauri mock IPC now covers DirectAnswer send/stream
+AgentRun/task-session completion,
+`send_message` / `start_stream_message` proposal-path command-surface execution,
+including waiting governed task state, completed governed `proposal.create`
+queue action, and pending Review Center proposal, plus `send_message` /
+`start_stream_message` registered-MCP AgentLoop success, web AgentLoop blocker,
+registered-MCP ToolPermission proposal, fixture-backed web AgentLoop success, send/stream governed file-read,
+send/stream PlanExecute draft, and web-policy / missing-MCP blocker
+command-surface preservation as completed or blocked task sessions. A 24-case
+send/stream command-surface eval gate now aggregates DirectAnswer, scripted
+provider generation, file read, PlanExecute draft, proposal, web blocker, web AgentLoop blocker,
+fixture-backed web AgentLoop success, missing MCP blocker, registered MCP
+AgentLoop success, and registered MCP ToolPermission proposal through real Tauri mock IPC with legacy fallback=0 and silent
+write=0. The
+stream command now builds legacy
+fallback scaffolding only after the governed strategy attempt returns no result;
+the old deterministic 100-case suite is legacy scaffold coverage.
+Chat now renders an execution task panel
+with goal/current plan/action queue/observation metadata/blockers/transcript/
+fallback notice, Review Center affordances, and retry/resume/cancel controls.
+Review Center has a route-level proposal accept / explicit task resume handoff
+from the Chat task panel. Accepted ToolPermission proposal + explicit resume
+now has a narrow command-surface proof that replays a pending read action
+through the governed executor.
+Final completion is not proven: fixture-backed web success is deterministic and
+non-network, local HTTP provider-client proof is not external live-provider
+credit, and eval must expand to live-provider-backed generation, provider-backed
+web/MCP AgentLoop/manifest coverage, and broader provider/live proposal-permission
+proof.
+
+Historical W90-W158 status remains below for audit context.
 W90 retires Builder legacy direct apply. W91 retires Calibration direct and
 micro-evolution durable LifeModel writes. W92 retires Feedback evolution durable
 LifeModel / `evolution_rules` writes. W93 converts Snapshot restore and Data
@@ -452,16 +565,19 @@ runtime/model/tool, changes no product behavior or default Chat routing, retires
 no legacy path, and keeps fallback blockers plus
 `proposal_first_convergence_complete=false`.
 
-Hard boundaries:
+Current Main Chat Agent v1 boundaries:
 
-- default Chat remains `legacy_stream`.
 - Default `Send`, ordinary `send_message`, and ordinary
-  `start_stream_message` may enter only the legacy route, with the W49-W55 pure
-  guards/preflight allowed to fail closed.
+  `start_stream_message` must enter AgentIngress before strategy execution.
+- legacy generation remains available only as visible fallback.
+- No Main Chat strategy may silently write durable LifeModel-HS truth,
+  long-term Memory, file/calendar/email/external/provider/plugin state, or
+  dangerous shell state.
+- Memory and LifeModel update intents must create Review Center proposals.
 - W19-W60 readiness/review/preview/gate results are not migration permission.
 - W65-W72 backend-only descriptor/contract/harness/proof/gate/skeleton/binding work is not
-  migration permission and must keep the controlled adapter executor
-  disabled/unattached.
+  migration permission and is now historical regression context; it does not
+  authorize bypassing AgentIngress or Main Chat Agent v1 policy/proposal gates.
   W67 `harness_ready` only means the non-default invocation shape proof is
   safe; W68 `proof_ready` only means the SendMessageResult-compatible metadata
   shape proof is safe; W69 `proof_ready` only means the stream-compatible
@@ -885,13 +1001,57 @@ Low-Energy Support golden path complete -> W146 Preference Correction golden
 path complete -> W147 UI read model contract freeze complete -> W148 final
 backend completion gate complete -> W149 docs/progress/verification sync
 complete.
-Backend Completion Goal 8 is complete. Future Beta hardening can move to Skill
-Runtime or product surface work from the W149 backend completion baseline.
-Future default Chat
-executor implementation discussion may build on the W65-W72 proofs only through
-a separately reviewed task; keep default Chat on legacy_stream unless that
-separate task explicitly implements, reviews, verifies, and authorizes a route
-change.
+Backend Completion Goal 8 and Skill Runtime Beta Maturity are complete. Main
+Chat Agent Execution v1 is not complete yet: ordinary Chat now enters governed
+task/session scaffolding and ReActToolExecution attempts a governed plan-guided
+AgentLoop before single-step ActionExecutor-backed read fallback with direct
+read parser/executor input alignment, no-planned-action AgentLoop fallback,
+runtime eval webPolicyBlocker/mcpMissingReadTarget blocker-state proof,
+webSuccessfulReadCoverage fixture-backed success proof,
+mcpRegisteredReadSuccess proof,
+mcpToolPermissionProposalCoverage proof,
+providerRoute/localOnlyProviderGuard proof,
+evalProviderGeneration/evalSchedulerGeneration proof,
+webAgentLoop/mcpAgentLoop proof,
+DirectAnswer send/stream AgentRun/task-session proof,
+send/stream L2 DirectAnswer scheduler/provider trace proof,
+send/stream registered-MCP command-surface AgentLoop success proof,
+send/stream registered-MCP ToolPermission proposal proof,
+send/stream web AgentLoop blocker proof,
+send/stream fixture-backed web AgentLoop success proof,
+send/stream web/MCP blocker command-surface proof, send/stream file-read proof,
+send/stream PlanExecute draft proof, stream legacy fallback plan
+ordering proof, 24-case send/stream command-surface eval gate with legacy fallback=0 and silent write=0,
+explicit core runtime + command-surface `finalCompletionReady=false` with zero live-provider
+generation / combined web-MCP / split web / split MCP / proposal-permission coverage and named
+live-provider blockers including the split web/MCP blocker names,
+core final acceptance gate fail-closed aggregation and anti-spoof coverage proof,
+Tauri command-surface-to-core final acceptance integration proof,
+structured live-provider evidence aggregation proof with separate web/MCP AgentLoop requirements,
+split runtime/command-surface live web/MCP coverage fields,
+single Tauri final acceptance runner that combines core runtime, command-surface, and optional live evidence,
+non-test-only scripted AgentLoop eval proof visible to Tauri, live-evidence hydration of runtime/command final evidence,
+permission-preserving resume, accepted ToolPermission resume replay proof,
+cancel queued-action stop proof,
+eval-gated memory/session multi-step proof, governed follow-up synthesis, and an execution task panel with
+Review Center affordances plus route-level proposal accept / explicit task
+resume handoff. A metadata-safe live-provider eval preflight now fails closed
+without explicit live eval opt-in, provider key, network enabled, non-scripted
+scheduler, and no LocalOnly policy; it records blockers without invoking a
+model or writing state, with Tauri command-state no-invocation blocker coverage
+and ignored opt-in Tauri harness paths that invoke ordinary `send_message` only
+when external-provider preflight is ready. Those paths cover DirectAnswer,
+provider-backed ReAct web AgentLoop, registered MCP AgentLoop, and MCP
+ToolPermission proposal evidence, including `liveProviderInvoked`, AgentLoop
+action status, no single-step fallback, MCP target resolution / ToolPermission
+proposal checks, and no silent writes. Those ignored live runs were not executed
+in this environment.
+Main Chat Agent Execution v1 still is not complete:
+live-provider-backed generation eval, broader provider-backed web/MCP AgentLoop proof, and
+broader provider/live proposal-permission proof beyond the local runtime and command-surface proposal gates
+remain required before completion can be claimed. Future Beta hardening must keep proposal-first,
+permission/blocker, privacy/local-only, metadata-safe audit, and no-silent-write
+boundaries.
 ```
 
 `make ci` remains the release gate for implementation tasks. For docs-only

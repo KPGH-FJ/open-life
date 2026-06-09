@@ -7,7 +7,10 @@ use crate::storage::{
     load_mcp_audit_keyring_from_path, load_privacy_policy_from_path, mcp_audit_keyring_path,
     privacy_policy_path,
 };
-use openlife_core::agent::{PlanExecuteSessionStore, ProposalEngine, ProposalStore};
+use openlife_core::agent::{
+    main_chat_agent_v1::{ActionQueueStore, AgentTaskSessionStore},
+    PlanExecuteSessionStore, ProposalEngine, ProposalStore,
+};
 use openlife_core::builder::BuilderSessionStore;
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -324,6 +327,68 @@ fn init_plan_execute_session_store(
     }
 }
 
+fn init_main_chat_agent_session_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<AgentTaskSessionStore, String> {
+    match AgentTaskSessionStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("main_chat_agent_sessions.db");
+            startup_warnings.borrow_mut().push(format!(
+                "main_chat_agent_sessions.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match AgentTaskSessionStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 main_chat_agent_sessions.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    AgentTaskSessionStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 Main Chat Agent session store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn init_main_chat_action_queue_store(
+    db_path: &Path,
+    startup_warnings: &std::cell::RefCell<Vec<String>>,
+) -> Result<ActionQueueStore, String> {
+    match ActionQueueStore::new(db_path) {
+        Ok(store) => Ok(store),
+        Err(primary_err) => {
+            let fallback = recovery_db_path("main_chat_action_queue.db");
+            startup_warnings.borrow_mut().push(format!(
+                "main_chat_action_queue.db 初始化失败，正在使用临时数据库：{}",
+                primary_err
+            ));
+            match ActionQueueStore::new(&fallback) {
+                Ok(store) => Ok(store),
+                Err(fallback_err) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "临时 main_chat_action_queue.db 初始化也失败，已降级为内存数据库：{}",
+                        fallback_err
+                    ));
+                    ActionQueueStore::new_in_memory().map_err(|memory_err| {
+                        format!(
+                            "所有 Main Chat action queue store 初始化失败: primary={}, fallback={}, in_memory={}",
+                            primary_err, fallback_err, memory_err
+                        )
+                    })
+                }
+            }
+        }
+    }
+}
+
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
@@ -457,6 +522,30 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         std::process::exit(1);
     });
 
+    let main_chat_agent_sessions_db_path = data_dir.join("main_chat_agent_sessions.db");
+    let main_chat_agent_session_store = init_store(
+        || init_main_chat_agent_session_store(&main_chat_agent_sessions_db_path, &startup_warnings),
+        || AgentTaskSessionStore::new_in_memory().map_err(|e| e.to_string()),
+        "MainChatAgentSessionStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
+    let main_chat_action_queue_db_path = data_dir.join("main_chat_action_queue.db");
+    let main_chat_action_queue_store = init_store(
+        || init_main_chat_action_queue_store(&main_chat_action_queue_db_path, &startup_warnings),
+        || ActionQueueStore::new_in_memory().map_err(|e| e.to_string()),
+        "MainChatActionQueueStore",
+        &startup_warnings,
+    )
+    .unwrap_or_else(|e| {
+        log::warn!("[startup] Fatal: {}", e);
+        std::process::exit(1);
+    });
+
     let patches_db_path = data_dir.join("patches.db");
     let patch_store = init_store(
         || {
@@ -581,6 +670,8 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         policy_store: Arc::new(policy_store),
         proposal_store: Some(Arc::new(Mutex::new(proposal_store))),
         plan_execute_session_store: Some(Arc::new(Mutex::new(plan_execute_session_store))),
+        main_chat_agent_session_store: Some(Arc::new(Mutex::new(main_chat_agent_session_store))),
+        main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),
         patch_store: Some(Arc::new(Mutex::new(patch_store))),
         rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
@@ -602,6 +693,7 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         startup_warnings: startup_warnings.into_inner(),
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_mutex: Arc::new(tokio::sync::Mutex::new(())),
+        web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 

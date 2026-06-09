@@ -53,6 +53,31 @@ impl super::ActionExecutor {
         // 2. Inspect PII
         let inspection = ctx.registry.inspect_call_arguments(tool_name, &args);
 
+        if manifest.is_none() {
+            let forced_decision = ToolPermissionDecision {
+                allowed: false,
+                requires_confirmation: false,
+                decision: "blocked".into(),
+                reason: "tool manifest not found for governed execution".into(),
+                policy_id: None,
+            };
+            let (action, observation) = self.build_blocked_action_observation(
+                tool_name,
+                &args,
+                &inspection,
+                &forced_decision,
+                None,
+                &request,
+            );
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("tool_manifest_not_found".into()),
+                governance_report: None,
+            });
+        }
+
         if let Some(m) = manifest
             .as_ref()
             .filter(|m| matches!(m.source, ToolSource::Plugin { .. } | ToolSource::A2A { .. }))
@@ -406,17 +431,40 @@ impl super::ActionExecutor {
             manifest.as_ref(),
             &request,
         );
+        if is_web_network_policy_blocker(tool_name, result.error.as_deref()) {
+            action.status = "blocked".into();
+            action.permission_decision = Some("network_policy_blocked".into());
+            if let Some(structured) = observation.structured_result.as_mut() {
+                if let Some(object) = structured.as_object_mut() {
+                    object.insert("status".into(), serde_json::json!("blocked"));
+                    object.insert("requires_confirmation".into(), serde_json::json!(false));
+                    object.insert(
+                        "permission_decision".into(),
+                        serde_json::json!("network_policy_blocked"),
+                    );
+                    object.insert("network_policy_blocked".into(), serde_json::json!(true));
+                }
+            }
+            return Ok(ActionExecutionResult {
+                action,
+                observation,
+                status: ActionExecutionStatus::Blocked,
+                stop_reason: Some("network_policy_blocked".into()),
+                governance_report: None,
+            });
+        }
 
         // For mcp.call_tool: override tool_scope with target manifest and handle
         // target tool permission failures as NeedsConfirmation instead of Failed
         if tool_name == "mcp.call_tool" {
+            let mut target_permission_manifest: Option<ToolManifest> = None;
             if let Some(target_name) = args.get("tool_name").and_then(|v: &Value| v.as_str()) {
-                if let Some(target_manifest) = ctx
+                let target_manifest = ctx
                     .registry
                     .list_manifests()
                     .into_iter()
-                    .find(|m| m.name == target_name || m.id == target_name)
-                {
+                    .find(|m| m.name == target_name || m.id == target_name);
+                if let Some(target_manifest) = target_manifest {
                     action.tool_scope = Some(ToolActionScope {
                         tool_name: target_manifest.name.clone(),
                         tool_id: target_manifest.id.clone(),
@@ -426,6 +474,32 @@ impl super::ActionExecutor {
                         action_type: target_manifest.action_type.clone(),
                         requires_confirmation: false,
                         allowed: result.success,
+                    });
+                    target_permission_manifest = Some(target_manifest);
+                } else {
+                    action.status = "blocked".to_string();
+                    action.permission_decision = Some("mcp_read_tool_not_registered".into());
+                    if let Some(structured) = observation.structured_result.as_mut() {
+                        if let Some(object) = structured.as_object_mut() {
+                            object.insert("status".into(), serde_json::json!("blocked"));
+                            object.insert("requires_confirmation".into(), serde_json::json!(false));
+                            object.insert(
+                                "permission_decision".into(),
+                                serde_json::json!("mcp_read_tool_not_registered"),
+                            );
+                            object.insert(
+                                "blockerReason".into(),
+                                serde_json::json!("mcp_read_tool_not_registered"),
+                            );
+                            object.insert("directWritesExecuted".into(), serde_json::json!(false));
+                        }
+                    }
+                    return Ok(ActionExecutionResult {
+                        action,
+                        observation,
+                        status: ActionExecutionStatus::Blocked,
+                        stop_reason: Some("mcp_read_tool_not_registered".into()),
+                        governance_report: None,
                     });
                 }
             }
@@ -461,6 +535,29 @@ impl super::ActionExecutor {
                         });
                     }
                     if error.contains("blocked") || error.contains("ask_every_time") {
+                        if let Some(target_manifest) = target_permission_manifest.as_ref() {
+                            let target_args = args
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            let forced_decision = ToolPermissionDecision {
+                                allowed: false,
+                                requires_confirmation: true,
+                                decision: "ask_every_time".into(),
+                                reason: "target tool requires permission".into(),
+                                policy_id: None,
+                            };
+                            if let Some(result) = self.create_tool_permission_proposal(
+                                &request,
+                                ctx,
+                                &target_manifest.name,
+                                &target_args,
+                                Some(target_manifest),
+                                &forced_decision,
+                            ) {
+                                return result;
+                            }
+                        }
                         action.status = "needs_confirmation".to_string();
                         return Ok(ActionExecutionResult {
                             action,
@@ -611,6 +708,7 @@ impl super::ActionExecutor {
                 "status": status,
                 "requires_confirmation": needs_confirmation,
                 "permission_decision": decision.decision,
+                "directWritesExecuted": false,
             })),
             timestamp: now,
             react_trace: Some(trace),
@@ -704,6 +802,7 @@ impl super::ActionExecutor {
                 "status": status,
                 "requires_confirmation": false,
                 "permission_decision": null,
+                "directWritesExecuted": false,
             })),
             timestamp: now,
             react_trace: Some(trace),
@@ -946,6 +1045,7 @@ impl super::ActionExecutor {
             },
             "reason": decision.reason,
             "auto_generated": true,
+            "directWritesExecuted": false,
         });
 
         let affected_path = format!("tool_permission.{}.{}", source, tool_name);
@@ -981,12 +1081,33 @@ impl super::ActionExecutor {
                 tool_name, proposal.id
             ),
         );
+        result.status = ActionExecutionStatus::NeedsConfirmation;
+        result.stop_reason = Some("tool_permission_required".into());
+        result.action.status = "needs_confirmation".into();
+        result.action.permission_decision = Some("tool_permission_required".into());
+        if let Some(structured) = result.observation.structured_result.as_mut() {
+            if let Some(object) = structured.as_object_mut() {
+                object.insert("status".into(), serde_json::json!("needs_confirmation"));
+                object.insert("requires_confirmation".into(), serde_json::json!(true));
+                object.insert(
+                    "permission_decision".into(),
+                    serde_json::json!("tool_permission_required"),
+                );
+                object.insert("proposalId".into(), serde_json::json!(proposal.id.clone()));
+                object.insert("directWritesExecuted".into(), serde_json::json!(false));
+            }
+        }
         if let Some(trace) = result.action.react_trace.as_mut() {
             trace.proposal_id = Some(proposal.id.clone());
+            trace.status = "needs_confirmation".into();
+            trace.permission_decision = Some("tool_permission_required".into());
             trace.action_category = "proposal".into();
         }
         if let Some(trace) = result.observation.react_trace.as_mut() {
             trace.proposal_id = Some(proposal.id.clone());
+            trace.status = "needs_confirmation".into();
+            trace.observation_status = Some("needs_confirmation".into());
+            trace.permission_decision = Some("tool_permission_required".into());
             trace.action_category = "proposal".into();
         }
 
@@ -1132,6 +1253,25 @@ impl super::ActionExecutor {
 
         Some(Ok(proposal_id))
     }
+}
+
+fn is_web_network_policy_blocker(tool_name: &str, error: Option<&str>) -> bool {
+    if !matches!(tool_name, "web.fetch" | "web.search") {
+        return false;
+    }
+    let Some(error) = error else {
+        return false;
+    };
+    [
+        "Network tools are disabled by policy",
+        "denied by network policy override",
+        "network denylist",
+        "not in the network allowlist",
+        "private/internal address",
+        "Invalid URL scheme",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
 }
 
 fn extract_proposal_id_from_text(text: &str) -> Option<String> {

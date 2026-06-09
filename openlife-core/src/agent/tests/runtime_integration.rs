@@ -449,6 +449,7 @@ fn hs_external_write_policy_converts_direct_write_to_proposal_first() {
         proposal_store: Some(&proposal_store),
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
     };
 
@@ -976,6 +977,7 @@ fn hs_external_write_policy_overrides_allow_until_revoked_and_skips_executor() {
         proposal_store: Some(&proposal_store),
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
     };
 
@@ -1109,6 +1111,7 @@ fn hs_external_write_policy_intercepts_mcp_call_tool_target_even_when_allowed() 
         proposal_store: Some(&proposal_store),
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: Some(&packet),
     };
 

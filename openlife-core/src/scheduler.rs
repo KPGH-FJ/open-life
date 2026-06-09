@@ -20,6 +20,9 @@ pub struct InferenceScheduler {
     pub embedding_enabled: bool,
     /// Optional model router for intelligent routing (experimental)
     pub model_router: Option<ModelRouter>,
+    /// Optional deterministic generation response for runtime harnesses.
+    /// Production constructors leave this unset, so normal provider behavior is unchanged.
+    pub scripted_generation_response: Option<String>,
 }
 
 impl Default for InferenceScheduler {
@@ -34,6 +37,7 @@ impl Default for InferenceScheduler {
             embedding_model: "text-embedding-3-small".into(),
             embedding_enabled: true,
             model_router: None,
+            scripted_generation_response: None,
         }
     }
 }
@@ -92,11 +96,17 @@ impl InferenceScheduler {
             embedding_model,
             embedding_enabled,
             model_router: None,
+            scripted_generation_response: None,
         }
     }
 
     pub fn with_model_router(mut self, router: ModelRouter) -> Self {
         self.model_router = Some(router);
+        self
+    }
+
+    pub fn with_scripted_generation_response(mut self, response: impl Into<String>) -> Self {
+        self.scripted_generation_response = Some(response.into());
         self
     }
 
@@ -116,6 +126,10 @@ impl InferenceScheduler {
                 "[ModelRouter] Route decision: provider={}, model={}, reason={}",
                 decision.provider, decision.model, decision.reason
             );
+
+            if let Some(ref response) = self.scripted_generation_response {
+                return Ok(response.clone());
+            }
 
             if decision.provider == "ollama" {
                 let resolved_local_model = resolve_ollama_model(&self.local_model).await;
@@ -144,6 +158,9 @@ impl InferenceScheduler {
             let use_local = self.should_use_local_for_chat(tools_prompt, ollama_available);
 
             if use_local {
+                if let Some(ref response) = self.scripted_generation_response {
+                    return Ok(response.clone());
+                }
                 chat_with_ollama(
                     resolved_local_model.as_deref().unwrap_or(&self.local_model),
                     messages,
@@ -151,6 +168,9 @@ impl InferenceScheduler {
                 )
                 .await
             } else {
+                if let Some(ref response) = self.scripted_generation_response {
+                    return Ok(response.clone());
+                }
                 chat_with_openrouter(
                     messages,
                     life_model,

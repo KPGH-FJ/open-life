@@ -133,6 +133,7 @@ fn test_action_parser_final_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -165,6 +166,7 @@ fn test_action_parser_actions_envelope() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -183,6 +185,43 @@ fn test_action_parser_actions_envelope() {
         .warnings
         .iter()
         .any(|warning| warning.contains("unregistered_tool_defaulted_mcp_tool")));
+}
+
+#[test]
+fn test_action_parser_direct_read_actions_keep_executor_input_shape() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig::default());
+    let mut run = AgentRun::new_chat_run("test", "Hi");
+    let mut tool_call_count = 0u32;
+
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: None,
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+        web_search_fixture_output: None,
+        hs_runtime_packet: None,
+    };
+
+    let reply = r#"{"actions": [{"name": "memory.search", "action_type": "memory_search", "arguments": {"query": "budget review", "session_id": "s1", "limit": 3}}]}"#;
+    let actions = loop_instance
+        .parse_tool_calls(reply, &action_ctx, &mut run, &mut tool_call_count)
+        .unwrap();
+
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0].action_type, "memory_search");
+    assert_eq!(actions[0].target, "memory.search");
+    assert_eq!(actions[0].input["query"], "budget review");
+    assert_eq!(actions[0].input["session_id"], "s1");
+    assert_eq!(actions[0].input["limit"], 3);
+    assert!(actions[0].input.get("arguments").is_none());
 }
 
 /// Test 8: Action Parser - legacy tool_calls format still works
@@ -205,6 +244,7 @@ fn test_action_parser_legacy_tool_calls() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -237,6 +277,7 @@ fn test_action_parser_malformed_json_fail_soft() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -270,6 +311,7 @@ fn test_action_parser_no_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -302,6 +344,7 @@ fn test_action_parser_final_with_actions() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -381,6 +424,7 @@ fn test_max_tool_calls_stop_reason() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -415,6 +459,7 @@ fn test_json_self_repair_flag_on_malformed_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -452,6 +497,7 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -462,6 +508,86 @@ fn test_json_self_repair_flag_not_set_on_valid_json() {
 
     assert!(!parsed.json_parse_failed);
     assert_eq!(parsed.actions.len(), 1);
+}
+
+#[tokio::test]
+async fn agent_loop_executes_multi_step_read_observe_follow_up_without_network() {
+    let loop_instance = create_test_agent_loop(AgentLoopConfig {
+        max_steps: 3,
+        max_tool_calls: 2,
+        allow_writes: false,
+        allow_cloud: false,
+        ..AgentLoopConfig::default()
+    })
+    .with_scripted_replies(vec![
+        r#"{"final":"I will search memory first.","actions":[{"name":"memory.search","action_type":"memory_search","arguments":{"query":"energy planning","session_id":"session-multistep","limit":5}}],"thought_summary":"Need a read-only observation.","warnings":[]}"#.into(),
+        r#"{"final":"Here is the note from memory: low energy planning on Tuesday.","actions":[],"thought_summary":"Used the observation to answer.","warnings":[]}"#.into(),
+    ]);
+    let task = AgentTask {
+        kind: AgentTaskKind::Conversation,
+        session_id: "session-multistep".into(),
+        user_text: "What did we discuss about energy planning?".into(),
+        messages: vec![ChatMessage {
+            role: "user".into(),
+            content: "What did we discuss about energy planning?".into(),
+        }],
+        layer: Layer::L2,
+    };
+    let (registry, permission_store, audit_store, privacy_engine) = create_test_action_ctx();
+    let memory_store = crate::memory::MemoryStore::new_in_memory().unwrap();
+    memory_store
+        .save_message(
+            "session-multistep",
+            &ChatMessage {
+                role: "user".into(),
+                content: "We discussed low energy planning on Tuesday.".into(),
+            },
+        )
+        .unwrap();
+    let action_ctx = ActionExecutionContext {
+        registry: &registry,
+        permission_store: &permission_store,
+        audit_store: &audit_store,
+        privacy_engine: &privacy_engine,
+        safe_paths: &[],
+        calendar_ics_paths: &[],
+        life_model: None,
+        memory_store: Some(&memory_store),
+        proposal_store: None,
+        agent_run_store: None,
+        network_policy: None,
+        web_search_fixture_output: None,
+        hs_runtime_packet: None,
+    };
+
+    let result = loop_instance
+        .run(
+            &task,
+            &LifeModel::default(),
+            "Available tools: memory.search",
+            None,
+            privacy_engine.clone(),
+            &action_ctx,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.step_count, 2);
+    assert_eq!(result.tool_call_count, 1);
+    assert_eq!(result.stop_reason, "no_tools");
+    assert!(result.final_response.contains("low energy planning"));
+    assert_eq!(result.run.actions.len(), 1);
+    assert_eq!(result.run.actions[0].action_type, "memory_search");
+    assert_eq!(result.run.observations.len(), 1);
+    assert!(result.run.observations[0]
+        .content
+        .contains("low energy planning"));
+    assert_eq!(result.run.status, AgentRunStatus::Completed);
+    let structured = result.run.observations[0]
+        .structured_result
+        .as_ref()
+        .expect("memory search observation should be structured");
+    assert_eq!(structured["directWritesExecuted"], serde_json::json!(false));
 }
 
 /// Test 16: Proposal-generation tools bypass permission-confirmation blocking.
@@ -492,6 +618,7 @@ fn test_proposal_tool_bypass_permission_blocking() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -561,6 +688,7 @@ fn test_permission_check_tool() {
         proposal_store: None,
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 
@@ -614,6 +742,7 @@ fn test_memory_propose_write_creates_proposal() {
         proposal_store: Some(&prop_store),
         agent_run_store: None,
         network_policy: None,
+        web_search_fixture_output: None,
         hs_runtime_packet: None,
     };
 

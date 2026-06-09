@@ -169,6 +169,24 @@ pub struct ReactBetaExecutionStatusReport {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatAgentExecutionV1EvalGateReport {
+    pub report_kind: String,
+    pub runtime_eval: openlife_core::agent::main_chat_agent_v1::MainChatRuntimeEvalReport,
+    pub acceptance:
+        openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceReport,
+    pub live_provider_preflight:
+        openlife_core::agent::main_chat_agent_v1::MainChatLiveProviderEvalPreflightReport,
+    pub command_surface_gate_executed: bool,
+    pub live_provider_attempted: bool,
+    pub migration_permission: bool,
+    pub metadata_safe: bool,
+    pub no_external_provider_invocation: bool,
+    pub no_app_store_writes: bool,
+    pub metadata_safe_summary: Value,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeMigrationGateCheckInput {
@@ -1699,6 +1717,94 @@ pub(crate) async fn get_react_beta_execution_status_with_state(
     })
 }
 
+#[tauri::command]
+pub async fn run_main_chat_agent_execution_v1_eval_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<MainChatAgentExecutionV1EvalGateReport, String> {
+    run_main_chat_agent_execution_v1_eval_gate_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn run_main_chat_agent_execution_v1_eval_gate_with_state(
+    state: &Arc<AppState>,
+) -> Result<MainChatAgentExecutionV1EvalGateReport, String> {
+    let runtime_eval =
+        openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
+            openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
+        );
+    let config = state.config.lock().await.clone();
+    let scripted_provider_response_present = state
+        .scheduler
+        .lock()
+        .await
+        .scripted_generation_response
+        .is_some();
+    let live_provider_preflight =
+        openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_live_provider_eval_preflight_from_config(
+            &config,
+            false,
+            scripted_provider_response_present,
+            false,
+        );
+    let acceptance =
+        openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_agent_execution_v1_acceptance_gate(
+            openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceInput {
+                runtime_report: runtime_eval.clone(),
+                command_surface:
+                    openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
+                        total_cases: 0,
+                        legacy_fallback_count: 0,
+                        silent_write_count: 0,
+                        send_stream_matrix_coverage: 0.0,
+                        final_completion_ready: false,
+                    },
+                live_provider:
+                    openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceLiveEvidence {
+                        generation_eval_executed: false,
+                        web_mcp_agent_loop_eval_executed: false,
+                        web_agent_loop_eval_executed: false,
+                        mcp_agent_loop_eval_executed: false,
+                        proposal_permission_eval_executed: false,
+                        no_silent_writes: true,
+                    },
+            },
+        );
+    let metadata_safe_summary = json!({
+        "reportKind": "main_chat_agent_execution_v1_eval_gate",
+        "runtimeTotalCases": runtime_eval.total_cases,
+        "runtimeFailedCases": runtime_eval.failed_cases,
+        "runtimeDeterministicStubCases": runtime_eval.deterministic_stub_case_count,
+        "runtimeSilentWriteCount": runtime_eval.silent_write_count,
+        "commandSurfaceGateExecuted": false,
+        "liveProviderAttempted": false,
+        "liveProviderPreflightReady": live_provider_preflight.ready,
+        "liveProviderPreflightStatus": live_provider_preflight.status,
+        "liveProviderPreflightProvider": live_provider_preflight.provider,
+        "liveProviderPreflightBlockers": live_provider_preflight.blockers,
+        "liveProviderPreflightRequiredEvidence": live_provider_preflight.required_evidence,
+        "liveProviderPreflightInvocationAllowed": live_provider_preflight.live_provider_invocation_allowed,
+        "liveProviderPreflightModelInvoked": live_provider_preflight.model_invoked,
+        "liveProviderPreflightDirectWritesExecuted": live_provider_preflight.direct_writes_executed,
+        "acceptanceReady": acceptance.ready,
+        "acceptanceStatus": acceptance.status,
+        "blockerCount": acceptance.blockers.len(),
+        "metadataSafe": true,
+    });
+
+    Ok(MainChatAgentExecutionV1EvalGateReport {
+        report_kind: "main_chat_agent_execution_v1_eval_gate".into(),
+        runtime_eval,
+        acceptance,
+        live_provider_preflight,
+        command_surface_gate_executed: false,
+        live_provider_attempted: false,
+        migration_permission: false,
+        metadata_safe: true,
+        no_external_provider_invocation: true,
+        no_app_store_writes: true,
+        metadata_safe_summary,
+    })
+}
+
 async fn find_preview_run_for_gate(
     input: RuntimeMigrationGateCheckInput,
     state: &Arc<AppState>,
@@ -3003,6 +3109,94 @@ mod tests {
         assert!(!serialized.contains("memory context"));
         assert!(!serialized.contains("LifeModel text"));
         assert!(!serialized.contains("secret@example.com"));
+
+        let after = status_side_effect_counts(&state).await;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn main_chat_agent_execution_v1_eval_gate_command_runs_core_runtime_eval_read_only_and_blocked_without_live(
+    ) {
+        let state = preview_state().await;
+        {
+            let mut config = state.config.lock().await;
+            config.system.network_policy.enabled = false;
+        }
+        let before = status_side_effect_counts(&state).await;
+
+        let report = run_main_chat_agent_execution_v1_eval_gate_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(report.report_kind, "main_chat_agent_execution_v1_eval_gate");
+        assert_eq!(report.runtime_eval.total_cases, 100);
+        assert_eq!(report.runtime_eval.deterministic_stub_case_count, 0);
+        assert_eq!(report.runtime_eval.failed_cases, 0);
+        assert!(!report.acceptance.ready);
+        assert_eq!(report.acceptance.status, "blocked");
+        assert!(!report.command_surface_gate_executed);
+        assert!(!report.live_provider_attempted);
+        assert!(!report.migration_permission);
+        assert!(report.metadata_safe);
+        assert!(report.no_external_provider_invocation);
+        assert!(report.no_app_store_writes);
+        assert!(report
+            .acceptance
+            .blockers
+            .contains(&"command_surface_cases_below_24".to_string()));
+        assert!(report
+            .acceptance
+            .blockers
+            .contains(&"live_provider_generation_not_executed".to_string()));
+        assert!(!report.live_provider_preflight.ready);
+        assert_eq!(report.live_provider_preflight.status, "blocked");
+        assert!(
+            !report
+                .live_provider_preflight
+                .live_provider_invocation_allowed
+        );
+        assert!(!report.live_provider_preflight.model_invoked);
+        assert!(!report.live_provider_preflight.direct_writes_executed);
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"explicit_live_eval_required".to_string()));
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"provider_api_key_missing".to_string()));
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"network_disabled".to_string()));
+        let live_preflight_blockers = report
+            .metadata_safe_summary
+            .get("liveProviderPreflightBlockers")
+            .and_then(Value::as_array)
+            .expect("live provider preflight blockers should be reported");
+        assert!(live_preflight_blockers
+            .iter()
+            .any(|blocker| blocker == "explicit_live_eval_required"));
+        assert!(live_preflight_blockers
+            .iter()
+            .any(|blocker| blocker == "provider_api_key_missing"));
+        assert!(live_preflight_blockers
+            .iter()
+            .any(|blocker| blocker == "network_disabled"));
+        assert_eq!(
+            report
+                .metadata_safe_summary
+                .get("liveProviderPreflightModelInvoked")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("raw tool payload"));
+        assert!(!serialized.contains("memory context"));
+        assert!(!serialized.contains("LifeModel text"));
 
         let after = status_side_effect_counts(&state).await;
         assert_eq!(before, after);
