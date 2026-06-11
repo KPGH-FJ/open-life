@@ -1,7 +1,7 @@
 # OpenLife Plans Document Governance
 
 > Last updated: 2026-06-09
-> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; Main Chat Agent Execution v1 remediation in progress, not complete
+> Status: authoritative document index for Agents, W150-W158 Skill Runtime Beta Maturity complete; Main Chat Agent Execution v1 stabilization is the current Goal-mode entry; v1 is not complete
 
 This file prevents old planning documents from steering new Agent work. If two
 documents disagree, use the precedence below and treat lower-priority stale text
@@ -13,8 +13,19 @@ as reference only.
    - Project-wide Agent instructions, current constraints, and Tool Taxonomy.
 2. `plans/README.md`
    - This authority map and current entry point.
-3. `plans/main_chat_agent_migration_v1_goal_spec.md`
-   - Active Main Chat Agent Execution v1 remediation spec / audit trail.
+3. `plans/main_chat_agent_v1_stabilization_goal_spec.md`
+   - Current Goal-mode entry for the stabilization / acceptance-blocker
+     remediation pass after checkpoint `d8e415f`. This Goal does not restart
+     the previous broad migration Goal and does not expand the product roadmap.
+     It exists to fix known blockers: real auditable final gate, external
+     live-provider evidence/preflight, test-only harness leakage, ReAct
+     tool-selection boundary, safe workspace file read, controlled
+     knowledge-format context surfaces, and `src-tauri/src/lib.rs` module
+     cleanup. It must fail closed and must not claim completion without real
+     evidence.
+4. `plans/main_chat_agent_migration_v1_goal_spec.md`
+   - Main Chat Agent Execution v1 remediation spec / audit trail and capability
+     target.
      Ordinary Main Chat now enters AgentIngress and a governed task session,
      ReActToolExecution now attempts the governed plan-guided AgentLoop before
      single-step ActionExecutor-backed read fallback, AgentLoop results that do
@@ -96,59 +107,70 @@ as reference only.
      provider-backed ReAct web AgentLoop, registered MCP AgentLoop, and MCP
      ToolPermission proposal evidence, including `liveProviderInvoked`,
      AgentLoop action status, no single-step fallback, MCP target resolution /
-     ToolPermission proposal checks, and no silent writes. The ignored live
+     ToolPermission proposal checks, and no silent writes. ReAct generic MCP
+     candidate selection now records deterministic capability/name/tag ranking
+     evidence in the metadata-safe candidate contract, including rank, source,
+     capability digest, and match reason, while continuing to reject
+     high-risk/critical/confirmation-required/write-like read-shaped manifests.
+     This is local deterministic selection evidence, not provider-backed or
+     model-ranked live selection evidence. The ignored live
      runs were not executed in this environment and do not count as
      live-provider completion.
      Final completion still requires live-provider-backed
      generation eval coverage, broader provider-backed web/MCP AgentLoop and
      manifest/permission coverage, and broader provider/live proposal-permission
      proof.
-4. `plans/openlife_lifemodel_governed_agent_runtime.md`
+5. `plans/openlife_lifemodel_governed_agent_runtime.md`
    - Current implementation program and next development order.
-5. `plans/lifemodel_governed_backend_completion_goal_spec.md`
+6. `plans/lifemodel_governed_backend_completion_goal_spec.md`
    - Completed Goal-mode master spec for the pre-UI LifeModel-governed
      backend kernel through W149.
-6. `plans/lifemodel_governed_runtime_progress.md`
+7. `plans/lifemodel_governed_runtime_progress.md`
    - Compact W1-W158 completion/status index. This is not a second roadmap.
-7. `plans/skill_runtime_goal_spec.md`
+8. `plans/skill_runtime_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for W150-W158 Skill Runtime
      Beta Maturity. This is not default Chat migration permission.
-8. `plans/react_beta_execution_hardening_goal_spec.md`
+9. `plans/react_beta_execution_hardening_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for ReAct Beta Execution
      Hardening W114-W123.
-9. `plans/runtime_strategy_maturity_goal_spec.md`
+10. `plans/runtime_strategy_maturity_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for RuntimeStrategy /
      Multi-Strategy Runtime Maturity W106-W113.
-10. `plans/plan_execute_product_vertical_goal_spec.md`
+11. `plans/plan_execute_product_vertical_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for the Plan-Execute Product
      Vertical W98-W105.
-11. `plans/legacy_direct_write_convergence_goal_spec.md`
+12. `plans/legacy_direct_write_convergence_goal_spec.md`
    - Completed CLI Goal-mode spec and audit trail for Legacy Direct-Write
      Convergence W90-W97.
-12. `plans/lifemodel_maturation_goal_plan.md`
+13. `plans/lifemodel_maturation_goal_plan.md`
    - Completed Goal-mode preparation/spec and audit trail for the W73-W78
      LifeModel Maturation proof slice after W72.
-13. Hard governance baselines:
+14. Hard governance baselines:
    - `plans/adr/0013-lifemodel-hs-source-of-truth-governance.md`
    - `plans/openlife_react_beta_roadmap.md`
    - `plans/lifemodel_hs_mvp_task_specs.md`
    - `plans/lifemodel_hs_legacy_write_path_audit.md`
-14. Scoped architecture/product baselines:
+15. Scoped architecture/product baselines:
    - `plans/openlife_agent_framework_architecture.md`
    - `OpenLife_PRD_v2_Agent_Framework.md`
-15. Current execution helpers:
+16. Current execution helpers:
    - `plans/openlife_development_plan.md`
    - `plans/openlife_codex_execution_playbook.md`
-16. Current product-surface rewrite entry:
+17. Current product-surface rewrite entry:
    - `plans/frontend_product_shell_rewrite_goal_spec.md`
    - `plans/frontend_product_shell_rewrite_plan.md`
-17. Historical/reference documents.
+18. Historical/reference documents.
    - Useful for context, but never authoritative for current task order.
 
 ## 2. Current Position
 
-Current latest status is **Main Chat Agent Execution v1 remediation in progress
-after W150-W158 Skill Runtime Beta Maturity**. Ordinary `send_message` and
+Current latest status is **Main Chat Agent Execution v1 stabilization is the
+current Goal-mode entry, and v1 remains not complete**. The next Goal should use
+`plans/main_chat_agent_v1_stabilization_goal_spec.md` to fix acceptance
+blockers before any broader capability expansion.
+
+Main Chat Agent Execution v1 remediation remains in progress after W150-W158
+Skill Runtime Beta Maturity. Ordinary `send_message` and
 `start_stream_message` now enter `AgentIngress`, create/resume durable
 `AgentTaskSession` records, and can render `ExecutionTranscript` / action queue
 state in Chat through an execution task panel. `DirectAnswer` is now on a governed strategy path. Proposal /
@@ -214,8 +236,12 @@ liveProviderWebAgentLoopCoverage and liveProviderMcpAgentLoopCoverage fields,
 both zero until the live harnesses actually run.
 The Tauri final acceptance runner now combines the core runtime gate,
 command-surface gate, and optional live harness evidence into one report; the
-default no-live path runs local gates and remains blocked. Complete clean live
-harness evidence is explicitly merged into runtime live coverage and
+default no-live path runs local gates and remains blocked. When
+`OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1` is set, the runner uses isolated eval
+AppState instances to execute the four ordinary Main Chat live harness scenarios
+and returns exact blocked reports if credential/network/provider preflight fails;
+the current environment only proves the no-invocation blocker path. Complete
+clean live harness evidence is explicitly merged into runtime live coverage and
 command-surface final evidence before the core final acceptance gate is
 evaluated.
 ActionExecutor now maps missing MCP read targets to a governed blocked action
@@ -231,6 +257,78 @@ cases, and broader provider/live proposal-permission proof beyond the
 fail-closed live-provider preflight, local runtime/command-surface proposal
 gates, route-level UI handoff, and narrow accepted ToolPermission resume replay
 case.
+
+Stabilization progress after checkpoint `d8e415f`: final-gate aggregation,
+live evidence normalization, command-surface live overlay, blocker derivation,
+and live-provider required-evidence plus blocked/completed report construction
+now live in `src-tauri/src/main_chat_final_gate.rs` and are used by the final
+acceptance runner. A real non-default
+`run_main_chat_agent_execution_v1_final_acceptance_gate` Tauri command now uses
+the same aggregation, runs core runtime eval, attaches current state/scheduler
+metadata-safe live-provider preflight, avoids external provider invocation by
+default, avoids app-store writes, and fails closed with
+`migrationPermission=false` when live evidence is absent; it also runs all 24
+local send/stream command-surface cases on an isolated eval AppState, using
+`send_message_with_state` for send cases and
+`start_stream_message_governed_eval_with_state` for stream cases. With explicit
+live opt-in, the same runner now executes DirectAnswer, web AgentLoop,
+registered MCP AgentLoop, and MCP ToolPermission proposal harness scenarios on
+isolated eval AppState instances; missing credentials produce four blocked
+reports with no Main Chat/provider invocation.
+Command-surface eval
+case matrix, scenario state setup, prompt/session-id mapping,
+case assertion/no-silent-write interpretation, report shape, coverage math, and
+acceptance evidence normalization now live in
+`src-tauri/src/main_chat_command_surface_eval.rs`, and isolated eval
+AppState construction now lives in `src-tauri/src/main_chat_eval_state.rs` so
+the command-surface and live harness state setup no longer depends on a
+`#[cfg(test)]` state factory. Live-provider harness opt-in, suite execution,
+ordinary `send_message` invocation, and report extraction now live in
+`src-tauri/src/main_chat_live_provider_harness.rs` instead of `src-tauri/src/lib.rs`.
+Main Chat task-control command state plus resume/cancel/retry/replay helpers
+now live in `src-tauri/src/main_chat_task_controls.rs`, with Tauri command
+registration still in `src-tauri/src/lib.rs`.
+Main Chat generation support helpers for chat persistence, vector persistence,
+AgentRun finalization, non-stream fallback generation, provider endpoint
+classification, and metadata-safe preview text now live in
+`src-tauri/src/main_chat_generation_support.rs`.
+ReAct tool-selection plan/candidate helpers now live in
+`src-tauri/src/main_chat_react_tool_selection.rs`.
+ReAct AgentLoop attempt execution, runtime helper types, follow-up synthesis,
+action-to-tool-call conversion, and tool-call/blocker metadata helpers now live in
+`src-tauri/src/main_chat_react_runtime.rs`, and ReAct
+ActionExecutor-backed fallback execution now lives in
+`src-tauri/src/main_chat_react_execution.rs`.
+Main Chat proposal and ToolPermission proposal support helpers now live in
+`src-tauri/src/main_chat_proposal_support.rs`.
+Main Chat HS runtime packet/topic/tool-requirement and LifeModel section
+helpers now live in `src-tauri/src/main_chat_hs_runtime.rs`.
+Main Chat task-session, transcript, and action-queue runtime support helpers now
+live in `src-tauri/src/main_chat_runtime_support.rs`.
+Main Chat context compilation and selected-skill sanitization now live beside
+bounded knowledge-format loading in `src-tauri/src/main_chat_context_loader.rs`.
+The Main Chat workspace file read
+resolver now accepts explicit workspace-relative paths, resolves from the
+project workspace root even when the process CWD is `src-tauri`, canonicalizes
+read targets, and blocks traversal/outside-workspace reads before execution. The
+ReAct AgentLoop prompt now carries a metadata-safe tool-candidate contract,
+generic MCP read requests can expose a bounded registered read-only manifest
+candidate set, deterministic capability/name/tag ranking is recorded as
+candidate rank/source/capability digest/match reason evidence, high-risk /
+critical / confirmation-required / write-like read-shaped manifests are excluded
+from that candidate set, and selected candidate targets are enforced through
+`toolset_allowlist`. Main
+Chat context assembly now uses a controlled loader for bounded
+workspace/configured `AGENTS.md`, `SOUL.md`, root / `memories/` `USER.md` /
+`MEMORY.md`, and selected `SKILL.md` surfaces, with optional sanitized
+`selectedSkillId` plumbing through ordinary send/stream command surfaces and
+frontend Tauri wrappers plus an explicit manual Chat composer `SKILL.md`
+context field; the async context compiler and selected-skill sanitizer are now
+owned by the same focused context module. This improves the current narrow paths, but it does
+not change the final completion status or satisfy real live-provider evidence,
+remaining external live-provider harness evidence, broader provider-backed /
+model-ranked manifest and capability selection, or further module cleanup of
+other Main Chat runtime/strategy code.
 
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
 completed W90-W97 Goal-mode spec and audit trail. W90-W92 retire the
@@ -867,13 +965,15 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 | W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
-| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first, rejects no-planned-action AgentLoop results as incomplete tool execution, then falls back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, and broader provider/live proposal-permission proof remain required before completion |
+| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first with a metadata-safe tool-candidate contract, generic MCP read bounded read-only manifest candidate set, deterministic capability/name/tag ranking evidence, candidate rank/source/capability digest/match reason metadata, high-risk/confirmation/write-like candidate exclusion, and `toolset_allowlist` enforcement, with ReAct tool-selection plan/candidate helpers extracted to `src-tauri/src/main_chat_react_tool_selection.rs`, ReAct AgentLoop attempt execution/runtime helper types/follow-up synthesis/action-to-tool-call conversion/tool-call metadata helpers extracted to `src-tauri/src/main_chat_react_runtime.rs`, ReAct ActionExecutor-backed fallback execution extracted to `src-tauri/src/main_chat_react_execution.rs`, proposal/ToolPermission proposal support helpers extracted to `src-tauri/src/main_chat_proposal_support.rs`, HS runtime packet/topic/tool-requirement helpers extracted to `src-tauri/src/main_chat_hs_runtime.rs`, and task-session/transcript/action-queue runtime support helpers extracted to `src-tauri/src/main_chat_runtime_support.rs`; rejects no-planned-action AgentLoop results as incomplete tool execution, then falls back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; Main Chat context assembly now uses a controlled knowledge-format loader for bounded workspace/configured `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, and selected `SKILL.md` surfaces, with context compilation / selected-skill sanitization extracted to `src-tauri/src/main_chat_context_loader.rs`, optional sanitized selected-skill id plumbing through send/stream command surfaces, frontend Tauri wrappers, and an explicit manual Chat composer source; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, broader provider/live proposal-permission proof, and broader provider-backed/model-ranked manifest/capability selection remain required before completion |
 
 ## 4. Current Authoritative Entry Points
 
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
+| `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Current Goal-mode entry for stabilization / acceptance-blocker remediation. Use before restarting broader Main Chat capability expansion. |
+| `plans/main_chat_agent_migration_v1_goal_spec.md` | Main Chat Agent Execution v1 capability target and audit trail. Do not directly restart it as the next broad Goal unless explicitly requested. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |
 | `plans/lifemodel_governed_backend_completion_goal_spec.md` | Completed Backend Completion master spec through Goal 8 / W147-W149. |
 | `plans/lifemodel_governed_runtime_progress.md` | W1-W158 structured status index and compressed guardrail map. |

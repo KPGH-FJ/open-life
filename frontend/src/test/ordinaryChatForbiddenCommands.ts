@@ -48,4 +48,5 @@ export const FORBIDDEN_ORDINARY_CHAT_COMMANDS = [
   "run_skill",
   "get_skill_run_status",
   "run_main_chat_agent_execution_v1_eval_gate",
+  "run_main_chat_agent_execution_v1_final_acceptance_gate",
 ] as const;

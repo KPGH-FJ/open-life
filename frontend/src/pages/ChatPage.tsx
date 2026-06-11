@@ -473,6 +473,7 @@ export default function ChatPage({
   const [currentSessionId, setCurrentSessionId] = useState<string>("default");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [selectedSkillId, setSelectedSkillId] = useState("");
   const [sending, setSending] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(true);
   const [preferLocal, setPreferLocal] = useState<boolean>(true);
@@ -1175,9 +1176,12 @@ export default function ChatPage({
     emitCompanionStage("sorting");
 
     try {
+      const selectedSkillOption = selectedSkillId.trim() || undefined;
       // The streaming backend persists the user message before model execution.
       // Saving it here as well creates duplicate user rows in history and memory retrieval.
-      await startStreamMessage(currentSessionId, nextMessages);
+      await startStreamMessage(currentSessionId, nextMessages, {
+        selectedSkillId: selectedSkillOption,
+      });
       await loadSessions();
     } catch (e) {
       flushStreaming();
@@ -1197,6 +1201,7 @@ export default function ChatPage({
     currentSessionId,
     messages,
     diagnostics,
+    selectedSkillId,
     tryHandleQuickCommand,
     emitCompanionStage,
   ]);
@@ -1228,7 +1233,10 @@ export default function ChatPage({
     setLegacyFallbackUsed(false);
     emitCompanionStage("sorting");
     try {
-      await startStreamMessage(currentSessionId, retryMessages);
+      const selectedSkillOption = selectedSkillId.trim() || undefined;
+      await startStreamMessage(currentSessionId, retryMessages, {
+        selectedSkillId: selectedSkillOption,
+      });
     } catch (e) {
       flushStreaming();
       if (!streamErrorHandledRef.current) {
@@ -1242,7 +1250,13 @@ export default function ChatPage({
       setSending(false);
       emitCompanionStage("error");
     }
-  }, [currentSessionId, messages, sending, emitCompanionStage]);
+  }, [
+    currentSessionId,
+    messages,
+    selectedSkillId,
+    sending,
+    emitCompanionStage,
+  ]);
 
   const handleResumeMainChatTask = useCallback(async () => {
     const taskSessionId = currentAgentIngress?.agentTaskSessionId;
@@ -3020,7 +3034,9 @@ export default function ChatPage({
           sending={sending}
           streamInterrupted={streamInterrupted}
           diagnostics={diagnostics}
+          selectedSkillId={selectedSkillId}
           onInputChange={handleInputChange}
+          onSelectedSkillIdChange={setSelectedSkillId}
           onComposerFocus={() => emitCompanionStage("listening")}
           onSend={handleSend}
           onContinueStream={handleContinueStream}

@@ -957,6 +957,44 @@ describe("ChatPage", () => {
     }
   });
 
+  it("passes an explicitly selected skill id through the ordinary chat stream payload", async () => {
+    render(
+      <BrowserRouter>
+        <ChatPage />
+      </BrowserRouter>
+    );
+
+    const textarea = await screen.findByPlaceholderText(/输入消息/);
+    await screen.findByText("聊天就绪");
+
+    fireEvent.change(screen.getByLabelText("Skill context"), {
+      target: { value: "weekly-planning" },
+    });
+    fireEvent.change(textarea, { target: { value: "按这个技能整理本周计划" } });
+    fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith(
+        "start_stream_message",
+        expect.objectContaining({
+          selectedSkillId: "weekly-planning",
+          selected_skill_id: "weekly-planning",
+          args: expect.objectContaining({
+            selectedSkillId: "weekly-planning",
+            selected_skill_id: "weekly-planning",
+          }),
+        }),
+      );
+    });
+
+    for (const forbiddenCommand of FORBIDDEN_ORDINARY_CHAT_COMMANDS) {
+      expect(
+        vi.mocked(invoke).mock.calls.some(([cmd]) => cmd === forbiddenCommand),
+        `${forbiddenCommand} must not be called by ordinary Send`,
+      ).toBe(false);
+    }
+  });
+
   it("shows lightweight trust status and run evidence in companion mode only", async () => {
     const companionRun = {
       id: "run-chat-1",

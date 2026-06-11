@@ -215,6 +215,13 @@ function sessionArgs(sessionId: string): { sessionId: string; session_id: string
   return { sessionId, session_id: sessionId };
 }
 
+function selectedSkillArgs(
+  selectedSkillId?: string
+): { selectedSkillId: string; selected_skill_id: string } | undefined {
+  const trimmed = selectedSkillId?.trim();
+  return trimmed ? { selectedSkillId: trimmed, selected_skill_id: trimmed } : undefined;
+}
+
 function snakeToCamel(key: string): string {
   return key.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
 }
@@ -326,10 +333,19 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 }
 
 // DEPRECATED: use sendMessageV2 for full trace support
-export async function sendMessage(sessionId: string, messages: ChatMessage[]): Promise<string> {
+export interface MainChatMessageOptions {
+  selectedSkillId?: string;
+}
+
+export async function sendMessage(
+  sessionId: string,
+  messages: ChatMessage[],
+  options: MainChatMessageOptions = {}
+): Promise<string> {
   const result = await safeInvoke<SendMessageResult>("send_message", {
     ...sessionArgs(sessionId),
     messages,
+    ...selectedSkillArgs(options.selectedSkillId),
   });
   return result.reply;
 }
@@ -663,9 +679,14 @@ export interface MainChatAgentExecutionV1EvalGateReport {
 
 export async function sendMessageV2(
   sessionId: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  options: MainChatMessageOptions = {}
 ): Promise<SendMessageResult> {
-  return safeInvoke<SendMessageResult>("send_message", { ...sessionArgs(sessionId), messages });
+  return safeInvoke<SendMessageResult>("send_message", {
+    ...sessionArgs(sessionId),
+    messages,
+    ...selectedSkillArgs(options.selectedSkillId),
+  });
 }
 
 export async function getMainChatAgentTaskState(
@@ -1101,9 +1122,14 @@ export async function checkDefaultChatAdapterCutoverPlanApprovalReadiness(
 
 export async function startStreamMessage(
   sessionId: string,
-  messages: ChatMessage[]
+  messages: ChatMessage[],
+  options: MainChatMessageOptions = {}
 ): Promise<void> {
-  const payload = { ...sessionArgs(sessionId), messages };
+  const payload = {
+    ...sessionArgs(sessionId),
+    messages,
+    ...selectedSkillArgs(options.selectedSkillId),
+  };
   return safeInvoke<void>("start_stream_message", { ...payload, args: payload });
 }
 

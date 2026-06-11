@@ -187,6 +187,24 @@ pub struct MainChatAgentExecutionV1EvalGateReport {
     pub metadata_safe_summary: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MainChatAgentExecutionV1FinalAcceptanceGateCommandReport {
+    pub report_kind: String,
+    pub final_gate: crate::main_chat_final_gate::MainChatAgentExecutionV1FinalGateReport,
+    pub(crate) command_surface_eval:
+        crate::main_chat_command_surface_eval::MainChatCommandSurfaceEvalReport,
+    pub live_provider_preflight:
+        openlife_core::agent::main_chat_agent_v1::MainChatLiveProviderEvalPreflightReport,
+    pub command_surface_gate_executed: bool,
+    pub live_provider_attempted: bool,
+    pub migration_permission: bool,
+    pub metadata_safe: bool,
+    pub no_external_provider_invocation: bool,
+    pub no_app_store_writes: bool,
+    pub metadata_safe_summary: Value,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeMigrationGateCheckInput {
@@ -1651,7 +1669,7 @@ fn looks_like_email_for_metadata(text: &str) -> bool {
     })
 }
 
-fn push_unique_string(values: &mut Vec<String>, value: String) {
+pub(super) fn push_unique_string(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
@@ -1800,6 +1818,96 @@ pub(crate) async fn run_main_chat_agent_execution_v1_eval_gate_with_state(
         migration_permission: false,
         metadata_safe: true,
         no_external_provider_invocation: true,
+        no_app_store_writes: true,
+        metadata_safe_summary,
+    })
+}
+
+#[tauri::command]
+pub async fn run_main_chat_agent_execution_v1_final_acceptance_gate(
+    state: State<'_, Arc<AppState>>,
+) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {
+    run_main_chat_agent_execution_v1_final_acceptance_gate_with_state(&state.inner().clone()).await
+}
+
+pub(crate) async fn run_main_chat_agent_execution_v1_final_acceptance_gate_with_state(
+    state: &Arc<AppState>,
+) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {
+    run_main_chat_agent_execution_v1_final_acceptance_gate_with_state_and_live_opt_in(
+        state,
+        crate::main_chat_live_provider_harness::main_chat_live_provider_eval_opt_in_from_env(),
+    )
+    .await
+}
+
+pub(crate) async fn run_main_chat_agent_execution_v1_final_acceptance_gate_with_state_and_live_opt_in(
+    state: &Arc<AppState>,
+    explicit_live_eval_requested: bool,
+) -> Result<MainChatAgentExecutionV1FinalAcceptanceGateCommandReport, String> {
+    let runtime_eval =
+        openlife_core::agent::main_chat_agent_v1::run_main_chat_agent_v1_runtime_eval_suite(
+            openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_cases(),
+        );
+    let (live_provider_preflight, live_reports) =
+        crate::main_chat_live_provider_harness::run_main_chat_live_provider_eval_harness_suite_from_state(
+            state,
+            explicit_live_eval_requested,
+        )
+        .await?;
+    let command_surface_eval =
+        crate::main_chat_command_surface_eval::run_main_chat_command_surface_eval_report().await;
+    let command_surface = command_surface_eval.acceptance_evidence();
+    let command_surface_total_cases = command_surface.total_cases;
+    let command_surface_send_stream_matrix_coverage = command_surface.send_stream_matrix_coverage;
+    let external_provider_invoked = live_reports
+        .iter()
+        .any(|report| report.provider_endpoint_kind == "external_provider" && report.model_invoked);
+    let final_gate =
+        crate::main_chat_final_gate::build_main_chat_agent_execution_v1_final_gate_report(
+            runtime_eval,
+            command_surface_total_cases,
+            command_surface,
+            explicit_live_eval_requested,
+            live_reports,
+        );
+    let no_external_provider_invocation = !external_provider_invoked;
+    let metadata_safe_summary = json!({
+        "reportKind": "main_chat_agent_execution_v1_final_acceptance_gate",
+        "runtimeTotalCases": final_gate.runtime_total_cases,
+        "commandSurfaceTotalCases": final_gate.command_surface_total_cases,
+        "commandSurfaceGateExecuted": true,
+        "commandSurfaceFailedCases": command_surface_eval.failed_cases,
+        "commandSurfaceFailures": command_surface_eval.failures.clone(),
+        "commandSurfaceSendStreamMatrixCoverage": command_surface_send_stream_matrix_coverage,
+        "commandSurfaceLegacyFallbackCount": command_surface_eval.legacy_fallback_count,
+        "commandSurfaceSilentWriteCount": command_surface_eval.silent_write_count,
+        "liveProviderAttempted": explicit_live_eval_requested,
+        "liveProviderReportCount": final_gate.live_provider_report_count,
+        "liveProviderReadyCount": final_gate.live_provider_ready_count,
+        "liveProviderPreflightReady": live_provider_preflight.ready,
+        "liveProviderPreflightStatus": live_provider_preflight.status,
+        "liveProviderPreflightProvider": live_provider_preflight.provider,
+        "liveProviderPreflightBlockers": live_provider_preflight.blockers,
+        "liveProviderPreflightRequiredEvidence": live_provider_preflight.required_evidence,
+        "liveProviderPreflightInvocationAllowed": live_provider_preflight.live_provider_invocation_allowed,
+        "liveProviderPreflightModelInvoked": live_provider_preflight.model_invoked,
+        "liveProviderPreflightDirectWritesExecuted": live_provider_preflight.direct_writes_executed,
+        "acceptanceReady": final_gate.acceptance.ready,
+        "acceptanceStatus": final_gate.acceptance.status,
+        "blockerCount": final_gate.acceptance.blockers.len(),
+        "metadataSafe": true,
+    });
+
+    Ok(MainChatAgentExecutionV1FinalAcceptanceGateCommandReport {
+        report_kind: "main_chat_agent_execution_v1_final_acceptance_gate".into(),
+        final_gate,
+        command_surface_eval,
+        live_provider_preflight,
+        command_surface_gate_executed: true,
+        live_provider_attempted: explicit_live_eval_requested,
+        migration_permission: false,
+        metadata_safe: true,
+        no_external_provider_invocation,
         no_app_store_writes: true,
         metadata_safe_summary,
     })
@@ -2967,7 +3075,7 @@ mod tests {
     use openlife_core::life_model::LifeModel;
 
     async fn preview_state() -> std::sync::Arc<crate::AppState> {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let manager = state.life_model_manager.lock().await;
             manager.save(&LifeModel::default()).unwrap();
@@ -3197,6 +3305,157 @@ mod tests {
         assert!(!serialized.contains("raw tool payload"));
         assert!(!serialized.contains("memory context"));
         assert!(!serialized.contains("LifeModel text"));
+
+        let after = status_side_effect_counts(&state).await;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn main_chat_agent_execution_v1_final_acceptance_command_uses_real_aggregation_and_fails_closed_without_live(
+    ) {
+        let state = preview_state().await;
+        {
+            let mut config = state.config.lock().await;
+            config.system.network_policy.enabled = false;
+        }
+        let before = status_side_effect_counts(&state).await;
+
+        let report = run_main_chat_agent_execution_v1_final_acceptance_gate_with_state(&state)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            report.report_kind,
+            "main_chat_agent_execution_v1_final_acceptance_gate"
+        );
+        assert_eq!(report.final_gate.runtime_total_cases, 100);
+        assert_eq!(
+            report.final_gate.command_surface_total_cases,
+            crate::main_chat_command_surface_eval::MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES.len()
+        );
+        assert_eq!(
+            report.command_surface_eval.total_cases,
+            crate::main_chat_command_surface_eval::MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES.len()
+        );
+        assert_eq!(report.command_surface_eval.failed_cases, 0);
+        assert!(report.command_surface_eval.send_coverage > 0.0);
+        assert!(report.command_surface_eval.stream_coverage > 0.0);
+        assert!(report.command_surface_eval.failures.is_empty());
+        assert_eq!(
+            report
+                .command_surface_eval
+                .acceptance_evidence()
+                .send_stream_matrix_coverage,
+            1.0
+        );
+        assert!(!report.final_gate.live_provider_attempted);
+        assert_eq!(report.final_gate.live_provider_report_count, 0);
+        assert_eq!(report.final_gate.live_provider_ready_count, 0);
+        assert!(!report.final_gate.acceptance.ready);
+        assert_eq!(report.final_gate.acceptance.status, "blocked");
+        assert!(report.command_surface_gate_executed);
+        assert!(!report.live_provider_attempted);
+        assert!(!report.migration_permission);
+        assert!(report.metadata_safe);
+        assert!(report.no_external_provider_invocation);
+        assert!(report.no_app_store_writes);
+        assert!(!report
+            .final_gate
+            .acceptance
+            .blockers
+            .contains(&"command_surface_cases_below_24".to_string()));
+        assert!(!report
+            .final_gate
+            .acceptance
+            .blockers
+            .contains(&"command_surface_send_stream_matrix_incomplete".to_string()));
+        assert!(report
+            .final_gate
+            .acceptance
+            .blockers
+            .contains(&"live_provider_generation_not_executed".to_string()));
+        assert!(!report.live_provider_preflight.ready);
+        assert_eq!(report.live_provider_preflight.status, "blocked");
+        assert!(!report.live_provider_preflight.model_invoked);
+        assert!(!report.live_provider_preflight.direct_writes_executed);
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"explicit_live_eval_required".to_string()));
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"network_disabled".to_string()));
+
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("raw prompt"));
+        assert!(!serialized.contains("raw assistant output"));
+        assert!(!serialized.contains("raw tool payload"));
+        assert!(!serialized.contains("memory context"));
+        assert!(!serialized.contains("LifeModel text"));
+
+        let after = status_side_effect_counts(&state).await;
+        assert_eq!(before, after);
+    }
+
+    #[tokio::test]
+    async fn main_chat_agent_execution_v1_final_acceptance_command_attempts_live_when_opted_in_and_blocks_without_credentials(
+    ) {
+        let state = preview_state().await;
+        {
+            let mut config = state.config.lock().await;
+            config.llm.provider = "openai".into();
+            config.llm.openai_base = "https://api.openai.com/v1".into();
+            config.llm.chat_model = "gpt-4o-mini".into();
+            config.llm.openai_key.clear();
+            config.system.network_policy.enabled = true;
+        }
+        {
+            let config = state.config.lock().await.clone();
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+                config.local_model.clone(),
+                false,
+                config.llm.provider.clone(),
+                config.llm.openai_base.clone(),
+                String::new(),
+                config.llm.chat_model.clone(),
+                config.llm.embedding_model.clone(),
+                false,
+            );
+        }
+        let before = status_side_effect_counts(&state).await;
+
+        let report =
+            run_main_chat_agent_execution_v1_final_acceptance_gate_with_state_and_live_opt_in(
+                &state, true,
+            )
+            .await
+            .unwrap();
+
+        assert!(report.live_provider_attempted);
+        assert!(report.command_surface_gate_executed);
+        assert_eq!(report.command_surface_eval.failed_cases, 0);
+        assert_eq!(report.final_gate.live_provider_report_count, 4);
+        assert_eq!(report.final_gate.live_provider_ready_count, 0);
+        assert_eq!(report.final_gate.live_provider_main_chat_invoked_count, 0);
+        assert_eq!(report.final_gate.live_provider_model_invoked_count, 0);
+        assert!(report.no_external_provider_invocation);
+        assert!(!report.live_provider_preflight.ready);
+        assert!(report
+            .live_provider_preflight
+            .blockers
+            .contains(&"provider_api_key_missing".to_string()));
+        assert!(report
+            .final_gate
+            .live_provider_blockers
+            .contains(&"provider_api_key_missing".to_string()));
+        assert!(!report.final_gate.acceptance.ready);
+        assert!(report
+            .final_gate
+            .acceptance
+            .blockers
+            .contains(&"live_provider_generation_not_executed".to_string()));
 
         let after = status_side_effect_counts(&state).await;
         assert_eq!(before, after);

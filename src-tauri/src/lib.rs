@@ -8,7 +8,7 @@ use openlife_core::llm::ChatMessage;
 use openlife_core::memory::MemorySearchHit;
 use openlife_core::router::RouterStatus;
 use openlife_core::scheduler::InferenceScheduler;
-use openlife_core::vectors::{embed_text_with_privacy, MemoryChunk, VectorInsertItem};
+use openlife_core::vectors::{embed_text_with_privacy, MemoryChunk};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
@@ -26,9 +26,26 @@ pub mod commands;
 pub(crate) mod default_chat_adapter;
 pub mod errors;
 pub(crate) mod legacy_write_convergence;
+#[allow(dead_code)]
+pub(crate) mod main_chat_command_surface_eval;
+pub(crate) mod main_chat_context_loader;
+#[allow(dead_code)]
+pub(crate) mod main_chat_eval_state;
+#[allow(dead_code)]
+pub(crate) mod main_chat_final_gate;
+pub(crate) mod main_chat_generation_support;
+pub(crate) mod main_chat_hs_runtime;
+pub(crate) mod main_chat_live_provider_harness;
+pub(crate) mod main_chat_proposal_support;
+pub(crate) mod main_chat_react_execution;
+pub(crate) mod main_chat_react_runtime;
+pub(crate) mod main_chat_react_tool_selection;
+pub(crate) mod main_chat_runtime_support;
+pub(crate) mod main_chat_task_controls;
 pub mod scheduler_runner;
 pub mod state;
 pub mod storage;
+pub(crate) mod workspace_file_resolver;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -83,9 +100,11 @@ use commands::agent_runtime::{
     record_default_chat_adapter_narrow_implementation_plan_review_decision,
     run_controlled_chat_cutover_candidate, run_controlled_chat_migration_shadow_run,
     run_default_chat_adapter_controlled_preview, run_default_chat_adapter_dry_run,
-    run_main_chat_agent_execution_v1_eval_gate, run_multi_strategy_agent_preview,
+    run_main_chat_agent_execution_v1_eval_gate,
+    run_main_chat_agent_execution_v1_final_acceptance_gate, run_multi_strategy_agent_preview,
     update_plan_execute_session_draft,
 };
+
 use commands::builder::{
     builder_apply_signals, builder_create_proposals, builder_delete_session,
     builder_get_pending_signals, builder_list_unfinished, builder_start, builder_step,
@@ -113,6 +132,35 @@ use commands::execution::{
 use commands::feedback::{
     apply_feedback_evolution, generate_evolution_report, get_feedback_summary, log_analytics_event,
     save_feedback,
+};
+use main_chat_context_loader::compile_main_chat_context;
+#[cfg(test)]
+use main_chat_context_loader::sanitize_main_chat_selected_skill_id;
+use main_chat_generation_support::{
+    finalize_chat_agent_run, generate_non_stream_fallback, main_chat_provider_endpoint_kind,
+    persist_chat_message_if_needed, persist_vector_memory_for_message, preview_text,
+};
+#[cfg(test)]
+use main_chat_hs_runtime::hs_tool_requirements;
+pub(crate) use main_chat_hs_runtime::{
+    build_chat_runtime_hs_packet, classify_hs_policy_topic, included_life_model_sections,
+};
+use main_chat_proposal_support::{
+    attach_main_chat_tool_permission_proposal_metadata, create_main_chat_agent_proposal,
+};
+use main_chat_react_execution::execute_main_chat_react_action_with_executor;
+use main_chat_react_runtime::{
+    agent_actions_to_tool_call_results, main_chat_permission_blocker_reason,
+    synthesize_main_chat_react_follow_up, tool_call_from_action,
+    try_run_main_chat_react_agent_loop,
+};
+use main_chat_react_tool_selection::build_main_chat_react_action_plan;
+#[cfg(test)]
+use main_chat_react_tool_selection::main_chat_workspace_file_target;
+use main_chat_runtime_support::{
+    append_main_chat_agent_transcript, append_main_chat_direct_answer_contract_transcript,
+    complete_main_chat_agent_turn_session, enqueue_main_chat_agent_action, fail_main_chat_action,
+    start_main_chat_agent_turn, transition_main_chat_action, MainChatAgentTurn,
 };
 pub use openlife_core::memory_cache::HotMemoryCache;
 pub use openlife_core::memory_cache::SharedHotCache;
@@ -147,6 +195,10 @@ use commands::state::{
     record_state, toggle_daily_goal, update_daily_goal,
 };
 use commands::version::{create_snapshot, diff_snapshots, list_snapshots, restore_snapshot};
+use main_chat_task_controls::{
+    cancel_main_chat_agent_task, get_main_chat_agent_task_state, resume_main_chat_agent_task,
+    retry_main_chat_agent_action,
+};
 use storage::app_data_dir;
 
 #[derive(Clone, serde::Serialize)]
@@ -188,25 +240,6 @@ pub struct SendMessageResult {
     pub execution_transcript:
         Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
     pub legacy_fallback_used: bool,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatAgentTaskState {
-    pub session: Option<openlife_core::agent::main_chat_agent_v1::AgentTaskSession>,
-    pub actions: Vec<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction>,
-    pub transcript: Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
-    pub pending_approval_count: usize,
-    pub active_tool_count: usize,
-    pub can_resume: bool,
-    pub can_cancel: bool,
-    pub can_retry: bool,
-}
-
-#[derive(Clone)]
-struct MainChatAgentTurn {
-    decision: openlife_core::agent::main_chat_agent_v1::AgentIngressDecision,
-    transcript_entries: Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
 }
 
 #[derive(serde::Serialize)]
@@ -259,58 +292,6 @@ pub struct SystemDiagnostics {
     pub pending_proposal_count: usize,
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
-}
-
-async fn generate_and_persist_chat_proposals(
-    state: &Arc<AppState>,
-    agent_run: &openlife_core::agent::AgentRun,
-    reply: &str,
-    life_model: &LifeModel,
-) {
-    let Some(ref proposal_store_arc) = state.proposal_store else {
-        return;
-    };
-
-    let proposals = {
-        let engine = state.proposal_engine.lock().await;
-        match engine.generate_from_run(agent_run, reply, life_model) {
-            Ok(proposals) => proposals,
-            Err(e) => {
-                log::warn!("[ChatProposal] Proposal generation failed: {}", e);
-                return;
-            }
-        }
-    };
-
-    if proposals.is_empty() {
-        return;
-    }
-
-    let mut created_proposal_ids = Vec::new();
-    {
-        let store = proposal_store_arc.lock().await;
-        for proposal in proposals {
-            let proposal_id = proposal.id.clone();
-            if let Err(e) = store.create_proposal(&proposal) {
-                log::warn!("[ChatProposal] Failed to save proposal: {}", e);
-            } else {
-                created_proposal_ids.push(proposal_id);
-            }
-        }
-    }
-
-    if created_proposal_ids.is_empty() {
-        return;
-    }
-
-    if let Some(ref run_store_arc) = state.agent_run_store {
-        let run_store = run_store_arc.lock().await;
-        for proposal_id in created_proposal_ids {
-            if let Err(e) = run_store.add_generated_proposal(&agent_run.id, &proposal_id) {
-                log::warn!("[AgentRun] 关联 Chat Proposal 失败: {}", e);
-            }
-        }
-    }
 }
 
 pub(crate) async fn persist_life_model(
@@ -379,291 +360,6 @@ fn try_auto_checkin_daily_goals(content: &str, life_model: &mut LifeModel) -> Op
     }
 }
 
-async fn persist_chat_message_if_needed(
-    session_id: &str,
-    msg: &ChatMessage,
-    state: &State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
-    let store = state.memory_store.lock().await;
-    let should_skip = store
-        .load_recent_messages(session_id, 1)
-        .map_err(|e| e.to_string())?
-        .last()
-        .map(|last| last.role == msg.role && last.content == msg.content)
-        .unwrap_or(false);
-    if should_skip {
-        let _ = store.touch_chat_session(session_id);
-        return Ok(false);
-    }
-    store
-        .save_message(session_id, msg)
-        .map_err(|e| e.to_string())?;
-    let _ = store.touch_chat_session(session_id);
-    Ok(true)
-}
-
-async fn persist_vector_memory_for_message(
-    session_id: &str,
-    msg: &ChatMessage,
-    state: &State<'_, Arc<AppState>>,
-) {
-    let content = msg.content.trim();
-    if content.is_empty() {
-        return;
-    }
-    let (provider, openai_base, openai_key, embedding_model, embedding_enabled) = {
-        let cfg = state.config.lock().await;
-        (
-            cfg.llm.provider.clone(),
-            cfg.llm.openai_base.clone(),
-            cfg.llm.openai_key.clone(),
-            cfg.llm.embedding_model.clone(),
-            cfg.llm.embedding_enabled,
-        )
-    };
-    let privacy_engine = state.privacy_engine.lock().await.clone();
-    let hs_local_only =
-        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
-    let embedding = match embed_text_with_privacy(
-        content,
-        &provider,
-        &openai_base,
-        &openai_key,
-        &embedding_model,
-        embedding_enabled,
-        &privacy_engine,
-        hs_local_only,
-    )
-    .await
-    {
-        Ok(embedding) if !embedding.is_empty() => embedding,
-        Ok(_) => return,
-        Err(e) => {
-            eprintln!(
-                "[memory] embedding generation failed for {} message in session {}: {} - lib.rs:520",
-                msg.role, session_id, e
-            );
-            return;
-        }
-    };
-    let store = state.vector_store.lock().await;
-    let item = VectorInsertItem {
-        session_id,
-        content,
-        embedding: &embedding,
-        source: if msg.role == "assistant" {
-            "assistant_reply"
-        } else {
-            "user_message"
-        },
-    };
-    if let Err(e) = store.insert_batch(&[item]) {
-        eprintln!(
-            "[memory] vector insert failed for {} message in session {}: {} - lib.rs:537",
-            msg.role, session_id, e
-        );
-    }
-}
-
-async fn start_main_chat_agent_turn(
-    session_id: &str,
-    user_msg: Option<&ChatMessage>,
-    task_kind: openlife_core::agent::AgentTaskKind,
-    state: &State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTurn, String> {
-    let user_text = user_msg
-        .filter(|message| message.role == "user")
-        .map(|message| message.content.as_str())
-        .unwrap_or_default();
-    let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default();
-    let decision = ingress.decide(session_id, user_text, None, task_kind);
-    let mut transcript_entries = Vec::new();
-
-    if let Some(task_session_id) = decision.agent_task_session_id.as_deref() {
-        if let Some(ref store_arc) = state.main_chat_agent_session_store {
-            let store = store_arc.lock().await;
-            match store.load_session(task_session_id) {
-                Ok(Some(_)) => {
-                    if let Err(err) = store.resume_session(task_session_id) {
-                        log::warn!("[MainChatAgent] resume session failed: {}", err);
-                    }
-                }
-                Ok(None) => {
-                    if let Err(err) = store.create_session(
-                        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
-                            chat_session_id: session_id.to_string(),
-                            user_goal: if user_text.trim().is_empty() {
-                                "Main Chat request".into()
-                            } else {
-                                user_text.to_string()
-                            },
-                            selected_strategy: decision.selected_strategy,
-                            current_plan_summary: None,
-                            context_snapshot_refs: Vec::new(),
-                        },
-                    ) {
-                        log::warn!("[MainChatAgent] create session failed: {}", err);
-                    }
-                }
-                Err(err) => {
-                    log::warn!("[MainChatAgent] load session failed: {}", err);
-                }
-            }
-        }
-
-        transcript_entries.extend(
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::UserInput,
-                "User submitted a Main Chat request.",
-                serde_json::json!({
-                    "chatSessionId": session_id,
-                    "userMessagePresent": !user_text.trim().is_empty(),
-                    "rawUserTextStored": false,
-                }),
-            )
-            .await,
-        );
-        transcript_entries.extend(
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::RouteDecision,
-                "AgentIngress selected a Main Chat strategy.",
-                serde_json::json!({
-                    "requestId": decision.request_id,
-                    "selectedStrategy": decision.selected_strategy.as_str(),
-                    "confidence": decision.confidence,
-                    "fallbackEligible": decision.fallback_eligible,
-                    "riskLevel": decision.privacy_risk.risk_level,
-                    "privacyClass": decision.privacy_risk.privacy_class,
-                    "policyReasonCode": decision.privacy_risk.policy_reason_code,
-                    "rawUserTextStored": false,
-                }),
-            )
-            .await,
-        );
-    }
-
-    Ok(MainChatAgentTurn {
-        decision,
-        transcript_entries,
-    })
-}
-
-async fn append_main_chat_agent_transcript(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: Option<&str>,
-    kind: openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind,
-    summary: impl Into<String>,
-    metadata: serde_json::Value,
-) -> Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry> {
-    let Some(task_session_id) = task_session_id else {
-        return Vec::new();
-    };
-    let Some(ref store_arc) = state.main_chat_agent_session_store else {
-        return Vec::new();
-    };
-    let store = store_arc.lock().await;
-    match store.append_transcript_entry(
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryDraft {
-            session_id: task_session_id.to_string(),
-            kind,
-            summary: summary.into(),
-            metadata,
-        },
-    ) {
-        Ok(entry) => vec![entry],
-        Err(err) => {
-            log::warn!("[MainChatAgent] append transcript failed: {}", err);
-            Vec::new()
-        }
-    }
-}
-
-async fn append_main_chat_direct_answer_contract_transcript(
-    state: &State<'_, Arc<AppState>>,
-    main_chat_agent_turn: &MainChatAgentTurn,
-    user_text: &str,
-) -> Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry> {
-    let Some(task_session_id) = main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref()
-    else {
-        return Vec::new();
-    };
-    let mut entries = Vec::new();
-    entries.extend(
-        append_main_chat_agent_transcript(
-            state,
-            Some(task_session_id),
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Plan,
-            "DirectAnswer prompt contract was prepared.",
-            serde_json::json!({
-                "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-                "promptContract": "direct_answer_reflex",
-                "toolExecutionAllowed": false,
-                "writeExecutionAllowed": false,
-                "silentWritesAllowed": false,
-                "legacyFallbackUsed": false,
-            }),
-        )
-        .await,
-    );
-    let compiled_context = compile_main_chat_context(
-        state,
-        &main_chat_agent_turn.decision,
-        task_session_id,
-        user_text,
-    )
-    .await;
-    entries.extend(
-        append_main_chat_agent_transcript(
-            state,
-            Some(task_session_id),
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
-            "Bounded context was selected for this strategy.",
-            serde_json::json!({
-                "contextSnapshotRef": compiled_context.context_snapshot_ref,
-                "selectedSourceCount": compiled_context.selected_sources.len(),
-                "totalTokenEstimate": compiled_context.total_token_estimate,
-                "rawLifeModelYamlIncluded": compiled_context.raw_life_model_yaml_included,
-                "rawTopKMemoryTrusted": compiled_context.raw_topk_memory_trusted,
-                "workspacePolicyOverrideBlocked": compiled_context.workspace_policy_override_blocked,
-                "sources": compiled_context.selected_sources,
-            }),
-        )
-        .await,
-    );
-    entries
-}
-
-async fn complete_main_chat_agent_turn_session(
-    state: &State<'_, Arc<AppState>>,
-    main_chat_agent_turn: &MainChatAgentTurn,
-    final_summary: &str,
-) {
-    let Some(task_session_id) = main_chat_agent_turn
-        .decision
-        .agent_task_session_id
-        .as_deref()
-    else {
-        return;
-    };
-    let Some(ref store_arc) = state.main_chat_agent_session_store else {
-        return;
-    };
-    let store = store_arc.lock().await;
-    if let Err(err) = store.complete_session(task_session_id, final_summary) {
-        log::warn!(
-            "[MainChatAgent] complete direct answer session failed: {}",
-            err
-        );
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 async fn try_run_main_chat_agent_strategy(
     session_id: &str,
@@ -674,10 +370,11 @@ async fn try_run_main_chat_agent_strategy(
     embed_err: Option<String>,
     auto_checkin_msg: Option<String>,
     main_chat_agent_turn: &MainChatAgentTurn,
-    state: &State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
     privacy_engine: &PrivacyEngine,
     privacy_map: &HashMap<String, String>,
     existing_agent_run: Option<openlife_core::agent::AgentRun>,
+    selected_skill_id: Option<&str>,
 ) -> Result<Option<SendMessageResult>, String> {
     use openlife_core::agent::main_chat_agent_v1::{
         ExecutionQueueStatus, ExecutionTranscriptEntryKind, MainChatAgentStrategy,
@@ -713,6 +410,7 @@ async fn try_run_main_chat_agent_strategy(
         &main_chat_agent_turn.decision,
         task_session_id,
         user_text,
+        selected_skill_id,
     )
     .await;
     execution_transcript.extend(
@@ -728,6 +426,7 @@ async fn try_run_main_chat_agent_strategy(
                 "rawLifeModelYamlIncluded": compiled_context.raw_life_model_yaml_included,
                 "rawTopKMemoryTrusted": compiled_context.raw_topk_memory_trusted,
                 "workspacePolicyOverrideBlocked": compiled_context.workspace_policy_override_blocked,
+                "selectedSkillInstructionLoaded": compiled_context.selected_skill_instruction_loaded,
                 "sources": compiled_context.selected_sources,
             }),
         )
@@ -770,7 +469,7 @@ async fn try_run_main_chat_agent_strategy(
                 layer: Layer::L2,
             };
             let hs_packet =
-                build_chat_runtime_hs_packet(state.inner(), &task, life_model, "", None).await?;
+                build_chat_runtime_hs_packet(state, &task, life_model, "", None).await?;
             let direct_answer_model_route = scheduler.preview_chat_route(None).await;
             let scripted_provider_response = scheduler.scripted_generation_response.is_some();
             let provider_endpoint_kind =
@@ -1167,7 +866,7 @@ async fn try_run_main_chat_agent_strategy(
                     source_chat_session_id: Some(session_id.to_string()),
                     max_steps: Some(5),
                 },
-                &state.inner().clone(),
+                state,
             )
             .await?;
             transition_main_chat_action(
@@ -1479,1841 +1178,13 @@ async fn try_run_main_chat_agent_strategy(
     }))
 }
 
-async fn compile_main_chat_context(
-    state: &State<'_, Arc<AppState>>,
-    decision: &openlife_core::agent::main_chat_agent_v1::AgentIngressDecision,
-    task_session_id: &str,
-    user_text: &str,
-) -> openlife_core::agent::main_chat_agent_v1::CompiledContext {
-    use openlife_core::agent::main_chat_agent_v1::{
-        ContextCompiler, ContextCompilerInput, ContextSourceCandidate, ContextSourceKind,
-    };
-
-    let mut candidates = vec![
-        ContextSourceCandidate::new(
-            ContextSourceKind::StableCore,
-            "openlife.main_chat_agent_v1",
-            "OpenLife Main Chat uses AgentIngress, strategy routing, policy, action queue, proposal blockers, and traceable fallback.",
-            "stable core behavior",
-            "public",
-            24,
-        ),
-        ContextSourceCandidate::new(
-            ContextSourceKind::RuntimePolicy,
-            "policy.main_chat_agent_v1",
-            "No silent durable LifeModel, Memory, file, calendar, email, external, provider, plugin, or dangerous writes.",
-            "runtime policy overlay",
-            "internal",
-            20,
-        ),
-        ContextSourceCandidate::new(
-            ContextSourceKind::StrategyContract,
-            decision.selected_strategy.as_str(),
-            format!("Selected strategy: {}", decision.selected_strategy.as_str()),
-            "strategy contract",
-            "internal",
-            8,
-        ),
-        ContextSourceCandidate::new(
-            ContextSourceKind::SessionState,
-            task_session_id,
-            format!("Active Main Chat task session for request {}", decision.request_id),
-            "active task session",
-            "internal",
-            10,
-        ),
-        ContextSourceCandidate::new(
-            ContextSourceKind::Observation,
-            "turn.user_request_shape",
-            format!(
-                "User request present: {}; chars: {}",
-                !user_text.trim().is_empty(),
-                user_text.chars().count()
-            ),
-            "ephemeral turn context",
-            "internal",
-            8,
-        ),
-    ];
-
-    if let Ok(path) = std::env::current_dir().map(|dir| dir.join("AGENTS.md")) {
-        if let Ok(content) = std::fs::read_to_string(&path) {
-            candidates.push(ContextSourceCandidate::new(
-                ContextSourceKind::WorkspaceInstruction,
-                "AGENTS.md",
-                content.chars().take(1200).collect::<String>(),
-                "workspace instruction scoped to current task",
-                "internal",
-                40,
-            ));
-        }
-    }
-    if let Ok(sessions) = {
-        let store = state.memory_store.lock().await;
-        store.list_sessions(5)
-    } {
-        candidates.push(ContextSourceCandidate::new(
-            ContextSourceKind::SelectedPersonalContext,
-            "chat_sessions.recent",
-            format!(
-                "Recent session count available for search: {}",
-                sessions.len()
-            ),
-            "bounded session search metadata",
-            "internal",
-            8,
-        ));
-    }
-
-    ContextCompiler::default().compile(ContextCompilerInput {
-        strategy: decision.selected_strategy,
-        privacy_risk: decision.privacy_risk.clone(),
-        active_session_id: Some(task_session_id.to_string()),
-        token_budget: 160,
-        selected_skill_id: None,
-        candidates,
-    })
-}
-
-async fn enqueue_main_chat_agent_action(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    action_type: &str,
-    description: &str,
-    execution_transcript: &mut Vec<
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry,
-    >,
-) -> Result<openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction, String> {
-    use openlife_core::agent::main_chat_agent_v1::{
-        ExecutionAction, ExecutionPolicy, ExecutionTranscriptEntryKind,
-    };
-    let policy = ExecutionPolicy::default().classify(&ExecutionAction::new(
-        action_type.to_string(),
-        description.to_string(),
-    ));
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
-    let queue = queue_arc.lock().await;
-    let queued = queue
-        .enqueue(
-            task_session_id,
-            ExecutionAction::new(action_type.to_string(), description.to_string()),
-            policy,
-        )
-        .map_err(|err| format!("enqueue Main Chat action failed: {err}"))?;
-    drop(queue);
-
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if let Err(err) = store.record_action_queue_id(task_session_id, &queued.id) {
-            log::warn!("[MainChatAgent] record action id failed: {}", err);
-        }
-    }
-
-    execution_transcript.extend(
-        append_main_chat_agent_transcript(
-            state,
-            Some(task_session_id),
-            ExecutionTranscriptEntryKind::Action,
-            "Execution action entered the governed queue.",
-            serde_json::json!({
-                "actionId": queued.id,
-                "actionType": queued.action.action_type,
-                "queueStatus": queued.status,
-                "policyLevel": queued.policy.level.as_str(),
-                "policyReasonCode": queued.policy.reason_code,
-                "executionAllowed": queued.policy.execution_allowed,
-                "requiresProposal": queued.policy.requires_proposal,
-                "requiresConfirmation": queued.policy.requires_confirmation,
-                "silentWriteAllowed": queued.policy.silent_write_allowed,
-            }),
-        )
-        .await,
-    );
-    Ok(queued)
-}
-
-async fn transition_main_chat_action(
-    state: &State<'_, Arc<AppState>>,
-    action_id: &str,
-    status: openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus,
-    observation_metadata: Option<serde_json::Value>,
-) -> Result<(), String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .transition(action_id, status, observation_metadata)
-        .map_err(|err| format!("transition Main Chat action failed: {err}"))?;
-    Ok(())
-}
-
-async fn fail_main_chat_action(
-    state: &State<'_, Arc<AppState>>,
-    action_id: &str,
-    error: &str,
-    observation_metadata: serde_json::Value,
-) -> Result<(), String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
-    let queue = queue_arc.lock().await;
-    queue
-        .fail(action_id, error.to_string(), Some(observation_metadata))
-        .map_err(|err| format!("fail Main Chat action failed: {err}"))?;
-    Ok(())
-}
-
-#[derive(Clone)]
-struct MainChatReactActionPlan {
-    queue_action_type: String,
-    executor_action_type: String,
-    target: String,
-    arguments: serde_json::Value,
-    description: String,
-    requires_network: bool,
-    uses_ephemeral_file_permission: bool,
-    uses_ephemeral_mcp_wrapper_permission: bool,
-}
-
-struct MainChatObservation {
-    summary: String,
-    output_preview: String,
-    final_answer: String,
-    metadata: serde_json::Value,
-    executor_status: openlife_core::agent::ActionExecutionStatus,
-    blocker_reason: Option<String>,
-}
-
-struct MainChatMcpReadResolution {
-    target: String,
-    arguments: serde_json::Value,
-    resolved: bool,
-    blocker_reason: Option<String>,
-}
-
-struct MainChatReactFollowUp {
-    reply: String,
-    model_route: Option<openlife_core::agent::ModelRouteTrace>,
-    transcript_entries: Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
-}
-
-struct MainChatReactAgentLoopAttempt {
-    reply: Option<String>,
-    tool_calls: Vec<ToolCallResult>,
-    model_route: Option<openlife_core::agent::ModelRouteTrace>,
-    transcript_entries: Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
-    metadata: serde_json::Value,
-    queue_status: Option<openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus>,
-    blocker_reason: Option<String>,
-}
-
-fn build_main_chat_react_action_plan(
-    session_id: &str,
-    user_text: &str,
-) -> Result<MainChatReactActionPlan, String> {
-    let lower = user_text.to_ascii_lowercase();
-    if lower.contains("mcp") {
-        let tool_name = infer_main_chat_mcp_tool_name(user_text).unwrap_or_default();
-        return Ok(MainChatReactActionPlan {
-            queue_action_type: "mcp.read_only".into(),
-            executor_action_type: "mcp_tool".into(),
-            target: "mcp.call_tool".into(),
-            arguments: serde_json::json!({
-                "tool_name": tool_name,
-                "arguments": {},
-            }),
-            description: "Call a registered MCP read tool through ActionExecutor.".into(),
-            requires_network: false,
-            uses_ephemeral_file_permission: false,
-            uses_ephemeral_mcp_wrapper_permission: true,
-        });
-    }
-
-    if lower.contains("agents.md") || lower.contains("read ") || lower.contains("file") {
-        let (path_label, path) = main_chat_workspace_file_target(user_text)?;
-        return Ok(MainChatReactActionPlan {
-            queue_action_type: "file.read".into(),
-            executor_action_type: "mcp_tool".into(),
-            target: "file.read".into(),
-            arguments: serde_json::json!({ "path": path }),
-            description: format!("Read workspace file {path_label} through ActionExecutor."),
-            requires_network: false,
-            uses_ephemeral_file_permission: true,
-            uses_ephemeral_mcp_wrapper_permission: false,
-        });
-    }
-
-    if lower.contains("web")
-        || lower.contains("fetch")
-        || lower.contains("http://")
-        || lower.contains("https://")
-    {
-        if lower.contains("fetch") || lower.contains("http://") || lower.contains("https://") {
-            if let Some(url) = extract_main_chat_url(user_text) {
-                return Ok(MainChatReactActionPlan {
-                    queue_action_type: "web.fetch".into(),
-                    executor_action_type: "mcp_tool".into(),
-                    target: "web.fetch".into(),
-                    arguments: serde_json::json!({ "url": url, "summarize": true }),
-                    description: "Fetch a URL through governed ActionExecutor network policy."
-                        .into(),
-                    requires_network: true,
-                    uses_ephemeral_file_permission: false,
-                    uses_ephemeral_mcp_wrapper_permission: false,
-                });
-            }
-        }
-        return Ok(MainChatReactActionPlan {
-            queue_action_type: "web.search".into(),
-            executor_action_type: "mcp_tool".into(),
-            target: "web.search".into(),
-            arguments: serde_json::json!({
-                "query": main_chat_search_query(user_text),
-                "max_results": 5,
-            }),
-            description: "Search the web through governed ActionExecutor network policy.".into(),
-            requires_network: true,
-            uses_ephemeral_file_permission: false,
-            uses_ephemeral_mcp_wrapper_permission: false,
-        });
-    }
-
-    if lower.contains("yesterday")
-        || lower.contains("past sessions")
-        || lower.contains("what did i ask")
-    {
-        return Ok(MainChatReactActionPlan {
-            queue_action_type: "session.search".into(),
-            executor_action_type: "session_search".into(),
-            target: "session.search".into(),
-            arguments: serde_json::json!({
-                "query": main_chat_search_query(user_text),
-                "limit": 5,
-            }),
-            description: "Search prior chat/session memory through ActionExecutor.".into(),
-            requires_network: false,
-            uses_ephemeral_file_permission: false,
-            uses_ephemeral_mcp_wrapper_permission: false,
-        });
-    }
-
-    Ok(MainChatReactActionPlan {
-        queue_action_type: "memory.search".into(),
-        executor_action_type: "memory_search".into(),
-        target: "memory.search".into(),
-        arguments: serde_json::json!({
-            "query": main_chat_search_query(user_text),
-            "session_id": session_id,
-            "limit": 5,
-        }),
-        description: "Search current session memory through ActionExecutor.".into(),
-        requires_network: false,
-        uses_ephemeral_file_permission: false,
-        uses_ephemeral_mcp_wrapper_permission: false,
-    })
-}
-
-fn build_main_chat_react_agent_loop_messages(
-    messages_for_generation: &[ChatMessage],
-    plan: &MainChatReactActionPlan,
-) -> Vec<ChatMessage> {
-    let arguments_digest =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments);
-    let arguments_digest_label =
-        format!("bytes:{} hash:{}", arguments_digest.0, arguments_digest.1);
-    let mut guided_messages = Vec::with_capacity(messages_for_generation.len() + 1);
-    guided_messages.push(ChatMessage {
-        role: "system".into(),
-        content: format!(
-            concat!(
-                "Main Chat Agent v1 selected a governed read-only ReAct action for this turn.\n",
-                "Use at most this planned action. If the action is unnecessary, answer directly.\n",
-                "When using the action, return only a JSON envelope shaped as ",
-                "{{\"final\":\"...\",\"actions\":[{{\"name\":\"<plannedTarget>\",",
-                "\"action_type\":\"<plannedExecutorActionType>\",\"arguments\":{{}}}}],",
-                "\"thought_summary\":\"...\",\"warnings\":[]}}.\n",
-                "Do not call any unplanned tool and do not execute durable writes.\n",
-                "plannedActionType={}; plannedExecutorActionType={}; plannedTarget={}; ",
-                "argumentsDigest={}; allowWrites=false; directWritesAllowed=false; ",
-                "durableWritesAllowed=false; externalWritesAllowed=false."
-            ),
-            plan.queue_action_type, plan.executor_action_type, plan.target, arguments_digest_label
-        ),
-    });
-    guided_messages.extend_from_slice(messages_for_generation);
-    guided_messages
-}
-
-fn main_chat_react_agent_loop_execution_plan(
-    registry: &openlife_core::mcp::McpRegistry,
-    plan: &MainChatReactActionPlan,
-) -> MainChatReactActionPlan {
-    if plan.target != "mcp.call_tool" {
-        return plan.clone();
-    }
-
-    let resolution = resolve_main_chat_mcp_read_target(registry, plan);
-    if !resolution.resolved {
-        return plan.clone();
-    }
-
-    let mut resolved = plan.clone();
-    resolved.target = resolution.target;
-    resolved.arguments = resolution.arguments;
-    resolved.description = format!(
-        "Call registered MCP read target {} through governed AgentLoop.",
-        resolved.target
-    );
-    resolved
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn try_run_main_chat_react_agent_loop(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    session_id: &str,
-    user_text: &str,
-    messages_for_generation: &[ChatMessage],
-    life_model: &LifeModel,
-    privacy_engine: &PrivacyEngine,
-    privacy_map: &HashMap<String, String>,
-    plan: &MainChatReactActionPlan,
-    local_only_required: bool,
-) -> Result<MainChatReactAgentLoopAttempt, String> {
-    use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-
-    let allow_cloud = !local_only_required;
-    let scheduler = state.scheduler.lock().await.clone();
-    let scripted_provider_response = scheduler.scripted_generation_response.is_some();
-    let provider_endpoint_kind =
-        main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response);
-    let live_provider_invoked =
-        allow_cloud && !scripted_provider_response && provider_endpoint_kind == "external_provider";
-    let mut transcript_entries = append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::Plan,
-        "Governed ReAct AgentLoop attempt started.",
-        serde_json::json!({
-            "agentLoopAttempted": true,
-            "singleStepFallbackAvailable": true,
-            "allowWrites": false,
-            "allowCloud": allow_cloud,
-            "localOnlyRequired": local_only_required,
-            "plannedActionType": plan.queue_action_type.clone(),
-            "plannedTarget": plan.target.clone(),
-            "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
-            "toolExecutionAllowed": true,
-            "writeExecutionAllowed": false,
-            "directWritesExecuted": false,
-            "providerEndpointKind": provider_endpoint_kind,
-            "scriptedProviderResponse": scripted_provider_response,
-            "externalLiveProviderEvalPreflighted": false,
-        }),
-    )
-    .await;
-
-    let failed_attempt = |metadata: serde_json::Value,
-                          transcript_entries: Vec<
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry,
-    >| MainChatReactAgentLoopAttempt {
-        reply: None,
-        tool_calls: Vec::new(),
-        model_route: None,
-        transcript_entries,
-        metadata,
-        queue_status: None,
-        blocker_reason: None,
-    };
-
-    let tools_prompt = {
-        let registry = state.mcp_registry.lock().await;
-        registry.tools_prompt()
-    };
-    let agent_loop_plan = {
-        let registry = state.mcp_registry.lock().await;
-        main_chat_react_agent_loop_execution_plan(&registry, plan)
-    };
-    let web_search_fixture_output = state.web_search_fixture_output.lock().await.clone();
-    let (safe_paths, calendar_ics_paths, network_policy, agent_runtime, loop_config) = {
-        let cfg = state.config.lock().await;
-        let mut safe_paths = cfg.system.safe_paths.clone();
-        if let Ok(workspace) = std::env::current_dir().and_then(|dir| dir.canonicalize()) {
-            let workspace = workspace.to_string_lossy().to_string();
-            if !safe_paths.iter().any(|path| path == &workspace) {
-                safe_paths.push(workspace);
-            }
-        }
-        (
-            safe_paths,
-            cfg.system.calendar_ics_paths.clone(),
-            cfg.system.network_policy.clone(),
-            openlife_core::agent::AgentRuntime::new(life_model.clone(), scheduler.clone(), &cfg),
-            openlife_core::agent::AgentLoopConfig {
-                max_steps: cfg.system.agent_loop_max_steps,
-                max_tool_calls: cfg.system.agent_loop_max_tool_calls,
-                timeout_seconds: cfg.system.agent_loop_timeout_seconds,
-                allow_writes: false,
-                allow_cloud,
-                shutdown_notify: Some(state.inner().shutdown_notify.clone()),
-                ..Default::default()
-            },
-        )
-    };
-    let action_executor =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
-            allow_writes: false,
-            allow_cloud,
-            ..Default::default()
-        });
-    let agent_loop = openlife_core::agent::AgentLoop::new(
-        agent_runtime,
-        action_executor,
-        scheduler.clone(),
-        loop_config,
-    );
-    let agent_loop_messages =
-        build_main_chat_react_agent_loop_messages(messages_for_generation, &agent_loop_plan);
-    let task = openlife_core::agent::AgentTask {
-        kind: openlife_core::agent::AgentTaskKind::Conversation,
-        session_id: session_id.to_string(),
-        user_text: user_text.to_string(),
-        messages: agent_loop_messages,
-        layer: Layer::L2,
-    };
-    let hs_packet = match build_chat_runtime_hs_packet(
-        state.inner(),
-        &task,
-        life_model,
-        &tools_prompt,
-        None,
-    )
-    .await
-    {
-        Ok(packet) => packet,
-        Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
-            let metadata = serde_json::json!({
-                "agentLoopAttempted": true,
-                "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
-                "modelErrorDigest": model_error_digest,
-                "directWritesExecuted": false,
-            });
-            transcript_entries.extend(
-                append_main_chat_agent_transcript(
-                    state,
-                    Some(task_session_id),
-                    ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed before execution; single-step fallback remains available.",
-                    metadata.clone(),
-                )
-                .await,
-            );
-            return Ok(failed_attempt(metadata, transcript_entries));
-        }
-    };
-
-    let local_permission_store = if plan.uses_ephemeral_file_permission
-        || plan.uses_ephemeral_mcp_wrapper_permission
-    {
-        match openlife_core::tool_permissions::ToolPermissionStore::new_in_memory() {
-            Ok(store) => {
-                if plan.uses_ephemeral_file_permission {
-                    if let Err(err) = store.grant(
-                        "file.read",
-                        "builtin",
-                        "low",
-                        "read",
-                        openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                        None,
-                    ) {
-                        let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
-                                &serde_json::json!({ "error": err.to_string() }),
-                            );
-                        let metadata = serde_json::json!({
-                            "agentLoopAttempted": true,
-                            "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
-                            "modelErrorDigest": model_error_digest,
-                            "directWritesExecuted": false,
-                        });
-                        transcript_entries.extend(
-                            append_main_chat_agent_transcript(
-                                state,
-                                Some(task_session_id),
-                                ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare file permission; single-step fallback remains available.",
-                                metadata.clone(),
-                            )
-                            .await,
-                        );
-                        return Ok(failed_attempt(metadata, transcript_entries));
-                    }
-                }
-                if plan.uses_ephemeral_mcp_wrapper_permission {
-                    if let Err(err) = store.grant(
-                        "mcp.call_tool",
-                        "builtin",
-                        "medium",
-                        "external_side_effect",
-                        openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                        None,
-                    ) {
-                        let model_error_digest =
-                            openlife_core::agent::react_beta::metadata_safe_value_digest(
-                                &serde_json::json!({ "error": err.to_string() }),
-                            );
-                        let metadata = serde_json::json!({
-                            "agentLoopAttempted": true,
-                            "agentLoopSucceeded": false,
-                            "singleStepFallbackUsed": true,
-                            "modelErrorDigest": model_error_digest,
-                            "directWritesExecuted": false,
-                        });
-                        transcript_entries.extend(
-                            append_main_chat_agent_transcript(
-                                state,
-                                Some(task_session_id),
-                                ExecutionTranscriptEntryKind::Error,
-                                "Governed ReAct AgentLoop could not prepare MCP wrapper permission; single-step fallback remains available.",
-                                metadata.clone(),
-                            )
-                            .await,
-                        );
-                        return Ok(failed_attempt(metadata, transcript_entries));
-                    }
-                }
-                Some(store)
-            }
-            Err(err) => {
-                let model_error_digest =
-                    openlife_core::agent::react_beta::metadata_safe_value_digest(
-                        &serde_json::json!({ "error": err.to_string() }),
-                    );
-                let metadata = serde_json::json!({
-                    "agentLoopAttempted": true,
-                    "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
-                    "modelErrorDigest": model_error_digest,
-                    "directWritesExecuted": false,
-                });
-                transcript_entries.extend(
-                    append_main_chat_agent_transcript(
-                        state,
-                        Some(task_session_id),
-                        ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop could not create file permission context; single-step fallback remains available.",
-                        metadata.clone(),
-                    )
-                    .await,
-                );
-                return Ok(failed_attempt(metadata, transcript_entries));
-            }
-        }
-    } else {
-        None
-    };
-    let permission_store_guard = if local_permission_store.is_none() {
-        Some(state.tool_permission_store.lock().await)
-    } else {
-        None
-    };
-    let permission_store_ref = match (&local_permission_store, &permission_store_guard) {
-        (Some(store), _) => store,
-        (None, Some(store)) => &**store,
-        _ => return Err("tool permission store unavailable".into()),
-    };
-
-    let loop_result = {
-        let (registry, audit_store) = state.inner().get_mcp_state().await;
-        let memory_store = state.memory_store.lock().await;
-        let agent_run_store_guard = if let Some(ref store_arc) = state.agent_run_store {
-            Some(store_arc.lock().await)
-        } else {
-            None
-        };
-        let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
-            &registry,
-            permission_store_ref,
-            &audit_store,
-            privacy_engine,
-            &safe_paths,
-        )
-        .with_life_model(life_model)
-        .with_memory_store(&memory_store)
-        .with_calendar_ics_paths(&calendar_ics_paths)
-        .with_network_policy(&network_policy);
-        if let Some(ref agent_run_store) = agent_run_store_guard {
-            action_ctx = action_ctx.with_agent_run_store(agent_run_store);
-        }
-        if let Some(ref packet) = hs_packet {
-            action_ctx = action_ctx.with_hs_runtime_packet(packet);
-        }
-        if let Some(ref fixture_output) = web_search_fixture_output {
-            action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
-        }
-
-        agent_loop
-            .run(
-                &task,
-                life_model,
-                &tools_prompt,
-                None,
-                privacy_engine.clone(),
-                &action_ctx,
-            )
-            .await
-    };
-
-    match loop_result {
-        Ok(result) => {
-            let planned_action_observed = result.run.actions.iter().any(|action| {
-                action.action_type == agent_loop_plan.executor_action_type
-                    && action.target.as_deref() == Some(agent_loop_plan.target.as_str())
-            });
-            if !planned_action_observed {
-                let metadata = serde_json::json!({
-                    "agentLoopAttempted": true,
-                    "agentLoopSucceeded": false,
-                    "singleStepFallbackUsed": true,
-                    "plannedActionObserved": false,
-                    "toolCallCount": result.tool_call_count,
-                    "stepCount": result.step_count,
-                    "stopReason": result.stop_reason.clone(),
-                    "directWritesExecuted": false,
-                });
-                transcript_entries.extend(
-                    append_main_chat_agent_transcript(
-                        state,
-                        Some(task_session_id),
-                        ExecutionTranscriptEntryKind::Error,
-                        "Governed ReAct AgentLoop did not observe the planned action; single-step fallback remains available.",
-                        metadata.clone(),
-                    )
-                    .await,
-                );
-                return Ok(failed_attempt(metadata, transcript_entries));
-            }
-            let observed_action = result.run.actions.iter().find(|action| {
-                action.action_type == agent_loop_plan.executor_action_type
-                    && action.target.as_deref() == Some(agent_loop_plan.target.as_str())
-            });
-            let observed_action_status = observed_action
-                .map(|action| action.status.clone())
-                .unwrap_or_else(|| "unknown".into());
-            let observed_action_error = observed_action.and_then(|action| action.error.clone());
-            let observed_action_id = observed_action.map(|action| action.id.clone());
-            let observed_observation = result
-                .run
-                .observations
-                .iter()
-                .find(|observation| {
-                    observation.action_id.as_deref() == observed_action_id.as_deref()
-                })
-                .or_else(|| result.run.observations.first());
-            let observed_permission_decision = observed_action
-                .and_then(|action| action.permission_decision.clone())
-                .or_else(|| {
-                    observed_observation
-                        .and_then(|observation| observation.structured_result.as_ref())
-                        .and_then(|structured| structured.get("permission_decision"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                });
-            let agent_loop_queue_status = match observed_action_status.as_str() {
-                "succeeded" => openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
-                "needs_confirmation" => {
-                    openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-                }
-                "blocked" | "failed" => {
-                    openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-                }
-                _ => openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
-            };
-            let agent_loop_blocker_reason = if observed_action_status == "succeeded" {
-                None
-            } else {
-                observed_permission_decision
-                    .clone()
-                    .or(observed_action_error.clone())
-                    .or_else(|| Some(result.stop_reason.clone()))
-                    .or_else(|| Some(observed_action_status.clone()))
-            };
-            let observed_tool_scope = observed_action.and_then(|action| action.tool_scope.as_ref());
-            let requested_mcp_target = plan
-                .arguments
-                .get("tool_name")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            let mcp_read_target_resolved = plan.target == "mcp.call_tool"
-                && !requested_mcp_target.is_empty()
-                && observed_tool_scope
-                    .map(|scope| {
-                        scope.tool_name == requested_mcp_target
-                            && scope.action_type.eq_ignore_ascii_case("read")
-                    })
-                    .unwrap_or(false);
-            let resolved_target = observed_tool_scope
-                .map(|scope| scope.tool_name.clone())
-                .filter(|target| !target.trim().is_empty());
-            let resolved_action_type = observed_tool_scope
-                .map(|scope| scope.action_type.clone())
-                .filter(|action_type| !action_type.trim().is_empty());
-            let mut metadata = serde_json::json!({
-                "agentLoopAttempted": true,
-                "agentLoopSucceeded": true,
-                "singleStepFallbackUsed": false,
-                "plannedActionObserved": true,
-                "plannedTarget": plan.target.clone(),
-                "executionTarget": agent_loop_plan.target.clone(),
-                "agentLoopActionStatus": observed_action_status.clone(),
-                "permissionDecision": observed_permission_decision.clone(),
-                "blockerReason": agent_loop_blocker_reason.clone(),
-                "toolCallCount": result.tool_call_count,
-                "stepCount": result.step_count,
-                "stopReason": result.stop_reason.clone(),
-                "statusUpdateCount": result.status_updates.len(),
-                "directWritesExecuted": false,
-                "providerEndpointKind": provider_endpoint_kind,
-                "scriptedProviderResponse": scripted_provider_response,
-                "liveProviderInvoked": live_provider_invoked,
-                "externalLiveProviderEvalPreflighted": false,
-            });
-            if plan.target == "mcp.call_tool" {
-                if let Some(object) = metadata.as_object_mut() {
-                    object.insert(
-                        "mcpReadTargetResolved".into(),
-                        serde_json::json!(mcp_read_target_resolved),
-                    );
-                    object.insert(
-                        "requestedTarget".into(),
-                        serde_json::json!(plan.target.clone()),
-                    );
-                    object.insert(
-                        "resolvedTarget".into(),
-                        resolved_target
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                    );
-                    object.insert(
-                        "resolvedActionType".into(),
-                        resolved_action_type
-                            .map(serde_json::Value::String)
-                            .unwrap_or(serde_json::Value::Null),
-                    );
-                }
-            }
-            transcript_entries.extend(
-                append_main_chat_agent_transcript(
-                    state,
-                    Some(task_session_id),
-                    ExecutionTranscriptEntryKind::FollowUp,
-                    "Governed ReAct AgentLoop completed.",
-                    metadata.clone(),
-                )
-                .await,
-            );
-            let model_route = Some(scheduler.preview_chat_route(Some(&tools_prompt)).await);
-            let reply = if observed_action_status == "succeeded" {
-                privacy_engine.reconstruct(&result.final_response, privacy_map)
-            } else {
-                format!(
-                    "That read action is blocked by governance: {}",
-                    agent_loop_blocker_reason
-                        .clone()
-                        .unwrap_or_else(|| observed_action_status.clone())
-                )
-            };
-            let tool_calls =
-                agent_actions_to_tool_call_results(&result.run.actions, &result.run.id);
-            Ok(MainChatReactAgentLoopAttempt {
-                reply: Some(reply),
-                tool_calls,
-                model_route,
-                transcript_entries,
-                metadata,
-                queue_status: Some(agent_loop_queue_status),
-                blocker_reason: agent_loop_blocker_reason,
-            })
-        }
-        Err(err) => {
-            let model_error_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
-            let metadata = serde_json::json!({
-                "agentLoopAttempted": true,
-                "agentLoopSucceeded": false,
-                "singleStepFallbackUsed": true,
-                "modelErrorDigest": model_error_digest,
-                "directWritesExecuted": false,
-            });
-            transcript_entries.extend(
-                append_main_chat_agent_transcript(
-                    state,
-                    Some(task_session_id),
-                    ExecutionTranscriptEntryKind::Error,
-                    "Governed ReAct AgentLoop failed; single-step fallback remains available.",
-                    metadata.clone(),
-                )
-                .await,
-            );
-            Ok(failed_attempt(metadata, transcript_entries))
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn synthesize_main_chat_react_follow_up(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    session_id: &str,
-    user_text: &str,
-    messages_for_generation: &[ChatMessage],
-    life_model: &LifeModel,
-    privacy_engine: &PrivacyEngine,
-    privacy_map: &HashMap<String, String>,
-    observation: &MainChatObservation,
-) -> Result<MainChatReactFollowUp, String> {
-    use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-
-    let mut transcript_entries = append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::FollowUp,
-        "ReAct follow-up synthesis started after a governed observation.",
-        serde_json::json!({
-            "actionExecutorBacked": true,
-            "observationDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&observation.metadata),
-            "toolExecutionAllowed": false,
-            "writeExecutionAllowed": false,
-            "directWritesExecuted": false,
-        }),
-    )
-    .await;
-
-    let observation_preview = preview_text(&observation.output_preview, 1500);
-    let mut follow_up_messages = messages_for_generation.to_vec();
-    follow_up_messages.push(ChatMessage {
-        role: "system".into(),
-        content: "You are synthesizing the final answer for OpenLife Main Chat Agent v1 after a governed read-only ReAct observation. Do not call tools. Do not write memory, LifeModel, files, email, calendar, providers, or plugins. Use only the observation and the user's request. If the observation is insufficient, say what is missing and keep the answer concise.".into(),
-    });
-    follow_up_messages.push(ChatMessage {
-        role: "user".into(),
-        content: format!(
-            "User request:\n{}\n\nGoverned observation:\n{}\n\nReturn the final answer now.",
-            user_text, observation_preview
-        ),
-    });
-
-    let scheduler = state.scheduler.lock().await.clone();
-    let task = openlife_core::agent::AgentTask {
-        kind: openlife_core::agent::AgentTaskKind::Conversation,
-        session_id: session_id.to_string(),
-        user_text: user_text.to_string(),
-        messages: follow_up_messages.clone(),
-        layer: Layer::L2,
-    };
-    let hs_packet =
-        build_chat_runtime_hs_packet(state.inner(), &task, life_model, "", None).await?;
-
-    let (reply, model_generated, model_error_digest) = match generate_non_stream_fallback(
-        &scheduler,
-        follow_up_messages,
-        life_model,
-        "",
-        hs_packet.clone(),
-    )
-    .await
-    {
-        Ok(generated) => (
-            privacy_engine.reconstruct(&generated, privacy_map),
-            true,
-            None,
-        ),
-        Err(err) => {
-            let err_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
-                &serde_json::json!({ "error": err.to_string() }),
-            );
-            (
-                format!(
-                    "I completed the governed read action and synthesized the available observation without executing any write.\n\n{}",
-                    preview_text(&observation.output_preview, 900)
-                ),
-                false,
-                Some(err_digest),
-            )
-        }
-    };
-    let model_route = if model_generated {
-        Some(scheduler.preview_chat_route(None).await)
-    } else {
-        None
-    };
-
-    transcript_entries.extend(
-        append_main_chat_agent_transcript(
-            state,
-            Some(task_session_id),
-            ExecutionTranscriptEntryKind::FollowUp,
-            "ReAct follow-up synthesis completed.",
-            serde_json::json!({
-                "modelGenerated": model_generated,
-                "modelErrorDigest": model_error_digest,
-                "hsPacketSelected": hs_packet.is_some(),
-                "toolCallCount": 0,
-                "directWritesExecuted": false,
-                "legacyFallbackUsed": false,
-                "failSoftFallbackUsed": !model_generated,
-            }),
-        )
-        .await,
-    );
-
-    Ok(MainChatReactFollowUp {
-        reply,
-        model_route,
-        transcript_entries,
-    })
-}
-
-async fn execute_main_chat_react_action_with_executor(
-    state: &State<'_, Arc<AppState>>,
-    plan: &MainChatReactActionPlan,
-    local_only_required: bool,
-) -> Result<MainChatObservation, String> {
-    if local_only_required && plan.requires_network {
-        return Err(
-            "local-only policy blocks governed network reads for this Main Chat request".into(),
-        );
-    }
-
-    let (safe_paths, calendar_ics_paths, network_policy) = {
-        let cfg = state.config.lock().await;
-        let mut safe_paths = cfg.system.safe_paths.clone();
-        if let Ok(workspace) = std::env::current_dir().and_then(|dir| dir.canonicalize()) {
-            let workspace = workspace.to_string_lossy().to_string();
-            if !safe_paths.iter().any(|path| path == &workspace) {
-                safe_paths.push(workspace);
-            }
-        }
-        (
-            safe_paths,
-            cfg.system.calendar_ics_paths.clone(),
-            cfg.system.network_policy.clone(),
-        )
-    };
-    let web_search_fixture_output = state.web_search_fixture_output.lock().await.clone();
-    let local_permission_store = if plan.uses_ephemeral_file_permission {
-        let store = openlife_core::tool_permissions::ToolPermissionStore::new_in_memory()
-            .map_err(|err| format!("create ephemeral tool permission store failed: {err}"))?;
-        store
-            .grant(
-                "file.read",
-                "builtin",
-                "low",
-                "read",
-                openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                None,
-            )
-            .map_err(|err| format!("grant ephemeral file.read permission failed: {err}"))?;
-        Some(store)
-    } else {
-        None
-    };
-    let permission_store_guard = if local_permission_store.is_none() {
-        Some(state.tool_permission_store.lock().await)
-    } else {
-        None
-    };
-    let permission_store_ref = match (&local_permission_store, &permission_store_guard) {
-        (Some(store), _) => store,
-        (None, Some(store)) => &**store,
-        _ => return Err("tool permission store unavailable".into()),
-    };
-
-    let registry = state.mcp_registry.lock().await;
-    let audit_store = state.mcp_audit_store.lock().await;
-    let privacy_engine = state.privacy_engine.lock().await;
-    let memory_store = state.memory_store.lock().await;
-    let agent_run_store_guard = if let Some(ref store_arc) = state.agent_run_store {
-        Some(store_arc.lock().await)
-    } else {
-        None
-    };
-    let mcp_read_resolution = resolve_main_chat_mcp_read_target(&registry, plan);
-    if let Some(ref blocker_reason) = mcp_read_resolution.blocker_reason {
-        return Ok(blocked_main_chat_observation(
-            plan,
-            blocker_reason,
-            serde_json::json!({
-                "mcpReadTargetResolved": mcp_read_resolution.resolved,
-                "mcpReadTarget": mcp_read_resolution.target,
-            }),
-        ));
-    }
-
-    let mut action_ctx = openlife_core::agent::ActionExecutionContext::new(
-        &registry,
-        permission_store_ref,
-        &audit_store,
-        &privacy_engine,
-        &safe_paths,
-    )
-    .with_memory_store(&memory_store)
-    .with_network_policy(&network_policy)
-    .with_calendar_ics_paths(&calendar_ics_paths);
-    if let Some(ref agent_run_store) = agent_run_store_guard {
-        action_ctx = action_ctx.with_agent_run_store(agent_run_store);
-    }
-    if let Some(ref fixture_output) = web_search_fixture_output {
-        action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
-    }
-
-    let request_input = if plan.executor_action_type == "mcp_tool" {
-        serde_json::json!({ "arguments": mcp_read_resolution.arguments.clone() })
-    } else {
-        mcp_read_resolution.arguments.clone()
-    };
-    let request = openlife_core::agent::AgentActionRequest {
-        action_type: plan.executor_action_type.clone(),
-        target: mcp_read_resolution.target.clone(),
-        input: request_input,
-        source_run_id: None,
-        step_index: 0,
-    };
-    let result =
-        openlife_core::agent::ActionExecutor::new(openlife_core::agent::ActionExecutorConfig {
-            allow_writes: false,
-            ..Default::default()
-        })
-        .execute(request, &action_ctx)
-        .map_err(|err| format!("ActionExecutor failed: {err}"))?;
-
-    let executor_status = result.status.clone();
-    let status_label = match executor_status {
-        openlife_core::agent::ActionExecutionStatus::Succeeded => "succeeded",
-        openlife_core::agent::ActionExecutionStatus::Failed => "failed",
-        openlife_core::agent::ActionExecutionStatus::Blocked => "blocked",
-        openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => "needs_confirmation",
-    };
-    let blocker_reason = result
-        .stop_reason
-        .clone()
-        .or_else(|| result.action.error.clone())
-        .or_else(|| {
-            result
-                .observation
-                .structured_result
-                .as_ref()
-                .and_then(|value| value.get("permission_decision"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-        });
-    let output_preview = preview_text(&result.observation.content, 500);
-    let proposal_id = result
-        .action
-        .react_trace
-        .as_ref()
-        .and_then(|trace| trace.proposal_id.clone())
-        .or_else(|| {
-            result
-                .observation
-                .react_trace
-                .as_ref()
-                .and_then(|trace| trace.proposal_id.clone())
-        })
-        .or_else(|| {
-            result
-                .observation
-                .structured_result
-                .as_ref()
-                .and_then(|structured| {
-                    structured
-                        .get("proposalId")
-                        .or_else(|| structured.get("proposal_id"))
-                })
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
-    let final_answer = match executor_status {
-        openlife_core::agent::ActionExecutionStatus::Succeeded => format!(
-            "I completed the read-only action through the governed ActionExecutor path. Observation:\n\n{}",
-            preview_text(&result.observation.content, 700)
-        ),
-        openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
-            "That read action needs explicit permission before it can continue. I queued it as a blocker and did not execute any write.".into()
-        }
-        openlife_core::agent::ActionExecutionStatus::Blocked => format!(
-            "That read action is blocked by governance: {}",
-            blocker_reason
-                .clone()
-                .unwrap_or_else(|| "policy_blocked".into())
-        ),
-        openlife_core::agent::ActionExecutionStatus::Failed => format!(
-            "I could not complete that governed read action. Blocker: {}",
-            blocker_reason
-                .clone()
-                .unwrap_or_else(|| "action_failed".into())
-        ),
-    };
-    let mut metadata = serde_json::json!({
-        "actionType": plan.queue_action_type.clone(),
-        "executorActionType": plan.executor_action_type.clone(),
-        "target": mcp_read_resolution.target.clone(),
-        "requestedTarget": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&mcp_read_resolution.arguments),
-        "actionExecutorBacked": true,
-        "mcpReadTargetResolved": mcp_read_resolution.resolved,
-        "executorStatus": status_label,
-        "actionId": result.action.id,
-        "observationId": result.observation.id,
-        "stopReason": result.stop_reason,
-        "structuredResult": result.observation.structured_result,
-        "retryReplayable": matches!(executor_status, openlife_core::agent::ActionExecutionStatus::Failed)
-            && openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(&plan.queue_action_type),
-        "directWritesExecuted": false,
-    });
-    if let Some(ref proposal_id) = proposal_id {
-        if let Some(object) = metadata.as_object_mut() {
-            object.insert("proposalId".into(), serde_json::json!(proposal_id));
-        }
-    }
-
-    Ok(MainChatObservation {
-        summary: format!(
-            "Governed ReAct action {} finished with {status_label}.",
-            plan.target
-        ),
-        output_preview,
-        final_answer,
-        metadata,
-        executor_status,
-        blocker_reason,
-    })
-}
-
-fn resolve_main_chat_mcp_read_target(
-    registry: &openlife_core::mcp::McpRegistry,
-    plan: &MainChatReactActionPlan,
-) -> MainChatMcpReadResolution {
-    if plan.target != "mcp.call_tool" {
-        return MainChatMcpReadResolution {
-            target: plan.target.clone(),
-            arguments: plan.arguments.clone(),
-            resolved: false,
-            blocker_reason: None,
-        };
-    }
-
-    let tool_name = plan
-        .arguments
-        .get("tool_name")
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .trim();
-    if tool_name.is_empty() {
-        return MainChatMcpReadResolution {
-            target: plan.target.clone(),
-            arguments: plan.arguments.clone(),
-            resolved: false,
-            blocker_reason: Some("mcp_read_tool_name_missing".into()),
-        };
-    }
-
-    let manifest = registry
-        .list_manifests()
-        .into_iter()
-        .find(|manifest| manifest.name == tool_name || manifest.id == tool_name);
-    let Some(manifest) = manifest else {
-        return MainChatMcpReadResolution {
-            target: tool_name.into(),
-            arguments: plan.arguments.clone(),
-            resolved: false,
-            blocker_reason: Some("mcp_read_tool_not_registered".into()),
-        };
-    };
-
-    let read_only = manifest.action_type.eq_ignore_ascii_case("read")
-        || manifest
-            .capabilities
-            .iter()
-            .any(|capability| capability.eq_ignore_ascii_case("read"));
-    if !manifest.enabled || manifest.declarative_only || !read_only {
-        return MainChatMcpReadResolution {
-            target: manifest.name,
-            arguments: plan.arguments.clone(),
-            resolved: false,
-            blocker_reason: Some("mcp_read_tool_not_governed_read_only".into()),
-        };
-    }
-
-    MainChatMcpReadResolution {
-        target: manifest.name,
-        arguments: plan
-            .arguments
-            .get("arguments")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
-        resolved: true,
-        blocker_reason: None,
-    }
-}
-
-fn blocked_main_chat_observation(
-    plan: &MainChatReactActionPlan,
-    blocker_reason: &str,
-    extra_metadata: serde_json::Value,
-) -> MainChatObservation {
-    let metadata = serde_json::json!({
-        "actionType": plan.queue_action_type.clone(),
-        "executorActionType": plan.executor_action_type.clone(),
-        "target": plan.target.clone(),
-        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
-        "actionExecutorBacked": true,
-        "executorStatus": "blocked",
-        "blockerReason": blocker_reason,
-        "retryReplayable": false,
-        "directWritesExecuted": false,
-        "extra": extra_metadata,
-    });
-
-    MainChatObservation {
-        summary: format!("Governed ReAct action {} blocked.", plan.target),
-        output_preview: blocker_reason.into(),
-        final_answer: format!(
-            "That read action is blocked by governance: {}",
-            blocker_reason
-        ),
-        metadata,
-        executor_status: openlife_core::agent::ActionExecutionStatus::Blocked,
-        blocker_reason: Some(blocker_reason.into()),
-    }
-}
-
-fn main_chat_workspace_file_target(user_text: &str) -> Result<(String, String), String> {
-    let lower = user_text.to_ascii_lowercase();
-    let relative = if lower.contains("cargo.toml") {
-        "Cargo.toml"
-    } else if lower.contains("readme") {
-        "README.md"
-    } else if lower.contains("main_chat_agent_migration_v1_goal_spec") {
-        "plans/main_chat_agent_migration_v1_goal_spec.md"
-    } else {
-        "AGENTS.md"
-    };
-    let cwd =
-        std::env::current_dir().map_err(|err| format!("workspace path unavailable: {err}"))?;
-    let path = cwd.join(relative);
-    let canonical = path
-        .canonicalize()
-        .map_err(|err| format!("file is not readable in workspace: {err}"))?;
-    let workspace = cwd
-        .canonicalize()
-        .map_err(|err| format!("workspace canonicalization failed: {err}"))?;
-    if !canonical.starts_with(&workspace) {
-        return Err("file read outside workspace is blocked".into());
-    }
-    Ok((relative.into(), canonical.to_string_lossy().to_string()))
-}
-
-fn main_chat_search_query(user_text: &str) -> String {
-    let terms = main_chat_query_terms(user_text);
-    if terms.is_empty() {
-        user_text.trim().to_string()
-    } else {
-        terms.join(" ")
-    }
-}
-
-fn extract_main_chat_url(user_text: &str) -> Option<String> {
-    user_text
-        .split_whitespace()
-        .map(|part| {
-            part.trim_matches(|ch: char| {
-                matches!(ch, ',' | '.' | ')' | '(' | '"' | '\'' | '，' | '。')
-            })
-        })
-        .find(|part| part.starts_with("http://") || part.starts_with("https://"))
-        .map(str::to_string)
-}
-
-fn infer_main_chat_mcp_tool_name(user_text: &str) -> Option<String> {
-    let mut previous_was_marker = false;
-    for token in user_text.split_whitespace() {
-        let cleaned = token
-            .trim_matches(|ch: char| matches!(ch, ',' | ':' | ';' | ')' | '(' | '"' | '\'' | '`'));
-        let lower = cleaned.to_ascii_lowercase();
-        if previous_was_marker && (cleaned.contains('.') || cleaned.contains('_')) {
-            return Some(cleaned.to_string());
-        }
-        previous_was_marker = matches!(lower.as_str(), "mcp" | "tool" | "工具");
-    }
-    None
-}
-
-fn main_chat_query_terms(user_text: &str) -> Vec<String> {
-    let stop = [
-        "what",
-        "did",
-        "ask",
-        "you",
-        "about",
-        "past",
-        "sessions",
-        "search",
-        "notes",
-        "find",
-        "yesterday",
-        "我的",
-        "关于",
-    ];
-    let mut terms = user_text
-        .to_ascii_lowercase()
-        .split(|ch: char| !ch.is_alphanumeric())
-        .filter(|part| part.len() >= 4 && !stop.contains(part))
-        .take(8)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        terms.push("planning".into());
-    }
-    terms
-}
-
-async fn create_main_chat_agent_proposal(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy,
-    user_text: &str,
-) -> Result<openlife_core::agent::AgentProposal, String> {
-    use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-
-    let (proposal_type, affected_path, reason, risk_level, after) = match strategy {
-        openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::MemoryProposal => (
-            ProposalType::MemoryWrite,
-            "memory.pending.chat_conversation",
-            "User explicitly requested a memory update from Main Chat.",
-            RiskLevel::Medium,
-            serde_json::json!({
-                "content": user_text,
-                "source": "main_chat_agent_v1",
-                "originatingTaskSessionId": task_session_id,
-                "directMemoryWrite": false,
-            }),
-        ),
-        _ => (
-            ProposalType::LifeModelUpdate,
-            "lifemodel.pending.chat_conversation",
-            "User explicitly requested a LifeModel-affecting update from Main Chat.",
-            RiskLevel::High,
-            serde_json::json!({
-                "requestedChange": user_text,
-                "source": "main_chat_agent_v1",
-                "originatingTaskSessionId": task_session_id,
-                "directLifeModelWrite": false,
-            }),
-        ),
-    };
-    let mut proposal = AgentProposal::new(
-        proposal_type,
-        affected_path,
-        after,
-        reason,
-        0.86,
-        risk_level,
-        ProposalSource::ChatConversation,
-    );
-    proposal.source_detail = Some(format!("main_chat_agent_task_session:{task_session_id}"));
-
-    let mut internal_transcript = Vec::new();
-    let queued = enqueue_main_chat_agent_action(
-        state,
-        task_session_id,
-        "proposal.create",
-        "Create a Review Center proposal from Main Chat.",
-        &mut internal_transcript,
-    )
-    .await?;
-    let store_arc = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "Proposal store not available".to_string())?;
-    let store = store_arc.lock().await;
-    store
-        .create_proposal(&proposal)
-        .map_err(|err| format!("create proposal failed: {err}"))?;
-    drop(store);
-    transition_main_chat_action(
-        state,
-        &queued.id,
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Executing,
-        None,
-    )
-    .await?;
-    transition_main_chat_action(
-        state,
-        &queued.id,
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Observed,
-        Some(serde_json::json!({
-            "proposalId": proposal.id,
-            "proposalType": proposal.proposal_type,
-            "directWritesExecuted": false,
-        })),
-    )
-    .await?;
-    transition_main_chat_action(
-        state,
-        &queued.id,
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed,
-        None,
-    )
-    .await?;
-    let _ = append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::Action,
-        "Proposal create action completed without applying the proposal.",
-        serde_json::json!({
-            "actionId": queued.id,
-            "proposalId": proposal.id,
-            "directWritesExecuted": false,
-        }),
-    )
-    .await;
-    Ok(proposal)
-}
-
-async fn attach_main_chat_tool_permission_proposal_metadata(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    plan: &MainChatReactActionPlan,
-    blocker_reason: Option<&str>,
-    mut metadata: serde_json::Value,
-) -> Result<
-    (
-        serde_json::Value,
-        Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
-    ),
-    String,
-> {
-    use openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind;
-    use openlife_core::agent::{
-        AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
-    };
-
-    if plan.queue_action_type != "mcp.read_only" {
-        return Ok((metadata, Vec::new()));
-    }
-
-    let (manifest, target_arguments) = {
-        let registry = state.mcp_registry.lock().await;
-        let resolution = resolve_main_chat_mcp_read_target(&registry, plan);
-        if !resolution.resolved {
-            return Ok((metadata, Vec::new()));
-        }
-        let manifest = registry
-            .list_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == resolution.target || manifest.id == resolution.target)
-            .ok_or_else(|| {
-                format!(
-                    "resolved MCP read target missing from registry: {}",
-                    resolution.target
-                )
-            })?;
-        (manifest, resolution.arguments)
-    };
-
-    let source = openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest);
-    let (input_length_bytes, input_hash) =
-        openlife_core::agent::react_beta::metadata_safe_value_digest(&target_arguments);
-    let risk_level = match manifest.risk_level.to_ascii_lowercase().as_str() {
-        "high" => RiskLevel::High,
-        "low" => RiskLevel::Low,
-        _ => RiskLevel::Medium,
-    };
-    let affected_path = format!("tool_permission.{}.{}", source, manifest.name);
-    let after = serde_json::json!({
-        "permission_action": "grant",
-        "permission": "allow_once",
-        "tool_name": manifest.name.clone(),
-        "source": source,
-        "risk_level": manifest.risk_level.clone(),
-        "action_type": manifest.action_type.clone(),
-        "capabilities": manifest.capabilities.clone(),
-        "originatingTaskSessionId": task_session_id,
-        "blocked_action": {
-            "action_type": plan.queue_action_type,
-            "target": plan.target,
-            "resolved_target": manifest.name.clone(),
-            "input_hash": input_hash,
-            "input_length_bytes": input_length_bytes,
-        },
-        "reason": blocker_reason.unwrap_or("tool_permission_required"),
-        "auto_generated": true,
-        "mainChatAgentV1": true,
-        "directWritesExecuted": false,
-    });
-    let proposal_store_arc = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "Proposal store not available".to_string())?;
-    let existing_proposal_id = metadata
-        .get("proposalId")
-        .or_else(|| metadata.get("proposal_id"))
-        .or_else(|| {
-            metadata
-                .get("structuredResult")
-                .and_then(|structured| structured.get("proposalId"))
-        })
-        .or_else(|| {
-            metadata
-                .get("structuredResult")
-                .and_then(|structured| structured.get("proposal_id"))
-        })
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let proposal = {
-        let proposal_store = proposal_store_arc.lock().await;
-        if let Some(existing_proposal_id) = existing_proposal_id {
-            if let Some(mut existing) = proposal_store
-                .get_proposal(&existing_proposal_id)
-                .map_err(|err| format!("load existing ToolPermission proposal failed: {err}"))?
-                .filter(|proposal| {
-                    proposal.proposal_type == ProposalType::ToolPermission
-                        && proposal.status == ProposalStatus::Pending
-                })
-            {
-                existing.source = ProposalSource::ChatConversation;
-                existing.source_detail =
-                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
-                existing.affected_path = affected_path.clone();
-                existing.after = after.clone();
-                existing.reason =
-                    "Allow the pending Main Chat MCP read action to continue after explicit review."
-                        .into();
-                existing.confidence = 0.72;
-                existing.risk_level = risk_level;
-                proposal_store.update_proposal(&existing).map_err(|err| {
-                    format!("link existing Main Chat ToolPermission proposal failed: {err}")
-                })?;
-                existing
-            } else {
-                let mut proposal = AgentProposal::new(
-                    ProposalType::ToolPermission,
-                    &affected_path,
-                    after.clone(),
-                    "Allow the pending Main Chat MCP read action to continue after explicit review.",
-                    0.72,
-                    risk_level,
-                    ProposalSource::ChatConversation,
-                );
-                proposal.source_detail =
-                    Some(format!("main_chat_agent_task_session:{task_session_id}"));
-                proposal_store.create_proposal(&proposal).map_err(|err| {
-                    format!("create Main Chat ToolPermission proposal failed: {err}")
-                })?;
-                proposal
-            }
-        } else {
-            let mut proposal = AgentProposal::new(
-                ProposalType::ToolPermission,
-                &affected_path,
-                after.clone(),
-                "Allow the pending Main Chat MCP read action to continue after explicit review.",
-                0.72,
-                risk_level,
-                ProposalSource::ChatConversation,
-            );
-            proposal.source_detail =
-                Some(format!("main_chat_agent_task_session:{task_session_id}"));
-            proposal_store
-                .create_proposal(&proposal)
-                .map_err(|err| format!("create Main Chat ToolPermission proposal failed: {err}"))?;
-            proposal
-        }
-    };
-
-    if let Some(object) = metadata.as_object_mut() {
-        object.insert("proposalId".into(), serde_json::json!(proposal.id.clone()));
-        object.insert(
-            "proposalType".into(),
-            serde_json::json!(proposal.proposal_type.to_string()),
-        );
-        object.insert("permissionProposalCreated".into(), serde_json::json!(true));
-        object.insert("toolName".into(), serde_json::json!(manifest.name.clone()));
-        object.insert("resumeReplayable".into(), serde_json::json!(true));
-        object.insert("directWritesExecuted".into(), serde_json::json!(false));
-    }
-    if let Some(structured) = metadata
-        .get_mut("structuredResult")
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        structured.insert("proposalId".into(), serde_json::json!(proposal.id.clone()));
-        structured.insert("permissionProposalCreated".into(), serde_json::json!(true));
-        structured.insert("directWritesExecuted".into(), serde_json::json!(false));
-    }
-
-    let transcript_entries = append_main_chat_agent_transcript(
-        state,
-        Some(task_session_id),
-        ExecutionTranscriptEntryKind::PermissionRequest,
-        "ToolPermission proposal created for pending Main Chat action.",
-        serde_json::json!({
-            "proposalId": proposal.id,
-            "proposalType": proposal.proposal_type,
-            "affectedPath": proposal.affected_path,
-            "toolName": proposal.after.get("tool_name").cloned().unwrap_or(serde_json::Value::Null),
-            "resumeReplayable": true,
-            "directWritesExecuted": false,
-        }),
-    )
-    .await;
-
-    Ok((metadata, transcript_entries))
-}
-
-fn main_chat_permission_blocker_reason(
-    plan: &MainChatReactActionPlan,
-    blocker_reason: &str,
-) -> String {
-    if plan.queue_action_type == "mcp.read_only" {
-        "tool_permission_required".into()
-    } else {
-        blocker_reason.into()
-    }
-}
-
-fn tool_call_from_action(
-    name: &str,
-    action_id: &str,
-    success: bool,
-    output: Option<String>,
-    error: Option<String>,
-    status: ToolCallStatus,
-    requires_confirmation: bool,
-) -> ToolCallResult {
-    ToolCallResult {
-        name: name.into(),
-        arguments: serde_json::json!({ "mainChatAgentV1": true }),
-        sanitized_arguments: Some(serde_json::json!({ "mainChatAgentV1": true })),
-        success,
-        output,
-        error,
-        permission_level: if requires_confirmation {
-            "confirmation_required".into()
-        } else {
-            "governed".into()
-        },
-        status,
-        requires_confirmation,
-        pii_found: false,
-        privacy_warnings: Vec::new(),
-        action_id: Some(action_id.into()),
-        run_id: None,
-        permission_decision: Some(if requires_confirmation {
-            "blocked_pending_confirmation".into()
-        } else {
-            "policy_checked".into()
-        }),
-        react_trace: None,
-    }
-}
-
-async fn finalize_chat_agent_run(
-    session_id: &str,
-    assistant_message: &ChatMessage,
-    reply: &str,
-    reasoning_trace: &mut ReasoningTrace,
-    agent_run: &mut openlife_core::agent::AgentRun,
-    life_model: &LifeModel,
-    state: &State<'_, Arc<AppState>>,
-) -> Result<(), String> {
-    let inserted = persist_chat_message_if_needed(session_id, assistant_message, state).await?;
-
-    reasoning_trace.generation_result = Some(match reasoning_trace.generation_result.take() {
-        Some(serde_json::Value::Object(mut metadata)) => {
-            metadata.insert("text".into(), serde_json::Value::String(reply.to_string()));
-            serde_json::Value::Object(metadata)
-        }
-        _ => serde_json::json!({ "text": reply }),
-    });
-    agent_run.output_preview = Some(preview_text(reply, 200));
-    if agent_run.status == openlife_core::agent::AgentRunStatus::Running {
-        agent_run.status = openlife_core::agent::AgentRunStatus::Completed;
-    }
-    agent_run.finished_at = Some(chrono::Utc::now());
-    agent_run.reasoning_trace = Some(reasoning_trace.clone());
-
-    if let Some(ref store_arc) = state.agent_run_store {
-        let store = store_arc.lock().await;
-        match store.get_run(&agent_run.id) {
-            Ok(Some(_)) => {
-                if let Err(e) = store.update_run(agent_run) {
-                    log::warn!("[AgentRun] 更新运行记录失败: {}", e);
-                }
-            }
-            Ok(None) => {
-                if let Err(e) = store.create_run(agent_run) {
-                    log::warn!("[AgentRun] 保存运行记录失败: {}", e);
-                }
-            }
-            Err(e) => {
-                log::warn!("[AgentRun] 查询运行记录失败: {}", e);
-                if let Err(e) = store.create_run(agent_run) {
-                    log::warn!("[AgentRun] 保存运行记录失败: {}", e);
-                }
-            }
-        }
-    }
-
-    if inserted
-        && timeout(
-            Duration::from_secs(CHAT_VECTOR_PERSIST_TIMEOUT_SECS),
-            persist_vector_memory_for_message(session_id, assistant_message, state),
-        )
-        .await
-        .is_err()
-    {
-        eprintln!(
-            "[memory] vector persistence timed out after {}s for assistant message in session {}",
-            CHAT_VECTOR_PERSIST_TIMEOUT_SECS, session_id
-        );
-    }
-
-    if timeout(
-        Duration::from_secs(CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS),
-        generate_and_persist_chat_proposals(state.inner(), agent_run, reply, life_model),
-    )
-    .await
-    .is_err()
-    {
-        eprintln!(
-            "[ChatProposal] Proposal generation timed out after {}s for run {}",
-            CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS, agent_run.id
-        );
-    }
-    Ok(())
-}
-
 /// Shared preprocessing for chat commands:
 /// saves user message, loads model/tools/config, applies privacy filter,
 /// values filter, and vector memory retrieval.
 async fn preprocess_chat_input(
     session_id: &str,
     messages: &[ChatMessage],
-    state: &State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<
     (
         LifeModel,
@@ -3517,7 +1388,7 @@ async fn preprocess_chat_input(
 async fn preprocess_chat_input_v2(
     session_id: &str,
     messages: &[ChatMessage],
-    state: &State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<
     (
         LifeModel,
@@ -3939,7 +1810,18 @@ fn ordinary_stream_chat_execution_plan(layer: Layer) -> OrdinaryChatExecutionPla
 async fn send_message(
     session_id: String,
     messages: Vec<ChatMessage>,
+    selected_skill_id: Option<String>,
     state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
+    send_message_with_state(session_id, messages, selected_skill_id, state.inner()).await
+}
+
+pub(crate) async fn send_message_with_state(
+    session_id: String,
+    messages: Vec<ChatMessage>,
+    selected_skill_id: Option<String>,
+    state: &Arc<AppState>,
 ) -> Result<SendMessageResult, String> {
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
@@ -3981,6 +1863,7 @@ async fn send_message(
                         &state,
                         &main_chat_agent_turn,
                         user_text,
+                        selected_skill_id.as_deref(),
                     )
                     .await,
                 );
@@ -4107,10 +1990,10 @@ async fn send_message(
 
     let auto_checkin_msg = if let Some(ref m) = user_msg {
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
-        capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
+        capture_conversation_signals(&session_id, &m.content, &life_model, state).await;
         if msg.is_some() {
             let _ = persist_life_model(
-                &state.inner().clone(),
+                state,
                 life_model.clone(),
                 false,
                 LifeModelMaterializerCallerContext::new(
@@ -4139,6 +2022,7 @@ async fn send_message(
         &privacy_engine,
         &privacy_map,
         None,
+        selected_skill_id.as_deref(),
     )
     .await?
     {
@@ -4183,7 +2067,7 @@ async fn send_message_with_legacy_generation(
     context_summary: openlife_core::agent::types::ContextSummary,
     ordinary_plan: OrdinaryChatExecutionPlan,
     main_chat_agent_turn: MainChatAgentTurn,
-    state: State<'_, Arc<AppState>>,
+    state: &Arc<AppState>,
 ) -> Result<SendMessageResult, String> {
     debug_assert_eq!(
         ordinary_plan.route_kind,
@@ -4205,8 +2089,7 @@ async fn send_message_with_legacy_generation(
         layer,
     };
     let hs_packet =
-        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
-            .await?;
+        build_chat_runtime_hs_packet(state, &task, &life_model, &tools_prompt, None).await?;
 
     let mut reply = generate_non_stream_fallback(
         &scheduler,
@@ -4521,13 +2404,12 @@ async fn send_message_with_agent_loop(
 struct StartStreamMessageArgs {
     session_id: String,
     messages: Vec<ChatMessage>,
+    #[serde(default)]
+    selected_skill_id: Option<String>,
 }
 
 const STREAM_INIT_TIMEOUT_SECS: u64 = 45;
 const STREAM_CHUNK_TIMEOUT_SECS: u64 = 90;
-const NON_STREAM_FALLBACK_TIMEOUT_SECS: u64 = 120;
-const CHAT_VECTOR_PERSIST_TIMEOUT_SECS: u64 = 8;
-const CHAT_PROPOSAL_GENERATION_TIMEOUT_SECS: u64 = 5;
 
 /// Emit a unified agent-status-update event for both streaming and non-streaming paths.
 /// Frontend AgentStateIndicator expects: phase, message, step_index, tool_call_index, timestamp.
@@ -4553,78 +2435,6 @@ fn emit_agent_status_update(
             "timestamp": chrono::Utc::now().to_rfc3339(),
         }),
     );
-}
-
-fn emit_stream_error<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    session_id: &str,
-    run_id: &str,
-    error: impl Into<String>,
-) {
-    let _ = app_handle.emit(
-        "stream-message-error",
-        serde_json::json!({
-            "session_id": session_id,
-            "run_id": run_id,
-            "error": error.into(),
-        }),
-    );
-}
-
-async fn generate_non_stream_fallback(
-    scheduler: &InferenceScheduler,
-    messages: Vec<ChatMessage>,
-    life_model: &LifeModel,
-    tools_prompt: &str,
-    hs_packet: Option<openlife_core::agent::RuntimeHSPacket>,
-) -> Result<String, String> {
-    let fallback = async {
-        if let Some(packet) = hs_packet {
-            scheduler
-                .generate_with_hs_packet(messages, life_model, Some(tools_prompt), &packet)
-                .await
-        } else {
-            scheduler
-                .generate(messages, life_model, Some(tools_prompt))
-                .await
-        }
-    };
-
-    timeout(
-        Duration::from_secs(NON_STREAM_FALLBACK_TIMEOUT_SECS),
-        fallback,
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "非流式重试超时（{} 秒），请检查模型服务或切换后端。",
-            NON_STREAM_FALLBACK_TIMEOUT_SECS
-        )
-    })?
-    .map_err(|e| e.to_string())
-}
-
-fn main_chat_provider_endpoint_kind(
-    scheduler: &InferenceScheduler,
-    scripted_provider_response: bool,
-) -> &'static str {
-    if scripted_provider_response {
-        return "scripted_scheduler_response";
-    }
-
-    let base = scheduler.openai_base.trim().to_ascii_lowercase();
-    if base.starts_with("http://127.0.0.1")
-        || base.starts_with("http://localhost")
-        || base.starts_with("http://[::1]")
-    {
-        return "local_test_http";
-    }
-
-    if scheduler.provider.trim().eq_ignore_ascii_case("none") {
-        "none"
-    } else {
-        "external_provider"
-    }
 }
 
 /// Handle AgentLoop failure: try non-stream fallback, create AgentRun with
@@ -4669,337 +2479,6 @@ async fn handle_agent_loop_fallback(
     }
 
     Ok((fallback_reply, agent_run))
-}
-
-fn preview_text(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
-
-fn included_life_model_sections(life_model: &LifeModel) -> Vec<String> {
-    if life_model.is_effectively_empty() {
-        Vec::new()
-    } else {
-        vec![
-            "identity".to_string(),
-            "goals".to_string(),
-            "capabilities".to_string(),
-            "state".to_string(),
-        ]
-    }
-}
-
-#[allow(dead_code)]
-fn agent_actions_to_tool_call_results(
-    actions: &[openlife_core::agent::AgentAction],
-    run_id: &str,
-) -> Vec<ToolCallResult> {
-    actions
-        .iter()
-        .map(|action| {
-            let output = action.output.as_ref().and_then(|value| {
-                value
-                    .get("text")
-                    .and_then(|text| text.as_str())
-                    .map(ToString::to_string)
-                    .or_else(|| value.as_str().map(ToString::to_string))
-            });
-            ToolCallResult {
-                name: action.target.clone().unwrap_or_default(),
-                arguments: action.input.clone(),
-                sanitized_arguments: None,
-                success: matches!(
-                    action.status.as_str(),
-                    "succeeded" | "completed" | "success"
-                ),
-                output,
-                error: action.error.clone(),
-                permission_level: action
-                    .tool_scope
-                    .as_ref()
-                    .map(|scope| scope.risk_level.clone())
-                    .unwrap_or_else(|| "low".to_string()),
-                status: match action.status.as_str() {
-                    "success" | "succeeded" | "completed" => ToolCallStatus::Success,
-                    "needs_confirmation" => ToolCallStatus::NeedsConfirmation,
-                    "blocked" => ToolCallStatus::Blocked,
-                    _ => ToolCallStatus::Error,
-                },
-                requires_confirmation: action.status == "needs_confirmation",
-                pii_found: false,
-                privacy_warnings: Vec::new(),
-                action_id: Some(action.id.clone()),
-                run_id: Some(run_id.to_string()),
-                permission_decision: action.permission_decision.clone(),
-                react_trace: action.react_trace.clone(),
-            }
-        })
-        .collect()
-}
-
-pub(crate) async fn build_chat_runtime_hs_packet(
-    state: &Arc<AppState>,
-    task: &openlife_core::agent::AgentTask,
-    life_model: &LifeModel,
-    tools_prompt: &str,
-    agent_run_id: Option<String>,
-) -> Result<Option<openlife_core::agent::RuntimeHSPacket>, String> {
-    let topic = classify_hs_policy_topic(&task.user_text, tools_prompt);
-    let tool_requirements = hs_tool_requirements(&task.user_text, tools_prompt);
-    let risk_level = hs_risk_level(topic, &tool_requirements);
-    let state_hints = serde_json::json!({
-        "energy": life_model.state.health_status.energy_level,
-    });
-    let sanitized_intent_summary =
-        sanitized_hs_intent_summary(task.kind, topic, &tool_requirements, &task.user_text);
-
-    let heuristic_store = state.heuristic_store.lock().await;
-    openlife_core::agent::build_runtime_hs_packet(
-        &state.policy_store,
-        &heuristic_store,
-        openlife_core::agent::RuntimeHSPacketBuildInput {
-            task,
-            sanitized_intent_summary,
-            privacy_topic: topic,
-            risk_level,
-            tool_requirements,
-            current_state_hints: state_hints,
-            token_budget: 384,
-            agent_run_id,
-        },
-    )
-    .map_err(|e| format!("HS runtime packet build failed: {}", e))
-}
-
-fn classify_hs_policy_topic(
-    user_text: &str,
-    _tools_prompt: &str,
-) -> openlife_core::agent::PolicyTopic {
-    let text = user_text.to_lowercase();
-    let privacy_engine = PrivacyEngine::new();
-    let privacy_findings = privacy_engine.detect(&text);
-    if privacy_findings
-        .iter()
-        .any(|(ptype, _)| matches!(ptype, openlife_core::privacy::PrivacyType::IdCard))
-    {
-        return openlife_core::agent::PolicyTopic::Identity;
-    }
-    if privacy_findings
-        .iter()
-        .any(|(ptype, _)| matches!(ptype, openlife_core::privacy::PrivacyType::BankCard))
-    {
-        return openlife_core::agent::PolicyTopic::Finance;
-    }
-    if privacy_findings.iter().any(|(ptype, _)| {
-        matches!(
-            ptype,
-            openlife_core::privacy::PrivacyType::Email
-                | openlife_core::privacy::PrivacyType::Phone
-                | openlife_core::privacy::PrivacyType::Address
-                | openlife_core::privacy::PrivacyType::Name
-                | openlife_core::privacy::PrivacyType::Generic
-        )
-    }) {
-        return openlife_core::agent::PolicyTopic::PrivateFile;
-    }
-
-    if contains_any(
-        &text,
-        &[
-            "health",
-            "medical",
-            "medicine",
-            "medication",
-            "prescription",
-            "doctor",
-            "therapy",
-            "mental",
-            "mental health",
-            "illness",
-            "diagnosis",
-            "diagnose",
-            "anxiety",
-            "depression",
-            "drug",
-            "药",
-            "用药",
-            "处方",
-            "病",
-            "医院",
-            "健康",
-            "心理",
-            "焦虑",
-            "抑郁",
-            "诊断",
-            "治疗",
-        ],
-    ) {
-        openlife_core::agent::PolicyTopic::Health
-    } else if contains_any(
-        &text,
-        &[
-            "finance",
-            "bank",
-            "salary",
-            "income",
-            "insurance",
-            "debt",
-            "loan",
-            "tax",
-            "credit",
-            "mortgage",
-            "投资",
-            "银行",
-            "工资",
-            "收入",
-            "保险",
-            "债务",
-            "负债",
-            "贷款",
-            "税",
-            "信用卡",
-        ],
-    ) {
-        openlife_core::agent::PolicyTopic::Finance
-    } else if contains_any(
-        &text,
-        &[
-            "identity",
-            "identity card",
-            "id card",
-            "passport",
-            "ssn",
-            "values",
-            "mission",
-            "身份",
-            "身份证",
-            "护照",
-            "证件",
-            "价值观",
-            "使命",
-        ],
-    ) {
-        openlife_core::agent::PolicyTopic::Identity
-    } else if contains_any(
-        &text,
-        &[
-            "relationship",
-            "intimate relationship",
-            "partner",
-            "family",
-            "breakup",
-            "break up",
-            "divorce",
-            "family conflict",
-            "关系",
-            "亲密关系",
-            "伴侣",
-            "家人",
-            "分手",
-            "家庭矛盾",
-            "家庭冲突",
-            "婚姻",
-            "离婚",
-            "恋爱",
-        ],
-    ) {
-        openlife_core::agent::PolicyTopic::Relationship
-    } else if contains_any(
-        &text,
-        &[
-            "private file",
-            "privacy",
-            "private",
-            "secret",
-            "confidential",
-            "contract",
-            "resume",
-            "cv",
-            "私人文件",
-            "隐私",
-            "机密",
-            "合同",
-            "简历",
-        ],
-    ) {
-        openlife_core::agent::PolicyTopic::PrivateFile
-    } else {
-        openlife_core::agent::PolicyTopic::General
-    }
-}
-
-fn hs_tool_requirements(user_text: &str, _tools_prompt: &str) -> Vec<String> {
-    let text = user_text.to_lowercase();
-    let mut requirements = Vec::new();
-    if contains_any(
-        &text,
-        &[
-            "write",
-            "save",
-            "send",
-            "email",
-            "calendar",
-            "file.write",
-            "propose_event",
-            "保存",
-            "写入",
-            "发送",
-            "邮件",
-            "日历",
-        ],
-    ) {
-        requirements.push("write".to_string());
-    }
-    if contains_any(
-        &text,
-        &[
-            "send", "email", "calendar", "external", "发送", "邮件", "日历",
-        ],
-    ) {
-        requirements.push("external_side_effect".to_string());
-    }
-    requirements.sort();
-    requirements.dedup();
-    requirements
-}
-
-fn hs_risk_level(
-    topic: openlife_core::agent::PolicyTopic,
-    tool_requirements: &[String],
-) -> openlife_core::agent::RiskLevel {
-    if topic != openlife_core::agent::PolicyTopic::General
-        || tool_requirements
-            .iter()
-            .any(|requirement| requirement == "write" || requirement == "external_side_effect")
-    {
-        openlife_core::agent::RiskLevel::High
-    } else {
-        openlife_core::agent::RiskLevel::Low
-    }
-}
-
-fn sanitized_hs_intent_summary(
-    task_kind: openlife_core::agent::AgentTaskKind,
-    topic: openlife_core::agent::PolicyTopic,
-    tool_requirements: &[String],
-    user_text: &str,
-) -> String {
-    let char_count = user_text.chars().count();
-    let length_bucket = match char_count {
-        0..=80 => "short",
-        81..=240 => "medium",
-        _ => "long",
-    };
-    format!(
-        "task_kind={}; topic={:?}; length_bucket={}; tool_requirements={}",
-        task_kind,
-        topic,
-        length_bucket,
-        tool_requirements.join(",")
-    )
-}
-
-fn contains_any(text: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| text.contains(needle))
 }
 
 /// Streaming callback that forwards AgentLoop events to Tauri frontend via emit().
@@ -5353,18 +2832,41 @@ async fn start_stream_message<R: tauri::Runtime>(
     args: Option<StartStreamMessageArgs>,
     session_id: Option<String>,
     messages: Option<Vec<ChatMessage>>,
+    selected_skill_id: Option<String>,
     app_handle: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
-    let (session_id, messages) = if let Some(args) = args {
-        (args.session_id, args.messages)
+    let (session_id, messages, selected_skill_id) = if let Some(args) = args {
+        (args.session_id, args.messages, args.selected_skill_id)
     } else {
         (
             session_id.ok_or_else(|| "start_stream_message 缺少 session_id".to_string())?,
             messages.ok_or_else(|| "start_stream_message 缺少 messages".to_string())?,
+            selected_skill_id,
         )
     };
 
+    let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
+    let app_handle = app_handle.clone();
+    start_stream_message_with_state(
+        session_id,
+        messages,
+        selected_skill_id,
+        state.inner(),
+        move |event, payload| {
+            let _ = app_handle.emit(event, payload);
+        },
+    )
+    .await
+}
+
+pub(crate) async fn start_stream_message_with_state(
+    session_id: String,
+    messages: Vec<ChatMessage>,
+    selected_skill_id: Option<String>,
+    state: &Arc<AppState>,
+    mut emit_stream_event: impl FnMut(&str, serde_json::Value) + Send,
+) -> Result<(), String> {
     let user_msg = messages.last().cloned();
     let intent = if let Some(ref m) = user_msg {
         if m.role == "user" {
@@ -5387,7 +2889,7 @@ async fn start_stream_message<R: tauri::Runtime>(
         &session_id,
         user_msg.as_ref(),
         openlife_core::agent::AgentTaskKind::Conversation,
-        &state,
+        state,
     )
     .await?;
 
@@ -5412,9 +2914,10 @@ async fn start_stream_message<R: tauri::Runtime>(
                 let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
                 execution_transcript.extend(
                     append_main_chat_direct_answer_contract_transcript(
-                        &state,
+                        state,
                         &main_chat_agent_turn,
                         &user_input_text,
+                        selected_skill_id.as_deref(),
                     )
                     .await,
                 );
@@ -5422,9 +2925,9 @@ async fn start_stream_message<R: tauri::Runtime>(
                 if let Some(ref user) = user_msg {
                     if user.role == "user" {
                         let user_inserted =
-                            persist_chat_message_if_needed(&session_id, user, &state).await?;
+                            persist_chat_message_if_needed(&session_id, user, state).await?;
                         if user_inserted {
-                            persist_vector_memory_for_message(&session_id, user, &state).await;
+                            persist_vector_memory_for_message(&session_id, user, state).await;
                         }
                     }
                 }
@@ -5440,7 +2943,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                     content: reply.clone(),
                 };
 
-                let _ = app_handle.emit(
+                emit_stream_event(
                     "stream-message-start",
                     serde_json::json!({
                         "session_id": &session_id,
@@ -5452,7 +2955,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                         "legacy_fallback_used": false,
                     }),
                 );
-                let _ = app_handle.emit(
+                emit_stream_event(
                     "stream-message-chunk",
                     serde_json::json!({
                         "session_id": &session_id,
@@ -5496,12 +2999,12 @@ async fn start_stream_message<R: tauri::Runtime>(
                     &mut reasoning_trace,
                     &mut agent_run,
                     &life_model,
-                    &state,
+                    state,
                 )
                 .await
                 {
                     log::warn!("[L1 Stream] finalize_chat_agent_run failed: {}", e);
-                    let _ = app_handle.emit(
+                    emit_stream_event(
                         "stream-message-error",
                         serde_json::json!({
                             "session_id": &session_id,
@@ -5512,14 +3015,14 @@ async fn start_stream_message<R: tauri::Runtime>(
                     return Err(e);
                 }
                 complete_main_chat_agent_turn_session(
-                    &state,
+                    state,
                     &main_chat_agent_turn,
                     "DirectAnswer completed without tool execution.",
                 )
                 .await;
                 execution_transcript.extend(
                     append_main_chat_agent_transcript(
-                        &state,
+                        state,
                         main_chat_agent_turn
                             .decision
                             .agent_task_session_id
@@ -5535,7 +3038,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                     .await,
                 );
 
-                let _ = app_handle.emit(
+                emit_stream_event(
                     "stream-message-done",
                     serde_json::json!({
                         "session_id": &session_id,
@@ -5568,9 +3071,9 @@ async fn start_stream_message<R: tauri::Runtime>(
         embed_err,
         context_summary,
     ) = match if use_v2 {
-        preprocess_chat_input_v2(&session_id, &messages, &state).await
+        preprocess_chat_input_v2(&session_id, &messages, state).await
     } else {
-        preprocess_chat_input(&session_id, &messages, &state).await
+        preprocess_chat_input(&session_id, &messages, state).await
     } {
         Ok(result) => result,
         Err(message) => {
@@ -5592,10 +3095,10 @@ async fn start_stream_message<R: tauri::Runtime>(
 
     let auto_checkin_msg_stream = if let Some(ref m) = user_msg {
         let msg = try_auto_checkin_daily_goals(&m.content, &mut life_model);
-        capture_conversation_signals(&session_id, &m.content, &life_model, state.inner()).await;
+        capture_conversation_signals(&session_id, &m.content, &life_model, state).await;
         if msg.is_some() {
             if let Err(message) = persist_life_model(
-                &state.inner().clone(),
+                &state.clone(),
                 life_model.clone(),
                 false,
                 LifeModelMaterializerCallerContext::new(
@@ -5635,15 +3138,16 @@ async fn start_stream_message<R: tauri::Runtime>(
         embed_err.clone(),
         auto_checkin_msg_stream.clone(),
         &main_chat_agent_turn,
-        &state,
+        state,
         &privacy_engine,
         &privacy_map,
         Some(agent_run.clone()),
+        selected_skill_id.as_deref(),
     )
     .await?
     {
         let run_id = result.run_id.clone().unwrap_or_default();
-        let _ = app_handle.emit(
+        emit_stream_event(
             "stream-message-start",
             serde_json::json!({
                 "session_id": &session_id,
@@ -5655,7 +3159,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                 "legacy_fallback_used": result.legacy_fallback_used,
             }),
         );
-        let _ = app_handle.emit(
+        emit_stream_event(
             "stream-message-chunk",
             serde_json::json!({
                 "session_id": &session_id,
@@ -5663,7 +3167,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                 "chunk": result.reply.clone(),
             }),
         );
-        let _ = app_handle.emit(
+        emit_stream_event(
             "stream-message-done",
             serde_json::json!({
                 "session_id": &session_id,
@@ -5705,8 +3209,7 @@ async fn start_stream_message<R: tauri::Runtime>(
     };
 
     let hs_packet =
-        build_chat_runtime_hs_packet(state.inner(), &task, &life_model, &tools_prompt, None)
-            .await?;
+        build_chat_runtime_hs_packet(state, &task, &life_model, &tools_prompt, None).await?;
 
     let mut reasoning_trace = ReasoningTrace::default();
     if let Some(err) = embed_err {
@@ -5756,7 +3259,7 @@ async fn start_stream_message<R: tauri::Runtime>(
         "main_chat_agent_v1_direct_answer_stream".to_string()
     });
 
-    let _ = app_handle.emit(
+    emit_stream_event(
         "stream-message-start",
         serde_json::json!({
             "session_id": &session_id,
@@ -5773,7 +3276,7 @@ async fn start_stream_message<R: tauri::Runtime>(
     if let Some(ref ex) = reasoning_trace.generation_result {
         if let Some(text) = ex.get("text").and_then(|t| t.as_str()) {
             full_reply = text.to_string();
-            let _ = app_handle.emit(
+            emit_stream_event(
                 "stream-message-chunk",
                 serde_json::json!({
                     "session_id": &session_id,
@@ -5845,7 +3348,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                                     stream_error
                                 ));
                                 full_reply.push_str(&fallback_text);
-                                let _ = app_handle.emit(
+                                emit_stream_event(
                                     "stream-message-chunk",
                                     serde_json::json!({
                                         "session_id": &session_id,
@@ -5859,11 +3362,13 @@ async fn start_stream_message<R: tauri::Runtime>(
                                     "流式响应超时，非流式重试也失败：{}；重试错误：{}",
                                     stream_error, fallback_error
                                 );
-                                emit_stream_error(
-                                    &app_handle,
-                                    &session_id,
-                                    &agent_run.id,
-                                    message.clone(),
+                                emit_stream_event(
+                                    "stream-message-error",
+                                    serde_json::json!({
+                                        "session_id": &session_id,
+                                        "run_id": agent_run.id,
+                                        "error": message.clone(),
+                                    }),
                                 );
                                 let error = openlife_core::agent::AgentRunError {
                                     message: message.clone(),
@@ -5889,7 +3394,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                     Ok(chunk) => {
                         if !chunk.is_empty() {
                             full_reply.push_str(&chunk);
-                            let _ = app_handle.emit(
+                            emit_stream_event(
                                 "stream-message-chunk",
                                 serde_json::json!({
                                     "session_id": &session_id,
@@ -5923,7 +3428,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                                     stream_error
                                 ));
                                 full_reply.push_str(&fallback_text);
-                                let _ = app_handle.emit(
+                                emit_stream_event(
                                     "stream-message-chunk",
                                     serde_json::json!({
                                         "session_id": &session_id,
@@ -5937,11 +3442,13 @@ async fn start_stream_message<R: tauri::Runtime>(
                                     "流式响应失败，非流式重试也失败：{}；重试错误：{}",
                                     stream_error, fallback_error
                                 );
-                                emit_stream_error(
-                                    &app_handle,
-                                    &session_id,
-                                    &agent_run.id,
-                                    message.clone(),
+                                emit_stream_event(
+                                    "stream-message-error",
+                                    serde_json::json!({
+                                        "session_id": &session_id,
+                                        "run_id": agent_run.id,
+                                        "error": message.clone(),
+                                    }),
                                 );
                                 let error = openlife_core::agent::AgentRunError {
                                     message: message.clone(),
@@ -5978,7 +3485,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                             stream_error
                         ));
                         full_reply = reply.clone();
-                        let _ = app_handle.emit(
+                        emit_stream_event(
                             "stream-message-chunk",
                             serde_json::json!({
                                 "session_id": &session_id,
@@ -5991,7 +3498,14 @@ async fn start_stream_message<R: tauri::Runtime>(
                             "流式响应初始化失败，非流式重试也失败：{}；重试错误：{}",
                             stream_error, fallback_error
                         );
-                        emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
+                        emit_stream_event(
+                            "stream-message-error",
+                            serde_json::json!({
+                                "session_id": &session_id,
+                                "run_id": agent_run.id,
+                                "error": message.clone(),
+                            }),
+                        );
                         let error = openlife_core::agent::AgentRunError {
                             message: message.clone(),
                             phase: "stream".to_string(),
@@ -6026,7 +3540,7 @@ async fn start_stream_message<R: tauri::Runtime>(
                         stream_error
                     ));
                     full_reply = reply.clone();
-                    let _ = app_handle.emit(
+                    emit_stream_event(
                         "stream-message-chunk",
                         serde_json::json!({
                             "session_id": &session_id,
@@ -6039,7 +3553,14 @@ async fn start_stream_message<R: tauri::Runtime>(
                         "流式响应为空，非流式重试也失败：{}；重试错误：{}",
                         stream_error, fallback_error
                     );
-                    emit_stream_error(&app_handle, &session_id, &agent_run.id, message.clone());
+                    emit_stream_event(
+                        "stream-message-error",
+                        serde_json::json!({
+                            "session_id": &session_id,
+                            "run_id": agent_run.id,
+                            "error": message.clone(),
+                        }),
+                    );
                     let error = openlife_core::agent::AgentRunError {
                         message: message.clone(),
                         phase: "stream".to_string(),
@@ -6095,12 +3616,12 @@ async fn start_stream_message<R: tauri::Runtime>(
         &mut reasoning_trace,
         &mut agent_run,
         &life_model,
-        &state,
+        state,
     )
     .await
     {
         log::warn!("[Stream] finalize_chat_agent_run failed: {}", e);
-        let _ = app_handle.emit(
+        emit_stream_event(
             "stream-message-error",
             serde_json::json!({
                 "session_id": &session_id,
@@ -6114,7 +3635,7 @@ async fn start_stream_message<R: tauri::Runtime>(
     if legacy_fallback_used {
         execution_transcript.extend(
             append_main_chat_agent_transcript(
-                &state,
+                state,
                 main_chat_agent_turn
                     .decision
                     .agent_task_session_id
@@ -6133,7 +3654,7 @@ async fn start_stream_message<R: tauri::Runtime>(
     }
     execution_transcript.extend(
         append_main_chat_agent_transcript(
-            &state,
+            state,
             main_chat_agent_turn
                 .decision
                 .agent_task_session_id
@@ -6148,7 +3669,7 @@ async fn start_stream_message<R: tauri::Runtime>(
         .await,
     );
 
-    let _ = app_handle.emit(
+    emit_stream_event(
         "stream-message-done",
         serde_json::json!({
             "session_id": &session_id,
@@ -6163,838 +3684,6 @@ async fn start_stream_message<R: tauri::Runtime>(
     );
 
     Ok(())
-}
-
-#[tauri::command]
-async fn get_main_chat_agent_task_state(
-    task_session_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTaskState, String> {
-    load_main_chat_agent_task_state(&task_session_id, &state).await
-}
-
-#[tauri::command]
-async fn resume_main_chat_agent_task(
-    task_session_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTaskState, String> {
-    let store_arc = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat task session store not available".to_string())?;
-    let session = {
-        let store = store_arc.lock().await;
-        store
-            .load_session(&task_session_id)
-            .map_err(|err| format!("load Main Chat task before resume failed: {err}"))?
-    };
-    let actions = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
-        let queue = queue_arc.lock().await;
-        queue
-            .list_for_session(&task_session_id)
-            .map_err(|err| format!("load Main Chat actions before resume failed: {err}"))?
-    } else {
-        Vec::new()
-    };
-    let resume_decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_task_resume(
-        session.as_ref(),
-        &actions,
-    );
-    if !resume_decision.allowed {
-        return Err(format!(
-            "resume Main Chat task rejected: {}",
-            resume_decision.reason_code
-        ));
-    }
-
-    if resume_decision.remain_waiting_permission {
-        if let Some(session_ref) = session.as_ref() {
-            if let Some(action_ref) = actions
-                .iter()
-                .find(|action| action.status == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission)
-            {
-                if main_chat_pending_action_permission_ready_for_resume(
-                    &state,
-                    session_ref,
-                    action_ref,
-                )
-                .await?
-                {
-                    append_main_chat_agent_transcript(
-                        &state,
-                        Some(&task_session_id),
-                        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
-                        "Task resume is replaying a pending action after accepted ToolPermission.",
-                        serde_json::json!({
-                            "actionId": action_ref.id,
-                            "resumeRequested": true,
-                            "automaticResumeReplayStarted": true,
-                            "directWritesExecuted": false,
-                        }),
-                    )
-                    .await;
-                    replay_main_chat_agent_action(
-                        &state,
-                        &task_session_id,
-                        &action_ref.id,
-                        session_ref,
-                        action_ref,
-                    )
-                    .await?;
-                    mark_main_chat_action_resume_replay_metadata(&state, &action_ref.id).await?;
-                    append_main_chat_agent_transcript(
-                        &state,
-                        Some(&task_session_id),
-                        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Observation,
-                        "Task resume replay completed through the governed executor.",
-                        serde_json::json!({
-                            "actionId": action_ref.id,
-                            "resumeRequested": true,
-                            "automaticResumeReplayCompleted": true,
-                            "directWritesExecuted": false,
-                        }),
-                    )
-                    .await;
-                    return load_main_chat_agent_task_state(&task_session_id, &state).await;
-                }
-            }
-        }
-        let store = store_arc.lock().await;
-        store
-            .mark_waiting_permission(&task_session_id)
-            .map_err(|err| format!("preserve Main Chat permission blocker failed: {err}"))?;
-        drop(store);
-        append_main_chat_agent_transcript(
-            &state,
-            Some(&task_session_id),
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
-            "Task resume was requested but pending permission blockers remain.",
-            serde_json::json!({
-                "resumeRequested": true,
-                "resumeBlockedByPendingPermission": true,
-                "resumeReasonCode": resume_decision.reason_code,
-                "pendingPermissionCount": resume_decision.pending_permission_count,
-                "pendingBlockerCount": resume_decision.pending_blocker_count,
-                "directWritesExecuted": false,
-            }),
-        )
-        .await;
-        return load_main_chat_agent_task_state(&task_session_id, &state).await;
-    }
-
-    let store = store_arc.lock().await;
-    store
-        .resume_session(&task_session_id)
-        .map_err(|err| format!("resume Main Chat task failed: {err}"))?;
-    drop(store);
-    append_main_chat_agent_transcript(
-        &state,
-        Some(&task_session_id),
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
-        "Task was resumed from Main Chat.",
-        serde_json::json!({
-            "resumeRequested": true,
-            "resumeReasonCode": resume_decision.reason_code,
-            "resumeBlockedByPendingPermission": false,
-            "directWritesExecuted": false,
-        }),
-    )
-    .await;
-    load_main_chat_agent_task_state(&task_session_id, &state).await
-}
-
-async fn main_chat_pending_action_permission_ready_for_resume(
-    state: &State<'_, Arc<AppState>>,
-    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
-    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
-) -> Result<bool, String> {
-    use openlife_core::agent::main_chat_agent_v1::{ExecutionQueueStatus, MainChatAgentStrategy};
-
-    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution
-        || action.status != ExecutionQueueStatus::PendingPermission
-        || !openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
-            &action.action.action_type,
-        )
-    {
-        return Ok(false);
-    }
-    if !main_chat_pending_action_has_accepted_tool_permission_proposal(state, action).await? {
-        return Ok(false);
-    }
-
-    let plan = build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)?;
-    if plan.queue_action_type != action.action.action_type {
-        return Ok(false);
-    }
-
-    let (tool_name, source, risk_level, action_type, capabilities) = {
-        let registry = state.mcp_registry.lock().await;
-        let resolution = resolve_main_chat_mcp_read_target(&registry, &plan);
-        if resolution.blocker_reason.is_some() {
-            return Ok(false);
-        }
-        let Some(manifest) = registry.list_manifests().into_iter().find(|manifest| {
-            manifest.name == resolution.target || manifest.id == resolution.target
-        }) else {
-            return Ok(false);
-        };
-        (
-            manifest.name.clone(),
-            openlife_core::agent::action_executor::helpers::canonical_tool_source(&manifest),
-            manifest.risk_level.clone(),
-            manifest.action_type.clone(),
-            manifest.capabilities.clone(),
-        )
-    };
-
-    let decision = {
-        let permission_store = state.tool_permission_store.lock().await;
-        permission_store
-            .peek(
-                &tool_name,
-                &source,
-                &risk_level,
-                &action_type,
-                &capabilities,
-            )
-            .map_err(|err| format!("peek ToolPermission for resume failed: {err}"))?
-    };
-
-    Ok(decision.allowed && decision.policy_id.is_some())
-}
-
-async fn main_chat_pending_action_has_accepted_tool_permission_proposal(
-    state: &State<'_, Arc<AppState>>,
-    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
-) -> Result<bool, String> {
-    let proposal_ids = main_chat_action_proposal_ids(action);
-    if proposal_ids.is_empty() {
-        return Ok(false);
-    }
-    let Some(ref proposal_store_arc) = state.proposal_store else {
-        return Ok(false);
-    };
-    let proposal_store = proposal_store_arc.lock().await;
-    for proposal_id in proposal_ids {
-        let proposal = proposal_store
-            .get_proposal(&proposal_id)
-            .map_err(|err| format!("load ToolPermission proposal for resume failed: {err}"))?;
-        if proposal.is_some_and(|proposal| {
-            proposal.proposal_type == openlife_core::agent::ProposalType::ToolPermission
-                && proposal.status == openlife_core::agent::ProposalStatus::Accepted
-        }) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn main_chat_action_proposal_ids(
-    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
-) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(metadata) = action.observation_metadata.as_ref() {
-        collect_main_chat_proposal_ids(metadata, &mut ids);
-    }
-    ids.sort();
-    ids.dedup();
-    ids
-}
-
-fn collect_main_chat_proposal_ids(value: &serde_json::Value, ids: &mut Vec<String>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (key, value) in map {
-                if matches!(key.as_str(), "proposalId" | "proposal_id") {
-                    if let Some(id) = value.as_str() {
-                        ids.push(id.to_string());
-                    }
-                }
-                collect_main_chat_proposal_ids(value, ids);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                collect_main_chat_proposal_ids(value, ids);
-            }
-        }
-        _ => {}
-    }
-}
-
-async fn mark_main_chat_action_resume_replay_metadata(
-    state: &State<'_, Arc<AppState>>,
-    action_id: &str,
-) -> Result<(), String> {
-    let queue_arc = state
-        .main_chat_action_queue_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat action queue store not available".to_string())?;
-    let queue = queue_arc.lock().await;
-    let action = queue
-        .load(action_id)
-        .map_err(|err| format!("load Main Chat action after resume replay failed: {err}"))?
-        .ok_or_else(|| format!("Main Chat action not found after resume replay: {action_id}"))?;
-    let mut metadata = action
-        .observation_metadata
-        .unwrap_or_else(|| serde_json::json!({}));
-    if let Some(object) = metadata.as_object_mut() {
-        object.insert(
-            "automaticResumeReplayCompleted".into(),
-            serde_json::json!(
-                action.status
-                    == openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
-            ),
-        );
-        object.insert("resumeRequested".into(), serde_json::json!(true));
-        object.insert("directWritesExecuted".into(), serde_json::json!(false));
-    }
-    queue
-        .transition(&action.id, action.status, Some(metadata))
-        .map_err(|err| format!("mark Main Chat resume replay metadata failed: {err}"))?;
-    Ok(())
-}
-
-#[tauri::command]
-async fn cancel_main_chat_agent_task(
-    task_session_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTaskState, String> {
-    let store_arc = state
-        .main_chat_agent_session_store
-        .as_ref()
-        .ok_or_else(|| "Main Chat task session store not available".to_string())?;
-    let store = store_arc.lock().await;
-    store
-        .cancel_session(&task_session_id, "Cancelled from Main Chat controls.")
-        .map_err(|err| format!("cancel Main Chat task failed: {err}"))?;
-    drop(store);
-    cancel_main_chat_nonterminal_actions(&state, &task_session_id).await?;
-    append_main_chat_agent_transcript(
-        &state,
-        Some(&task_session_id),
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
-        "Task and queued actions were cancelled from Main Chat.",
-        serde_json::json!({
-            "cancelRequested": true,
-            "queuedActionsCancelled": true,
-            "directWritesExecuted": false,
-        }),
-    )
-    .await;
-    load_main_chat_agent_task_state(&task_session_id, &state).await
-}
-
-async fn cancel_main_chat_nonterminal_actions(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-) -> Result<(), String> {
-    let Some(ref queue_arc) = state.main_chat_action_queue_store else {
-        return Ok(());
-    };
-    let actions = {
-        let queue = queue_arc.lock().await;
-        queue
-            .list_for_session(task_session_id)
-            .map_err(|err| format!("list Main Chat actions before cancel failed: {err}"))?
-    };
-    for action in actions {
-        if matches!(
-            action.status,
-            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
-                | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Cancelled
-        ) {
-            continue;
-        }
-        transition_main_chat_action(
-            state,
-            &action.id,
-            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Cancelled,
-            Some(serde_json::json!({
-                "cancelRequested": true,
-                "taskSessionId": task_session_id,
-                "previousStatus": action.status.as_str(),
-                "directWritesExecuted": false,
-            })),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn retry_main_chat_agent_action(
-    task_session_id: String,
-    action_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTaskState, String> {
-    let session = if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        store
-            .load_session(&task_session_id)
-            .map_err(|err| format!("load Main Chat task failed: {err}"))?
-    } else {
-        None
-    };
-    let action = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
-        let queue = queue_arc.lock().await;
-        queue
-            .load(&action_id)
-            .map_err(|err| format!("load Main Chat action failed: {err}"))?
-    } else {
-        None
-    };
-    let retry_decision = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_action_retry(
-        session.as_ref(),
-        action.as_ref(),
-    );
-    if !retry_decision.allowed {
-        return Err(format!(
-            "retry Main Chat action rejected: {}",
-            retry_decision.reason_code
-        ));
-    }
-
-    transition_main_chat_action(
-        &state,
-        &action_id,
-        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Retrying,
-        Some(serde_json::json!({ "retryRequested": true })),
-    )
-    .await?;
-    if retry_decision.manual_blocker_required {
-        let manual_blocker = format!("manual_retry_replay_required:{action_id}");
-        transition_main_chat_action(
-            &state,
-            &action_id,
-            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission,
-            Some(serde_json::json!({
-                "retryRequested": true,
-                "manualReplayRequired": true,
-                "manualBlocker": manual_blocker,
-                "automaticExecution": false,
-            })),
-        )
-        .await?;
-        if let Some(ref store_arc) = state.main_chat_agent_session_store {
-            let store = store_arc.lock().await;
-            if let Some(current) = session.as_ref() {
-                if matches!(
-                    current.status,
-                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-                        | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-                ) {
-                    store
-                        .resume_session(&task_session_id)
-                        .map_err(|err| format!("resume task before retry blocker failed: {err}"))?;
-                }
-            }
-            store
-                .set_pending_blockers(&task_session_id, vec![manual_blocker.clone()])
-                .map_err(|err| format!("set retry manual blocker failed: {err}"))?;
-            store
-                .mark_waiting_permission(&task_session_id)
-                .map_err(|err| format!("mark retry manual blocker pending failed: {err}"))?;
-        }
-        append_main_chat_agent_transcript(
-            &state,
-            Some(&task_session_id),
-            openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
-            "Action retry requires manual replay because the failed action has no safe replay payload.",
-            serde_json::json!({
-                "actionId": action_id,
-                "retryRequested": true,
-                "manualReplayRequired": true,
-                "manualBlocker": manual_blocker,
-                "automaticExecution": false,
-            }),
-        )
-        .await;
-    } else if let (Some(session_ref), Some(action_ref)) = (session.as_ref(), action.as_ref()) {
-        if let Err(error) = replay_main_chat_agent_action(
-            &state,
-            &task_session_id,
-            &action_id,
-            session_ref,
-            action_ref,
-        )
-        .await
-        {
-            let manual_blocker = format!("automatic_retry_replay_blocked:{action_id}");
-            transition_main_chat_action(
-                &state,
-                &action_id,
-                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission,
-                Some(serde_json::json!({
-                    "retryRequested": true,
-                    "manualReplayRequired": true,
-                    "manualBlocker": manual_blocker,
-                    "automaticExecution": false,
-                    "automaticReplayBlocked": true,
-                    "retryReplayErrorDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
-                        &serde_json::json!({ "error": error.to_string() })
-                    ),
-                })),
-            )
-            .await?;
-            if let Some(ref store_arc) = state.main_chat_agent_session_store {
-                let store = store_arc.lock().await;
-                if matches!(
-                    session_ref.status,
-                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-                        | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-                ) {
-                    store
-                        .resume_session(&task_session_id)
-                        .map_err(|err| format!("resume task before retry blocker failed: {err}"))?;
-                }
-                store
-                    .set_pending_blockers(&task_session_id, vec![manual_blocker.clone()])
-                    .map_err(|err| format!("set retry automatic blocker failed: {err}"))?;
-                store
-                    .mark_waiting_permission(&task_session_id)
-                    .map_err(|err| format!("mark retry automatic blocker pending failed: {err}"))?;
-            }
-            append_main_chat_agent_transcript(
-                &state,
-                Some(&task_session_id),
-                openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::PermissionRequest,
-                "Automatic action retry replay could not be safely reconstructed and now requires manual review.",
-                serde_json::json!({
-                    "actionId": action_id,
-                    "retryRequested": true,
-                    "manualReplayRequired": true,
-                    "manualBlocker": manual_blocker,
-                    "automaticExecution": false,
-                    "automaticReplayBlocked": true,
-                }),
-            )
-            .await;
-        }
-    }
-    append_main_chat_agent_transcript(
-        &state,
-        Some(&task_session_id),
-        openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntryKind::Retry,
-        "Action retry was requested from Main Chat.",
-        serde_json::json!({
-            "actionId": action_id,
-            "retryRequested": true,
-            "retryReasonCode": retry_decision.reason_code,
-            "manualReplayRequired": retry_decision.manual_blocker_required,
-            "automaticExecution": false,
-        }),
-    )
-    .await;
-    load_main_chat_agent_task_state(&task_session_id, &state).await
-}
-
-async fn replay_main_chat_agent_action(
-    state: &State<'_, Arc<AppState>>,
-    task_session_id: &str,
-    action_id: &str,
-    session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
-    action: &openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction,
-) -> Result<(), String> {
-    use openlife_core::agent::main_chat_agent_v1::{
-        AgentIngress, AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntryKind,
-        MainChatAgentStrategy,
-    };
-
-    if session.selected_strategy != MainChatAgentStrategy::ReActToolExecution {
-        return Err("retry_replay_strategy_not_react".into());
-    }
-    if !openlife_core::agent::main_chat_agent_v1::main_chat_action_type_supports_automatic_retry(
-        &action.action.action_type,
-    ) {
-        return Err("retry_replay_action_type_not_supported".into());
-    }
-
-    let action_plan =
-        build_main_chat_react_action_plan(&session.chat_session_id, &session.user_goal)?;
-    if action_plan.queue_action_type != action.action.action_type {
-        return Err("retry_replay_plan_mismatch".into());
-    }
-
-    if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        if matches!(
-            session.status,
-            AgentTaskSessionStatus::WaitingPermission
-                | AgentTaskSessionStatus::Blocked
-                | AgentTaskSessionStatus::Failed
-        ) {
-            store
-                .resume_session(task_session_id)
-                .map_err(|err| format!("resume task before automatic retry failed: {err}"))?;
-        }
-        store
-            .set_pending_blockers(task_session_id, Vec::new())
-            .map_err(|err| format!("clear retry blockers failed: {err}"))?;
-    }
-
-    transition_main_chat_action(
-        state,
-        action_id,
-        ExecutionQueueStatus::Executing,
-        Some(serde_json::json!({
-            "retryRequested": true,
-            "automaticExecution": true,
-            "automaticReplayStarted": true,
-            "directWritesExecuted": false,
-        })),
-    )
-    .await?;
-
-    let local_only_required = AgentIngress::default()
-        .decide(
-            &session.chat_session_id,
-            &session.user_goal,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        )
-        .privacy_risk
-        .local_only_required;
-
-    let observation = match execute_main_chat_react_action_with_executor(
-        state,
-        &action_plan,
-        local_only_required,
-    )
-    .await
-    {
-        Ok(observation) => observation,
-        Err(error) => {
-            let metadata = serde_json::json!({
-                "retryRequested": true,
-                "automaticExecution": true,
-                "automaticReplayFailed": true,
-                "retryReplayErrorDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(
-                    &serde_json::json!({ "error": error.to_string() })
-                ),
-                "directWritesExecuted": false,
-            });
-            fail_main_chat_action(
-                state,
-                action_id,
-                "automatic retry replay failed",
-                metadata.clone(),
-            )
-            .await?;
-            if let Some(ref store_arc) = state.main_chat_agent_session_store {
-                let store = store_arc.lock().await;
-                store
-                    .fail_session(task_session_id, "Automatic retry replay failed.")
-                    .map_err(|err| format!("mark automatic retry failed failed: {err}"))?;
-            }
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::Error,
-                "Automatic retry replay failed through the governed executor.",
-                metadata,
-            )
-            .await;
-            return Ok(());
-        }
-    };
-
-    let mut retry_metadata = observation.metadata.clone();
-    if let Some(object) = retry_metadata.as_object_mut() {
-        object.insert("retryRequested".into(), serde_json::json!(true));
-        object.insert("automaticExecution".into(), serde_json::json!(true));
-        object.insert("directWritesExecuted".into(), serde_json::json!(false));
-    }
-
-    match observation.executor_status {
-        openlife_core::agent::ActionExecutionStatus::Succeeded => {
-            if let Some(object) = retry_metadata.as_object_mut() {
-                object.insert("automaticReplayCompleted".into(), serde_json::json!(true));
-            }
-            transition_main_chat_action(
-                state,
-                action_id,
-                ExecutionQueueStatus::Observed,
-                Some(retry_metadata.clone()),
-            )
-            .await?;
-            transition_main_chat_action(state, action_id, ExecutionQueueStatus::Completed, None)
-                .await?;
-            if let Some(ref store_arc) = state.main_chat_agent_session_store {
-                let store = store_arc.lock().await;
-                store
-                    .set_pending_blockers(task_session_id, Vec::new())
-                    .map_err(|err| format!("clear retry blockers after replay failed: {err}"))?;
-                store
-                    .complete_session(task_session_id, "Automatic retry replay completed.")
-                    .map_err(|err| format!("complete task after automatic retry failed: {err}"))?;
-            }
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::Observation,
-                "Automatic retry replay completed through the governed executor.",
-                retry_metadata,
-            )
-            .await;
-        }
-        openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
-            if let Some(object) = retry_metadata.as_object_mut() {
-                object.insert(
-                    "automaticReplayNeedsPermission".into(),
-                    serde_json::json!(true),
-                );
-            }
-            transition_main_chat_action(
-                state,
-                action_id,
-                ExecutionQueueStatus::PendingPermission,
-                Some(retry_metadata.clone()),
-            )
-            .await?;
-            let blocker = observation
-                .blocker_reason
-                .clone()
-                .unwrap_or_else(|| "tool_permission_required".into());
-            if let Some(ref store_arc) = state.main_chat_agent_session_store {
-                let store = store_arc.lock().await;
-                store
-                    .set_pending_blockers(task_session_id, vec![blocker.clone()])
-                    .map_err(|err| format!("set retry permission blocker failed: {err}"))?;
-                store
-                    .mark_waiting_permission(task_session_id)
-                    .map_err(|err| format!("mark retry permission pending failed: {err}"))?;
-            }
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::PermissionRequest,
-                "Automatic retry replay needs permission before it can continue.",
-                retry_metadata,
-            )
-            .await;
-        }
-        openlife_core::agent::ActionExecutionStatus::Blocked
-        | openlife_core::agent::ActionExecutionStatus::Failed => {
-            if let Some(object) = retry_metadata.as_object_mut() {
-                object.insert("automaticReplayFailed".into(), serde_json::json!(true));
-            }
-            let blocker = observation
-                .blocker_reason
-                .clone()
-                .unwrap_or_else(|| "automatic_retry_replay_failed".into());
-            fail_main_chat_action(state, action_id, &blocker, retry_metadata.clone()).await?;
-            if let Some(ref store_arc) = state.main_chat_agent_session_store {
-                let store = store_arc.lock().await;
-                if observation.executor_status
-                    == openlife_core::agent::ActionExecutionStatus::Blocked
-                {
-                    store
-                        .block_session(task_session_id, "Automatic retry replay was blocked.")
-                        .map_err(|err| format!("mark automatic retry blocked failed: {err}"))?;
-                } else {
-                    store
-                        .fail_session(task_session_id, "Automatic retry replay failed.")
-                        .map_err(|err| format!("mark automatic retry failed failed: {err}"))?;
-                }
-            }
-            append_main_chat_agent_transcript(
-                state,
-                Some(task_session_id),
-                ExecutionTranscriptEntryKind::Error,
-                "Automatic retry replay did not complete.",
-                retry_metadata,
-            )
-            .await;
-        }
-    }
-
-    Ok(())
-}
-
-async fn load_main_chat_agent_task_state(
-    task_session_id: &str,
-    state: &State<'_, Arc<AppState>>,
-) -> Result<MainChatAgentTaskState, String> {
-    let session = if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        store
-            .load_session(task_session_id)
-            .map_err(|err| format!("load Main Chat task failed: {err}"))?
-    } else {
-        None
-    };
-    let transcript = if let Some(ref store_arc) = state.main_chat_agent_session_store {
-        let store = store_arc.lock().await;
-        store
-            .list_transcript_entries(task_session_id)
-            .map_err(|err| format!("load Main Chat transcript failed: {err}"))?
-    } else {
-        Vec::new()
-    };
-    let actions = if let Some(ref queue_arc) = state.main_chat_action_queue_store {
-        let queue = queue_arc.lock().await;
-        queue
-            .list_for_session(task_session_id)
-            .map_err(|err| format!("load Main Chat actions failed: {err}"))?
-    } else {
-        Vec::new()
-    };
-    let pending_approval_count = session
-        .as_ref()
-        .map(|session| session.pending_blockers.len())
-        .unwrap_or(0)
-        + actions
-            .iter()
-            .filter(|action| {
-                matches!(
-                    action.status,
-                    openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-                )
-            })
-            .count();
-    let active_tool_count = actions
-        .iter()
-        .filter(|action| {
-            matches!(
-                action.status,
-                openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Executing
-                    | openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Retrying
-            )
-        })
-        .count();
-    let can_resume = session.as_ref().is_some_and(|session| {
-        matches!(
-            session.status,
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-        )
-    });
-    let can_cancel = session.as_ref().is_some_and(|session| {
-        !matches!(
-            session.status,
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled
-                | openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed
-        )
-    });
-    let can_retry = actions.iter().any(|action| {
-        matches!(
-            action.status,
-            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed
-        )
-    });
-
-    Ok(MainChatAgentTaskState {
-        session,
-        actions,
-        transcript,
-        pending_approval_count,
-        active_tool_count,
-        can_resume,
-        can_cancel,
-        can_retry,
-    })
 }
 
 #[tauri::command]
@@ -7221,6 +3910,7 @@ pub fn run() {
             replay_agent_action,
             run_multi_strategy_agent_preview,
             run_main_chat_agent_execution_v1_eval_gate,
+            run_main_chat_agent_execution_v1_final_acceptance_gate,
             get_runtime_strategy_registry_status,
             get_react_beta_execution_status,
             create_plan_execute_session,
@@ -7414,6 +4104,22 @@ mod legacy_write_convergence_tests;
 #[cfg(test)]
 mod hs_runtime_tests {
     use super::*;
+    use crate::main_chat_command_surface_eval::{
+        MainChatCommandSurfaceEvalEntryPoint, MainChatCommandSurfaceEvalEvidence,
+        MainChatCommandSurfaceEvalReport, MainChatCommandSurfaceEvalScenario,
+        MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES,
+    };
+    use crate::main_chat_final_gate::{
+        main_chat_live_provider_acceptance_evidence, main_chat_live_provider_report_blockers,
+        MainChatAgentExecutionV1FinalGateReport, MainChatLiveProviderEvalHarnessReport,
+        MainChatLiveProviderEvalHarnessScenario,
+    };
+    use crate::main_chat_live_provider_harness::{
+        run_main_chat_live_provider_eval_harness, MainChatLiveProviderEvalHarnessInput,
+    };
+    use crate::main_chat_react_tool_selection::{
+        build_main_chat_react_agent_loop_messages, main_chat_react_agent_loop_execution_plan,
+    };
 
     #[test]
     fn default_chat_adapter_cutover_route_guard_defaults_to_disabled_legacy_stream() {
@@ -9838,8 +6544,8 @@ mod hs_runtime_tests {
             .find("async fn start_stream_message<R: tauri::Runtime>(")
             .expect("stream command exists");
         let next_command = source
-            .find("async fn get_main_chat_agent_task_state(")
-            .expect("stream command should be followed by task-state command");
+            .find("async fn execute_tool_call(")
+            .expect("stream command should be followed by tool execution command");
         let stream_body = &source[stream_start..next_command];
         let strategy_attempt = stream_body
             .find("try_run_main_chat_agent_strategy(")
@@ -10024,10 +6730,15 @@ mod hs_runtime_tests {
 
     #[test]
     fn retry_main_chat_action_enters_manual_blocker_when_not_replayable() {
-        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-        let retry_body =
-            extract_rust_function_body(&source, "async fn retry_main_chat_agent_action(");
+        let module_path = format!(
+            "{}/src/main_chat_task_controls.rs",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(module_path).expect("read task-control module");
+        let retry_body = extract_rust_function_body(
+            &source,
+            "pub(crate) async fn retry_main_chat_agent_action(",
+        );
 
         assert!(
             retry_body.contains("manual_blocker_required"),
@@ -10045,10 +6756,15 @@ mod hs_runtime_tests {
 
     #[test]
     fn retry_main_chat_action_replays_replayable_action_instead_of_state_only() {
-        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-        let retry_body =
-            extract_rust_function_body(&source, "async fn retry_main_chat_agent_action(");
+        let module_path = format!(
+            "{}/src/main_chat_task_controls.rs",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(module_path).expect("read task-control module");
+        let retry_body = extract_rust_function_body(
+            &source,
+            "pub(crate) async fn retry_main_chat_agent_action(",
+        );
 
         assert!(
             retry_body.contains("replay_main_chat_agent_action("),
@@ -10062,10 +6778,13 @@ mod hs_runtime_tests {
 
     #[test]
     fn resume_main_chat_task_preserves_pending_permission_blocker_instead_of_state_only() {
-        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path = format!(
+            "{}/src/main_chat_task_controls.rs",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(module_path).expect("read task-control module");
         let resume_body =
-            extract_rust_function_body(&source, "async fn resume_main_chat_agent_task(");
+            extract_rust_function_body(&source, "pub(crate) async fn resume_main_chat_agent_task(");
 
         assert!(
             resume_body.contains("evaluate_main_chat_task_resume("),
@@ -10089,7 +6808,7 @@ mod hs_runtime_tests {
         };
         use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![resume_main_chat_agent_task])
@@ -10258,7 +6977,7 @@ mod hs_runtime_tests {
             ExecutionQueueStatus, MainChatAgentStrategy,
         };
 
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![cancel_main_chat_agent_task])
@@ -10391,11 +7110,13 @@ mod hs_runtime_tests {
 
     #[test]
     fn main_chat_mcp_read_resolves_registered_tool_instead_of_wrapper_only() {
-        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_react_execution.rs");
+        let source =
+            std::fs::read_to_string(module_path).expect("read src/main_chat_react_execution.rs");
         let executor_body = extract_rust_function_body(
             &source,
-            "async fn execute_main_chat_react_action_with_executor(",
+            "pub(crate) async fn execute_main_chat_react_action_with_executor(",
         );
 
         assert!(
@@ -10414,13 +7135,17 @@ mod hs_runtime_tests {
         let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
         let strategy_body =
             extract_rust_function_body(&source, "async fn try_run_main_chat_agent_strategy(");
+        let runtime_module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
+        let runtime_source =
+            std::fs::read_to_string(runtime_module_path).expect("read main_chat_react_runtime.rs");
 
         assert!(
             strategy_body.contains("try_run_main_chat_react_agent_loop("),
             "ReActToolExecution must attempt the governed AgentLoop before single-step fallback"
         );
         assert!(
-            source.contains("agentLoopAttempted"),
+            runtime_source.contains("agentLoopAttempted"),
             "Main Chat ReAct AgentLoop attempt/fallback must be visible in transcript metadata"
         );
     }
@@ -10461,6 +7186,321 @@ mod hs_runtime_tests {
             !guidance.content.contains("\"query\""),
             "plan guidance must not include structured executor arguments"
         );
+    }
+
+    #[test]
+    fn main_chat_react_agent_loop_guidance_declares_governed_tool_candidate_set() {
+        let plan = build_main_chat_react_action_plan(
+            "session-candidate-guidance",
+            "what did i ask yesterday about API keys?",
+        )
+        .expect("build session search plan");
+        let original_messages = vec![ChatMessage {
+            role: "user".into(),
+            content: "what did i ask yesterday about API keys?".into(),
+        }];
+
+        let guided_messages = build_main_chat_react_agent_loop_messages(&original_messages, &plan);
+        let guidance = guided_messages
+            .first()
+            .expect("tool candidate guidance should be prepended");
+
+        assert!(
+            guidance.content.contains("allowedToolCandidates="),
+            "AgentLoop guidance must expose the governed candidate set, not only a prose planned action"
+        );
+        assert!(
+            guidance.content.contains("candidateCount=1"),
+            "single-candidate turns must still declare candidate count for auditability"
+        );
+        assert!(guidance.content.contains("candidateId=session.search"));
+        assert!(guidance.content.contains("candidateTarget=session.search"));
+        assert!(guidance.content.contains("toolsetAllowlistRequired=true"));
+        assert!(
+            !guidance.content.contains("what did i ask yesterday"),
+            "candidate guidance must not duplicate raw user text"
+        );
+        assert!(
+            !guidance.content.contains("\"query\""),
+            "candidate guidance must not include structured executor arguments"
+        );
+    }
+
+    #[test]
+    fn main_chat_react_agent_loop_execution_plan_can_declare_multiple_governed_mcp_candidates() {
+        let registry = openlife_core::mcp::McpRegistry::new();
+        let plan = build_main_chat_react_action_plan(
+            "session-multi-candidate-guidance",
+            "Use an mcp read-only utility tool now.",
+        )
+        .expect("build generic MCP read plan");
+
+        let agent_loop_plan = main_chat_react_agent_loop_execution_plan(&registry, &plan);
+        let candidate_ids = agent_loop_plan.tool_candidate_ids();
+        let contract = agent_loop_plan.tool_candidate_contract();
+
+        assert!(
+            agent_loop_plan.tool_candidate_count() >= 2,
+            "generic MCP reads must expose a governed manifest candidate set, not only the wrapper"
+        );
+        assert!(
+            candidate_ids
+                .iter()
+                .any(|candidate| candidate == "builtin_echo"),
+            "candidate set should include the registered read-only builtin echo manifest"
+        );
+        assert!(
+            candidate_ids
+                .iter()
+                .any(|candidate| candidate == "tool.list_available"),
+            "candidate set should include another registered read-only manifest for model selection"
+        );
+        assert!(contract.contains("allowedToolCandidates="));
+        assert!(contract.contains("candidateId=builtin_echo"));
+        assert!(contract.contains("candidateTarget=builtin_echo"));
+        assert!(contract.contains("candidateId=tool.list_available"));
+        assert!(contract.contains("candidateTarget=tool.list_available"));
+        assert!(
+            contract.contains(&format!(
+                "candidateCount={}",
+                agent_loop_plan.tool_candidate_count()
+            )),
+            "candidate contract must publish the real governed candidate count"
+        );
+        assert!(
+            !contract.contains("candidateCount=1;"),
+            "multi-candidate MCP plans must not retain singleton audit metadata"
+        );
+    }
+
+    #[test]
+    fn main_chat_react_agent_loop_ranks_mcp_candidates_by_manifest_capability_match() {
+        let mut registry = openlife_core::mcp::McpRegistry::new();
+        registry.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                id: "zzz_calendar.read".into(),
+                name: "zzz_calendar.read".into(),
+                description: "Read calendar availability without writes.".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+                permission_level: "low".into(),
+                risk_level: "low".into(),
+                version: "1.0.0".into(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["read".into(), "calendar".into()],
+                requires_confirmation: false,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec!["calendar".into()],
+            },
+            Box::new(|_| Ok("metadata-safe calendar read placeholder".into())),
+        );
+        let plan = build_main_chat_react_action_plan(
+            "session-capability-ranked-candidate",
+            "Use an MCP read-only calendar tool now.",
+        )
+        .expect("build generic MCP read plan");
+
+        let agent_loop_plan = main_chat_react_agent_loop_execution_plan(&registry, &plan);
+        let candidate_ids = agent_loop_plan.tool_candidate_ids();
+        let contract = agent_loop_plan.tool_candidate_contract();
+
+        assert!(
+            candidate_ids
+                .first()
+                .is_some_and(|candidate| candidate.contains("calendar")),
+            "generic MCP candidate selection should rank manifest capability/name matches ahead of generic utility reads"
+        );
+        assert!(
+            contract.contains("candidateRank=1"),
+            "candidate contract must expose deterministic rank evidence"
+        );
+        assert!(
+            contract.contains("candidateSource="),
+            "candidate contract must expose manifest source evidence"
+        );
+        assert!(
+            contract.contains("capabilitiesDigest="),
+            "candidate contract must expose metadata-safe capability evidence"
+        );
+        assert!(
+            contract.contains("matchReason=capability_or_name_match"),
+            "candidate contract must explain capability/name match ranking without raw prompt text"
+        );
+    }
+
+    #[test]
+    fn main_chat_react_agent_loop_mcp_candidate_set_excludes_high_risk_confirmation_manifests() {
+        let mut registry = openlife_core::mcp::McpRegistry::new();
+        registry.register_builtin(
+            openlife_core::tool_manifest::ToolManifest {
+                id: "dangerous_secret.read".into(),
+                name: "dangerous_secret.read".into(),
+                description: "High-risk secret read should require confirmation.".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+                permission_level: "high".into(),
+                risk_level: "high".into(),
+                version: "1.0.0".into(),
+                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+                capabilities: vec!["read".into()],
+                requires_confirmation: true,
+                enabled: true,
+                declarative_only: false,
+                action_type: "read".into(),
+                tags: vec!["secrets".into()],
+            },
+            Box::new(|_| Ok("metadata-safe secret read placeholder".into())),
+        );
+        let plan = build_main_chat_react_action_plan(
+            "session-high-risk-candidate-filter",
+            "Use an mcp read-only utility tool now.",
+        )
+        .expect("build generic MCP read plan");
+
+        let agent_loop_plan = main_chat_react_agent_loop_execution_plan(&registry, &plan);
+        let candidate_ids = agent_loop_plan.tool_candidate_ids();
+        let contract = agent_loop_plan.tool_candidate_contract();
+
+        assert!(
+            candidate_ids
+                .iter()
+                .any(|candidate| candidate == "builtin_echo"),
+            "safe read candidates must remain available"
+        );
+        assert!(
+            !candidate_ids
+                .iter()
+                .any(|candidate| candidate == "dangerous_secret.read"),
+            "high-risk or confirmation-required read-like manifests must not become model-selectable candidates"
+        );
+        assert!(
+            !contract.contains("candidateId=dangerous_secret.read"),
+            "metadata-safe candidate contract must exclude high-risk read-like manifests"
+        );
+    }
+
+    #[test]
+    fn main_chat_react_tool_selection_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_react_tool_selection.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_react_tool_selection;"),
+            "Main Chat ReAct tool-selection helpers must live in a focused module"
+        );
+        assert!(
+            module_path.is_file(),
+            "Main Chat ReAct tool-selection module file must exist outside lib.rs"
+        );
+        assert!(
+            !source.contains("\npub(crate) struct MainChatReactToolCandidate"),
+            "tool candidate struct should not stay concentrated in lib.rs"
+        );
+        assert!(
+            !source.contains("\npub(crate) struct MainChatReactActionPlan"),
+            "action plan struct should not stay concentrated in lib.rs"
+        );
+        assert!(
+            !source.contains("\nfn main_chat_governed_mcp_read_tool_candidates("),
+            "governed MCP candidate selection should not stay concentrated in lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_hs_runtime_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_hs_runtime.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_hs_runtime;"),
+            "Main Chat HS runtime helpers must live in a focused module"
+        );
+        assert!(
+            module_path.is_file(),
+            "Main Chat HS runtime module file must exist outside lib.rs"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_hs_runtime.rs");
+        assert!(
+            module_source.contains("pub(crate) async fn build_chat_runtime_hs_packet("),
+            "HS packet builder must be reusable outside src/lib.rs"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn classify_hs_policy_topic("),
+            "HS topic classifier must be reusable outside src/lib.rs"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn hs_tool_requirements("),
+            "HS tool requirement classifier must be reusable outside src/lib.rs"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn included_life_model_sections("),
+            "LifeModel section metadata helper must be reusable outside src/lib.rs"
+        );
+        assert!(
+            !source.contains("\npub(crate) async fn build_chat_runtime_hs_packet("),
+            "HS packet builder should not stay concentrated in lib.rs"
+        );
+        assert!(
+            !source.contains("\nfn classify_hs_policy_topic("),
+            "HS topic classifier should not stay concentrated in lib.rs"
+        );
+        assert!(
+            !source.contains("\nfn hs_tool_requirements("),
+            "HS tool requirement classifier should not stay concentrated in lib.rs"
+        );
+        assert!(
+            !source.contains("\nfn included_life_model_sections("),
+            "LifeModel section metadata helper should not stay concentrated in lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_react_agent_loop_configures_tool_allowlist_from_candidate_set() {
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
+        let source = std::fs::read_to_string(module_path).expect("read main_chat_react_runtime.rs");
+        let attempt_body = extract_rust_function_body(
+            &source,
+            "pub(crate) async fn try_run_main_chat_react_agent_loop(",
+        );
+
+        assert!(
+            attempt_body.contains("toolset_allowlist: agent_loop_plan.allowed_tool_targets()"),
+            "AgentLoop config must enforce the governed candidate target set through toolset_allowlist"
+        );
+    }
+
+    #[test]
+    fn main_chat_context_loader_declares_controlled_knowledge_format_surfaces() {
+        let module_path = format!(
+            "{}/src/main_chat_context_loader.rs",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let source = std::fs::read_to_string(module_path)
+            .expect("Main Chat knowledge context loader module should exist");
+
+        for required_surface in [
+            "AGENTS.md",
+            "SOUL.md",
+            "USER.md",
+            "MEMORY.md",
+            "memories/USER.md",
+            "memories/MEMORY.md",
+            "skills/<selected>/SKILL.md",
+        ] {
+            assert!(
+                source.contains(required_surface),
+                "knowledge context loader must declare bounded surface {required_surface}"
+            );
+        }
+        assert!(source.contains("ContextSourceKind::SkillInstruction"));
+        assert!(source.contains("selected_skill_id"));
+        assert!(source.contains("validate_selected_skill_id"));
     }
 
     #[test]
@@ -10822,6 +7862,9 @@ mod hs_runtime_tests {
             "run_main_chat_agent_execution_v1_eval_gate",
             "run_main_chat_agent_execution_v1_eval_gate_with_state",
             "MainChatAgentExecutionV1EvalGateReport",
+            "run_main_chat_agent_execution_v1_final_acceptance_gate",
+            "run_main_chat_agent_execution_v1_final_acceptance_gate_with_state",
+            "MainChatAgentExecutionV1FinalAcceptanceGateCommandReport",
         ];
 
         for forbidden in forbidden_command_surfaces {
@@ -10946,336 +7989,779 @@ mod hs_runtime_tests {
         }
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MainChatLiveProviderEvalHarnessScenario {
-        DirectAnswer,
-        WebAgentLoop,
-        RegisteredMcpAgentLoop,
-        McpToolPermissionProposal,
+    #[test]
+    fn workspace_file_resolver_accepts_explicit_nested_workspace_relative_path() {
+        let (label, path) = main_chat_workspace_file_target("Read plans/README.md").unwrap();
+
+        assert_eq!(label, "plans/README.md");
+        assert!(path.ends_with("plans/README.md"));
     }
 
-    impl MainChatLiveProviderEvalHarnessScenario {
-        fn as_str(self) -> &'static str {
-            match self {
-                MainChatLiveProviderEvalHarnessScenario::DirectAnswer => "direct-answer",
-                MainChatLiveProviderEvalHarnessScenario::WebAgentLoop => "web-agent-loop",
-                MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                    "registered-mcp-agent-loop"
-                }
-                MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                    "mcp-tool-permission-proposal"
-                }
-            }
-        }
+    #[test]
+    fn workspace_file_resolver_blocks_explicit_path_traversal() {
+        let error = main_chat_workspace_file_target("Read ../Cargo.toml").unwrap_err();
 
-        fn prompt(self) -> &'static str {
-            match self {
-                MainChatLiveProviderEvalHarnessScenario::DirectAnswer => {
-                    "Answer in one short sentence: what is this live provider eval proving?"
-                }
-                MainChatLiveProviderEvalHarnessScenario::WebAgentLoop => {
-                    "Please web search OpenLife release notes and use the governed web.search action before answering."
-                }
-                MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                    "Use mcp builtin_echo read-only now and call the governed MCP read action before answering."
-                }
-                MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                    "Use mcp memory.search now and create a governed permission request if the tool requires review."
-                }
-            }
+        assert!(error.contains("outside workspace") || error.contains("path traversal"));
+    }
+
+    fn create_main_chat_knowledge_workspace() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("create knowledge workspace");
+        std::fs::create_dir_all(root.path().join("plans")).expect("create plans dir");
+        std::fs::create_dir_all(root.path().join("memories")).expect("create memories dir");
+        std::fs::create_dir_all(root.path().join("skills/summarize"))
+            .expect("create selected skill dir");
+        std::fs::create_dir_all(root.path().join("skills/other")).expect("create other skill dir");
+        std::fs::write(
+            root.path().join("AGENTS.md"),
+            format!("workspace instruction\n{}", "A".repeat(1600)),
+        )
+        .expect("write AGENTS.md");
+        std::fs::write(root.path().join("SOUL.md"), "bounded soul context").expect("write SOUL.md");
+        std::fs::write(root.path().join("memories/USER.md"), "bounded user context")
+            .expect("write USER.md");
+        std::fs::write(
+            root.path().join("memories/MEMORY.md"),
+            "bounded memory context",
+        )
+        .expect("write MEMORY.md");
+        std::fs::write(
+            root.path().join("skills/summarize/SKILL.md"),
+            "selected summarize skill instructions",
+        )
+        .expect("write selected SKILL.md");
+        std::fs::write(
+            root.path().join("skills/other/SKILL.md"),
+            "unselected skill instructions must not load",
+        )
+        .expect("write other SKILL.md");
+        root
+    }
+
+    #[test]
+    fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
+        let root = create_main_chat_knowledge_workspace();
+        let candidates =
+            crate::main_chat_context_loader::load_workspace_knowledge_context_candidates(
+                root.path(),
+                Some("summarize"),
+            );
+        let source_ids = candidates
+            .iter()
+            .map(|candidate| candidate.source_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(source_ids.contains(&"AGENTS.md"));
+        assert!(source_ids.contains(&"SOUL.md"));
+        assert!(source_ids.contains(&"memories/USER.md"));
+        assert!(source_ids.contains(&"memories/MEMORY.md"));
+        assert!(source_ids.contains(&"skills/summarize/SKILL.md"));
+        assert!(!source_ids.contains(&"skills/other/SKILL.md"));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.content.chars().count() <= 1200));
+        let selected_skill = candidates
+            .iter()
+            .find(|candidate| candidate.source_id == "skills/summarize/SKILL.md")
+            .expect("selected skill candidate");
+        assert_eq!(
+            selected_skill.source_kind,
+            openlife_core::agent::main_chat_agent_v1::ContextSourceKind::SkillInstruction
+        );
+        assert_eq!(
+            selected_skill.selected_skill_id.as_deref(),
+            Some("summarize")
+        );
+    }
+
+    #[test]
+    fn main_chat_knowledge_context_loader_does_not_load_unselected_skill_instruction() {
+        let root = create_main_chat_knowledge_workspace();
+        let candidates =
+            crate::main_chat_context_loader::load_workspace_knowledge_context_candidates(
+                root.path(),
+                None,
+            );
+
+        assert!(!candidates.iter().any(|candidate| {
+            candidate.source_kind
+                == openlife_core::agent::main_chat_agent_v1::ContextSourceKind::SkillInstruction
+        }));
+    }
+
+    #[test]
+    fn main_chat_context_compiler_is_extracted_to_context_loader() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_context_loader.rs");
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_context_loader.rs");
+        let compile_body = extract_rust_function_body(
+            &module_source,
+            "pub(crate) async fn compile_main_chat_context(",
+        );
+
+        assert!(
+            compile_body.contains("load_current_workspace_knowledge_context_candidates"),
+            "Main Chat context assembly must use the controlled knowledge-format loader"
+        );
+        assert!(
+            !compile_body.contains("std::fs::read_to_string(&path)"),
+            "Main Chat context assembly must not regress to ad hoc AGENTS.md-only reads"
+        );
+        assert!(
+            module_source.contains("selected_skill_id: Option<&str>"),
+            "Main Chat context compiler must accept a selected skill id from ordinary chat surfaces"
+        );
+        assert!(
+            !compile_body.contains("let selected_skill_id: Option<String> = None;"),
+            "Main Chat context compiler must not discard selected skill ids"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn sanitize_main_chat_selected_skill_id("),
+            "selected skill id sanitization should live with Main Chat context loading"
+        );
+        assert!(
+            !source.contains("\nasync fn compile_main_chat_context("),
+            "Main Chat context compiler should not remain in lib.rs"
+        );
+        assert!(
+            !source.contains("\nfn sanitize_main_chat_selected_skill_id("),
+            "selected skill id sanitizer should not remain in lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_runtime_support_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_runtime_support.rs");
+        assert!(
+            module_path.exists(),
+            "Main Chat runtime support helper module file must exist outside lib.rs"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_runtime_support.rs");
+
+        for expected in [
+            "pub(crate) struct MainChatAgentTurn",
+            "pub(crate) async fn start_main_chat_agent_turn(",
+            "pub(crate) async fn append_main_chat_agent_transcript(",
+            "pub(crate) async fn append_main_chat_direct_answer_contract_transcript(",
+            "pub(crate) async fn complete_main_chat_agent_turn_session(",
+            "pub(crate) async fn enqueue_main_chat_agent_action(",
+            "pub(crate) async fn transition_main_chat_action(",
+            "pub(crate) async fn fail_main_chat_action(",
+        ] {
+            assert!(
+                module_source.contains(expected),
+                "runtime support module must expose {expected}"
+            );
+        }
+        for forbidden in [
+            "\nstruct MainChatAgentTurn",
+            "\nasync fn start_main_chat_agent_turn(",
+            "\npub(crate) async fn append_main_chat_agent_transcript(",
+            "\nasync fn append_main_chat_direct_answer_contract_transcript(",
+            "\nasync fn complete_main_chat_agent_turn_session(",
+            "\nasync fn enqueue_main_chat_agent_action(",
+            "\npub(crate) async fn transition_main_chat_action(",
+            "\npub(crate) async fn fail_main_chat_action(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "runtime support helper {forbidden} should not remain in lib.rs"
+            );
         }
     }
 
-    #[derive(Debug, Clone)]
-    struct MainChatLiveProviderEvalHarnessInput {
-        scenario: MainChatLiveProviderEvalHarnessScenario,
-        session_id: String,
-        prompt: String,
-        explicit_live_eval_requested: bool,
-        local_only_required: bool,
-    }
+    #[test]
+    fn main_chat_generation_support_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_generation_support.rs");
+        assert!(
+            module_path.exists(),
+            "Main Chat generation/finalization support module file must exist outside lib.rs"
+        );
+        let module_source = std::fs::read_to_string(&module_path)
+            .expect("read src/main_chat_generation_support.rs");
 
-    #[derive(Debug, Clone)]
-    struct MainChatLiveProviderEvalHarnessReport {
-        scenario: MainChatLiveProviderEvalHarnessScenario,
-        ready: bool,
-        status: String,
-        provider: String,
-        provider_endpoint_kind: String,
-        blockers: Vec<String>,
-        required_evidence: Vec<String>,
-        live_provider_invocation_allowed: bool,
-        main_chat_invoked: bool,
-        model_invoked: bool,
-        direct_writes_executed: bool,
-        legacy_fallback_used: bool,
-        agent_loop_succeeded: bool,
-        single_step_fallback_used: bool,
-        agent_loop_action_status: Option<String>,
-        mcp_read_target_resolved: bool,
-        tool_permission_proposal_created: bool,
-        run_id: Option<String>,
-        task_session_id: Option<String>,
-        response_preview: Option<String>,
-    }
-
-    fn main_chat_live_provider_acceptance_evidence(
-        reports: &[MainChatLiveProviderEvalHarnessReport],
-    ) -> openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceLiveEvidence
-    {
-        let traceable_live_report = |report: &MainChatLiveProviderEvalHarnessReport| {
-            report
-                .run_id
-                .as_ref()
-                .is_some_and(|run_id| !run_id.trim().is_empty())
-                && report
-                    .task_session_id
-                    .as_ref()
-                    .is_some_and(|task_session_id| !task_session_id.trim().is_empty())
-                && report
-                    .response_preview
-                    .as_ref()
-                    .is_some_and(|preview| !preview.trim().is_empty())
-        };
-        let clean_live_report = |report: &MainChatLiveProviderEvalHarnessReport| {
-            report.ready
-                && report.status == "completed"
-                && report.blockers.is_empty()
-                && report.main_chat_invoked
-                && report.live_provider_invocation_allowed
-                && report.provider_endpoint_kind == "external_provider"
-                && report.model_invoked
-                && !report.direct_writes_executed
-                && !report.legacy_fallback_used
-                && traceable_live_report(report)
-        };
-        let generation_eval_executed = reports.iter().any(|report| {
-            clean_live_report(report)
-                && report.scenario == MainChatLiveProviderEvalHarnessScenario::DirectAnswer
-                && !report.agent_loop_succeeded
-        });
-        let web_agent_loop_eval_executed = reports.iter().any(|report| {
-            clean_live_report(report)
-                && report.scenario == MainChatLiveProviderEvalHarnessScenario::WebAgentLoop
-                && report.agent_loop_succeeded
-                && !report.single_step_fallback_used
-                && report.agent_loop_action_status.as_deref() == Some("succeeded")
-                && !report.mcp_read_target_resolved
-                && !report.tool_permission_proposal_created
-        });
-        let mcp_agent_loop_eval_executed = reports.iter().any(|report| {
-            clean_live_report(report)
-                && report.scenario
-                    == MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop
-                && report.agent_loop_succeeded
-                && !report.single_step_fallback_used
-                && report.agent_loop_action_status.as_deref() == Some("succeeded")
-                && report.mcp_read_target_resolved
-        });
-        let proposal_permission_eval_executed = reports.iter().any(|report| {
-            clean_live_report(report)
-                && report.scenario
-                    == MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal
-                && report.agent_loop_succeeded
-                && !report.single_step_fallback_used
-                && report.agent_loop_action_status.as_deref() == Some("needs_confirmation")
-                && report.tool_permission_proposal_created
-        });
-        let no_silent_writes = reports.iter().all(|report| !report.direct_writes_executed);
-
-        openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceLiveEvidence {
-            generation_eval_executed,
-            web_mcp_agent_loop_eval_executed: web_agent_loop_eval_executed
-                && mcp_agent_loop_eval_executed,
-            web_agent_loop_eval_executed,
-            mcp_agent_loop_eval_executed,
-            proposal_permission_eval_executed,
-            no_silent_writes,
+        for expected in [
+            "pub(crate) async fn persist_chat_message_if_needed(",
+            "pub(crate) async fn persist_vector_memory_for_message(",
+            "pub(crate) async fn finalize_chat_agent_run(",
+            "pub(crate) async fn generate_non_stream_fallback(",
+            "pub(crate) fn main_chat_provider_endpoint_kind(",
+            "pub(crate) fn preview_text(",
+        ] {
+            assert!(
+                module_source.contains(expected),
+                "generation support module must expose {expected}"
+            );
+        }
+        for forbidden in [
+            "\nasync fn persist_chat_message_if_needed(",
+            "\nasync fn persist_vector_memory_for_message(",
+            "\nasync fn generate_and_persist_chat_proposals(",
+            "\nasync fn finalize_chat_agent_run(",
+            "\npub(crate) async fn generate_non_stream_fallback(",
+            "\npub(crate) fn main_chat_provider_endpoint_kind(",
+            "\npub(crate) fn preview_text(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "generation support helper {forbidden} should not remain in lib.rs"
+            );
         }
     }
 
-    fn push_live_provider_blocker(blockers: &mut Vec<String>, blocker: &str) {
-        if !blockers.iter().any(|existing| existing == blocker) {
-            blockers.push(blocker.to_string());
+    #[test]
+    fn main_chat_react_runtime_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_react_runtime.rs");
+        assert!(
+            module_path.exists(),
+            "Main Chat ReAct runtime helper module file must exist outside lib.rs"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_react_runtime.rs");
+
+        for expected in [
+            "pub(crate) struct MainChatObservation",
+            "pub(crate) struct MainChatReactFollowUp",
+            "pub(crate) struct MainChatReactAgentLoopAttempt",
+            "pub(crate) async fn synthesize_main_chat_react_follow_up(",
+            "pub(crate) fn main_chat_permission_blocker_reason(",
+            "pub(crate) fn blocked_main_chat_observation(",
+            "pub(crate) fn tool_call_from_action(",
+            "pub(crate) fn agent_actions_to_tool_call_results(",
+            "pub(crate) async fn try_run_main_chat_react_agent_loop(",
+        ] {
+            assert!(
+                module_source.contains(expected),
+                "ReAct runtime helper module must expose {expected}"
+            );
+        }
+        for forbidden in [
+            "\npub(crate) struct MainChatObservation",
+            "\nstruct MainChatReactFollowUp",
+            "\nstruct MainChatReactAgentLoopAttempt",
+            "\nasync fn synthesize_main_chat_react_follow_up(",
+            "\nfn main_chat_permission_blocker_reason(",
+            "\nfn blocked_main_chat_observation(",
+            "\nfn tool_call_from_action(",
+            "\nfn agent_actions_to_tool_call_results(",
+            "\nasync fn try_run_main_chat_react_agent_loop(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "ReAct runtime helper {forbidden} should not remain in lib.rs"
+            );
         }
     }
 
-    fn main_chat_live_provider_report_blockers(
-        report: &MainChatLiveProviderEvalHarnessReport,
-    ) -> Vec<String> {
-        let mut blockers = report.blockers.clone();
-        if report.direct_writes_executed {
-            push_live_provider_blocker(&mut blockers, "live_provider_direct_writes_detected");
+    #[test]
+    fn main_chat_proposal_support_helpers_are_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        assert!(
+            source.contains("pub(crate) mod main_chat_proposal_support;"),
+            "Main Chat proposal support module must be declared from lib.rs"
+        );
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_proposal_support.rs");
+        assert!(
+            module_path.exists(),
+            "Main Chat proposal support module file must exist outside lib.rs"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_proposal_support.rs");
+
+        for expected in [
+            "pub(crate) async fn create_main_chat_agent_proposal(",
+            "pub(crate) async fn attach_main_chat_tool_permission_proposal_metadata(",
+        ] {
+            assert!(
+                module_source.contains(expected),
+                "proposal support module must expose {expected}"
+            );
         }
-        if report.legacy_fallback_used {
-            push_live_provider_blocker(&mut blockers, "live_provider_legacy_fallback_detected");
+        for forbidden in [
+            "\nasync fn create_main_chat_agent_proposal(",
+            "\nasync fn attach_main_chat_tool_permission_proposal_metadata(",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "proposal support helper {forbidden} should not remain in lib.rs"
+            );
         }
-        if !report
-            .run_id
-            .as_ref()
-            .is_some_and(|run_id| !run_id.trim().is_empty())
-            || !report
-                .task_session_id
-                .as_ref()
-                .is_some_and(|task_session_id| !task_session_id.trim().is_empty())
-            || !report
-                .response_preview
-                .as_ref()
-                .is_some_and(|preview| !preview.trim().is_empty())
-        {
-            push_live_provider_blocker(&mut blockers, "live_provider_trace_missing");
-        }
-        match report.scenario {
-            MainChatLiveProviderEvalHarnessScenario::DirectAnswer => {
-                if !report.ready || report.status != "completed" || !report.model_invoked {
-                    push_live_provider_blocker(
-                        &mut blockers,
-                        "live_provider_generation_not_completed",
-                    );
-                }
-            }
-            MainChatLiveProviderEvalHarnessScenario::WebAgentLoop => {
-                if !report.ready
-                    || report.status != "completed"
-                    || !report.agent_loop_succeeded
-                    || report.agent_loop_action_status.as_deref() != Some("succeeded")
-                {
-                    push_live_provider_blocker(
-                        &mut blockers,
-                        "live_provider_web_agent_loop_not_completed",
-                    );
-                }
-            }
-            MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                if !report.ready
-                    || report.status != "completed"
-                    || !report.agent_loop_succeeded
-                    || report.agent_loop_action_status.as_deref() != Some("succeeded")
-                    || !report.mcp_read_target_resolved
-                {
-                    push_live_provider_blocker(
-                        &mut blockers,
-                        "live_provider_mcp_agent_loop_not_completed",
-                    );
-                }
-            }
-            MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                if !report.ready
-                    || report.status != "completed"
-                    || !report.agent_loop_succeeded
-                    || report.agent_loop_action_status.as_deref() != Some("needs_confirmation")
-                    || !report.tool_permission_proposal_created
-                {
-                    push_live_provider_blocker(
-                        &mut blockers,
-                        "live_provider_proposal_permission_not_completed",
-                    );
-                }
-            }
-        }
-        blockers
+    }
+
+    #[test]
+    fn main_chat_react_execution_helper_is_extracted_from_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        assert!(
+            source.contains("pub(crate) mod main_chat_react_execution;"),
+            "Main Chat ReAct execution module must be declared from lib.rs"
+        );
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_react_execution.rs");
+        assert!(
+            module_path.exists(),
+            "Main Chat ReAct execution module file must exist outside lib.rs"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read src/main_chat_react_execution.rs");
+
+        assert!(
+            module_source
+                .contains("pub(crate) async fn execute_main_chat_react_action_with_executor("),
+            "ReAct execution module must expose the ActionExecutor fallback helper"
+        );
+        assert!(
+            module_source.contains("ActionExecutor::new("),
+            "ReAct execution module must own ActionExecutor fallback construction"
+        );
+        assert!(
+            module_source.contains("resolve_main_chat_mcp_read_target("),
+            "ReAct execution module must preserve registered MCP read resolution"
+        );
+        assert!(
+            !source.contains("\npub(crate) async fn execute_main_chat_react_action_with_executor("),
+            "ActionExecutor fallback helper should not remain in lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_selected_skill_id_is_sanitized_before_context_compilation() {
+        assert_eq!(
+            sanitize_main_chat_selected_skill_id(Some(" summarize ")).as_deref(),
+            Some("summarize")
+        );
+        assert_eq!(
+            sanitize_main_chat_selected_skill_id(Some("planner.v1_beta-2")).as_deref(),
+            Some("planner.v1_beta-2")
+        );
+        assert!(sanitize_main_chat_selected_skill_id(Some("../summarize")).is_none());
+        assert!(sanitize_main_chat_selected_skill_id(Some("skills/summarize")).is_none());
+        assert!(sanitize_main_chat_selected_skill_id(Some("bad skill")).is_none());
+        assert!(sanitize_main_chat_selected_skill_id(None).is_none());
+    }
+
+    #[test]
+    fn ordinary_chat_commands_plumb_selected_skill_id_to_context_loader() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+        let stream_body = extract_rust_function_body(
+            &source,
+            "async fn start_stream_message<R: tauri::Runtime>(",
+        );
+
+        assert!(
+            source.contains("selected_skill_id: Option<String>"),
+            "ordinary chat command inputs must expose optional selected skill id"
+        );
+        assert!(
+            send_body.contains("selected_skill_id.as_deref()"),
+            "send_message must pass selected skill id into Main Chat context assembly"
+        );
+        assert!(
+            stream_body.contains("selected_skill_id.as_deref()"),
+            "start_stream_message must pass selected skill id into Main Chat context assembly"
+        );
+        assert!(
+            source.contains("selected_skill_id: Option<String>,"),
+            "stream args must carry optional selected skill id for args payloads"
+        );
+    }
+
+    #[test]
+    fn main_chat_final_gate_aggregation_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_final_gate;"),
+            "pure Main Chat final-gate aggregation must live in a non-test module"
+        );
+        assert!(
+            source.contains(
+                "main_chat_final_gate::build_main_chat_agent_execution_v1_final_gate_report("
+            ),
+            "the final acceptance runner must use the reusable final-gate aggregation module"
+        );
+        assert!(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/main_chat_final_gate.rs")
+                .is_file(),
+            "final-gate aggregation module file must exist outside #[cfg(test)]"
+        );
+    }
+
+    #[test]
+    fn main_chat_command_surface_eval_report_normalization_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_command_surface_eval.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_command_surface_eval;"),
+            "command-surface eval case matrix and evidence normalization must live in a non-test module"
+        );
+        assert!(
+            module_path.is_file(),
+            "command-surface eval report module file must exist outside #[cfg(test)]"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read command-surface eval module");
+        assert!(
+            module_source.contains("MainChatCommandSurfaceEvalReport"),
+            "command-surface eval report type must be reusable by production/test code"
+        );
+        assert!(
+            module_source.contains("MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES"),
+            "the 24-case send/stream command-surface matrix must not be hidden in tests"
+        );
+        assert!(
+            module_source.contains("acceptance_evidence("),
+            "command-surface acceptance evidence normalization must be reusable outside tests"
+        );
+        assert!(
+            module_source.contains("from_case_evidence("),
+            "command-surface report aggregation must be reusable outside tests"
+        );
+        assert!(
+            source.contains("MainChatCommandSurfaceEvalReport::from_case_evidence("),
+            "the 24-case command-surface runner must call the reusable report aggregation"
+        );
+    }
+
+    #[test]
+    fn main_chat_live_provider_blocked_report_builder_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_final_gate.rs");
+        let module_source = std::fs::read_to_string(&module_path).expect("read final gate module");
+
+        assert!(
+            module_source
+                .contains("pub(crate) fn blocked_main_chat_live_provider_eval_harness_report("),
+            "preflight-blocked live-provider harness reports must be built by reusable production code"
+        );
+        assert!(
+            source.contains(
+                "main_chat_final_gate::blocked_main_chat_live_provider_eval_harness_report("
+            ),
+            "the live-provider harness must use the reusable blocked-report builder"
+        );
+    }
+
+    #[test]
+    fn main_chat_live_provider_completed_report_builder_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_final_gate.rs");
+        let module_source = std::fs::read_to_string(&module_path).expect("read final gate module");
+
+        assert!(
+            module_source
+                .contains("pub(crate) fn completed_main_chat_live_provider_eval_harness_report("),
+            "completed live-provider harness report shape must be reusable production code"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn main_chat_live_provider_required_evidence("),
+            "live-provider required-evidence list must not be duplicated in test helpers"
+        );
+        assert!(
+            source.contains(
+                "main_chat_final_gate::completed_main_chat_live_provider_eval_harness_report("
+            ),
+            "final-gate tests must build completed live-provider reports through the reusable helper"
+        );
+    }
+
+    #[test]
+    fn main_chat_live_provider_harness_execution_is_not_concentrated_in_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_live_provider_harness.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_live_provider_harness;"),
+            "live-provider harness execution must live in a focused non-test module"
+        );
+        assert!(
+            module_path.is_file(),
+            "live-provider harness execution module file must exist outside #[cfg(test)]"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read live-provider harness module");
+        assert!(
+            module_source.contains("run_main_chat_live_provider_eval_harness_suite_from_state"),
+            "live-provider harness suite must be reusable by the real final acceptance runner"
+        );
+        assert!(
+            module_source.contains("send_message_with_state("),
+            "live-provider harness execution must use the ordinary Main Chat send path"
+        );
+        assert!(
+            !source.contains(
+                "\npub(crate) async fn run_main_chat_live_provider_eval_harness_suite_from_state("
+            ),
+            "live-provider harness suite must not remain concentrated in src/lib.rs"
+        );
+        assert!(
+            !source.contains("\npub(crate) async fn run_main_chat_live_provider_eval_harness("),
+            "live-provider harness execution must not remain concentrated in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_task_controls_are_not_concentrated_in_lib_rs() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_task_controls.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_task_controls;"),
+            "Main Chat task-control commands must live in a focused non-test module"
+        );
+        assert!(
+            module_path.is_file(),
+            "Main Chat task-control module file must exist outside #[cfg(test)]"
+        );
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read task-control module");
+        assert!(
+            module_source.contains("pub struct MainChatAgentTaskState"),
+            "task-state response shape must move with the task-control commands"
+        );
+        assert!(
+            module_source.contains("pub(crate) async fn resume_main_chat_agent_task("),
+            "resume command implementation must be reusable outside src/lib.rs"
+        );
+        assert!(
+            module_source.contains("pub(crate) async fn cancel_main_chat_agent_task("),
+            "cancel command implementation must be reusable outside src/lib.rs"
+        );
+        assert!(
+            module_source.contains("pub(crate) async fn retry_main_chat_agent_action("),
+            "retry command implementation must be reusable outside src/lib.rs"
+        );
+        assert!(
+            !source.contains("\nasync fn resume_main_chat_agent_task("),
+            "resume command body must not remain concentrated in src/lib.rs"
+        );
+        assert!(
+            !source.contains("\nasync fn cancel_main_chat_agent_task("),
+            "cancel command body must not remain concentrated in src/lib.rs"
+        );
+        assert!(
+            !source.contains("\nasync fn retry_main_chat_agent_action("),
+            "retry command body must not remain concentrated in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn isolated_main_chat_eval_state_factory_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_eval_state.rs");
+
+        assert!(
+            source.contains("pub(crate) mod main_chat_eval_state;"),
+            "isolated Main Chat eval state factory must live in a non-test module"
+        );
+        assert!(
+            module_path.is_file(),
+            "isolated Main Chat eval state module file must exist outside #[cfg(test)]"
+        );
+        let module_source = std::fs::read_to_string(&module_path).expect("read eval state module");
+        assert!(
+            module_source.contains("build_isolated_main_chat_eval_state"),
+            "production/test code must share an isolated state factory for command-surface evidence"
+        );
+        assert!(
+            !module_source.contains("#[cfg(test)]"),
+            "isolated eval state factory must be callable by the real non-default final gate"
+        );
+    }
+
+    #[test]
+    fn main_chat_command_surface_eval_scenario_setup_is_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_command_surface_eval.rs");
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read command-surface eval module");
+
+        assert!(
+            module_source
+                .contains("pub(crate) async fn configure_main_chat_command_surface_eval_state("),
+            "scenario-specific command-surface eval state setup must be reusable outside #[cfg(test)]"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn main_chat_command_surface_eval_user_text("),
+            "scenario prompt mapping must be reusable outside #[cfg(test)]"
+        );
+        assert!(
+            module_source.contains("pub(crate) fn main_chat_command_surface_eval_session_id("),
+            "deterministic session-id mapping must be reusable outside #[cfg(test)]"
+        );
+        assert!(
+            !source.contains("\n    async fn configure_main_chat_command_surface_eval_state("),
+            "scenario setup must not remain as a test-only helper in src/lib.rs"
+        );
+        assert!(
+            !source.contains("\n    fn main_chat_command_surface_eval_user_text("),
+            "scenario prompt mapping must not remain as a test-only helper in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_command_surface_eval_assertions_are_not_hidden_in_test_module() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_command_surface_eval.rs");
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read command-surface eval module");
+
+        assert!(
+            module_source
+                .contains("pub(crate) async fn assert_main_chat_command_surface_eval_case("),
+            "command-surface case interpretation must be reusable outside #[cfg(test)]"
+        );
+        assert!(
+            !module_source.contains(
+                "#[cfg(test)]\npub(crate) async fn assert_main_chat_command_surface_eval_case("
+            ),
+            "command-surface case interpretation must not be cfg(test)-gated"
+        );
+        assert!(
+            module_source
+                .contains("pub(crate) fn main_chat_command_surface_eval_has_silent_write("),
+            "no-silent-write detection must be reusable outside #[cfg(test)]"
+        );
+        assert!(
+            !module_source.contains(
+                "#[cfg(test)]\npub(crate) fn main_chat_command_surface_eval_has_silent_write("
+            ),
+            "no-silent-write detection must not be cfg(test)-gated"
+        );
+        assert!(
+            !source.contains("\n    async fn assert_main_chat_command_surface_eval_case("),
+            "command-surface assertions must not remain as test-only helpers in src/lib.rs"
+        );
+        assert!(
+            !source.contains("\n    fn main_chat_command_surface_eval_has_silent_write("),
+            "no-silent-write detection must not remain as a test-only helper in src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn main_chat_command_surface_send_eval_runner_uses_case_assertions() {
+        let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_command_surface_eval.rs");
+        let module_source =
+            std::fs::read_to_string(&module_path).expect("read command-surface eval module");
+        let send_case_body = extract_rust_function_body(
+            &module_source,
+            "async fn run_main_chat_command_surface_state_eval_case(",
+        );
+
+        assert!(
+            send_case_body.contains("assert_main_chat_command_surface_eval_case("),
+            "production command-surface eval must verify real scenario effects before awarding coverage"
+        );
+        assert!(
+            send_case_body.contains("list_transcript_entries("),
+            "production command-surface eval must inspect transcript evidence"
+        );
+        assert!(
+            send_case_body.contains("list_pending_proposals(20)"),
+            "production command-surface eval must inspect proposal evidence"
+        );
+        assert!(
+            send_case_body.contains("start_stream_message_with_state("),
+            "production command-surface eval must execute stream cases through the reusable stream state executor"
+        );
+    }
+
+    #[test]
+    fn main_chat_send_command_has_non_tauri_state_executor() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let send_body = extract_rust_function_body(&source, "async fn send_message(");
+
+        assert!(
+            source.contains("\npub(crate) async fn send_message_with_state("),
+            "send_message must delegate to an Arc<AppState> executor that non-default gates can call without tauri::State"
+        );
+        assert!(
+            send_body.contains(
+                "send_message_with_state(session_id, messages, selected_skill_id, state.inner()).await"
+            ),
+            "the Tauri command wrapper must call the reusable send_message_with_state executor"
+        );
+    }
+
+    #[test]
+    fn main_chat_stream_command_has_non_tauri_state_executor() {
+        let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
+        let stream_body = extract_rust_function_body(
+            &source,
+            "async fn start_stream_message<R: tauri::Runtime>(",
+        );
+
+        assert!(
+            source.contains("\npub(crate) async fn start_stream_message_with_state("),
+            "start_stream_message must delegate to an Arc<AppState> executor that final gates can call without tauri::State or mock IPC"
+        );
+        assert!(
+            stream_body.contains("start_stream_message_with_state("),
+            "the Tauri stream command wrapper must call the reusable start_stream_message_with_state executor"
+        );
     }
 
     fn successful_live_provider_harness_report(
         scenario: MainChatLiveProviderEvalHarnessScenario,
     ) -> MainChatLiveProviderEvalHarnessReport {
-        let agent_loop_succeeded = !matches!(
+        main_chat_final_gate::completed_main_chat_live_provider_eval_harness_report(
             scenario,
-            MainChatLiveProviderEvalHarnessScenario::DirectAnswer
-        );
-        let agent_loop_action_status = match scenario {
-            MainChatLiveProviderEvalHarnessScenario::DirectAnswer => None,
-            MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                Some("needs_confirmation".to_string())
-            }
-            MainChatLiveProviderEvalHarnessScenario::WebAgentLoop
-            | MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                Some("succeeded".to_string())
-            }
-        };
-
-        MainChatLiveProviderEvalHarnessReport {
-            scenario,
-            ready: true,
-            status: "completed".into(),
-            provider: "openai".into(),
-            provider_endpoint_kind: "external_provider".into(),
-            blockers: Vec::new(),
-            required_evidence: vec![
-                "live_provider_generation".into(),
-                "provider_backed_web_mcp_agent_loop".into(),
-                "provider_backed_web_agent_loop".into(),
-                "provider_backed_mcp_agent_loop".into(),
-                "provider_live_proposal_permission".into(),
-            ],
-            live_provider_invocation_allowed: true,
-            main_chat_invoked: true,
-            model_invoked: true,
-            direct_writes_executed: false,
-            legacy_fallback_used: false,
-            agent_loop_succeeded,
-            single_step_fallback_used: false,
-            agent_loop_action_status,
-            mcp_read_target_resolved: matches!(
-                scenario,
-                MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop
-            ),
-            tool_permission_proposal_created: matches!(
-                scenario,
-                MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal
-            ),
-            run_id: Some(format!("live-run-{}", scenario.as_str())),
-            task_session_id: Some(format!("live-task-{}", scenario.as_str())),
-            response_preview: Some("Live provider response.".into()),
-        }
+            "openai",
+            "external_provider",
+            format!("live-run-{}", scenario.as_str()),
+            format!("live-task-{}", scenario.as_str()),
+            "Live provider response.",
+        )
     }
 
     fn blocked_live_provider_harness_report(
         blocker: &str,
     ) -> MainChatLiveProviderEvalHarnessReport {
-        MainChatLiveProviderEvalHarnessReport {
-            scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
-            ready: false,
-            status: "blocked".into(),
-            provider: "openai".into(),
-            provider_endpoint_kind: "external_provider".into(),
-            blockers: vec![blocker.into()],
-            required_evidence: vec![
-                "live_provider_generation".into(),
-                "provider_backed_web_mcp_agent_loop".into(),
-                "provider_backed_web_agent_loop".into(),
-                "provider_backed_mcp_agent_loop".into(),
-                "provider_live_proposal_permission".into(),
-            ],
-            live_provider_invocation_allowed: false,
-            main_chat_invoked: false,
-            model_invoked: false,
-            direct_writes_executed: false,
-            legacy_fallback_used: false,
-            agent_loop_succeeded: false,
-            single_step_fallback_used: false,
-            agent_loop_action_status: None,
-            mcp_read_target_resolved: false,
-            tool_permission_proposal_created: false,
-            run_id: None,
-            task_session_id: None,
-            response_preview: None,
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct MainChatAgentExecutionV1FinalGateReport {
-        runtime_total_cases: usize,
-        command_surface_total_cases: usize,
-        live_provider_attempted: bool,
-        live_provider_report_count: usize,
-        live_provider_ready_count: usize,
-        live_provider_main_chat_invoked_count: usize,
-        live_provider_model_invoked_count: usize,
-        live_provider_direct_writes_executed: bool,
-        live_provider_blockers: Vec<String>,
-        acceptance:
-            openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceReport,
+        main_chat_final_gate::blocked_main_chat_live_provider_eval_harness_report(
+            MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
+            "openai",
+            "external_provider",
+            vec![blocker.into()],
+            main_chat_final_gate::main_chat_live_provider_required_evidence(),
+        )
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -11311,7 +8797,7 @@ mod hs_runtime_tests {
                 MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop,
                 MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
             ] {
-                let state = crate::test_utils::test_app_state();
+                let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
                 match live_config_mode {
                     MainChatLiveProviderEvalConfigMode::FromEnvironment => {
                         configure_live_provider_eval_state(&state).await;
@@ -11361,9 +8847,10 @@ mod hs_runtime_tests {
         } else {
             Vec::new()
         };
-        main_chat_agent_execution_v1_final_gate_report_from_parts(
+        main_chat_final_gate::build_main_chat_agent_execution_v1_final_gate_report(
             runtime_report,
-            command_surface_report,
+            command_surface_report.total_cases,
+            command_surface_report.acceptance_evidence(),
             include_live_provider,
             live_reports,
         )
@@ -11375,344 +8862,13 @@ mod hs_runtime_tests {
         live_provider_attempted: bool,
         live_reports: Vec<MainChatLiveProviderEvalHarnessReport>,
     ) -> MainChatAgentExecutionV1FinalGateReport {
-        let live_provider_report_count = live_reports.len();
-        let live_provider_ready_count = live_reports.iter().filter(|report| report.ready).count();
-        let live_provider_main_chat_invoked_count = live_reports
-            .iter()
-            .filter(|report| report.main_chat_invoked)
-            .count();
-        let live_provider_model_invoked_count = live_reports
-            .iter()
-            .filter(|report| report.model_invoked)
-            .count();
-        let live_provider_direct_writes_executed = live_reports
-            .iter()
-            .any(|report| report.direct_writes_executed);
-        let mut live_provider_blockers = Vec::new();
-        for report in &live_reports {
-            for blocker in main_chat_live_provider_report_blockers(report) {
-                if !live_provider_blockers
-                    .iter()
-                    .any(|existing| existing == &blocker)
-                {
-                    live_provider_blockers.push(blocker);
-                }
-            }
-        }
-        let live_provider = main_chat_live_provider_acceptance_evidence(&live_reports);
-        let runtime_report =
-            openlife_core::agent::main_chat_agent_v1::main_chat_runtime_eval_report_with_live_provider_evidence(
-                runtime_report,
-                &live_provider,
-            );
-        let command_surface =
-            command_surface_report.acceptance_evidence_with_live_provider(&live_provider);
-
-        let acceptance = openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_agent_execution_v1_acceptance_gate(
-            openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceInput {
-                runtime_report: runtime_report.clone(),
-                command_surface,
-                live_provider,
-            },
-        );
-
-        MainChatAgentExecutionV1FinalGateReport {
-            runtime_total_cases: runtime_report.total_cases,
-            command_surface_total_cases: command_surface_report.total_cases,
+        main_chat_final_gate::build_main_chat_agent_execution_v1_final_gate_report(
+            runtime_report,
+            command_surface_report.total_cases,
+            command_surface_report.acceptance_evidence(),
             live_provider_attempted,
-            live_provider_report_count,
-            live_provider_ready_count,
-            live_provider_main_chat_invoked_count,
-            live_provider_model_invoked_count,
-            live_provider_direct_writes_executed,
-            live_provider_blockers,
-            acceptance,
-        }
-    }
-
-    async fn run_main_chat_live_provider_eval_harness(
-        state: Arc<AppState>,
-        input: MainChatLiveProviderEvalHarnessInput,
-    ) -> std::result::Result<MainChatLiveProviderEvalHarnessReport, String> {
-        let config = state.config.lock().await.clone();
-        let scheduler = state.scheduler.lock().await.clone();
-        let scripted_provider_response_present = scheduler.scripted_generation_response.is_some();
-        let provider_endpoint_kind =
-            main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response_present)
-                .to_string();
-        let preflight =
-            openlife_core::agent::main_chat_agent_v1::evaluate_main_chat_live_provider_eval_preflight(
-                openlife_core::agent::main_chat_agent_v1::MainChatLiveProviderEvalPreflightInput {
-                    provider: scheduler.provider.clone(),
-                    api_key_present: !scheduler.effective_api_key().trim().is_empty(),
-                    network_enabled: config.system.network_policy.enabled,
-                    explicit_live_eval_requested: input.explicit_live_eval_requested,
-                    scripted_provider_response_present,
-                    local_only_required: input.local_only_required,
-                },
-            );
-        let mut blockers = preflight.blockers.clone();
-        if !matches!(
-            provider_endpoint_kind.as_str(),
-            "external_provider" | "local_test_http"
-        ) {
-            blockers.push("external_provider_endpoint_required".into());
-        }
-        let live_provider_invocation_allowed =
-            preflight.live_provider_invocation_allowed && blockers.is_empty();
-
-        if !live_provider_invocation_allowed {
-            return Ok(MainChatLiveProviderEvalHarnessReport {
-                scenario: input.scenario,
-                ready: false,
-                status: "blocked".into(),
-                provider: preflight.provider,
-                provider_endpoint_kind,
-                blockers,
-                required_evidence: preflight.required_evidence,
-                live_provider_invocation_allowed: false,
-                main_chat_invoked: false,
-                model_invoked: false,
-                direct_writes_executed: false,
-                legacy_fallback_used: false,
-                agent_loop_succeeded: false,
-                single_step_fallback_used: false,
-                agent_loop_action_status: None,
-                mcp_read_target_resolved: false,
-                tool_permission_proposal_created: false,
-                run_id: None,
-                task_session_id: None,
-                response_preview: None,
-            });
-        }
-
-        if input.scenario == MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop {
-            grant_builtin_echo_read_once(&state).await?;
-        }
-
-        let state_for_inspection = state.clone();
-        let app = tauri::test::mock_builder()
-            .manage(state)
-            .invoke_handler(tauri::generate_handler![send_message])
-            .build(tauri::test::mock_context(tauri::test::noop_assets()))
-            .map_err(|error| format!("build live provider eval app failed: {error}"))?;
-        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .map_err(|error| format!("build live provider eval webview failed: {error}"))?;
-        let response = tauri::test::get_ipc_response(
-            &webview,
-            main_chat_invoke_request(
-                "send_message",
-                serde_json::json!({
-                    "sessionId": input.session_id,
-                    "session_id": input.session_id,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": input.prompt,
-                        }
-                    ]
-                }),
-            ),
+            live_reports,
         )
-        .map_err(|error| format!("send_message live provider eval failed: {error:?}"))?
-        .deserialize::<serde_json::Value>()
-        .map_err(|error| format!("deserialize live provider eval response failed: {error}"))?;
-
-        let run_id = response
-            .get("run_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let task_session_id = response
-            .get("agent_ingress")
-            .and_then(|value| value.get("agentTaskSessionId"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let legacy_fallback_used = response
-            .get("legacy_fallback_used")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let model_invoked = response
-            .get("execution_transcript")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|entries| {
-                entries.iter().any(|entry| {
-                    entry
-                        .get("metadata")
-                        .and_then(|metadata| metadata.get("liveProviderInvoked"))
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                        && entry
-                            .get("metadata")
-                            .and_then(|metadata| metadata.get("providerEndpointKind"))
-                            .and_then(serde_json::Value::as_str)
-                            == Some(provider_endpoint_kind.as_str())
-                })
-            });
-        let agent_loop_metadata = response
-            .get("execution_transcript")
-            .and_then(serde_json::Value::as_array)
-            .and_then(|entries| {
-                entries.iter().find_map(|entry| {
-                    let summary_matches = entry
-                        .get("summary")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|summary| {
-                            summary.contains("Governed ReAct AgentLoop completed")
-                        });
-                    if summary_matches {
-                        entry.get("metadata").cloned()
-                    } else {
-                        None
-                    }
-                })
-            });
-        let agent_loop_succeeded = agent_loop_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("agentLoopSucceeded"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let single_step_fallback_used = agent_loop_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("singleStepFallbackUsed"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let agent_loop_action_status = agent_loop_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("agentLoopActionStatus"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let mcp_read_target_resolved = agent_loop_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("mcpReadTargetResolved"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let react_model_invoked = agent_loop_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("liveProviderInvoked"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let tool_permission_proposal_created = if input.scenario
-            == MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal
-        {
-            if let Some(ref task_session_id) = task_session_id {
-                let actions = if let Some(ref queue_arc) =
-                    state_for_inspection.main_chat_action_queue_store
-                {
-                    let queue = queue_arc.lock().await;
-                    queue.list_for_session(task_session_id).unwrap_or_default()
-                } else {
-                    Vec::new()
-                };
-                let proposal_id = actions.iter().find_map(|action| {
-                    action
-                        .observation_metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.get("proposalId"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string)
-                });
-                if let (Some(proposal_id), Some(ref proposal_arc)) =
-                    (proposal_id, state_for_inspection.proposal_store.as_ref())
-                {
-                    let proposal_store = proposal_arc.lock().await;
-                    proposal_store
-                        .list_pending_proposals(20)
-                        .unwrap_or_default()
-                        .iter()
-                        .any(|proposal| {
-                            proposal.id == proposal_id
-                                && proposal.proposal_type
-                                    == openlife_core::agent::ProposalType::ToolPermission
-                        })
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let direct_writes_executed = json_contains_direct_write_true(&response);
-        let response_preview = response
-            .get("reply")
-            .and_then(serde_json::Value::as_str)
-            .map(|reply| preview_text(reply, 240));
-        let provider_model_invoked = model_invoked || react_model_invoked;
-        let traceable_response = run_id
-            .as_ref()
-            .is_some_and(|run_id| !run_id.trim().is_empty())
-            && task_session_id
-                .as_ref()
-                .is_some_and(|task_session_id| !task_session_id.trim().is_empty())
-            && response_preview
-                .as_ref()
-                .is_some_and(|preview| !preview.trim().is_empty());
-        let completed = match input.scenario {
-            MainChatLiveProviderEvalHarnessScenario::DirectAnswer => {
-                traceable_response
-                    && model_invoked
-                    && !direct_writes_executed
-                    && !legacy_fallback_used
-            }
-            MainChatLiveProviderEvalHarnessScenario::WebAgentLoop => {
-                traceable_response
-                    && provider_model_invoked
-                    && agent_loop_succeeded
-                    && !single_step_fallback_used
-                    && agent_loop_action_status.as_deref() == Some("succeeded")
-                    && !direct_writes_executed
-                    && !legacy_fallback_used
-            }
-            MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                traceable_response
-                    && provider_model_invoked
-                    && agent_loop_succeeded
-                    && !single_step_fallback_used
-                    && agent_loop_action_status.as_deref() == Some("succeeded")
-                    && mcp_read_target_resolved
-                    && !direct_writes_executed
-                    && !legacy_fallback_used
-            }
-            MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                traceable_response
-                    && provider_model_invoked
-                    && agent_loop_succeeded
-                    && !single_step_fallback_used
-                    && agent_loop_action_status.as_deref() == Some("needs_confirmation")
-                    && tool_permission_proposal_created
-                    && !direct_writes_executed
-                    && !legacy_fallback_used
-            }
-        };
-
-        let mut report = MainChatLiveProviderEvalHarnessReport {
-            scenario: input.scenario,
-            ready: completed,
-            status: if completed { "completed" } else { "failed" }.into(),
-            provider: preflight.provider,
-            provider_endpoint_kind,
-            blockers: Vec::new(),
-            required_evidence: preflight.required_evidence,
-            live_provider_invocation_allowed,
-            main_chat_invoked: true,
-            model_invoked: provider_model_invoked,
-            direct_writes_executed,
-            legacy_fallback_used,
-            agent_loop_succeeded,
-            single_step_fallback_used,
-            agent_loop_action_status,
-            mcp_read_target_resolved,
-            tool_permission_proposal_created,
-            run_id,
-            task_session_id,
-            response_preview,
-        };
-        if !report.ready {
-            report.blockers = main_chat_live_provider_report_blockers(&report);
-        }
-        Ok(report)
     }
 
     async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
@@ -11844,360 +9000,32 @@ mod hs_runtime_tests {
         format!("http://{addr}/v1")
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MainChatCommandSurfaceEvalEntryPoint {
-        Send,
-        Stream,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MainChatCommandSurfaceEvalScenario {
-        DirectProviderTrace,
-        FileReadSuccess,
-        PlanExecuteDraft,
-        ProposalPath,
-        WebPolicyBlocker,
-        WebPolicyAgentLoopBlocker,
-        WebAgentLoopSuccess,
-        MissingMcpBlocker,
-        RegisteredMcpReadSuccess,
-        RegisteredMcpAgentLoopSuccess,
-        RegisteredMcpPermissionProposal,
-        RegisteredMcpAgentLoopPermissionProposal,
-    }
-
-    #[derive(Debug, Default)]
-    struct MainChatCommandSurfaceEvalReport {
-        total_cases: usize,
-        failed_cases: usize,
-        send_coverage: f32,
-        stream_coverage: f32,
-        provider_generation_coverage: f32,
-        file_read_coverage: f32,
-        plan_execute_coverage: f32,
-        proposal_coverage: f32,
-        web_policy_blocker_coverage: f32,
-        web_agent_loop_blocker_coverage: f32,
-        web_agent_loop_success_coverage: f32,
-        mcp_missing_read_target_blocker_coverage: f32,
-        mcp_registered_read_success_coverage: f32,
-        mcp_agent_loop_success_coverage: f32,
-        mcp_tool_permission_proposal_coverage: f32,
-        mcp_agent_loop_tool_permission_proposal_coverage: f32,
-        live_provider_generation_coverage: f32,
-        live_provider_web_mcp_agent_loop_coverage: f32,
-        live_provider_web_agent_loop_coverage: f32,
-        live_provider_mcp_agent_loop_coverage: f32,
-        live_provider_proposal_permission_coverage: f32,
-        final_completion_ready: bool,
-        final_completion_blockers: Vec<String>,
-        legacy_fallback_count: usize,
-        silent_write_count: usize,
-        failures: Vec<String>,
-    }
-
-    impl MainChatCommandSurfaceEvalReport {
-        fn acceptance_evidence(
-            &self,
-        ) -> openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence
-        {
-            let required_scenario_coverage_present = self.provider_generation_coverage > 0.0
-                && self.file_read_coverage > 0.0
-                && self.plan_execute_coverage > 0.0
-                && self.proposal_coverage > 0.0
-                && self.web_policy_blocker_coverage > 0.0
-                && self.web_agent_loop_blocker_coverage > 0.0
-                && self.web_agent_loop_success_coverage > 0.0
-                && self.mcp_missing_read_target_blocker_coverage > 0.0
-                && self.mcp_registered_read_success_coverage > 0.0
-                && self.mcp_agent_loop_success_coverage > 0.0
-                && self.mcp_tool_permission_proposal_coverage > 0.0
-                && self.mcp_agent_loop_tool_permission_proposal_coverage > 0.0;
-            let send_stream_matrix_coverage = if self.failed_cases == 0
-                && self.total_cases >= 24
-                && self.send_coverage >= 0.45
-                && self.stream_coverage >= 0.45
-                && required_scenario_coverage_present
-            {
-                1.0
-            } else {
-                0.0
-            };
-
-            openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
-                total_cases: self.total_cases,
-                legacy_fallback_count: usize_to_u32_saturating(self.legacy_fallback_count),
-                silent_write_count: usize_to_u32_saturating(self.silent_write_count),
-                send_stream_matrix_coverage,
-                final_completion_ready: self.final_completion_ready,
-            }
-        }
-
-        fn acceptance_evidence_with_live_provider(
-            &self,
-            live_provider: &openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceLiveEvidence,
-        ) -> openlife_core::agent::main_chat_agent_v1::MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence
-        {
-            let mut evidence = self.acceptance_evidence();
-            let live_provider_ready = live_provider.generation_eval_executed
-                && live_provider.web_mcp_agent_loop_eval_executed
-                && live_provider.web_agent_loop_eval_executed
-                && live_provider.mcp_agent_loop_eval_executed
-                && live_provider.proposal_permission_eval_executed
-                && live_provider.no_silent_writes;
-
-            evidence.final_completion_ready = evidence.total_cases >= 24
-                && evidence.legacy_fallback_count == 0
-                && evidence.silent_write_count == 0
-                && evidence.send_stream_matrix_coverage >= 1.0
-                && live_provider_ready;
-            evidence
-        }
-    }
-
-    fn usize_to_u32_saturating(value: usize) -> u32 {
-        value.min(u32::MAX as usize) as u32
-    }
-
-    #[derive(Debug)]
-    struct MainChatCommandSurfaceEvalEvidence {
-        entry_point: MainChatCommandSurfaceEvalEntryPoint,
-        provider_generation: bool,
-        file_read: bool,
-        plan_execute: bool,
-        proposal: bool,
-        web_policy_blocker: bool,
-        web_agent_loop_blocker: bool,
-        web_agent_loop_success: bool,
-        mcp_missing_read_target_blocker: bool,
-        mcp_registered_read_success: bool,
-        mcp_agent_loop_success: bool,
-        mcp_tool_permission_proposal: bool,
-        mcp_agent_loop_tool_permission_proposal: bool,
-        legacy_fallback_used: bool,
-        silent_write_detected: bool,
-    }
-
     async fn run_main_chat_command_surface_eval_gate() -> MainChatCommandSurfaceEvalReport {
-        let cases = [
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::DirectProviderTrace,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::DirectProviderTrace,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::FileReadSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::FileReadSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::PlanExecuteDraft,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::PlanExecuteDraft,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::ProposalPath,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::ProposalPath,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::WebPolicyBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::WebPolicyBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::MissingMcpBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::MissingMcpBlocker,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Send,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal,
-            ),
-            (
-                MainChatCommandSurfaceEvalEntryPoint::Stream,
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal,
-            ),
-        ];
-
         let mut evidence = Vec::new();
         let mut failures = Vec::new();
-        for (entry_point, scenario) in cases {
+        for (entry_point, scenario) in MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES {
             match run_main_chat_command_surface_eval_case(entry_point, scenario).await {
                 Ok(case_evidence) => evidence.push(case_evidence),
                 Err(error) => failures.push(format!("{entry_point:?}/{scenario:?}: {error}")),
             }
         }
 
-        let total_cases = cases.len();
-        let ratio = |count: usize| -> f32 {
-            if total_cases == 0 {
-                0.0
-            } else {
-                count as f32 / total_cases as f32
-            }
-        };
-        MainChatCommandSurfaceEvalReport {
-            total_cases,
-            failed_cases: failures.len(),
-            send_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.entry_point == MainChatCommandSurfaceEvalEntryPoint::Send)
-                    .count(),
-            ),
-            stream_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.entry_point == MainChatCommandSurfaceEvalEntryPoint::Stream)
-                    .count(),
-            ),
-            provider_generation_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.provider_generation)
-                    .count(),
-            ),
-            file_read_coverage: ratio(evidence.iter().filter(|case| case.file_read).count()),
-            plan_execute_coverage: ratio(evidence.iter().filter(|case| case.plan_execute).count()),
-            proposal_coverage: ratio(evidence.iter().filter(|case| case.proposal).count()),
-            web_policy_blocker_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.web_policy_blocker)
-                    .count(),
-            ),
-            web_agent_loop_blocker_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.web_agent_loop_blocker)
-                    .count(),
-            ),
-            web_agent_loop_success_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.web_agent_loop_success)
-                    .count(),
-            ),
-            mcp_missing_read_target_blocker_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.mcp_missing_read_target_blocker)
-                    .count(),
-            ),
-            mcp_registered_read_success_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.mcp_registered_read_success)
-                    .count(),
-            ),
-            mcp_agent_loop_success_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.mcp_agent_loop_success)
-                    .count(),
-            ),
-            mcp_tool_permission_proposal_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.mcp_tool_permission_proposal)
-                    .count(),
-            ),
-            mcp_agent_loop_tool_permission_proposal_coverage: ratio(
-                evidence
-                    .iter()
-                    .filter(|case| case.mcp_agent_loop_tool_permission_proposal)
-                    .count(),
-            ),
-            live_provider_generation_coverage: 0.0,
-            live_provider_web_mcp_agent_loop_coverage: 0.0,
-            live_provider_web_agent_loop_coverage: 0.0,
-            live_provider_mcp_agent_loop_coverage: 0.0,
-            live_provider_proposal_permission_coverage: 0.0,
-            final_completion_ready: false,
-            final_completion_blockers: vec![
-                "live_provider_generation_not_executed".into(),
-                "provider_backed_web_mcp_agent_loop_not_executed".into(),
-                "provider_backed_web_agent_loop_not_executed".into(),
-                "provider_backed_mcp_agent_loop_not_executed".into(),
-                "provider_live_proposal_permission_not_executed".into(),
-            ],
-            legacy_fallback_count: evidence
-                .iter()
-                .filter(|case| case.legacy_fallback_used)
-                .count(),
-            silent_write_count: evidence
-                .iter()
-                .filter(|case| case.silent_write_detected)
-                .count(),
+        MainChatCommandSurfaceEvalReport::from_case_evidence(
+            MAIN_CHAT_COMMAND_SURFACE_EVAL_CASES.len(),
+            evidence,
             failures,
-        }
+        )
     }
 
     async fn run_main_chat_command_surface_eval_case(
         entry_point: MainChatCommandSurfaceEvalEntryPoint,
         scenario: MainChatCommandSurfaceEvalScenario,
     ) -> std::result::Result<MainChatCommandSurfaceEvalEvidence, String> {
-        let state = crate::test_utils::test_app_state();
-        configure_main_chat_command_surface_eval_state(&state, scenario).await?;
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        main_chat_command_surface_eval::configure_main_chat_command_surface_eval_state(
+            &state, scenario,
+        )
+        .await?;
 
         let app = tauri::test::mock_builder()
             .manage(state.clone())
@@ -12208,38 +9036,12 @@ mod hs_runtime_tests {
             .build()
             .map_err(|error| format!("build mock webview failed: {error}"))?;
 
-        let session_id = format!(
-            "command-surface-eval-{}-{}",
-            match entry_point {
-                MainChatCommandSurfaceEvalEntryPoint::Send => "send",
-                MainChatCommandSurfaceEvalEntryPoint::Stream => "stream",
-            },
-            match scenario {
-                MainChatCommandSurfaceEvalScenario::DirectProviderTrace => "direct-provider",
-                MainChatCommandSurfaceEvalScenario::FileReadSuccess => "file-read-success",
-                MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => "plan-execute-draft",
-                MainChatCommandSurfaceEvalScenario::ProposalPath => "proposal",
-                MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => "web-blocker",
-                MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker => {
-                    "web-agent-loop-blocker"
-                }
-                MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess => {
-                    "web-agent-loop-success"
-                }
-                MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => "missing-mcp",
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => "mcp-success",
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
-                    "mcp-agent-loop"
-                }
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
-                    "mcp-permission-proposal"
-                }
-                MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
-                    "mcp-agent-loop-permission-proposal"
-                }
-            }
+        let session_id = main_chat_command_surface_eval::main_chat_command_surface_eval_session_id(
+            entry_point,
+            scenario,
         );
-        let user_text = main_chat_command_surface_eval_user_text(scenario);
+        let user_text =
+            main_chat_command_surface_eval::main_chat_command_surface_eval_user_text(scenario);
         let messages = serde_json::json!([{ "role": "user", "content": user_text }]);
         let response = invoke_main_chat_command_surface_eval_case(
             &webview,
@@ -12311,7 +9113,7 @@ mod hs_runtime_tests {
             Vec::new()
         };
 
-        assert_main_chat_command_surface_eval_case(
+        main_chat_command_surface_eval::assert_main_chat_command_surface_eval_case(
             scenario,
             &state,
             task_session_id,
@@ -12353,303 +9155,14 @@ mod hs_runtime_tests {
             mcp_agent_loop_tool_permission_proposal: scenario
                 == MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal,
             legacy_fallback_used,
-            silent_write_detected: main_chat_command_surface_eval_has_silent_write(
-                response.as_ref(),
-                &transcript,
-                &actions,
-                &runs,
-            ),
+            silent_write_detected:
+                main_chat_command_surface_eval::main_chat_command_surface_eval_has_silent_write(
+                    response.as_ref(),
+                    &transcript,
+                    &actions,
+                    &runs,
+                ),
         })
-    }
-
-    async fn configure_main_chat_command_surface_eval_state(
-        state: &Arc<AppState>,
-        scenario: MainChatCommandSurfaceEvalScenario,
-    ) -> std::result::Result<(), String> {
-        match scenario {
-            MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-direct".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response("command-surface eval direct provider reply");
-            }
-            MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
-                let cargo_toml_path = std::env::current_dir()
-                    .map_err(|error| format!("resolve eval cwd failed: {error}"))?
-                    .join("Cargo.toml")
-                    .to_string_lossy()
-                    .to_string();
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-file-read".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I will read the workspace file first.",
-                        "actions": [{
-                            "name": "file.read",
-                            "action_type": "mcp_tool",
-                            "arguments": {
-                                "path": cargo_toml_path
-                            }
-                        }],
-                        "thought_summary": "Need a governed workspace file observation.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {}
-            MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
-                let mut config = state.config.lock().await;
-                config.system.network_policy.enabled = false;
-            }
-            MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker => {
-                {
-                    let mut config = state.config.lock().await;
-                    config.system.network_policy.enabled = false;
-                }
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-web-loop".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I will run the governed web read first.",
-                        "actions": [{
-                            "name": "web.search",
-                            "action_type": "mcp_tool",
-                            "arguments": {
-                                "query": "OpenLife release notes",
-                                "max_results": 3
-                            }
-                        }],
-                        "thought_summary": "Need a governed network-policy checked web observation.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess => {
-                {
-                    let mut config = state.config.lock().await;
-                    config.system.network_policy.enabled = true;
-                }
-                {
-                    let mut fixture = state.web_search_fixture_output.lock().await;
-                    *fixture = Some(
-                        "Search results for \"OpenLife release notes\":\n1. OpenLife fixture result\n   URL: https://example.com/openlife-release-notes\n   Snippet: Governed web AgentLoop command-surface success fixture."
-                            .into(),
-                    );
-                }
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-web-loop-success".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I will run the governed web read first.",
-                        "actions": [{
-                            "name": "web.search",
-                            "action_type": "mcp_tool",
-                            "arguments": {
-                                "query": "OpenLife release notes",
-                                "max_results": 3
-                            }
-                        }],
-                        "thought_summary": "Need a governed successful web observation.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
-                grant_builtin_echo_read_once(state).await?;
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-mcp-fallback".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I can answer without a tool.",
-                        "actions": [],
-                        "thought_summary": "No governed observation yet.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
-                grant_builtin_echo_read_once(state).await?;
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-mcp-loop".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I will run the registered MCP read first.",
-                        "actions": [{
-                            "name": "builtin_echo",
-                            "action_type": "mcp_tool",
-                            "arguments": {}
-                        }],
-                        "thought_summary": "Need a governed read-only MCP observation.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-mcp-permission-fallback".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I can answer only after permission is reviewed.",
-                        "actions": [],
-                        "thought_summary": "The deterministic fallback should request tool permission.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
-                let mut scheduler = state.scheduler.lock().await;
-                *scheduler = openlife_core::scheduler::InferenceScheduler::new(
-                    "unused-local-model".into(),
-                    false,
-                    "openai".into(),
-                    "https://example.invalid/v1".into(),
-                    "test-key".into(),
-                    "gpt-command-surface-eval-mcp-permission-loop".into(),
-                    "text-embedding-test".into(),
-                    false,
-                )
-                .with_scripted_generation_response(
-                    serde_json::json!({
-                        "final": "I will run the registered MCP read after permission review.",
-                        "actions": [{
-                            "name": "memory.search",
-                            "action_type": "mcp_tool",
-                            "arguments": {}
-                        }],
-                        "thought_summary": "Need a governed read-only MCP observation that requires permission.",
-                        "warnings": []
-                    })
-                    .to_string(),
-                );
-            }
-            MainChatCommandSurfaceEvalScenario::ProposalPath
-            | MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {}
-        }
-        Ok(())
-    }
-
-    async fn grant_builtin_echo_read_once(
-        state: &Arc<AppState>,
-    ) -> std::result::Result<(), String> {
-        let store = state.tool_permission_store.lock().await;
-        store
-            .grant(
-                "builtin_echo",
-                "builtin",
-                "low",
-                "read",
-                openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                None,
-            )
-            .map_err(|error| format!("grant builtin_echo read permission failed: {error}"))?;
-        Ok(())
-    }
-
-    fn main_chat_command_surface_eval_user_text(
-        scenario: MainChatCommandSurfaceEvalScenario,
-    ) -> &'static str {
-        match scenario {
-            MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
-                "Explain focused work in one concise paragraph for a teammate."
-            }
-            MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
-                "Read Cargo.toml as a governed workspace file observation."
-            }
-            MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {
-                "Draft a weekly plan and break this goal into steps."
-            }
-            MainChatCommandSurfaceEvalScenario::ProposalPath => {
-                "Please remember that I prefer morning writing blocks."
-            }
-            MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
-                "Please web search OpenLife release notes."
-            }
-            MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker => {
-                "Please web search OpenLife release notes."
-            }
-            MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess => {
-                "Please web search OpenLife release notes."
-            }
-            MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
-                "Use mcp missing.status read-only now."
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess
-            | MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
-                "Use mcp builtin_echo read-only now."
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal
-            | MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
-                "Use mcp memory.search now."
-            }
-        }
     }
 
     fn invoke_main_chat_command_surface_eval_case<W>(
@@ -12698,778 +9211,6 @@ mod hs_runtime_tests {
                     .map(|_| None)
                     .map_err(|error| format!("start_stream_message invoke failed: {error:?}"))
             }
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn assert_main_chat_command_surface_eval_case(
-        scenario: MainChatCommandSurfaceEvalScenario,
-        state: &Arc<AppState>,
-        task_session_id: &str,
-        session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
-        transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
-        actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
-        proposals: &[openlife_core::agent::AgentProposal],
-        runs: &[openlife_core::agent::AgentRun],
-        response: Option<&serde_json::Value>,
-    ) -> std::result::Result<(), String> {
-        use openlife_core::agent::main_chat_agent_v1::{
-            AgentTaskSessionStatus, ExecutionQueueStatus, ExecutionTranscriptEntryKind,
-        };
-
-        match scenario {
-            MainChatCommandSurfaceEvalScenario::DirectProviderTrace => {
-                if session.status != AgentTaskSessionStatus::Completed {
-                    return Err(format!(
-                        "direct provider session status {:?}",
-                        session.status
-                    ));
-                }
-                let generation_entry = transcript
-                    .iter()
-                    .find(|entry| {
-                        entry
-                            .summary
-                            .contains("DirectAnswer generated a model response")
-                    })
-                    .ok_or_else(|| "missing DirectAnswer generation transcript".to_string())?;
-                if generation_entry
-                    .metadata
-                    .get("providerGenerationPath")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("main_chat_direct_answer_scheduler")
-                {
-                    return Err("missing provider generation path metadata".into());
-                }
-                let run = runs
-                    .iter()
-                    .find(|run| {
-                        run.reasoning_strategy.as_deref()
-                            == Some("main_chat_agent_v1_direct_answer")
-                    })
-                    .ok_or_else(|| "missing DirectAnswer AgentRun".to_string())?;
-                let route = run
-                    .model_route
-                    .as_ref()
-                    .ok_or_else(|| "missing DirectAnswer model route".to_string())?;
-                if route.provider != "openai" || route.route_type != "cloud" {
-                    return Err(format!(
-                        "unexpected DirectAnswer provider route {}/{}",
-                        route.provider, route.route_type
-                    ));
-                }
-                let scripted = generation_entry
-                    .metadata
-                    .get("scriptedProviderResponse")
-                    .and_then(serde_json::Value::as_bool);
-                let live = generation_entry
-                    .metadata
-                    .get("liveProviderInvoked")
-                    .and_then(serde_json::Value::as_bool);
-                if scripted != Some(true) || live != Some(false) {
-                    return Err(format!(
-                        "scripted DirectAnswer provider metadata scripted={scripted:?} live={live:?}"
-                    ));
-                }
-                if generation_entry
-                    .metadata
-                    .get("providerEndpointKind")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("scripted_scheduler_response")
-                    || generation_entry
-                        .metadata
-                        .get("externalLiveProviderEvalPreflighted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("scripted DirectAnswer metadata must not be treated as external live-provider eval proof".into());
-                }
-                if let Some(response) = response {
-                    if response
-                        .get("reasoning_trace")
-                        .and_then(|trace| trace.get("generation_result"))
-                        .and_then(|generation| generation.get("providerGenerationPath"))
-                        .and_then(serde_json::Value::as_str)
-                        != Some("main_chat_direct_answer_scheduler")
-                    {
-                        return Err("send response missing provider generation metadata".into());
-                    }
-                    let generation = response
-                        .get("reasoning_trace")
-                        .and_then(|trace| trace.get("generation_result"))
-                        .ok_or_else(|| "send response missing generation result".to_string())?;
-                    if generation
-                        .get("liveProviderInvoked")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                        || generation
-                            .get("scriptedProviderResponse")
-                            .and_then(serde_json::Value::as_bool)
-                            != Some(true)
-                        || generation
-                            .get("providerEndpointKind")
-                            .and_then(serde_json::Value::as_str)
-                            != Some("scripted_scheduler_response")
-                        || generation
-                            .get("externalLiveProviderEvalPreflighted")
-                            .and_then(serde_json::Value::as_bool)
-                            != Some(false)
-                    {
-                        return Err("send response missing scripted provider metadata".into());
-                    }
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
-                if session.status != AgentTaskSessionStatus::Completed {
-                    return Err(format!("file read session status {:?}", session.status));
-                }
-                if !session.pending_blockers.is_empty() {
-                    return Err(format!(
-                        "file read success kept blockers {:?}",
-                        session.pending_blockers
-                    ));
-                }
-                let completed_entry = transcript
-                    .iter()
-                    .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                    .ok_or_else(|| {
-                        "missing file read AgentLoop completion transcript".to_string()
-                    })?;
-                if completed_entry
-                    .metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || completed_entry
-                        .metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("succeeded")
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("file read AgentLoop metadata incomplete".into());
-                }
-                let file_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "file.read")
-                    .ok_or_else(|| "missing file.read action".to_string())?;
-                if file_action.status != ExecutionQueueStatus::Completed {
-                    return Err(format!("file.read action status {:?}", file_action.status));
-                }
-                let metadata = file_action
-                    .observation_metadata
-                    .as_ref()
-                    .ok_or_else(|| "missing file.read observation metadata".to_string())?;
-                if metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("succeeded")
-                    || metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("file.read action metadata incomplete".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::PlanExecuteDraft => {
-                if session.status != AgentTaskSessionStatus::Completed {
-                    return Err(format!("PlanExecute session status {:?}", session.status));
-                }
-                if !session.pending_blockers.is_empty() {
-                    return Err(format!(
-                        "PlanExecute draft kept blockers {:?}",
-                        session.pending_blockers
-                    ));
-                }
-                let plan_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "plan_execute.create_session")
-                    .ok_or_else(|| "missing plan_execute.create_session action".to_string())?;
-                if plan_action.status != ExecutionQueueStatus::Completed {
-                    return Err(format!(
-                        "plan_execute.create_session action status {:?}",
-                        plan_action.status
-                    ));
-                }
-                let metadata = plan_action
-                    .observation_metadata
-                    .as_ref()
-                    .ok_or_else(|| "missing PlanExecute observation metadata".to_string())?;
-                let plan_session_id = metadata
-                    .get("planExecuteSessionId")
-                    .and_then(serde_json::Value::as_str)
-                    .ok_or_else(|| "PlanExecute observation missing session id".to_string())?;
-                let step_count = metadata
-                    .get("stepCount")
-                    .and_then(serde_json::Value::as_u64)
-                    .ok_or_else(|| "PlanExecute observation missing step count".to_string())?;
-                if step_count == 0 {
-                    return Err("PlanExecute draft has no steps".into());
-                }
-                let store_arc = state
-                    .plan_execute_session_store
-                    .as_ref()
-                    .ok_or_else(|| "missing PlanExecute session store".to_string())?;
-                let store = store_arc.lock().await;
-                let plan_session = store
-                    .get_session(plan_session_id)
-                    .map_err(|error| format!("load PlanExecute session failed: {error}"))?
-                    .ok_or_else(|| "PlanExecute session was not persisted".to_string())?;
-                if plan_session.status != openlife_core::agent::PlanExecuteSessionStatus::Draft
-                    || plan_session.source_chat_session_id.as_deref()
-                        != Some(session.chat_session_id.as_str())
-                    || plan_session.steps.len() != step_count as usize
-                {
-                    return Err("persisted PlanExecute draft metadata mismatch".into());
-                }
-                if !transcript.iter().any(|entry| {
-                    entry
-                        .summary
-                        .contains("Governed PlanExecute draft session was created")
-                        && entry
-                            .metadata
-                            .get("directWritesExecuted")
-                            .and_then(serde_json::Value::as_bool)
-                            == Some(false)
-                }) {
-                    return Err("missing PlanExecute transcript metadata".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::ProposalPath => {
-                if session.status != AgentTaskSessionStatus::WaitingPermission {
-                    return Err(format!("proposal session status {:?}", session.status));
-                }
-                if !transcript
-                    .iter()
-                    .any(|entry| entry.kind == ExecutionTranscriptEntryKind::ProposalRequest)
-                {
-                    return Err("proposal transcript missing".into());
-                }
-                if !actions.iter().any(|action| {
-                    action.action.action_type == "proposal.create"
-                        && action.status == ExecutionQueueStatus::Completed
-                }) {
-                    return Err("proposal.create queue action did not complete".into());
-                }
-                if !proposals.iter().any(|proposal| {
-                    proposal.source == openlife_core::agent::ProposalSource::ChatConversation
-                        && proposal.source_detail.as_deref()
-                            == Some(
-                                format!("main_chat_agent_task_session:{task_session_id}").as_str(),
-                            )
-                }) {
-                    return Err("pending Review Center proposal not linked to task".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::WebPolicyBlocker => {
-                if session.status != AgentTaskSessionStatus::Blocked {
-                    return Err(format!("web blocker session status {:?}", session.status));
-                }
-                if !session
-                    .pending_blockers
-                    .iter()
-                    .any(|blocker| blocker.contains("network_policy_blocked"))
-                {
-                    return Err("network policy blocker not preserved on session".into());
-                }
-                let web_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "web.search")
-                    .ok_or_else(|| "missing web.search action".to_string())?;
-                if web_action.status != ExecutionQueueStatus::Failed {
-                    return Err(format!("web action status {:?}", web_action.status));
-                }
-                if web_action
-                    .observation_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.get("structuredResult"))
-                    .and_then(|value| value.get("network_policy_blocked"))
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                {
-                    return Err("web blocker observation missing network_policy_blocked".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::WebPolicyAgentLoopBlocker => {
-                if session.status != AgentTaskSessionStatus::Blocked {
-                    return Err(format!(
-                        "web AgentLoop blocker session status {:?}",
-                        session.status
-                    ));
-                }
-                if !session
-                    .pending_blockers
-                    .iter()
-                    .any(|blocker| blocker.contains("network_policy_blocked"))
-                {
-                    return Err("web AgentLoop blocker not preserved on session".into());
-                }
-                let completed_entry = transcript
-                    .iter()
-                    .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                    .ok_or_else(|| "missing web AgentLoop completion transcript".to_string())?;
-                if completed_entry
-                    .metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || completed_entry
-                        .metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("blocked")
-                    || completed_entry
-                        .metadata
-                        .get("permissionDecision")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("network_policy_blocked")
-                {
-                    return Err("web AgentLoop blocker metadata incomplete".into());
-                }
-                let web_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "web.search")
-                    .ok_or_else(|| "missing web.search AgentLoop action".to_string())?;
-                if web_action.status != ExecutionQueueStatus::Failed {
-                    return Err(format!(
-                        "web AgentLoop action status {:?}",
-                        web_action.status
-                    ));
-                }
-                let metadata = web_action
-                    .observation_metadata
-                    .as_ref()
-                    .ok_or_else(|| "missing web AgentLoop observation metadata".to_string())?;
-                if metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("blocked")
-                    || metadata
-                        .get("permissionDecision")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("network_policy_blocked")
-                {
-                    return Err("web AgentLoop action metadata incomplete".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::WebAgentLoopSuccess => {
-                if session.status != AgentTaskSessionStatus::Completed {
-                    return Err(format!(
-                        "web AgentLoop success session status {:?}",
-                        session.status
-                    ));
-                }
-                if !session.pending_blockers.is_empty() {
-                    return Err(format!(
-                        "web AgentLoop success kept blockers {:?}",
-                        session.pending_blockers
-                    ));
-                }
-                let completed_entry = transcript
-                    .iter()
-                    .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                    .ok_or_else(|| "missing web AgentLoop success transcript".to_string())?;
-                if completed_entry
-                    .metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || completed_entry
-                        .metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("succeeded")
-                    || completed_entry
-                        .metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("web AgentLoop success metadata incomplete".into());
-                }
-                let web_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "web.search")
-                    .ok_or_else(|| "missing web.search success action".to_string())?;
-                if web_action.status != ExecutionQueueStatus::Completed {
-                    return Err(format!(
-                        "web AgentLoop success action status {:?}",
-                        web_action.status
-                    ));
-                }
-                let metadata = web_action
-                    .observation_metadata
-                    .as_ref()
-                    .ok_or_else(|| "missing web AgentLoop success metadata".to_string())?;
-                if metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("succeeded")
-                    || metadata
-                        .get("directWritesExecuted")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                {
-                    return Err("web AgentLoop success action metadata incomplete".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::MissingMcpBlocker => {
-                if session.status != AgentTaskSessionStatus::Blocked {
-                    return Err(format!("missing MCP session status {:?}", session.status));
-                }
-                if !session
-                    .pending_blockers
-                    .iter()
-                    .any(|blocker| blocker.contains("mcp_read_tool_not_registered"))
-                {
-                    return Err("missing MCP blocker not preserved on session".into());
-                }
-                let mcp_action = actions
-                    .iter()
-                    .find(|action| action.action.action_type == "mcp.read_only")
-                    .ok_or_else(|| "missing mcp.read_only action".to_string())?;
-                if mcp_action.status != ExecutionQueueStatus::Failed {
-                    return Err(format!("missing MCP action status {:?}", mcp_action.status));
-                }
-                if mcp_action
-                    .observation_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.get("blockerReason"))
-                    .and_then(serde_json::Value::as_str)
-                    != Some("mcp_read_tool_not_registered")
-                {
-                    return Err("missing MCP observation did not keep blocker reason".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpReadSuccess => {
-                assert_mcp_read_success_action(actions, false)?;
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopSuccess => {
-                assert_mcp_read_success_action(actions, true)?;
-                let completed_entry = transcript
-                    .iter()
-                    .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                    .ok_or_else(|| "missing AgentLoop completion transcript".to_string())?;
-                if completed_entry
-                    .metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || completed_entry
-                        .metadata
-                        .get("mcpReadTargetResolved")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("resolvedTarget")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("builtin_echo")
-                {
-                    return Err("AgentLoop MCP completion metadata incomplete".into());
-                }
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpPermissionProposal => {
-                assert_mcp_tool_permission_proposal_action(
-                    task_session_id,
-                    session,
-                    actions,
-                    proposals,
-                    false,
-                )?;
-            }
-            MainChatCommandSurfaceEvalScenario::RegisteredMcpAgentLoopPermissionProposal => {
-                assert_mcp_tool_permission_proposal_action(
-                    task_session_id,
-                    session,
-                    actions,
-                    proposals,
-                    true,
-                )?;
-                let completed_entry = transcript
-                    .iter()
-                    .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
-                    .ok_or_else(|| "missing AgentLoop permission transcript".to_string())?;
-                if completed_entry
-                    .metadata
-                    .get("agentLoopSucceeded")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(true)
-                    || completed_entry
-                        .metadata
-                        .get("singleStepFallbackUsed")
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(false)
-                    || completed_entry
-                        .metadata
-                        .get("agentLoopActionStatus")
-                        .and_then(serde_json::Value::as_str)
-                        != Some("needs_confirmation")
-                {
-                    return Err("AgentLoop permission metadata incomplete".into());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn assert_mcp_read_success_action(
-        actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
-        require_agent_loop: bool,
-    ) -> std::result::Result<(), String> {
-        let mcp_action = actions
-            .iter()
-            .find(|action| action.action.action_type == "mcp.read_only")
-            .ok_or_else(|| "missing mcp.read_only action".to_string())?;
-        if mcp_action.status
-            != openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
-        {
-            return Err(format!("MCP action status {:?}", mcp_action.status));
-        }
-        let metadata = mcp_action
-            .observation_metadata
-            .as_ref()
-            .ok_or_else(|| "missing MCP observation metadata".to_string())?;
-        if metadata
-            .get("mcpReadTargetResolved")
-            .and_then(serde_json::Value::as_bool)
-            != Some(true)
-            || metadata
-                .get("directWritesExecuted")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-        {
-            return Err("MCP read success metadata incomplete".into());
-        }
-        if !require_agent_loop
-            && metadata.get("target").and_then(serde_json::Value::as_str) != Some("builtin_echo")
-        {
-            return Err("MCP fallback observation target metadata incomplete".into());
-        }
-        if require_agent_loop
-            && (metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || metadata
-                    .get("resolvedTarget")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("builtin_echo"))
-        {
-            return Err("MCP AgentLoop observation metadata incomplete".into());
-        }
-        Ok(())
-    }
-
-    fn assert_mcp_tool_permission_proposal_action(
-        task_session_id: &str,
-        session: &openlife_core::agent::main_chat_agent_v1::AgentTaskSession,
-        actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
-        proposals: &[openlife_core::agent::AgentProposal],
-        require_agent_loop: bool,
-    ) -> std::result::Result<(), String> {
-        if session.status
-            != openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
-        {
-            return Err(format!(
-                "MCP permission session status {:?}",
-                session.status
-            ));
-        }
-        if !session
-            .pending_blockers
-            .iter()
-            .any(|blocker| blocker.contains("tool_permission_required"))
-        {
-            return Err(format!(
-                "MCP permission blocker not preserved on session: {:?}",
-                session.pending_blockers
-            ));
-        }
-        let mcp_action = actions
-            .iter()
-            .find(|action| action.action.action_type == "mcp.read_only")
-            .ok_or_else(|| "missing mcp.read_only permission action".to_string())?;
-        if mcp_action.status
-            != openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::PendingPermission
-        {
-            return Err(format!(
-                "MCP permission action status {:?}",
-                mcp_action.status
-            ));
-        }
-        let metadata = mcp_action
-            .observation_metadata
-            .as_ref()
-            .ok_or_else(|| "missing MCP permission observation metadata".to_string())?;
-        if metadata
-            .get("directWritesExecuted")
-            .and_then(serde_json::Value::as_bool)
-            != Some(false)
-        {
-            return Err("MCP permission metadata missing no-write proof".into());
-        }
-        if require_agent_loop
-            && (metadata
-                .get("agentLoopSucceeded")
-                .and_then(serde_json::Value::as_bool)
-                != Some(true)
-                || metadata
-                    .get("singleStepFallbackUsed")
-                    .and_then(serde_json::Value::as_bool)
-                    != Some(false)
-                || metadata
-                    .get("agentLoopActionStatus")
-                    .and_then(serde_json::Value::as_str)
-                    != Some("needs_confirmation"))
-        {
-            return Err("MCP AgentLoop permission action metadata incomplete".into());
-        }
-        if !require_agent_loop
-            && metadata
-                .get("executorStatus")
-                .and_then(serde_json::Value::as_str)
-                != Some("needs_confirmation")
-        {
-            return Err("MCP fallback permission action metadata incomplete".into());
-        }
-        let proposal_id = metadata
-            .get("proposalId")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| "MCP permission action missing linked proposalId".to_string())?;
-        let proposal = proposals
-            .iter()
-            .find(|proposal| proposal.id == proposal_id)
-            .ok_or_else(|| "MCP permission proposal is not pending in Review Center".to_string())?;
-        if proposal.proposal_type != openlife_core::agent::ProposalType::ToolPermission {
-            return Err(format!(
-                "MCP permission proposal type {:?}",
-                proposal.proposal_type
-            ));
-        }
-        if proposal.source != openlife_core::agent::ProposalSource::ChatConversation {
-            return Err(format!(
-                "MCP permission proposal source {:?}",
-                proposal.source
-            ));
-        }
-        if proposal.source_detail.as_deref()
-            != Some(format!("main_chat_agent_task_session:{task_session_id}").as_str())
-        {
-            return Err("MCP permission proposal not linked to task session".into());
-        }
-        if proposal.affected_path != "tool_permission.builtin.memory.search" {
-            return Err(format!(
-                "MCP permission proposal affected path {}",
-                proposal.affected_path
-            ));
-        }
-        if proposal
-            .after
-            .get("permission_action")
-            .and_then(serde_json::Value::as_str)
-            != Some("grant")
-            || proposal
-                .after
-                .get("tool_name")
-                .and_then(serde_json::Value::as_str)
-                != Some("memory.search")
-            || proposal
-                .after
-                .get("directWritesExecuted")
-                .and_then(serde_json::Value::as_bool)
-                != Some(false)
-        {
-            return Err("MCP permission proposal payload incomplete".into());
-        }
-        Ok(())
-    }
-
-    fn main_chat_command_surface_eval_has_silent_write(
-        response: Option<&serde_json::Value>,
-        transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
-        actions: &[openlife_core::agent::main_chat_agent_v1::QueuedExecutionAction],
-        runs: &[openlife_core::agent::AgentRun],
-    ) -> bool {
-        response.is_some_and(|value| json_contains_direct_write_true(value))
-            || transcript
-                .iter()
-                .any(|entry| json_contains_direct_write_true(&entry.metadata))
-            || actions.iter().any(|action| {
-                action
-                    .observation_metadata
-                    .as_ref()
-                    .is_some_and(json_contains_direct_write_true)
-            })
-            || runs.iter().any(|run| {
-                run.reasoning_trace
-                    .as_ref()
-                    .and_then(|trace| trace.generation_result.as_ref())
-                    .is_some_and(json_contains_direct_write_true)
-            })
-    }
-
-    fn json_contains_direct_write_true(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
-                (key == "directWritesExecuted" && value.as_bool() == Some(true))
-                    || json_contains_direct_write_true(value)
-            }),
-            serde_json::Value::Array(values) => values.iter().any(json_contains_direct_write_true),
-            _ => false,
         }
     }
 
@@ -13924,7 +9665,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn main_chat_live_provider_eval_preflight_from_command_state_fails_closed() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.llm.provider = "custom".into();
@@ -13988,7 +9729,7 @@ mod hs_runtime_tests {
     #[tokio::test]
     async fn main_chat_live_provider_eval_harness_blocks_before_command_invocation_when_preflight_fails(
     ) {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.llm.provider = "custom".into();
@@ -14068,7 +9809,7 @@ mod hs_runtime_tests {
             MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop,
             MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
         ] {
-            let state = crate::test_utils::test_app_state();
+            let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
             {
                 let mut config = state.config.lock().await;
                 config.llm.provider = "custom".into();
@@ -14129,7 +9870,7 @@ mod hs_runtime_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn main_chat_live_provider_eval_harness_executes_local_http_provider_without_external_live_credit(
     ) {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         configure_live_provider_eval_state_with_local_http_provider(
             &state,
             "local provider harness direct answer",
@@ -14175,7 +9916,7 @@ mod hs_runtime_tests {
     #[tokio::test]
     #[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real provider API key"]
     async fn main_chat_live_provider_eval_harness_invokes_external_direct_answer_when_opted_in() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.llm.provider =
@@ -14254,7 +9995,7 @@ mod hs_runtime_tests {
             MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop,
             MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
         ] {
-            let state = crate::test_utils::test_app_state();
+            let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
             configure_live_provider_eval_state(&state).await;
 
             let report = run_main_chat_live_provider_eval_harness(
@@ -14317,7 +10058,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_command_surface_runs_governed_proposal_path() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![send_message])
@@ -14426,7 +10167,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_command_surface_runs_governed_proposal_path() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![start_stream_message])
@@ -14531,7 +10272,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_direct_answer_records_main_chat_run_and_completes_task() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![send_message])
@@ -14630,7 +10371,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_l2_direct_answer_records_scheduler_provider_generation_trace() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut scheduler = state.scheduler.lock().await;
             *scheduler = openlife_core::scheduler::InferenceScheduler::new(
@@ -14786,7 +10527,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_direct_answer_records_main_chat_run_and_completes_task() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![start_stream_message])
@@ -14895,7 +10636,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_l2_direct_answer_records_scheduler_provider_generation_trace() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut scheduler = state.scheduler.lock().await;
             *scheduler = openlife_core::scheduler::InferenceScheduler::new(
@@ -15071,7 +10812,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_command_surface_preserves_web_policy_blocker() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.system.network_policy.enabled = false;
@@ -15162,7 +10903,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_command_surface_preserves_missing_mcp_blocker() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![send_message])
@@ -15248,7 +10989,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_command_surface_preserves_registered_mcp_read_success() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let store = state.tool_permission_store.lock().await;
             store
@@ -15352,7 +11093,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallback() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let store = state.tool_permission_store.lock().await;
             store
@@ -15519,8 +11260,188 @@ mod hs_runtime_tests {
     }
 
     #[tokio::test]
+    async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_manifest() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        {
+            let store = state.tool_permission_store.lock().await;
+            store
+                .grant(
+                    "builtin_echo",
+                    "builtin",
+                    "low",
+                    "read",
+                    openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
+                    None,
+                )
+                .expect("grant builtin echo permission");
+        }
+        {
+            let mut scheduler = state.scheduler.lock().await;
+            *scheduler = openlife_core::scheduler::InferenceScheduler::new(
+                "unused-local-model".into(),
+                false,
+                "openai".into(),
+                "https://example.invalid/v1".into(),
+                "test-key".into(),
+                "gpt-react-mcp-loop-multi-candidate".into(),
+                "text-embedding-test".into(),
+                false,
+            )
+            .with_scripted_generation_response(
+                serde_json::json!({
+                    "final": "I will run one allowed registered MCP read first.",
+                    "actions": [{
+                        "name": "builtin_echo",
+                        "action_type": "mcp_tool",
+                        "arguments": {
+                            "text": "multi candidate selected"
+                        }
+                    }],
+                    "thought_summary": "Select one governed read-only manifest from the candidate set.",
+                    "warnings": []
+                })
+                .to_string(),
+            );
+        }
+        let app = tauri::test::mock_builder()
+            .manage(state.clone())
+            .invoke_handler(tauri::generate_handler![send_message])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build mock tauri app");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("build mock webview");
+        let session_id = "command-surface-mcp-agent-loop-multi-candidate";
+        let user_text = "Use an mcp read-only utility tool now.";
+
+        let response = tauri::test::get_ipc_response(
+            &webview,
+            main_chat_invoke_request(
+                "send_message",
+                serde_json::json!({
+                    "sessionId": session_id,
+                    "session_id": session_id,
+                    "messages": [{ "role": "user", "content": user_text }]
+                }),
+            ),
+        )
+        .expect("send_message mcp multi-candidate AgentLoop response")
+        .deserialize::<serde_json::Value>()
+        .expect("deserialize mcp multi-candidate AgentLoop response");
+
+        assert_eq!(response["legacy_fallback_used"], false);
+        assert_eq!(
+            response["agent_ingress"]["selectedStrategy"],
+            "re_act_tool_execution"
+        );
+        let task_session_id = response["agent_ingress"]["agentTaskSessionId"]
+            .as_str()
+            .expect("mcp multi-candidate AgentLoop task session id");
+
+        let completed_entry = {
+            let store_arc = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("main chat session store");
+            let store = store_arc.lock().await;
+            store
+                .list_transcript_entries(task_session_id)
+                .expect("list mcp multi-candidate AgentLoop transcript")
+                .into_iter()
+                .find(|entry| entry.summary.contains("Governed ReAct AgentLoop completed"))
+                .expect("mcp multi-candidate AgentLoop completion transcript entry")
+        };
+        let metadata = completed_entry.metadata;
+        let candidate_count = metadata
+            .get("toolSelectionCandidateCount")
+            .and_then(serde_json::Value::as_u64)
+            .expect("candidate count metadata");
+        assert!(
+            candidate_count >= 2,
+            "AgentLoop completion metadata must preserve the multi-candidate contract"
+        );
+        let candidate_ids = metadata
+            .get("toolSelectionCandidateIds")
+            .and_then(serde_json::Value::as_array)
+            .expect("candidate ids metadata");
+        assert!(candidate_ids
+            .iter()
+            .any(|candidate| candidate == "builtin_echo"));
+        assert_eq!(
+            metadata
+                .get("toolSelectionCandidateId")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+        assert_eq!(
+            metadata
+                .get("toolSelectionCandidateTarget")
+                .and_then(serde_json::Value::as_str),
+            Some("builtin_echo")
+        );
+        assert_eq!(
+            metadata
+                .get("modelSelectedAllowedTool")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            metadata
+                .get("singleStepFallbackUsed")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            metadata
+                .get("directWritesExecuted")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+
+        let actions = {
+            let queue_arc = state
+                .main_chat_action_queue_store
+                .as_ref()
+                .expect("main chat action queue store");
+            let queue = queue_arc.lock().await;
+            queue
+                .list_for_session(task_session_id)
+                .expect("list mcp multi-candidate AgentLoop actions")
+        };
+        let mcp_action = actions
+            .iter()
+            .find(|action| action.action.action_type == "mcp.read_only")
+            .expect("mcp read action");
+        assert_eq!(
+            mcp_action.status,
+            openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Completed
+        );
+        let observation = mcp_action
+            .observation_metadata
+            .as_ref()
+            .expect("mcp multi-candidate AgentLoop observation metadata");
+        assert_eq!(observation["agentLoopSucceeded"], serde_json::json!(true));
+        assert_eq!(
+            observation["toolSelectionCandidateId"],
+            serde_json::json!("builtin_echo")
+        );
+        assert_eq!(
+            observation["toolSelectionCandidateTarget"],
+            serde_json::json!("builtin_echo")
+        );
+        assert_eq!(
+            observation["singleStepFallbackUsed"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            observation["directWritesExecuted"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[tokio::test]
     async fn start_stream_message_command_surface_preserves_web_policy_blocker() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.system.network_policy.enabled = false;
@@ -15618,7 +11539,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_command_surface_preserves_missing_mcp_blocker() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let app = tauri::test::mock_builder()
             .manage(state.clone())
             .invoke_handler(tauri::generate_handler![start_stream_message])
@@ -15711,7 +11632,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_command_surface_preserves_registered_mcp_read_success() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let store = state.tool_permission_store.lock().await;
             store
@@ -15822,7 +11743,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_not_fallback() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let store = state.tool_permission_store.lock().await;
             store
@@ -15993,7 +11914,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn send_message_web_policy_blocker_completes_through_agent_loop_not_fallback() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.system.network_policy.enabled = false;
@@ -16168,7 +12089,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn start_stream_message_web_policy_blocker_completes_through_agent_loop_not_fallback() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         {
             let mut config = state.config.lock().await;
             config.system.network_policy.enabled = false;
@@ -16353,7 +12274,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn chat_runtime_hs_packet_uses_sanitized_inputs_and_seeded_stores() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let mut life_model = LifeModel::default();
         life_model.state.health_status.energy_level = 2;
 
@@ -16396,7 +12317,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn tools_prompt_catalog_alone_does_not_trigger_external_write_proposal_policy() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let life_model = LifeModel::default();
         let task = openlife_core::agent::AgentTask {
             kind: openlife_core::agent::AgentTaskKind::Conversation,
@@ -16499,7 +12420,7 @@ mod hs_runtime_tests {
 
     #[tokio::test]
     async fn hs_runtime_topic_keywords_select_sensitive_local_only_policy() {
-        let state = crate::test_utils::test_app_state();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let life_model = LifeModel::default();
         let text = "最近用药、债务、身份证和分手这些事情让我压力很大";
         let topic = classify_hs_policy_topic(text, "");

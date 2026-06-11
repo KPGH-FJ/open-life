@@ -241,6 +241,44 @@ describe("tauri command argument aliases", () => {
     );
   });
 
+  it("passes selected skill id aliases through chat command wrappers", async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      reply: "ok",
+      reasoning_trace: {},
+      tool_calls: [],
+    });
+
+    await sendMessageV2(
+      "session-skill",
+      [{ role: "user", content: "Summarize this" }],
+      { selectedSkillId: "summarize" }
+    );
+    await startStreamMessage(
+      "session-skill",
+      [{ role: "user", content: "Summarize this" }],
+      { selectedSkillId: "summarize" }
+    );
+
+    expect(invoke).toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({
+        selectedSkillId: "summarize",
+        selected_skill_id: "summarize",
+      })
+    );
+    expect(invoke).toHaveBeenCalledWith(
+      "start_stream_message",
+      expect.objectContaining({
+        selectedSkillId: "summarize",
+        selected_skill_id: "summarize",
+        args: expect.objectContaining({
+          selectedSkillId: "summarize",
+          selected_skill_id: "summarize",
+        }),
+      })
+    );
+  });
+
   it("normalizes optional state and daily-goal arguments before invoke", async () => {
     await recordState("睡眠", 7.5, "小时", "昨晚", 6, 9, 2);
     await addDailyGoal("阅读30分钟");

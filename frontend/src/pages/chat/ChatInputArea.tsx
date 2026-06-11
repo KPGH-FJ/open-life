@@ -1,5 +1,16 @@
 import { Link } from "react-router-dom";
-import { Send, Loader2, Target, Activity, Wifi, WifiOff, Cloud, Server } from "lucide-react";
+import {
+  Send,
+  Loader2,
+  Target,
+  Activity,
+  Wifi,
+  WifiOff,
+  Cloud,
+  Server,
+  FileText,
+  X,
+} from "lucide-react";
 import type { SystemDiagnostics } from "../../tauri";
 
 interface ChatInputAreaProps {
@@ -7,8 +18,10 @@ interface ChatInputAreaProps {
   sending: boolean;
   streamInterrupted: boolean;
   diagnostics: SystemDiagnostics | null;
+  selectedSkillId: string;
   companionMode?: boolean;
   onInputChange: (value: string) => void;
+  onSelectedSkillIdChange: (value: string) => void;
   onComposerFocus?: () => void;
   onSend: () => void;
   onContinueStream: () => void;
@@ -65,8 +78,10 @@ export default function ChatInputArea({
   sending,
   streamInterrupted,
   diagnostics,
+  selectedSkillId,
   companionMode = false,
   onInputChange,
+  onSelectedSkillIdChange,
   onComposerFocus,
   onSend,
   onContinueStream,
@@ -134,30 +149,53 @@ export default function ChatInputArea({
           </div>
         )}
         {!companionMode && (
-          <div className="flex items-center gap-2 text-xs text-gray-500">
-            <span className="font-medium text-gray-600">快捷指令:</span>
-            <button
-              onClick={() => onInputChange("/goal ")}
-              className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200"
-              title="查看今日目标"
-            >
-              <Target size={12} /> /goal
-            </button>
-            <button
-              onClick={() => onInputChange("/state ")}
-              className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200"
-              title="记录状态"
-            >
-              <Activity size={12} /> /state
-            </button>
-            <button
-              onClick={onRetryLastMessage}
-              disabled={sending}
-              className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200 disabled:opacity-40"
-              title="重新填入上一条用户消息"
-            >
-              重试上一条
-            </button>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+            <div className="flex items-center gap-2">
+              <span className="font-medium text-gray-600">快捷指令:</span>
+              <button
+                onClick={() => onInputChange("/goal ")}
+                className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200"
+                title="查看今日目标"
+              >
+                <Target size={12} /> /goal
+              </button>
+              <button
+                onClick={() => onInputChange("/state ")}
+                className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200"
+                title="记录状态"
+              >
+                <Activity size={12} /> /state
+              </button>
+              <button
+                onClick={onRetryLastMessage}
+                disabled={sending}
+                className="inline-flex items-center gap-1 rounded-md bg-gray-100 px-2 py-1 text-gray-700 hover:bg-gray-200 disabled:opacity-40"
+                title="重新填入上一条用户消息"
+              >
+                重试上一条
+              </button>
+            </div>
+            <label className="ml-auto flex min-w-[180px] max-w-[260px] flex-1 items-center gap-1.5 rounded-md border border-gray-200 bg-white px-2 py-1 text-gray-600">
+              <FileText size={12} className="shrink-0 text-gray-400" />
+              <span className="shrink-0 font-medium text-gray-500">SKILL.md</span>
+              <input
+                aria-label="Skill context"
+                value={selectedSkillId}
+                onChange={e => onSelectedSkillIdChange(e.target.value)}
+                placeholder="weekly-planning"
+                className="min-w-0 flex-1 bg-transparent text-xs text-gray-700 placeholder:text-gray-300 focus:outline-none"
+              />
+              {selectedSkillId.trim() && (
+                <button
+                  type="button"
+                  onClick={() => onSelectedSkillIdChange("")}
+                  className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                  title="清除技能上下文"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </label>
           </div>
         )}
         <div className="flex gap-3">
