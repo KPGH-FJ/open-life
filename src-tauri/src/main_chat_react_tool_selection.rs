@@ -1,5 +1,7 @@
 use openlife_core::llm::ChatMessage;
 
+const MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN: usize = 96;
+
 #[derive(Clone)]
 pub(crate) struct MainChatReactToolCandidate {
     pub(crate) candidate_id: String,
@@ -10,6 +12,26 @@ pub(crate) struct MainChatReactToolCandidate {
     pub(crate) capabilities: Vec<String>,
     pub(crate) selection_rank: usize,
     pub(crate) match_reason: String,
+}
+
+impl MainChatReactToolCandidate {
+    pub(crate) fn capabilities_digest_label(&self) -> String {
+        let capabilities_digest = openlife_core::agent::react_beta::metadata_safe_value_digest(
+            &serde_json::json!(self.capabilities),
+        );
+        format!(
+            "bytes:{} hash:{}",
+            capabilities_digest.0, capabilities_digest.1
+        )
+    }
+
+    pub(crate) fn manifest_source_label(&self) -> String {
+        main_chat_contract_label_or(&self.manifest_source, true, "contract_unsafe_source")
+    }
+
+    pub(crate) fn match_reason_label(&self) -> String {
+        main_chat_contract_label_or(&self.match_reason, false, "contract_unsafe")
+    }
 }
 
 #[derive(Clone)]
@@ -26,6 +48,13 @@ pub(crate) struct MainChatReactActionPlan {
 }
 
 impl MainChatReactActionPlan {
+    fn governed_candidate_input(candidate: &MainChatReactToolCandidate) -> serde_json::Value {
+        match candidate.executor_action_type.as_str() {
+            "memory_search" | "session_search" => candidate.arguments.clone(),
+            _ => serde_json::json!({ "arguments": candidate.arguments }),
+        }
+    }
+
     pub(crate) fn default_tool_candidate(&self) -> MainChatReactToolCandidate {
         MainChatReactToolCandidate {
             candidate_id: self.queue_action_type.clone(),
@@ -68,6 +97,39 @@ impl MainChatReactActionPlan {
         targets
     }
 
+    pub(crate) fn allowed_tool_actions(
+        &self,
+    ) -> Vec<openlife_core::agent::AgentLoopAllowedToolAction> {
+        let mut actions = Vec::new();
+        for candidate in self.tool_candidates() {
+            if !actions.iter().any(
+                |action: &openlife_core::agent::AgentLoopAllowedToolAction| {
+                    action.action_type == candidate.executor_action_type
+                        && action.target == candidate.target
+                },
+            ) {
+                actions.push(openlife_core::agent::AgentLoopAllowedToolAction {
+                    action_type: candidate.executor_action_type.clone(),
+                    target: candidate.target.clone(),
+                    input: Self::governed_candidate_input(&candidate),
+                });
+            }
+        }
+        actions
+    }
+
+    pub(crate) fn allowed_tool_action_metadata(&self) -> Vec<serde_json::Value> {
+        self.allowed_tool_actions()
+            .into_iter()
+            .map(|action| {
+                serde_json::json!({
+                    "actionType": action.action_type,
+                    "target": action.target,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn tool_candidate_for_action(
         &self,
         action_type: &str,
@@ -90,14 +152,21 @@ impl MainChatReactActionPlan {
                 );
                 let arguments_digest_label =
                     format!("bytes:{} hash:{}", arguments_digest.0, arguments_digest.1);
-                let capabilities_digest =
-                    openlife_core::agent::react_beta::metadata_safe_value_digest(
-                        &serde_json::json!(candidate.capabilities),
-                    );
-                let capabilities_digest_label = format!(
-                    "bytes:{} hash:{}",
-                    capabilities_digest.0, capabilities_digest.1
+                let capabilities_digest_label = candidate.capabilities_digest_label();
+                let candidate_id = main_chat_contract_label_or(
+                    &candidate.candidate_id,
+                    false,
+                    "contract_unsafe_candidate",
                 );
+                let candidate_action_type = main_chat_contract_label_or(
+                    &candidate.executor_action_type,
+                    false,
+                    "contract_unsafe_action",
+                );
+                let candidate_target =
+                    main_chat_contract_label_or(&candidate.target, false, "contract_unsafe_target");
+                let candidate_source = candidate.manifest_source_label();
+                let match_reason = candidate.match_reason_label();
                 format!(
                     concat!(
                         "{{candidateId={}; candidateActionType={}; ",
@@ -105,14 +174,14 @@ impl MainChatReactActionPlan {
                         "argumentDigest={}; capabilitiesDigest={}; matchReason={}; ",
                         "risk=read_only; allowWrites=false}}"
                     ),
-                    candidate.candidate_id,
-                    candidate.executor_action_type,
-                    candidate.target,
+                    candidate_id,
+                    candidate_action_type,
+                    candidate_target,
                     candidate.selection_rank,
-                    candidate.manifest_source,
+                    candidate_source,
                     arguments_digest_label,
                     capabilities_digest_label,
-                    candidate.match_reason
+                    match_reason
                 )
             })
             .collect::<Vec<_>>()
@@ -376,12 +445,7 @@ pub(crate) fn resolve_main_chat_mcp_read_target(
         };
     };
 
-    let read_only = manifest.action_type.eq_ignore_ascii_case("read")
-        || manifest
-            .capabilities
-            .iter()
-            .any(|capability| capability.eq_ignore_ascii_case("read"));
-    if !manifest.enabled || manifest.declarative_only || !read_only {
+    if !main_chat_manifest_is_explicit_read_target_candidate(&manifest) {
         return MainChatMcpReadResolution {
             target: manifest.name,
             arguments: plan.arguments.clone(),
@@ -420,8 +484,10 @@ fn main_chat_governed_mcp_read_tool_candidates(
             .cmp(&left_score)
             .then_with(|| left.name.cmp(&right.name))
     });
+    let mut seen_targets = std::collections::HashSet::new();
     manifests
         .into_iter()
+        .filter(|manifest| seen_targets.insert(manifest.name.clone()))
         .take(limit)
         .enumerate()
         .map(|(index, manifest)| {
@@ -452,8 +518,6 @@ fn main_chat_manifest_selection_score(
         return 0;
     }
     let searchable = std::iter::once(manifest.name.as_str())
-        .chain(std::iter::once(manifest.id.as_str()))
-        .chain(std::iter::once(manifest.description.as_str()))
         .chain(manifest.capabilities.iter().map(String::as_str))
         .chain(manifest.tags.iter().map(String::as_str))
         .map(normalize_main_chat_selection_text)
@@ -511,6 +575,11 @@ fn main_chat_manifest_is_governed_read_candidate(
     if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
         return false;
     }
+    if !main_chat_manifest_has_contract_safe_name(manifest)
+        || !main_chat_manifest_has_contract_safe_source(manifest)
+    {
+        return false;
+    }
     if manifest.requires_confirmation
         || matches!(
             manifest.risk_level.to_ascii_lowercase().as_str(),
@@ -530,6 +599,7 @@ fn main_chat_manifest_is_governed_read_candidate(
                 "write" | "external_side_effect"
             )
         })
+        || main_chat_manifest_has_write_like_surface(manifest)
     {
         return false;
     }
@@ -538,6 +608,130 @@ fn main_chat_manifest_is_governed_read_candidate(
             .capabilities
             .iter()
             .any(|capability| capability.eq_ignore_ascii_case("read"))
+}
+
+fn main_chat_manifest_is_explicit_read_target_candidate(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> bool {
+    if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
+        return false;
+    }
+    if !main_chat_manifest_has_contract_safe_name(manifest)
+        || !main_chat_manifest_has_contract_safe_source(manifest)
+    {
+        return false;
+    }
+    if matches!(
+        manifest.risk_level.to_ascii_lowercase().as_str(),
+        "high" | "critical"
+    ) || matches!(
+        manifest.permission_level.to_ascii_lowercase().as_str(),
+        "high" | "critical"
+    ) || matches!(
+        manifest.action_type.to_ascii_lowercase().as_str(),
+        "write" | "external_side_effect"
+    ) || manifest.capabilities.iter().any(|capability| {
+        matches!(
+            capability.to_ascii_lowercase().as_str(),
+            "write" | "external_side_effect"
+        )
+    }) || main_chat_manifest_has_write_like_surface(manifest)
+    {
+        return false;
+    }
+    manifest.action_type.eq_ignore_ascii_case("read")
+        || manifest
+            .capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("read"))
+}
+
+fn main_chat_manifest_has_contract_safe_name(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> bool {
+    main_chat_contract_safe_label(&manifest.name, false)
+}
+
+fn main_chat_manifest_has_contract_safe_source(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> bool {
+    main_chat_contract_safe_label(&manifest.source.to_string(), true)
+}
+
+fn main_chat_contract_safe_label(value: &str, allow_colon: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN
+        && value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '.' | '_' | '-' | '/')
+                || (allow_colon && ch == ':')
+        })
+}
+
+fn main_chat_contract_label_or(value: &str, allow_colon: bool, fallback: &str) -> String {
+    if main_chat_contract_safe_label(value, allow_colon) {
+        value.to_string()
+    } else {
+        fallback.to_string()
+    }
+}
+
+fn main_chat_manifest_has_write_like_surface(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> bool {
+    const WRITE_LIKE_CONTAINS_TERMS: &[&str] = &[
+        "write",
+        "send",
+        "delete",
+        "remove",
+        "update",
+        "create",
+        "modify",
+        "mutate",
+        "externalwrite",
+        "externalsideeffect",
+        "realwrite",
+        "emailsend",
+        "calendarsend",
+        "calendarwrite",
+        "providerwrite",
+        "shellexec",
+        "execute",
+    ];
+    std::iter::once(manifest.id.as_str())
+        .chain(std::iter::once(manifest.name.as_str()))
+        .chain(std::iter::once(manifest.action_type.as_str()))
+        .chain(manifest.capabilities.iter().map(String::as_str))
+        .chain(manifest.tags.iter().map(String::as_str))
+        .map(normalize_main_chat_selection_text)
+        .any(|surface| {
+            matches!(
+                surface.as_str(),
+                "write"
+                    | "send"
+                    | "delete"
+                    | "remove"
+                    | "update"
+                    | "create"
+                    | "modify"
+                    | "mutate"
+                    | "externalwrite"
+                    | "externalsideeffect"
+                    | "realwrite"
+                    | "emailsend"
+                    | "calendarsend"
+                    | "calendarwrite"
+                    | "providerwrite"
+                    | "shellexec"
+                    | "execute"
+                    | "exec"
+            ) || WRITE_LIKE_CONTAINS_TERMS
+                .iter()
+                .any(|term| surface.contains(term))
+                || surface.ends_with("write")
+                || surface.ends_with("send")
+                || surface.ends_with("delete")
+        })
 }
 
 pub(crate) fn main_chat_workspace_file_target(user_text: &str) -> Result<(String, String), String> {

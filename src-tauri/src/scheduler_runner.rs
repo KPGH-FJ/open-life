@@ -164,6 +164,7 @@ async fn execute_scheduled_task(
             "memory.search".into(),
             "proposal.create".into(),
         ],
+        tool_action_allowlist: Vec::new(),
     };
     let agent_loop = AgentLoop::new(
         agent_runtime,

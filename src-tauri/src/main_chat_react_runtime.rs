@@ -6,15 +6,16 @@ use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
 use openlife_core::privacy::PrivacyEngine;
 
+use crate::main_chat_generation_support::{
+    generate_non_stream_fallback, main_chat_provider_endpoint_kind, preview_text,
+};
+use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_agent_loop_messages, main_chat_react_agent_loop_execution_plan,
     MainChatReactActionPlan,
 };
 use crate::main_chat_runtime_support::append_main_chat_agent_transcript;
-use crate::{
-    build_chat_runtime_hs_packet, generate_non_stream_fallback, main_chat_provider_endpoint_kind,
-    preview_text, AppState, ToolCallResult, ToolCallStatus,
-};
+use crate::{AppState, ToolCallResult, ToolCallStatus};
 
 pub(crate) struct MainChatObservation {
     pub(crate) summary: String,
@@ -71,10 +72,12 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     };
     let tool_selection_candidate_ids = agent_loop_plan.tool_candidate_ids();
     let tool_selection_allowlist = agent_loop_plan.allowed_tool_targets();
+    let tool_selection_allowed_actions = agent_loop_plan.allowed_tool_action_metadata();
     let tool_selection_contract_digest =
         openlife_core::agent::react_beta::metadata_safe_value_digest(&serde_json::json!({
-            "candidateIds": tool_selection_candidate_ids,
-            "allowedTargets": tool_selection_allowlist,
+            "candidateIds": tool_selection_candidate_ids.clone(),
+            "allowedTargets": tool_selection_allowlist.clone(),
+            "allowedActions": tool_selection_allowed_actions.clone(),
             "allowWrites": false,
         }));
     let mut transcript_entries = append_main_chat_agent_transcript(
@@ -94,6 +97,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
             "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
             "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+            "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
             "toolSelectionContractDigest": tool_selection_contract_digest,
             "toolExecutionAllowed": true,
             "writeExecutionAllowed": false,
@@ -126,7 +130,13 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     let (safe_paths, calendar_ics_paths, network_policy, agent_runtime, loop_config) = {
         let cfg = state.config.lock().await;
         let mut safe_paths = cfg.system.safe_paths.clone();
-        if let Ok(workspace) = std::env::current_dir().and_then(|dir| dir.canonicalize()) {
+        if let Ok(workspace) =
+            crate::workspace_file_resolver::resolve_workspace_root().or_else(|_| {
+                std::env::current_dir()
+                    .and_then(|dir| dir.canonicalize())
+                    .map_err(|err| err.to_string())
+            })
+        {
             let workspace = workspace.to_string_lossy().to_string();
             if !safe_paths.iter().any(|path| path == &workspace) {
                 safe_paths.push(workspace);
@@ -145,6 +155,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 allow_cloud,
                 shutdown_notify: Some(state.shutdown_notify.clone()),
                 toolset_allowlist: agent_loop_plan.allowed_tool_targets(),
+                tool_action_allowlist: agent_loop_plan.allowed_tool_actions(),
                 ..Default::default()
             },
         )
@@ -360,6 +371,53 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
 
     match loop_result {
         Ok(result) => {
+            if result.stop_reason == "tool_allowlist_blocked" {
+                let metadata = serde_json::json!({
+                    "agentLoopAttempted": true,
+                    "agentLoopSucceeded": false,
+                    "singleStepFallbackUsed": false,
+                    "plannedActionObserved": false,
+                    "modelSelectedAllowedTool": false,
+                    "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
+                    "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+                    "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+                    "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
+                    "agentLoopActionStatus": "blocked",
+                    "blockerReason": "model_selected_disallowed_tool",
+                    "toolCallCount": result.tool_call_count,
+                    "stepCount": result.step_count,
+                    "stopReason": result.stop_reason.clone(),
+                    "directWritesExecuted": false,
+                    "providerEndpointKind": provider_endpoint_kind,
+                    "scriptedProviderResponse": scripted_provider_response,
+                    "liveProviderInvoked": live_provider_invoked,
+                    "externalLiveProviderEvalPreflighted": false,
+                });
+                transcript_entries.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Error,
+                        "Governed ReAct AgentLoop blocked a disallowed model-selected tool.",
+                        metadata.clone(),
+                    )
+                    .await,
+                );
+                return Ok(MainChatReactAgentLoopAttempt {
+                    reply: Some(
+                        "That tool call is blocked by governance: model_selected_disallowed_tool"
+                            .into(),
+                    ),
+                    tool_calls: Vec::new(),
+                    model_route: Some(scheduler.preview_chat_route(Some(&tools_prompt)).await),
+                    transcript_entries,
+                    metadata,
+                    queue_status: Some(
+                        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+                    ),
+                    blocker_reason: Some("model_selected_disallowed_tool".into()),
+                });
+            }
             let observed_action = result.run.actions.iter().find(|action| {
                 agent_loop_plan
                     .tool_candidate_for_action(&action.action_type, action.target.as_deref())
@@ -376,6 +434,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
                     "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
                     "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+                    "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
                     "toolCallCount": result.tool_call_count,
                     "stepCount": result.step_count,
                     "stopReason": result.stop_reason.clone(),
@@ -400,9 +459,95 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     observed_action.target.as_deref(),
                 )
                 .unwrap_or_else(|| agent_loop_plan.default_tool_candidate());
+            let selected_execution_policy =
+                openlife_core::agent::main_chat_agent_v1::ExecutionPolicy::default().classify(
+                    &openlife_core::agent::main_chat_agent_v1::ExecutionAction::new(
+                        agent_loop_plan.queue_action_type.clone(),
+                        format!(
+                            "Model selected governed ReAct candidate {} for {}",
+                            selected_tool_candidate.candidate_id, agent_loop_plan.description
+                        ),
+                    ),
+                );
             let observed_action_status = observed_action.status.clone();
             let observed_action_error = observed_action.error.clone();
             let observed_action_id = Some(observed_action.id.clone());
+            let selected_arguments_digest =
+                openlife_core::agent::react_beta::metadata_safe_value_digest(
+                    &selected_tool_candidate.arguments,
+                );
+            let selected_arguments_digest_label = format!(
+                "bytes:{} hash:{}",
+                selected_arguments_digest.0, selected_arguments_digest.1
+            );
+            let selected_capabilities_digest_label =
+                selected_tool_candidate.capabilities_digest_label();
+            let selected_manifest_source_label = selected_tool_candidate.manifest_source_label();
+            let selected_match_reason_label = selected_tool_candidate.match_reason_label();
+            if !selected_execution_policy.execution_allowed {
+                let metadata = serde_json::json!({
+                    "agentLoopAttempted": true,
+                    "agentLoopSucceeded": false,
+                    "singleStepFallbackUsed": false,
+                    "plannedActionObserved": true,
+                    "modelSelectedAllowedTool": true,
+                    "modelSelectedExecutionPolicyValidated": true,
+                    "modelSelectedExecutionAllowed": selected_execution_policy.execution_allowed,
+                    "modelSelectedExecutionPolicyLevel": selected_execution_policy.level.as_str(),
+                    "modelSelectedExecutionPolicyReasonCode": selected_execution_policy.reason_code.clone(),
+                    "modelSelectedRequiresProposal": selected_execution_policy.requires_proposal,
+                    "modelSelectedRequiresConfirmation": selected_execution_policy.requires_confirmation,
+                    "modelSelectedSilentWriteAllowed": selected_execution_policy.silent_write_allowed,
+                    "modelSelectedArgumentsSource": "governed_candidate_contract",
+                    "modelSelectedGovernedArgumentsDigest": selected_arguments_digest_label,
+                    "toolSelectionCandidateId": selected_tool_candidate.candidate_id.clone(),
+                    "toolSelectionCandidateTarget": selected_tool_candidate.target.clone(),
+                    "toolSelectionCandidateActionType": selected_tool_candidate.executor_action_type.clone(),
+                    "toolSelectionCandidateRank": selected_tool_candidate.selection_rank,
+                    "toolSelectionCandidateSource": selected_manifest_source_label,
+                    "toolSelectionCandidateCapabilitiesDigest": selected_capabilities_digest_label,
+                    "toolSelectionCandidateMatchReason": selected_match_reason_label,
+                    "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
+                    "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+                    "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+                    "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
+                    "agentLoopActionStatus": "blocked",
+                    "observedActionStatus": observed_action_status,
+                    "blockerReason": "model_selected_tool_policy_blocked",
+                    "toolCallCount": result.tool_call_count,
+                    "stepCount": result.step_count,
+                    "stopReason": result.stop_reason.clone(),
+                    "directWritesExecuted": false,
+                    "providerEndpointKind": provider_endpoint_kind,
+                    "scriptedProviderResponse": scripted_provider_response,
+                    "liveProviderInvoked": live_provider_invoked,
+                    "externalLiveProviderEvalPreflighted": false,
+                });
+                transcript_entries.extend(
+                    append_main_chat_agent_transcript(
+                        state,
+                        Some(task_session_id),
+                        ExecutionTranscriptEntryKind::Error,
+                        "Governed ReAct AgentLoop blocked the model-selected tool by ExecutionPolicy.",
+                        metadata.clone(),
+                    )
+                    .await,
+                );
+                return Ok(MainChatReactAgentLoopAttempt {
+                    reply: Some(
+                        "That tool call is blocked by governance: model_selected_tool_policy_blocked"
+                            .into(),
+                    ),
+                    tool_calls: Vec::new(),
+                    model_route: Some(scheduler.preview_chat_route(Some(&tools_prompt)).await),
+                    transcript_entries,
+                    metadata,
+                    queue_status: Some(
+                        openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus::Failed,
+                    ),
+                    blocker_reason: Some("model_selected_tool_policy_blocked".into()),
+                });
+            }
             let observed_observation = result
                 .run
                 .observations
@@ -458,11 +603,26 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 "singleStepFallbackUsed": false,
                 "plannedActionObserved": true,
                 "modelSelectedAllowedTool": true,
+                "modelSelectedExecutionPolicyValidated": true,
+                "modelSelectedExecutionAllowed": selected_execution_policy.execution_allowed,
+                "modelSelectedExecutionPolicyLevel": selected_execution_policy.level.as_str(),
+                "modelSelectedExecutionPolicyReasonCode": selected_execution_policy.reason_code.clone(),
+                "modelSelectedRequiresProposal": selected_execution_policy.requires_proposal,
+                "modelSelectedRequiresConfirmation": selected_execution_policy.requires_confirmation,
+                "modelSelectedSilentWriteAllowed": selected_execution_policy.silent_write_allowed,
+                "modelSelectedArgumentsSource": "governed_candidate_contract",
+                "modelSelectedGovernedArgumentsDigest": selected_arguments_digest_label,
                 "toolSelectionCandidateId": selected_tool_candidate.candidate_id.clone(),
                 "toolSelectionCandidateTarget": selected_tool_candidate.target.clone(),
+                "toolSelectionCandidateActionType": selected_tool_candidate.executor_action_type.clone(),
+                "toolSelectionCandidateRank": selected_tool_candidate.selection_rank,
+                "toolSelectionCandidateSource": selected_manifest_source_label,
+                "toolSelectionCandidateCapabilitiesDigest": selected_capabilities_digest_label,
+                "toolSelectionCandidateMatchReason": selected_match_reason_label,
                 "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
                 "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
                 "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+                "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
                 "plannedTarget": plan.target.clone(),
                 "executionTarget": selected_tool_candidate.target.clone(),
                 "agentLoopActionStatus": observed_action_status.clone(),

@@ -1,3 +1,4 @@
+use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::AppState;
 use openlife_core::agent::{
     behavior_checks_for_packet, AgentExecutionBudget, AgentRun, AgentRunStatus, AgentTask,
@@ -190,7 +191,7 @@ pub(crate) async fn create_plan_execute_session_with_state(
         }],
         layer: Layer::L2,
     };
-    let hs_packet = crate::build_chat_runtime_hs_packet(
+    let hs_packet = build_chat_runtime_hs_packet(
         state,
         &task,
         &life_model,

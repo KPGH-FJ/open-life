@@ -28,6 +28,20 @@ pub struct AgentLoopConfig {
     pub role: AgentRole,
     /// Optional restrict to specific tools (empty = all allowed)
     pub toolset_allowlist: Vec<String>,
+    /// Optional restrict to exact governed action/target candidate pairs.
+    /// When set, this is stricter than toolset_allowlist and is evaluated as
+    /// action_type + target together.
+    pub tool_action_allowlist: Vec<AgentLoopAllowedToolAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentLoopAllowedToolAction {
+    pub action_type: String,
+    pub target: String,
+    /// Governed executor input for this exact candidate pair. When the model
+    /// selects the pair, this replaces model-supplied arguments before
+    /// ActionExecutor invocation.
+    pub input: Value,
 }
 
 /// Specialization role for the agent loop.
@@ -51,6 +65,7 @@ impl Default for AgentLoopConfig {
             shutdown_notify: None,
             role: AgentRole::default(),
             toolset_allowlist: Vec::new(),
+            tool_action_allowlist: Vec::new(),
         }
     }
 }
@@ -713,7 +728,36 @@ impl AgentLoop {
                 }
 
                 let final_text = parsed.final_text;
-                let tool_actions = self.filter_tools_by_allowlist(parsed.actions, config);
+                let (tool_actions, rejected_tool_count) =
+                    self.partition_tools_by_allowlist(parsed.actions, config);
+                if rejected_tool_count > 0 {
+                    ctx.run.warnings.push(format!(
+                        "Tool selection blocked: disallowed_tool_count={rejected_tool_count}"
+                    ));
+                    self.emit_status(
+                        &mut status_updates,
+                        crate::agent::types::AgentLoopPhase::Failed,
+                        "Model selected a tool outside the configured allowlist",
+                        0,
+                        None,
+                    );
+                    if let Some(ref cb) = callback {
+                        cb.on_status(
+                            "failed",
+                            "Model selected a tool outside the configured allowlist",
+                            0,
+                        )
+                        .await;
+                    }
+                    return Ok(StepResult {
+                        stop_reason: "tool_allowlist_blocked".into(),
+                        final_response: final_text,
+                        should_continue: false,
+                        tool_call_count_delta: 0,
+                        observations: vec![],
+                        status_updates,
+                    });
+                }
 
                 if tool_actions.is_empty() {
                     self.emit_status(
@@ -1173,24 +1217,46 @@ impl AgentLoop {
         messages
     }
 
-    /// Filter tool actions by the configured allowlist.
-    /// Returns the filtered list (empty if allowlist is not configured).
-    fn filter_tools_by_allowlist(
+    /// Partition tool actions by the configured allowlist.
+    /// Returns all actions and zero rejected actions if allowlist is not configured.
+    fn partition_tools_by_allowlist(
         &self,
         actions: Vec<AgentActionRequest>,
         config: &AgentLoopConfig,
-    ) -> Vec<AgentActionRequest> {
-        if config.toolset_allowlist.is_empty() {
-            return actions;
+    ) -> (Vec<AgentActionRequest>, usize) {
+        if config.tool_action_allowlist.is_empty() && config.toolset_allowlist.is_empty() {
+            return (actions, 0);
         }
-        actions
-            .into_iter()
-            .filter(|a| {
-                config.toolset_allowlist.iter().any(|allowed| {
-                    a.target == *allowed || a.target.starts_with(&format!("{}.", allowed))
+        let mut allowed_actions = Vec::new();
+        let mut rejected_count = 0;
+        for mut action in actions {
+            let matched_allowed_action = if config.tool_action_allowlist.is_empty() {
+                None
+            } else {
+                config.tool_action_allowlist.iter().find(|allowed| {
+                    action.action_type == allowed.action_type && action.target == allowed.target
                 })
-            })
-            .collect()
+            };
+            let target_allowed = if config.tool_action_allowlist.is_empty() {
+                config
+                    .toolset_allowlist
+                    .iter()
+                    .any(|allowed| action.target == *allowed)
+            } else {
+                matched_allowed_action.is_some()
+            };
+            let action_type_allowed =
+                config.allow_writes || agent_loop_read_only_action_type(&action.action_type);
+            if target_allowed && action_type_allowed {
+                if let Some(allowed) = matched_allowed_action {
+                    action.input = allowed.input.clone();
+                }
+                allowed_actions.push(action);
+            } else {
+                rejected_count += 1;
+            }
+        }
+        (allowed_actions, rejected_count)
     }
 
     /// Execute a batch of tool actions, collecting observations and status updates.
@@ -1512,6 +1578,13 @@ impl AgentLoop {
     }
 }
 
+fn agent_loop_read_only_action_type(action_type: &str) -> bool {
+    matches!(
+        action_type,
+        "mcp_tool" | "builtin_tool" | "plugin_tool" | "memory_search" | "session_search"
+    )
+}
+
 struct GeneratedAgentResponse {
     runtime_output: AgentRuntimeOutput,
     reply: String,
@@ -1700,6 +1773,40 @@ mod tests {
         // step_index should start from tool_call_count (0)
         assert_eq!(result.actions[0].step_index, 0);
         assert_eq!(result.actions[1].step_index, 1);
+    }
+
+    #[test]
+    fn toolset_allowlist_rejects_prefixed_target_aliases() {
+        let agent = make_test_agent_loop();
+        let config = AgentLoopConfig {
+            allow_writes: false,
+            toolset_allowlist: vec!["memory.search".into()],
+            ..Default::default()
+        };
+        let exact_action = AgentActionRequest {
+            action_type: "memory_search".into(),
+            target: "memory.search".into(),
+            input: serde_json::json!({ "query": "safe" }),
+            source_run_id: None,
+            step_index: 0,
+        };
+        let prefixed_alias_action = AgentActionRequest {
+            action_type: "memory_search".into(),
+            target: "memory.search.exfiltrate".into(),
+            input: serde_json::json!({ "query": "unsafe" }),
+            source_run_id: None,
+            step_index: 1,
+        };
+
+        let (allowed, rejected_count) =
+            agent.partition_tools_by_allowlist(vec![exact_action, prefixed_alias_action], &config);
+
+        assert_eq!(allowed.len(), 1);
+        assert_eq!(allowed[0].target, "memory.search");
+        assert_eq!(
+            rejected_count, 1,
+            "toolset allowlist must reject prefixed aliases instead of treating them as governed targets"
+        );
     }
 
     #[test]

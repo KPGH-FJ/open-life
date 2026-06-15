@@ -1,7 +1,6 @@
-use crate::{
-    main_chat_command_surface_eval, main_chat_eval_state, main_chat_final_gate,
-    main_chat_provider_endpoint_kind, preview_text, send_message_with_state, AppState,
-};
+use crate::main_chat_generation_support::{main_chat_provider_endpoint_kind, preview_text};
+use crate::main_chat_send::send_message_with_state;
+use crate::{main_chat_command_surface_eval, main_chat_eval_state, main_chat_final_gate, AppState};
 use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 
@@ -101,6 +100,22 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness_suite_from_state(
                     agent_loop_action_status: None,
                     mcp_read_target_resolved: false,
                     tool_permission_proposal_created: false,
+                    tool_permission_proposal_target: None,
+                    tool_selection_candidate_count: 0,
+                    tool_selection_candidate_ids: Vec::new(),
+                    tool_selection_allowlist: Vec::new(),
+                    tool_selection_allowed_actions: Vec::new(),
+                    model_selected_allowed_tool: false,
+                    model_selected_execution_policy_validated: false,
+                    model_selected_execution_allowed: false,
+                    model_selected_governed_arguments: false,
+                    model_selected_candidate_id: None,
+                    model_selected_candidate_target: None,
+                    model_selected_candidate_action_type: None,
+                    model_selected_candidate_rank: None,
+                    model_selected_candidate_source: None,
+                    model_selected_candidate_capabilities_digest: None,
+                    model_selected_candidate_match_reason: None,
                     run_id: None,
                     task_session_id: None,
                     response_preview: None,
@@ -240,12 +255,101 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         .and_then(|metadata| metadata.get("mcpReadTargetResolved"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let tool_selection_candidate_count = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolSelectionCandidateCount"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0);
+    let tool_selection_candidate_ids =
+        string_array_metadata(&agent_loop_metadata, "toolSelectionCandidateIds");
+    let tool_selection_allowlist =
+        string_array_metadata(&agent_loop_metadata, "toolSelectionAllowlist");
+    let tool_selection_allowed_actions =
+        allowed_action_array_metadata(&agent_loop_metadata, "toolSelectionAllowedActions");
+    let model_selected_allowed_tool = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("modelSelectedAllowedTool"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let model_selected_execution_policy_validated = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("modelSelectedExecutionPolicyValidated"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let model_selected_execution_allowed = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("modelSelectedExecutionAllowed"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let model_selected_governed_arguments = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("modelSelectedArgumentsSource"))
+        .and_then(serde_json::Value::as_str)
+        == Some("governed_candidate_contract");
+    let model_selected_candidate_id =
+        non_empty_string_metadata(&agent_loop_metadata, "toolSelectionCandidateId");
+    let model_selected_candidate_target =
+        non_empty_string_metadata(&agent_loop_metadata, "toolSelectionCandidateTarget");
+    let model_selected_candidate_action_type =
+        non_empty_string_metadata(&agent_loop_metadata, "toolSelectionCandidateActionType");
+    let model_selected_candidate_rank = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolSelectionCandidateRank"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|rank| usize::try_from(rank).ok());
+    let model_selected_candidate_source = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolSelectionCandidateSource"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|source| !source.trim().is_empty())
+        .map(str::to_string);
+    let model_selected_candidate_capabilities_digest = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolSelectionCandidateCapabilitiesDigest"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|digest| !digest.trim().is_empty())
+        .map(str::to_string);
+    let model_selected_candidate_match_reason = agent_loop_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("toolSelectionCandidateMatchReason"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .map(str::to_string);
+    let ranked_manifest_trace_present = model_selected_candidate_rank.is_some_and(|rank| rank > 0)
+        && model_selected_candidate_source.is_some()
+        && model_selected_candidate_capabilities_digest.is_some()
+        && model_selected_candidate_match_reason.is_some();
+    let candidate_allowlist_trace_present = candidate_allowlist_metadata_trace_present(
+        tool_selection_candidate_count,
+        &tool_selection_candidate_ids,
+        &tool_selection_allowlist,
+        &tool_selection_allowed_actions,
+        model_selected_candidate_id.as_deref(),
+        model_selected_candidate_target.as_deref(),
+        model_selected_candidate_action_type.as_deref(),
+    );
+    let distinct_registered_mcp_candidate_trace_present =
+        distinct_registered_mcp_candidate_metadata_trace_present(
+            tool_selection_candidate_count,
+            &tool_selection_candidate_ids,
+            &tool_selection_allowlist,
+            &tool_selection_allowed_actions,
+        );
+    let web_agent_loop_target_trace_present = web_agent_loop_target_metadata_trace_present(
+        &tool_selection_candidate_ids,
+        &tool_selection_allowlist,
+        &tool_selection_allowed_actions,
+        model_selected_candidate_id.as_deref(),
+        model_selected_candidate_target.as_deref(),
+        model_selected_candidate_action_type.as_deref(),
+    );
     let react_model_invoked = agent_loop_metadata
         .as_ref()
         .and_then(|metadata| metadata.get("liveProviderInvoked"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let tool_permission_proposal_created = if input.scenario
+    let (tool_permission_proposal_created, tool_permission_proposal_target) = if input.scenario
         == main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal
     {
         if let Some(ref task_session_id) = task_session_id {
@@ -267,24 +371,45 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                 (proposal_id, state.proposal_store.as_ref())
             {
                 let proposal_store = proposal_arc.lock().await;
-                proposal_store
+                if let Some(proposal) = proposal_store
                     .list_pending_proposals(20)
                     .unwrap_or_default()
-                    .iter()
-                    .any(|proposal| {
-                        proposal.id == proposal_id
-                            && proposal.proposal_type
-                                == openlife_core::agent::ProposalType::ToolPermission
-                    })
+                    .into_iter()
+                    .find(|proposal| proposal.id == proposal_id)
+                {
+                    let proposal_target = proposal
+                        .after
+                        .get("tool_name")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|target| !target.trim().is_empty())
+                        .map(str::to_string);
+                    (
+                        proposal.proposal_type
+                            == openlife_core::agent::ProposalType::ToolPermission,
+                        proposal_target,
+                    )
+                } else {
+                    (false, None)
+                }
             } else {
-                false
+                (false, None)
             }
         } else {
-            false
+            (false, None)
         }
     } else {
-        false
+        (false, None)
     };
+    let proposal_permission_target_trace_present =
+        proposal_permission_target_metadata_trace_present(
+            &tool_selection_candidate_ids,
+            &tool_selection_allowlist,
+            &tool_selection_allowed_actions,
+            model_selected_candidate_id.as_deref(),
+            model_selected_candidate_target.as_deref(),
+            model_selected_candidate_action_type.as_deref(),
+            tool_permission_proposal_target.as_deref(),
+        );
     let direct_writes_executed =
         main_chat_command_surface_eval::json_contains_direct_write_true(&response);
     let response_preview = response
@@ -314,6 +439,14 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                 && agent_loop_succeeded
                 && !single_step_fallback_used
                 && agent_loop_action_status.as_deref() == Some("succeeded")
+                && tool_selection_candidate_count > 0
+                && model_selected_allowed_tool
+                && model_selected_execution_policy_validated
+                && model_selected_execution_allowed
+                && model_selected_governed_arguments
+                && ranked_manifest_trace_present
+                && candidate_allowlist_trace_present
+                && web_agent_loop_target_trace_present
                 && !direct_writes_executed
                 && !legacy_fallback_used
         }
@@ -324,6 +457,13 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                 && !single_step_fallback_used
                 && agent_loop_action_status.as_deref() == Some("succeeded")
                 && mcp_read_target_resolved
+                && distinct_registered_mcp_candidate_trace_present
+                && model_selected_allowed_tool
+                && model_selected_execution_policy_validated
+                && model_selected_execution_allowed
+                && model_selected_governed_arguments
+                && ranked_manifest_trace_present
+                && candidate_allowlist_trace_present
                 && !direct_writes_executed
                 && !legacy_fallback_used
         }
@@ -334,6 +474,14 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
                 && !single_step_fallback_used
                 && agent_loop_action_status.as_deref() == Some("needs_confirmation")
                 && tool_permission_proposal_created
+                && proposal_permission_target_trace_present
+                && tool_selection_candidate_count > 0
+                && model_selected_allowed_tool
+                && model_selected_execution_policy_validated
+                && model_selected_execution_allowed
+                && model_selected_governed_arguments
+                && ranked_manifest_trace_present
+                && candidate_allowlist_trace_present
                 && !direct_writes_executed
                 && !legacy_fallback_used
         }
@@ -357,6 +505,22 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         agent_loop_action_status,
         mcp_read_target_resolved,
         tool_permission_proposal_created,
+        tool_permission_proposal_target,
+        tool_selection_candidate_count,
+        tool_selection_candidate_ids,
+        tool_selection_allowlist,
+        tool_selection_allowed_actions,
+        model_selected_allowed_tool,
+        model_selected_execution_policy_validated,
+        model_selected_execution_allowed,
+        model_selected_governed_arguments,
+        model_selected_candidate_id,
+        model_selected_candidate_target,
+        model_selected_candidate_action_type,
+        model_selected_candidate_rank,
+        model_selected_candidate_source,
+        model_selected_candidate_capabilities_digest,
+        model_selected_candidate_match_reason,
         run_id,
         task_session_id,
         response_preview,
@@ -365,4 +529,206 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         report.blockers = main_chat_final_gate::main_chat_live_provider_report_blockers(&report);
     }
     Ok(report)
+}
+
+fn non_empty_string_metadata(metadata: &Option<serde_json::Value>, key: &str) -> Option<String> {
+    metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn string_array_metadata(metadata: &Option<serde_json::Value>, key: &str) -> Vec<String> {
+    metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn allowed_action_array_metadata(
+    metadata: &Option<serde_json::Value>,
+    key: &str,
+) -> Vec<serde_json::Value> {
+    metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    let action_type = value.get("actionType")?.as_str()?.trim();
+                    let target = value.get("target")?.as_str()?.trim();
+                    if action_type.is_empty() || target.is_empty() {
+                        return None;
+                    }
+                    Some(serde_json::json!({
+                        "actionType": action_type,
+                        "target": target,
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn candidate_allowlist_metadata_trace_present(
+    candidate_count: usize,
+    candidate_ids: &[String],
+    allowlist: &[String],
+    allowed_actions: &[serde_json::Value],
+    selected_id: Option<&str>,
+    selected_target: Option<&str>,
+    selected_action_type: Option<&str>,
+) -> bool {
+    let selected_id = match selected_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => return false,
+    };
+    let selected_target = match selected_target {
+        Some(target) if !target.trim().is_empty() => target,
+        _ => return false,
+    };
+    let selected_action_type = match selected_action_type {
+        Some(action_type) if !action_type.trim().is_empty() => action_type,
+        _ => return false,
+    };
+
+    candidate_count > 0
+        && candidate_ids.len() == candidate_count
+        && candidate_ids
+            .iter()
+            .any(|candidate_id| candidate_id == selected_id)
+        && allowlist.iter().any(|target| target == selected_target)
+        && allowed_actions.iter().any(|action| {
+            action.get("actionType").and_then(serde_json::Value::as_str)
+                == Some(selected_action_type)
+                && action.get("target").and_then(serde_json::Value::as_str) == Some(selected_target)
+        })
+}
+
+fn web_agent_loop_target_metadata_trace_present(
+    candidate_ids: &[String],
+    allowlist: &[String],
+    allowed_actions: &[serde_json::Value],
+    selected_id: Option<&str>,
+    selected_target: Option<&str>,
+    selected_action_type: Option<&str>,
+) -> bool {
+    let selected_id = match selected_id {
+        Some(id) if id.starts_with("web.") => id,
+        _ => return false,
+    };
+    let selected_target = match selected_target {
+        Some(target) if target.starts_with("web.") => target,
+        _ => return false,
+    };
+    let selected_action_type = match selected_action_type {
+        Some(action_type) if !action_type.trim().is_empty() => action_type,
+        _ => return false,
+    };
+
+    candidate_ids
+        .iter()
+        .any(|candidate_id| candidate_id == selected_id)
+        && allowlist
+            .iter()
+            .any(|target| target == selected_target && target.starts_with("web."))
+        && allowed_actions.iter().any(|action| {
+            action.get("actionType").and_then(serde_json::Value::as_str)
+                == Some(selected_action_type)
+                && action
+                    .get("target")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|target| target == selected_target && target.starts_with("web."))
+        })
+}
+
+fn proposal_permission_target_metadata_trace_present(
+    candidate_ids: &[String],
+    allowlist: &[String],
+    allowed_actions: &[serde_json::Value],
+    selected_id: Option<&str>,
+    selected_target: Option<&str>,
+    selected_action_type: Option<&str>,
+    proposal_target: Option<&str>,
+) -> bool {
+    let proposal_target = match proposal_target {
+        Some(target)
+            if !target.trim().is_empty()
+                && !target.starts_with("web.")
+                && !target.starts_with("file.") =>
+        {
+            target
+        }
+        _ => return false,
+    };
+    let selected_id = match selected_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => return false,
+    };
+    let selected_target = match selected_target {
+        Some(target) if target == proposal_target => target,
+        _ => return false,
+    };
+    let selected_action_type = match selected_action_type {
+        Some("mcp_tool") => "mcp_tool",
+        _ => return false,
+    };
+
+    candidate_ids
+        .iter()
+        .any(|candidate_id| candidate_id == selected_id)
+        && allowlist.iter().any(|target| target == selected_target)
+        && allowed_actions.iter().any(|action| {
+            action.get("actionType").and_then(serde_json::Value::as_str)
+                == Some(selected_action_type)
+                && action.get("target").and_then(serde_json::Value::as_str) == Some(selected_target)
+        })
+}
+
+fn distinct_registered_mcp_candidate_metadata_trace_present(
+    candidate_count: usize,
+    candidate_ids: &[String],
+    allowlist: &[String],
+    allowed_actions: &[serde_json::Value],
+) -> bool {
+    let distinct_candidate_ids = candidate_ids
+        .iter()
+        .filter(|candidate_id| !candidate_id.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let distinct_allowed_targets = allowlist
+        .iter()
+        .filter(|target| !target.trim().is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    let distinct_allowed_action_pairs = allowed_actions
+        .iter()
+        .filter_map(|action| {
+            let action_type = action.get("actionType")?.as_str()?.trim();
+            let target = action.get("target")?.as_str()?.trim();
+            if action_type.is_empty() || target.is_empty() {
+                return None;
+            }
+            Some((action_type, target))
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    candidate_count >= 2
+        && distinct_candidate_ids >= 2
+        && distinct_allowed_targets >= 2
+        && distinct_allowed_action_pairs >= 2
 }

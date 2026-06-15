@@ -163,8 +163,13 @@ async fn run_main_chat_command_surface_state_eval_case(
     }];
     let (response_value, task_session_id, legacy_fallback_used) = match entry_point {
         MainChatCommandSurfaceEvalEntryPoint::Send => {
-            let result =
-                crate::send_message_with_state(session_id.clone(), messages, None, &state).await?;
+            let result = crate::main_chat_send::send_message_with_state(
+                session_id.clone(),
+                messages,
+                None,
+                &state,
+            )
+            .await?;
             let task_session_id = result
                 .agent_ingress
                 .as_ref()
@@ -178,7 +183,7 @@ async fn run_main_chat_command_surface_state_eval_case(
         }
         MainChatCommandSurfaceEvalEntryPoint::Stream => {
             let mut emitted_events = Vec::<(String, serde_json::Value)>::new();
-            crate::start_stream_message_with_state(
+            crate::main_chat_streaming::start_stream_message_with_state(
                 session_id.clone(),
                 messages,
                 None,
@@ -288,8 +293,23 @@ pub(crate) async fn configure_main_chat_command_surface_eval_state(
             );
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
-            let cargo_toml_path = std::env::current_dir()
+            let workspace_root = std::env::current_dir()
                 .map_err(|error| format!("resolve eval cwd failed: {error}"))?
+                .canonicalize()
+                .map_err(|error| format!("canonicalize eval cwd failed: {error}"))?;
+            let workspace_root_label = workspace_root.to_string_lossy().to_string();
+            {
+                let mut config = state.config.lock().await;
+                if !config
+                    .system
+                    .safe_paths
+                    .iter()
+                    .any(|path| path == &workspace_root_label)
+                {
+                    config.system.safe_paths.push(workspace_root_label);
+                }
+            }
+            let cargo_toml_path = workspace_root
                 .join("Cargo.toml")
                 .to_string_lossy()
                 .to_string();
@@ -662,7 +682,23 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
         }
         MainChatCommandSurfaceEvalScenario::FileReadSuccess => {
             if session.status != AgentTaskSessionStatus::Completed {
-                return Err(format!("file read session status {:?}", session.status));
+                let action_debug: Vec<String> = actions
+                    .iter()
+                    .map(|action| {
+                        format!(
+                            "{}:{}:{:?}:{:?}:{:?}",
+                            action.action.action_type,
+                            action.action.description,
+                            action.status,
+                            action.error,
+                            action.observation_metadata
+                        )
+                    })
+                    .collect();
+                return Err(format!(
+                    "file read session status {:?}, blockers {:?}, actions {:?}",
+                    session.status, session.pending_blockers, action_debug
+                ));
             }
             if !session.pending_blockers.is_empty() {
                 return Err(format!(

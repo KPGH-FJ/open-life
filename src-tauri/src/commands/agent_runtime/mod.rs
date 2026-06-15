@@ -1,3 +1,4 @@
+use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::AppState;
 use openlife_core::agent::ReasoningTrace;
 use openlife_core::agent::{
@@ -2102,7 +2103,7 @@ async fn execute_multi_strategy_agent_preview(
         }],
         layer,
     };
-    let hs_packet = crate::build_chat_runtime_hs_packet(
+    let hs_packet = build_chat_runtime_hs_packet(
         state,
         &task,
         &life_model,

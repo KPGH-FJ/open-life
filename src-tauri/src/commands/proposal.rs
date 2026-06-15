@@ -2,6 +2,7 @@ use crate::legacy_write_convergence::{
     LifeModelMaterializerCallerContext, LifeModelMaterializerCallerKind,
     LifeModelMaterializerCallerPurpose,
 };
+use crate::main_chat_hs_runtime::classify_hs_policy_topic;
 use crate::{persist_life_model, storage::app_data_dir, AppState};
 use openlife_core::agent::{
     AgentProposal, MaturationProposalOutcome, ProposalSource, ProposalStatus, ProposalType,
@@ -789,7 +790,7 @@ async fn embed_proposal_memory_with_privacy(
         engine.clone()
     };
     let hs_local_only =
-        crate::classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
+        classify_hs_policy_topic(content, "") != openlife_core::agent::PolicyTopic::General;
 
     openlife_core::vectors::embed_text_with_privacy(
         content,

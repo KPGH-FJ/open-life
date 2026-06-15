@@ -48,7 +48,9 @@ pub use action_executor::{
     ActionExecutorConfig, AgentActionRequest,
 };
 pub use agent_loop::apply_react_guidance_to_config;
-pub use agent_loop::{AgentLoop, AgentLoopConfig, AgentLoopResult, StreamingCallback};
+pub use agent_loop::{
+    AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, StreamingCallback,
+};
 pub use backend_contract_freeze::{
     evaluate_final_backend_completion_gate, freeze_pre_ui_backend_read_model_contracts,
     BackendCompletionAcceptanceGateStatus, BackendCompletionGateEvidence,

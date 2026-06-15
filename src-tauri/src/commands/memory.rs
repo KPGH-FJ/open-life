@@ -1,5 +1,7 @@
 use crate::errors::AppError;
-use crate::{merge_memory_hits, AppState};
+use crate::main_chat_hs_runtime::classify_hs_policy_topic;
+use crate::main_chat_preprocess::merge_memory_hits;
+use crate::AppState;
 use openlife_core::memory_cache::HotMemoryCache;
 use openlife_core::vectors::{
     embed_text_with_privacy, ArchivedChunkSummary, ExportedVectorChunk, MemoryChunk, TierStats,
@@ -49,7 +51,7 @@ async fn embed_memory_text_with_privacy(
 ) -> Result<Vec<f32>, AppError> {
     let ctx = embedding_privacy_context(state).await;
     let hs_local_only =
-        crate::classify_hs_policy_topic(text, "") != openlife_core::agent::PolicyTopic::General;
+        classify_hs_policy_topic(text, "") != openlife_core::agent::PolicyTopic::General;
     embed_text_with_privacy(
         text,
         &ctx.provider,

@@ -21,15 +21,15 @@
 > does not invoke external providers by default or app-store writes, and fails
 > closed with live evidence blockers when those proofs are absent. With explicit
 > live opt-in, it uses isolated eval AppState instances to run DirectAnswer, web
-> AgentLoop, registered MCP AgentLoop, and MCP ToolPermission proposal harness
+> AgentLoop, bounded multi-candidate registered MCP AgentLoop, and MCP ToolPermission proposal harness
 > scenarios through the ordinary Main Chat path.
 > Command-surface eval case matrix, scenario state setup, prompt/session-id
 > mapping, case assertion/no-silent-write interpretation, report shape,
 > coverage math, and acceptance evidence normalization now live in
 > `src-tauri/src/main_chat_command_surface_eval.rs`; the final command now
 > runs all 24 local send/stream command-surface cases on an isolated eval
-> AppState, using `send_message_with_state` for send cases and
-> `start_stream_message_governed_eval_with_state` for stream cases. Isolated Main Chat eval
+> AppState, using `main_chat_send::send_message_with_state` for send cases and
+> `main_chat_streaming::start_stream_message_with_state` for stream cases. Isolated Main Chat eval
 > state construction also moved into `src-tauri/src/main_chat_eval_state.rs`, so
 > command-surface and live harness state setup no longer depends on a
 > `#[cfg(test)]` state factory. Live-provider harness opt-in, suite execution,
@@ -40,10 +40,22 @@
 > registration left in `src-tauri/src/lib.rs`.
 > Main Chat task session, transcript, and action-queue runtime support helpers
 > now live in `src-tauri/src/main_chat_runtime_support.rs`.
+> Main Chat send command state executor now lives in
+> `src-tauri/src/main_chat_send.rs`, leaving the Tauri send command in
+> `src-tauri/src/lib.rs` as command-surface wiring.
 > Main Chat generation support helpers for chat persistence, vector persistence,
 > AgentRun finalization, non-stream fallback generation, provider endpoint
 > classification, and metadata-safe preview text now live in
 > `src-tauri/src/main_chat_generation_support.rs`.
+> Main Chat legacy fallback route-plan and non-stream generation fallback
+> helpers now live in `src-tauri/src/main_chat_legacy_fallback.rs`, keeping
+> fallback orchestration outside `src-tauri/src/lib.rs` while preserving
+> explicit fallback visibility. Deprecated/non-default Main Chat AgentLoop
+> send/stream helpers now live in `src-tauri/src/main_chat_legacy_agent_loop.rs`.
+> Main Chat preprocessing and memory-hit merge helpers now live in
+> `src-tauri/src/main_chat_preprocess.rs`.
+> Main Chat auto-checkin, reasoning-trace prompt, and conversation-signal
+> helpers now live in `src-tauri/src/main_chat_conversation_updates.rs`.
 > Main Chat ReAct tool-selection plan/candidate helpers now live in
 > `src-tauri/src/main_chat_react_tool_selection.rs`.
 > Main Chat ReAct AgentLoop attempt execution, runtime helper types, follow-up
@@ -55,21 +67,91 @@
 > `src-tauri/src/main_chat_proposal_support.rs`.
 > Main Chat HS runtime packet/topic/tool-requirement helpers now live in
 > `src-tauri/src/main_chat_hs_runtime.rs`.
+> Main Chat strategy dispatch now lives in
+> `src-tauri/src/main_chat_strategy.rs`, leaving `src-tauri/src/lib.rs` focused
+> on command-surface wiring and fallback orchestration.
+> Main Chat stream command state executor and stream timeout policy now live in
+> `src-tauri/src/main_chat_streaming.rs`, leaving the Tauri stream command in
+> `src-tauri/src/lib.rs` as command-surface wiring.
 > Main Chat context compilation and selected-skill id sanitization now live with
 > the bounded knowledge-format loader in
 > `src-tauri/src/main_chat_context_loader.rs`, leaving ordinary send/stream
 > call sites in `src-tauri/src/lib.rs` to call that focused module.
+> Main Chat ReAct static/unit tests now live in
+> `src-tauri/src/main_chat_react_unit_tests.rs`, while command-surface boundary
+> tests live in `src-tauri/src/main_chat_react_boundary_tests.rs`, reducing the
+> Main Chat ReAct test mass inside `src-tauri/src/lib.rs`.
+> Final-acceptance helper/runner/evidence tests now live in
+> `src-tauri/src/main_chat_final_acceptance_tests.rs`, and the local
+> command-surface FileReadSuccess eval case explicitly scopes the isolated
+> AppState `safe_paths` to the canonical workspace root before reading the
+> workspace file.
+> Live-provider command-surface harness tests now live in
+> `src-tauri/src/main_chat_live_provider_tests.rs`, including the no-invocation
+> preflight blockers, local HTTP provider proof, and ignored external-provider
+> opt-in proof paths.
+> Command-surface proposal-path IPC tests now live in
+> `src-tauri/src/main_chat_command_surface_tests.rs`, keeping proposal-first
+> send/stream proofs out of `src-tauri/src/lib.rs`; the same focused module now
+> also owns DirectAnswer send/stream run-completion, scheduler/provider trace,
+> web-policy blocker, missing-MCP blocker, registered-MCP read-success, and
+> registered-MCP / web-policy AgentLoop no-fallback plus registered-MCP
+> multi-candidate AgentLoop IPC tests, as well as the 24-case command-surface
+> eval gate coverage test.
+> Main Chat HS runtime behavior and extraction-guard tests now live in
+> `src-tauri/src/main_chat_hs_runtime_tests.rs`, covering HS helper module
+> extraction, sanitized HS packet construction, tools-prompt read-only/write
+> requirement separation, LocalOnly no-cloud fallback, sensitive-topic
+> LocalOnly policy selection, and no `src-tauri/src/lib.rs` root re-export
+> for HS runtime helpers.
+> Main Chat task-control behavior tests now live in
+> `src-tauri/src/main_chat_task_control_tests.rs`, covering retry manual
+> blocker / automatic replay, permission-preserving resume / accepted
+> ToolPermission replay, and cancel queued-action stop behavior outside
+> `src-tauri/src/lib.rs`.
+> Main Chat context-loader and workspace-file resolver behavior tests now live
+> in `src-tauri/src/main_chat_context_loader_tests.rs`, covering bounded
+> knowledge-format surfaces, selected `SKILL.md` loading/sanitization,
+> selectedSkillId send/stream plumbing, and explicit workspace path/traversal
+> read boundaries outside `src-tauri/src/lib.rs`.
+> Main Chat runtime-module extraction guard tests now live in
+> `src-tauri/src/main_chat_runtime_module_tests.rs`, covering runtime /
+> generation / proposal / final-gate / command-surface / live-provider helper
+> module boundaries, focused module helper import direction, send/stream
+> state-executor guards, ordinary send/stream deprecated-helper isolation, and
+> Chat page migration-command isolation outside `src-tauri/src/lib.rs`.
 > Main Chat ReAct AgentLoop guidance now declares a metadata-safe tool-candidate
-> contract, configures `AgentLoopConfig` `toolset_allowlist` from the governed
-> candidate targets, records candidate count/ids/allowlist/model-selected match
-> metadata in transcript evidence, and supports a bounded multi-candidate
+> contract, configures `AgentLoopConfig` exact-target `toolset_allowlist` plus
+> exact action-target candidate pairs from the governed candidate set, records
+> candidate count/ids/allowlist/model-selected match metadata in transcript
+> evidence, and supports a bounded multi-candidate
 > registered read-only manifest set for generic MCP read requests. The generic
 > MCP candidate predicate now also excludes high-risk, critical,
-> confirmation-required, and write-like read-shaped manifests before exposing
-> candidates to the model. Generic MCP candidates now also receive deterministic
-> capability/name/tag ranking, and the metadata-safe candidate contract includes
-> candidate rank, source, capability digest, and match reason evidence. This is
-> local deterministic ranking evidence, not yet the full provider-backed /
+> confirmation-required, and write-like read-shaped manifests, including
+> embedded write-like terms in manifest id/name/action/capability/tag surfaces, and
+> contract-unsafe or oversized model-facing manifest names/source labels before exposing
+> candidates to the model; explicit named MCP read target resolution now uses
+> a permission-preserving governed-read target predicate that keeps safe read
+> ToolPermission proposal flow available while still rejecting high/critical,
+> write-like, and contract-unsafe read-shaped manifests before they can become
+> AgentLoop candidates.
+> Generic MCP candidates now also receive deterministic capability/name/tag
+> ranking that ignores raw manifest ids/descriptions, and the metadata-safe
+> candidate contract includes candidate rank, source, capability digest, and
+> sanitized match reason evidence; duplicate registered manifests are collapsed by
+> model-selectable target before the bounded limit is applied. This is local
+> deterministic ranking evidence.
+> AgentLoop now rejects model-selected
+> targets outside the governed allowlist, wrong action-target pairs, write-like
+> or unsupported action types, and unknown/non-candidate calls as explicit
+> `model_selected_disallowed_tool` blockers without entering the single-step
+> fallback or executing writes. Model-selected candidates now also record
+> metadata-safe ExecutionPolicy validation, and policy-denied selected
+> candidates block as `model_selected_tool_policy_blocked`. Exact
+> candidate-pair allowlist entries now carry governed executor input, and
+> boundary coverage verifies model-supplied `arguments` are replaced by the
+> governed candidate contract before execution. This is still not
+> the full provider-backed /
 > model-ranked manifest/capability path. Main Chat
 > workspace file read target resolution also moved from a small hardcoded
 > filename list to a workspace-root resolver that accepts explicit relative
@@ -187,11 +269,17 @@ The Goal starts from these known facts:
    credited as external live-provider completion.
 7. ReAct execution still starts from heuristic planned-action routing. It now
    exposes a metadata-safe governed candidate contract, enforces the candidate
-   targets through `AgentLoopConfig.toolset_allowlist`, and can let AgentLoop
-   select one registered read-only manifest from a bounded generic MCP candidate
-   set. The candidate filter excludes high-risk, critical,
-   confirmation-required, and write-like read-shaped manifests before model
-   selection, but still lacks full provider-backed/model-ranked
+   targets through exact `AgentLoopConfig.toolset_allowlist` target matching and exact action-target
+   candidate pairs, and can let AgentLoop select one registered read-only
+   manifest from a bounded generic MCP candidate set. The candidate filter
+   excludes high-risk, critical, confirmation-required, write-like, and
+   contract-unsafe or oversized model-facing manifest names/source labels before model
+   selection, and model-selected allowlist
+   misses / wrong action-target pairs / write-like or unsupported action types /
+   unknown non-candidate calls now become explicit blockers instead of falling
+   back; selected candidates also record metadata-safe ExecutionPolicy
+   validation and policy-denied selected candidates block explicitly. It still
+   lacks full provider-backed/model-ranked
    manifest/capability selection evidence.
 8. Workspace file read target selection is too hardcoded.
 9. Knowledge formats (`SOUL.md`, `USER.md`, `MEMORY.md`, `SKILL.md`,
@@ -292,7 +380,7 @@ Wire an opt-in live-provider acceptance path for:
 
 - DirectAnswer generation;
 - provider-backed web AgentLoop;
-- provider-backed registered MCP AgentLoop;
+- provider-backed bounded multi-candidate registered MCP AgentLoop;
 - provider-backed ToolPermission proposal.
 
 Rules:
@@ -305,6 +393,20 @@ Rules:
 - Credited scenarios must have non-empty run id, task session id, response
   preview, completed status, no blockers, no silent writes, and no legacy
   fallback.
+- Credited ReAct live scenarios must also carry metadata-safe governed
+  tool-selection evidence: bounded candidate count, model-selected allowed
+  tool, selected candidate rank/source/capability digest/match reason,
+  selected candidate id/target/action type, bounded candidate ids, target
+  allowlist, exact action-target allowlist, ExecutionPolicy
+  validation/allowance, and governed candidate arguments.
+- Credited web AgentLoop live scenarios must prove the selected candidate
+  target/action is scoped to a governed `web.*` tool.
+- Credited registered MCP live scenarios must prove at least two distinct
+  bounded model-selectable MCP candidates, targets, and action-target pairs
+  before model selection.
+- Credited MCP ToolPermission proposal live scenarios must prove the selected
+  candidate target/action matches the pending ToolPermission proposal target
+  and uses `mcp_tool`.
 - Local HTTP provider proof remains useful plumbing evidence, but not external
   live-provider completion credit.
 
@@ -352,15 +454,30 @@ boundary:
 Do not remove the governed fallback path until the new path is proven.
 
 Progress so far: the current runtime declares metadata-safe allowed candidates
-in the AgentLoop system message, enforces selected targets through
-`toolset_allowlist`, records candidate evidence in transcripts, supports a
+in the AgentLoop system message, enforces selected targets plus exact
+action-target pairs through exact `toolset_allowlist` target checks /
+candidate-pair checks, records
+candidate evidence in transcripts, supports a
 bounded generic MCP read manifest candidate set, ranks generic MCP candidates by
-deterministic query/manifest capability, name, description, and tag matches, and
-exposes candidate rank/source/capability digest/match reason evidence without
-raw manifest payloads. It also excludes high-risk / critical /
-confirmation-required / write-like manifests from that model-selectable set.
-Remaining Stage 5 work is real provider-backed/model-ranked manifest and
-capability selection before execution policy application.
+deterministic query/manifest capability, name, and tag matches while ignoring
+raw manifest ids/descriptions, and
+exposes candidate rank/source/capability digest/sanitized match reason evidence without
+raw manifest payloads, while redacting unsafe candidate contract label fields and deduplicating by model-selectable target before
+applying the bounded limit. It also excludes high-risk / critical /
+confirmation-required / write-like / contract-unsafe manifest names/source
+labels from that model-selectable set.
+AgentLoop now rejects model-selected allowlist misses, wrong action-target pairs,
+write-like or unsupported action types, and unknown non-candidate calls as explicit
+`model_selected_disallowed_tool` blockers, keeps the queued action failed, and
+does not enter the single-step fallback or execute writes. Model-selected
+candidates now also record selected candidate rank/source/capability
+digest/match reason metadata, selected candidate id/target/action type,
+bounded candidate ids, target allowlist, exact action-target allowlist, plus
+metadata-safe ExecutionPolicy validation, and
+policy-denied selected candidates block as
+`model_selected_tool_policy_blocked`. Remaining Stage 5 work is real
+provider-backed/model-ranked manifest and capability selection before execution
+policy application.
 
 ### Stage 6: Safe Workspace File Read
 
@@ -467,7 +584,8 @@ This Goal is complete only if all are true:
 8. External live-provider evidence is either credited from real completed runs
    or exact blockers are reported.
 9. ReAct tool selection is materially less heuristic and remains governed by
-   manifest/capability candidates plus `ExecutionPolicy`.
+   manifest/capability candidates plus metadata-safe `ExecutionPolicy`
+   validation.
 10. Workspace file read is safe and no longer hardcoded to a few filenames.
 11. Controlled knowledge-format surfaces are implemented as bounded context.
 12. New Main Chat logic is materially less concentrated in

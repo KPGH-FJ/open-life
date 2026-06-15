@@ -1,4 +1,5 @@
 use crate::errors::AppError;
+use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::AppState;
 use openlife_core::agent::{
     behavior_checks_for_packet, AgentAction, AgentObservation, AgentProposal, AgentRun,
@@ -456,7 +457,7 @@ pub async fn run_skill(
     };
 
     let hs_packet =
-        crate::build_chat_runtime_hs_packet(&state.inner().clone(), &task, &life_model, "", None)
+        build_chat_runtime_hs_packet(&state.inner().clone(), &task, &life_model, "", None)
             .await
             .map_err(AppError::internal)?;
 

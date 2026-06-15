@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
+use crate::main_chat_generation_support::preview_text;
 use crate::main_chat_react_runtime::{blocked_main_chat_observation, MainChatObservation};
 use crate::main_chat_react_tool_selection::{
     resolve_main_chat_mcp_read_target, MainChatReactActionPlan,
 };
-use crate::{preview_text, AppState};
+use crate::AppState;
 
 pub(crate) async fn execute_main_chat_react_action_with_executor(
     state: &Arc<AppState>,
@@ -20,7 +21,13 @@ pub(crate) async fn execute_main_chat_react_action_with_executor(
     let (safe_paths, calendar_ics_paths, network_policy) = {
         let cfg = state.config.lock().await;
         let mut safe_paths = cfg.system.safe_paths.clone();
-        if let Ok(workspace) = std::env::current_dir().and_then(|dir| dir.canonicalize()) {
+        if let Ok(workspace) =
+            crate::workspace_file_resolver::resolve_workspace_root().or_else(|_| {
+                std::env::current_dir()
+                    .and_then(|dir| dir.canonicalize())
+                    .map_err(|err| err.to_string())
+            })
+        {
             let workspace = workspace.to_string_lossy().to_string();
             if !safe_paths.iter().any(|path| path == &workspace) {
                 safe_paths.push(workspace);
