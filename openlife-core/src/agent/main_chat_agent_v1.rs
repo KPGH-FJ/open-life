@@ -2007,6 +2007,9 @@ pub fn evaluate_main_chat_live_provider_eval_preflight(
     if provider.is_empty() || matches!(provider.as_str(), "none" | "ollama" | "local") {
         blockers.push("cloud_provider_required".to_string());
     }
+    if !main_chat_live_provider_external_identity_allowed(&provider) {
+        blockers.push("external_provider_identity_required".to_string());
+    }
     if !input.api_key_present {
         blockers.push("provider_api_key_missing".to_string());
     }
@@ -2037,6 +2040,141 @@ pub fn evaluate_main_chat_live_provider_eval_preflight(
         model_invoked: false,
         direct_writes_executed: false,
     }
+}
+
+fn main_chat_live_provider_external_identity_allowed(provider: &str) -> bool {
+    if !main_chat_live_provider_contract_safe_label(provider) {
+        return false;
+    }
+    if matches!(
+        provider,
+        "" | "none"
+            | "ollama"
+            | "local"
+            | "localhost"
+            | "127.0.0.1"
+            | "::1"
+            | "0.0.0.0"
+            | "local_test_http"
+            | "local-test-http"
+            | "local_http"
+            | "local-http"
+            | "mock"
+            | "fixture"
+            | "synthetic"
+            | "scripted"
+    ) {
+        return false;
+    }
+    if main_chat_live_provider_label_is_local_network_alias(provider) {
+        return false;
+    }
+    let has_local_token = provider
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "local" | "localhost" | "mock" | "fixture" | "synthetic" | "scripted"
+            )
+        });
+    if has_local_token {
+        return false;
+    }
+    ![
+        "ollama",
+        "local",
+        "localhost",
+        "mock",
+        "fixture",
+        "synthetic",
+        "scripted",
+    ]
+    .iter()
+    .any(|alias| provider.contains(alias))
+}
+
+fn main_chat_live_provider_contract_safe_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/'))
+}
+
+fn main_chat_live_provider_label_is_local_network_alias(provider: &str) -> bool {
+    let normalized = provider
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '-' | '_' | '/') {
+                '.'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let parts = normalized.split('.').collect::<Vec<_>>();
+    if parts.len() >= 4
+        && parts.windows(4).any(|octets| {
+            if octets
+                .iter()
+                .any(|octet| octet.is_empty() || !octet.chars().all(|ch| ch.is_ascii_digit()))
+            {
+                return false;
+            }
+            let Some(first) = octets.first().and_then(|octet| octet.parse::<u8>().ok()) else {
+                return false;
+            };
+            let Some(second) = octets.get(1).and_then(|octet| octet.parse::<u8>().ok()) else {
+                return false;
+            };
+
+            first == 0
+                || first == 10
+                || first == 127
+                || (first == 169 && second == 254)
+                || (first == 172 && (16..=31).contains(&second))
+                || (first == 192 && second == 168)
+        })
+    {
+        return true;
+    }
+
+    main_chat_live_provider_label_has_embedded_local_network_alias(provider)
+}
+
+fn main_chat_live_provider_label_has_embedded_local_network_alias(provider: &str) -> bool {
+    let mut octets = Vec::new();
+    let mut current = String::new();
+    for ch in provider.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if let Ok(octet) = current.parse::<u16>() {
+                octets.push(octet);
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        if let Ok(octet) = current.parse::<u16>() {
+            octets.push(octet);
+        }
+    }
+
+    octets.windows(4).any(|window| {
+        if window.iter().any(|octet| *octet > 255) {
+            return false;
+        }
+        let first = window[0];
+        let second = window[1];
+
+        first == 0
+            || first == 10
+            || first == 127
+            || (first == 169 && second == 254)
+            || (first == 172 && (16..=31).contains(&second))
+            || (first == 192 && second == 168)
+    })
 }
 
 pub fn evaluate_main_chat_live_provider_eval_preflight_from_config(

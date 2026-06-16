@@ -587,6 +587,43 @@ fn live_provider_eval_preflight_is_ready_only_for_explicit_unscripted_cloud_rout
 }
 
 #[test]
+fn live_provider_eval_preflight_rejects_synthetic_or_local_provider_identity() {
+    for provider in [
+        "localhost",
+        "mock",
+        "local_test_http",
+        "openai-127-0-0-1",
+        "openai127-0-0-1",
+    ] {
+        let report = evaluate_main_chat_live_provider_eval_preflight(
+            MainChatLiveProviderEvalPreflightInput {
+                provider: provider.into(),
+                api_key_present: true,
+                network_enabled: true,
+                explicit_live_eval_requested: true,
+                scripted_provider_response_present: false,
+                local_only_required: false,
+            },
+        );
+
+        assert!(!report.ready, "provider must fail closed: {provider}");
+        assert!(
+            !report.live_provider_invocation_allowed,
+            "provider must not allow live invocation before external identity proof: {provider}"
+        );
+        assert!(
+            report
+                .blockers
+                .contains(&"external_provider_identity_required".to_string()),
+            "provider must report explicit external identity blocker: {provider}; blockers={:?}",
+            report.blockers
+        );
+        assert!(!report.model_invoked);
+        assert!(!report.direct_writes_executed);
+    }
+}
+
+#[test]
 fn live_provider_eval_preflight_from_config_uses_effective_key_without_serializing_it() {
     let mut config = crate::config::AppConfig::default();
     config.llm.provider = "openai".into();

@@ -1,4 +1,7 @@
-use super::{__cmd__send_message, __cmd__start_stream_message, send_message, start_stream_message};
+use super::{
+    __cmd__send_message, __cmd__start_stream_message, __tauri_command_name_send_message,
+    __tauri_command_name_start_stream_message, send_message, start_stream_message,
+};
 use crate::main_chat_final_acceptance_tests::run_main_chat_command_surface_eval_gate;
 
 #[test]
@@ -43,6 +46,24 @@ fn main_chat_invoke_request(cmd: &str, body: serde_json::Value) -> tauri::webvie
         headers: Default::default(),
         invoke_key: tauri::test::INVOKE_KEY.to_string(),
     }
+}
+
+fn main_chat_command_surface_test_context() -> tauri::Context<tauri::test::MockRuntime> {
+    let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+    let mock_ipc_origin = tauri::utils::acl::ExecutionContext::Remote {
+        url: "http://tauri.localhost"
+            .parse()
+            .expect("valid mock IPC origin pattern"),
+    };
+    context.runtime_authority_mut().__allow_command(
+        "send_message".into(),
+        mock_ipc_origin.clone(),
+    );
+    context.runtime_authority_mut().__allow_command(
+        "start_stream_message".into(),
+        mock_ipc_origin,
+    );
+    context
 }
 
 #[tokio::test]
@@ -97,7 +118,7 @@ async fn send_message_command_surface_runs_governed_proposal_path() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -206,7 +227,7 @@ async fn start_stream_message_command_surface_runs_governed_proposal_path() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -311,7 +332,7 @@ async fn send_message_direct_answer_records_main_chat_run_and_completes_task() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -424,7 +445,7 @@ async fn send_message_l2_direct_answer_records_scheduler_provider_generation_tra
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -566,7 +587,7 @@ async fn start_stream_message_direct_answer_records_main_chat_run_and_completes_
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -687,7 +708,7 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -853,7 +874,7 @@ async fn send_message_command_surface_preserves_web_policy_blocker() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -944,7 +965,7 @@ async fn start_stream_message_command_surface_preserves_web_policy_blocker() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1038,7 +1059,7 @@ async fn send_message_command_surface_preserves_missing_mcp_blocker() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1124,7 +1145,7 @@ async fn start_stream_message_command_surface_preserves_missing_mcp_blocker() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1230,7 +1251,7 @@ async fn send_message_command_surface_preserves_registered_mcp_read_success() {
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1334,7 +1355,7 @@ async fn start_stream_message_command_surface_preserves_registered_mcp_read_succ
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1471,7 +1492,7 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1639,7 +1660,7 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1812,7 +1833,7 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -1984,7 +2005,7 @@ async fn send_message_web_policy_blocker_completes_through_agent_loop_not_fallba
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![send_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()
@@ -2159,7 +2180,7 @@ async fn start_stream_message_web_policy_blocker_completes_through_agent_loop_no
     let app = tauri::test::mock_builder()
         .manage(state.clone())
         .invoke_handler(tauri::generate_handler![start_stream_message])
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
         .build()

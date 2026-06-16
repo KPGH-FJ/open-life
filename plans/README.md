@@ -66,8 +66,11 @@ as reference only.
      aggregate into separate Direct generation, web AgentLoop, MCP AgentLoop,
      and proposal-permission evidence, with harness scenario identity checked
      before evidence is credited. Credited live-provider scenarios must also
-     have completed status, no blockers, and non-empty run/task/response trace
-     fields. Runtime and
+     have completed status, no blockers, raw metadata-safe run/task ids with
+     no wrapping whitespace/control characters, and a bounded non-empty
+     harness-normalized single-line response trace field with no
+     leading/trailing whitespace, repeated whitespace runs, or control
+     characters. Runtime and
      command-surface reports now
      expose split zero live-provider web/MCP AgentLoop coverage rather than
      only a combined web-MCP field. Tauri now also has a single final
@@ -78,10 +81,15 @@ as reference only.
      core runtime gate. Complete clean live harness evidence is explicitly
      merged into runtime live coverage and command-surface final evidence; the
      runner returns runtime/command-surface case counts, live-provider
-     attempted/report/ready/main-chat-invoked/model-invoked counts,
-     metadata-safe live-provider blockers, a direct-write flag, and the nested
+     attempted/report/auditable-ready/main-chat-invoked/model-invoked counts,
+     where ready counts only reports credited by the matching scenario rules,
+     metadata-safe live-provider blockers, including missing live-evidence
+     blockers even when no live harness reports exist, a direct-write flag, and the nested
      core acceptance report; post-invocation live failures now also derive
-     scenario-specific blockers.
+     scenario-specific blockers, and ready/completed reports missing
+     live-provider invocation allowance, Main Chat invocation, or model
+     invocation proof derive explicit blockers instead of silently losing
+     credit.
      The explicit non-default `run_main_chat_agent_execution_v1_eval_gate`
      Tauri command exposes the core 100-case runtime eval gate as a
      metadata-safe, no-external-provider, no-app-store-write report with
@@ -100,30 +108,76 @@ as reference only.
      the external-provider preflight is ready. A non-ignored local HTTP
      OpenAI-compatible provider-client harness now permits the `local_test_http`
      endpoint kind and proves ordinary `send_message` can run DirectAnswer
-     through the real scheduler/HTTP client path with response trace and no
+     through the real scheduler/HTTP client path with normalized single-line
+     response trace and no
      silent writes; the acceptance evidence intentionally does not credit this
-     as external live-provider generation, and normal command-surface live
-     coverage remains zero. The ignored external paths cover DirectAnswer,
+     as external live-provider generation, derives
+     `live_provider_external_provider_missing` when such local proof or local,
+     localhost, mock, fixture-like, or loopback/private-network alias provider
+     identity, including alphanumeric-embedded IPv4 aliases and embedded
+     local/mock/fixture/synthetic/scripted/ollama labels, is audited as live evidence, and normal command-surface
+     live coverage remains zero.
+     The ignored external paths cover DirectAnswer,
      provider-backed ReAct web AgentLoop, bounded multi-candidate registered
      MCP AgentLoop, and MCP ToolPermission proposal evidence, including
      `liveProviderInvoked`,
+     metadata-safe provider identity with no local/private network alias,
+     including alphanumeric-embedded loopback/private IPv4 aliases or embedded
+     local/mock/fixture/synthetic/scripted/ollama labels,
+     raw metadata-safe provider model identity with no wrapping whitespace/control characters,
+     exact metadata-safe required-evidence manifest,
      AgentLoop action status, no single-step fallback, MCP target resolution /
      ToolPermission proposal checks, model-selected candidate
-     rank/source/capability digest/match reason, selected candidate id/target/action type,
+     rank/raw metadata-safe source with no wrapping whitespace/control characters/metadata-safe capability digest/bounded safe capability labels with a discrete read label and write-like labels rejected/raw metadata-safe match reason with no wrapping whitespace/control characters,
+     selected candidate id/target/action type, selected candidate rank matching
+     the selected candidate's 1-based position in the bounded candidate list,
      bounded candidate ids, target allowlist, exact action-target allowlist /
-     ExecutionPolicy / governed-arguments trace, and no silent writes. Web AgentLoop live credit
-     must prove selected candidate target/action evidence is scoped to a governed `web.*` tool.
+     ExecutionPolicy / metadata-safe governed-arguments digest trace, and no
+     silent writes; candidate ids, target allowlist, and action-target
+     allowlist must share the same distinct bounded target set and candidate
+     cardinality, every allowed action must use the model-selected
+     governed action type, every action-target allowlist entry must be an exact
+     two-field `{actionType,target}` metadata-safe object with no extra JSON
+     fields and no trim-normalized raw labels, registered MCP provider-ranked live credit must prove
+     AgentLoop candidate id order exactly matches the provider-ranked candidate
+     id order, and web AgentLoop live credit specifically requires
+     the selected governed `web.*` action type to be `mcp_tool`. DirectAnswer live credit
+     must prove direct provider generation with raw metadata-safe provider model identity with no wrapping whitespace/control characters and no AgentLoop, single-step fallback, MCP/proposal,
+     or tool-selection metadata. ReAct live credit must not use single-step fallback. Web AgentLoop live credit
+     must prove selected candidate id/target identity and action evidence are scoped to a governed `web.*` tool,
+     with no overlapping registered MCP read-success or ToolPermission proposal trace.
      Registered MCP live credit
-     must also prove at least two distinct bounded model-selectable MCP candidates / targets /
-     action-target pairs. MCP ToolPermission proposal live credit must also prove selected
-     candidate target/action evidence matches the pending ToolPermission proposal target and uses
-     `mcp_tool`. Live
+     must also prove at least two complete, duplicate-free bounded
+     model-selectable MCP candidates / targets / action-target pairs plus
+     provider-ranked selection metadata
+     (`toolSelectionModelRanked`, `provider_model` ranking source, cloud/provider-backed
+     ranking route with metadata-safe non-local ranking provider identity with no wrapping whitespace/control characters raw-exact matching the metadata-safe live report provider,
+     metadata-safe ranking model identity with no wrapping whitespace/control characters raw-exact matching the metadata-safe live report model, exact
+     one-field provider-ranking JSON response containing only `ranked_candidate_ids`, with Markdown fenced
+     JSON, extra explanatory text, and extra response fields rejected fail-soft, complete
+     duplicate-free bounded raw exact candidate-id permutation, contract-unsafe returned
+     candidate ids, including ids that only match after trimming whitespace,
+     rejected fail-soft, extra provider response fields rejected fail-soft, source
+     candidate sets with contract-unsafe candidate/action/target/source/match labels or
+     duplicate candidate ids rejected before provider invocation, contract-unsafe candidate/target/action
+     labels rejected, candidate ids matching the exact target/action-target
+     allowlists, selected candidate id matching
+     the selected MCP target, selected rank matching the provider-ranked order,
+     action type `mcp_tool`, metadata-safe response digest with
+     `bytes:<positive-n> hash:sha256:<64-hex>` shape, canonical decimal
+     byte count with no leading zeros, with zero-byte placeholders,
+     leading-zero byte counts, and free-form hash suffixes rejected by harness
+     ready checks and final credit, and no overlapping ToolPermission
+     proposal outcome). MCP ToolPermission proposal live credit must also prove selected
+     candidate id/target identity matches the pending ToolPermission proposal target, uses
+     `mcp_tool`, and has no overlapping registered MCP read-success outcome. Live
      ReAct reports missing that governance trace are not credited as
      web/MCP/proposal live evidence.
      ReAct generic MCP
      candidate selection now records deterministic capability/name/tag ranking
      evidence that ignores raw manifest ids/descriptions in the metadata-safe
-     candidate contract, including rank, source, capability digest, and sanitized match
+     candidate contract, including rank, source, capability digest, bounded safe
+     capability labels, and sanitized match
      reason, redacts unsafe candidate contract labels, deduplicates by model-selectable target before applying the
      bounded limit, while continuing to reject
      high-risk/critical/confirmation-required/write-like read-shaped manifests,
@@ -190,10 +244,21 @@ as reference only.
      send/stream state-executor guards, ordinary send/stream deprecated-helper
      isolation, and Chat page migration-command isolation outside
      `src-tauri/src/lib.rs`.
-     This is local deterministic selection evidence, not
-     provider-backed or model-ranked live selection evidence. The ignored live
-     runs were not executed in this environment and do not count as
-     live-provider completion.
+     Main Chat now also has a fail-soft provider/model-ranked preselection
+     path for multi-candidate MCP read plans: it sends only the metadata-safe
+     candidate contract, including capability digest and bounded safe capability labels, plus
+     privacy-masked bounded context to the provider without injecting
+     the full LifeModel system prompt, requires the previewed ranking route
+     provider/model to match the actual request provider/model before provider-ranked evidence is credited, accepts only
+     known candidate ids as a reorder signal, ignores invalid or
+     contract-unsafe ids, preserves
+     governed executor arguments, and records ranking source/digest plus
+     accepted candidate-order evidence only when the provider returns a
+     complete bounded candidate-id permutation; ignored provider orders keep
+     only the ignored flag and metadata-safe response digest. This path is covered with ordinary `send_message` through a
+     local HTTP OpenAI-compatible provider. The ignored external live runs were
+     not executed in this environment and do not count as live-provider
+     completion.
      Final completion still requires live-provider-backed
      generation eval coverage, broader provider-backed web/MCP AgentLoop and
      manifest/permission coverage, and broader provider/live proposal-permission
@@ -429,8 +494,7 @@ frontend Tauri wrappers plus an explicit manual Chat composer `SKILL.md`
 context field; the async context compiler and selected-skill sanitizer are now
 owned by the same focused context module. This improves the current narrow paths, but it does
 not change the final completion status or satisfy real live-provider evidence,
-remaining external live-provider harness evidence, broader provider-backed /
-model-ranked manifest and capability selection, or further module cleanup of
+remaining external live-provider harness evidence, or further module cleanup of
 other Main Chat runtime/strategy code.
 
 `plans/legacy_direct_write_convergence_goal_spec.md` is retained as the
@@ -1068,7 +1132,7 @@ metadata-safe safety, default Chat impact, and next dependency.
 | W144-W146 | Backend Completion Goal 7: Backend Golden Paths | Pure backend/core Weekly Planning, Low-Energy Support, and Preference Correction golden paths are complete; no default Chat migration, no ordinary send/stream replacement, no Tauri command, no UI, no durable LifeModel/Memory/external provider state write, and ordinary Chat does not call golden path helpers or treat golden path ready as migration permission |
 | W147-W149 | Backend Completion Goal 8: Pre-UI Backend Contract Freeze | Pure backend/core read-model contracts for Learning Inbox, Evidence Timeline, Proposal Review, Runtime Trace, Guidance Impact, Privacy Controls, and LifeModel Overview are frozen; final backend completion gate report and docs/progress/verification sync are complete; no command/UI/store write/runtime/model/tool/default Chat impact |
 | W150-W158 | Skill Runtime Beta Maturity | Built-in skill readiness, bounded metadata-safe context, HS privacy/model-route governance, fail-soft output envelopes, proposal candidate governance, plugin declarative-only boundary, non-default read-only status command, Runs/Review trace integration, and docs sync are complete; no ordinary Chat routing change and no migration permission |
-| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first with a metadata-safe tool-candidate contract, generic MCP read bounded read-only manifest candidate set, deterministic capability/name/tag ranking evidence, candidate rank/source/capability digest/sanitized match reason metadata, model-selected ExecutionPolicy metadata, governed candidate arguments source/digest metadata, high-risk/confirmation/write-like candidate exclusion, exact `toolset_allowlist` target enforcement, and exact action-target candidate enforcement, with ReAct tool-selection plan/candidate helpers extracted to `src-tauri/src/main_chat_react_tool_selection.rs`, ReAct AgentLoop attempt execution/runtime helper types/follow-up synthesis/action-to-tool-call conversion/tool-call metadata helpers extracted to `src-tauri/src/main_chat_react_runtime.rs`, ReAct ActionExecutor-backed fallback execution extracted to `src-tauri/src/main_chat_react_execution.rs`, proposal/ToolPermission proposal support helpers extracted to `src-tauri/src/main_chat_proposal_support.rs`, HS runtime packet/topic/tool-requirement helpers extracted to `src-tauri/src/main_chat_hs_runtime.rs`, task-session/transcript/action-queue runtime support helpers extracted to `src-tauri/src/main_chat_runtime_support.rs`, send command state executor extracted to `src-tauri/src/main_chat_send.rs`, strategy dispatch extracted to `src-tauri/src/main_chat_strategy.rs`, and stream command state executor extracted to `src-tauri/src/main_chat_streaming.rs`; rejects no-planned-action AgentLoop results as incomplete tool execution, blocks model-selected exact-target allowlist misses / wrong action-target pairs / write-like or unsupported action types / unknown non-candidate calls as explicit `model_selected_disallowed_tool` blockers without single-step fallback, replaces model-supplied arguments with exact allowlist governed executor input before execution, and blocks policy-denied selected candidates as `model_selected_tool_policy_blocked`, otherwise falling back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; Main Chat context assembly now uses a controlled knowledge-format loader for bounded workspace/configured `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, and selected `SKILL.md` surfaces, with context compilation / selected-skill sanitization extracted to `src-tauri/src/main_chat_context_loader.rs`, optional sanitized selected-skill id plumbing through send/stream command surfaces, frontend Tauri wrappers, and an explicit manual Chat composer source; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, broader provider/live proposal-permission proof, and broader provider-backed/model-ranked manifest/capability selection remain required before completion |
+| Main Chat Agent Execution v1 | Main Chat Agent remediation | Ordinary `send_message` / `start_stream_message` enter AgentIngress and governed task sessions with transcript/action queue foundations; DirectAnswer is on a real strategy path with send/stream AgentRun, prompt/context transcript, task-session completion proof, and L2 scheduler/provider generation trace proof; ReActToolExecution attempts the governed plan-guided AgentLoop first with a metadata-safe tool-candidate contract, generic MCP read bounded read-only manifest candidate set, deterministic capability/name/tag ranking evidence, provider/model-ranked preselection local HTTP proof, candidate rank/source/capability digest/bounded safe capability labels/sanitized match reason metadata, model-selected ExecutionPolicy metadata, governed candidate arguments source/digest metadata, high-risk/confirmation/write-like candidate exclusion, exact `toolset_allowlist` target enforcement, and exact action-target candidate enforcement, with ReAct tool-selection plan/candidate helpers extracted to `src-tauri/src/main_chat_react_tool_selection.rs`, ReAct AgentLoop attempt execution/runtime helper types/follow-up synthesis/action-to-tool-call conversion/tool-call metadata helpers extracted to `src-tauri/src/main_chat_react_runtime.rs`, ReAct ActionExecutor-backed fallback execution extracted to `src-tauri/src/main_chat_react_execution.rs`, proposal/ToolPermission proposal support helpers extracted to `src-tauri/src/main_chat_proposal_support.rs`, HS runtime packet/topic/tool-requirement helpers extracted to `src-tauri/src/main_chat_hs_runtime.rs`, task-session/transcript/action-queue runtime support helpers extracted to `src-tauri/src/main_chat_runtime_support.rs`, send command state executor extracted to `src-tauri/src/main_chat_send.rs`, strategy dispatch extracted to `src-tauri/src/main_chat_strategy.rs`, and stream command state executor extracted to `src-tauri/src/main_chat_streaming.rs`; rejects no-planned-action AgentLoop results as incomplete tool execution, blocks model-selected exact-target allowlist misses / wrong action-target pairs / write-like or unsupported action types / unknown non-candidate calls as explicit `model_selected_disallowed_tool` blockers without single-step fallback, replaces model-supplied arguments with exact allowlist governed executor input before execution, and blocks policy-denied selected candidates as `model_selected_tool_policy_blocked`, otherwise falling back to a single-step ActionExecutor-backed read path with direct read parser/executor input alignment, eval-gated memory/session multi-step read/observe/follow-up proof, web AgentLoop blocker proof, fixture-backed successful web read AgentLoop proof, registered MCP AgentLoop success proof, registered MCP ToolPermission proposal proof, and governed follow-up synthesis; Main Chat context assembly now uses a controlled knowledge-format loader for bounded workspace/configured `AGENTS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, and selected `SKILL.md` surfaces, with context compilation / selected-skill sanitization extracted to `src-tauri/src/main_chat_context_loader.rs`, optional sanitized selected-skill id plumbing through send/stream command surfaces, frontend Tauri wrappers, and an explicit manual Chat composer source; `proposal.create`, safe retry/replay, permission-preserving resume, accepted ToolPermission resume replay, cancel, execution task panel, and Review Center accept/resume handoff are covered; a 100-case runtime harness covers per-capability execution plus provider/local-only/eval-generation/webAgentLoop/mcpAgentLoop/mcpToolPermissionProposal metrics; a fail-closed live-provider eval preflight reports missing opt-in/key/network/non-scripted/local-only blockers without invoking a model; Tauri mock IPC covers send/stream DirectAnswer, L2 scheduler/provider generation trace, governed file-read, PlanExecute draft, proposal-path, registered-MCP AgentLoop success, registered-MCP ToolPermission proposal, web AgentLoop blocker, fixture-backed web AgentLoop success, web-policy blocker, and missing-MCP blocker; a 24-case send/stream command-surface eval gate keeps legacy fallback=0 and silent write=0; live-provider-backed generation eval, broader live/provider-backed web/MCP manifest coverage, and broader provider/live proposal-permission proof remain required before completion |
 
 ## 4. Current Authoritative Entry Points
 

@@ -137,8 +137,8 @@
 > AgentLoop candidates.
 > Generic MCP candidates now also receive deterministic capability/name/tag
 > ranking that ignores raw manifest ids/descriptions, and the metadata-safe
-> candidate contract includes candidate rank, source, capability digest, and
-> sanitized match reason evidence; duplicate registered manifests are collapsed by
+> candidate contract includes candidate rank, source, capability digest, bounded
+> safe capability labels, and sanitized match reason evidence; duplicate registered manifests are collapsed by
 > model-selectable target before the bounded limit is applied. This is local
 > deterministic ranking evidence.
 > AgentLoop now rejects model-selected
@@ -150,9 +150,24 @@
 > candidates block as `model_selected_tool_policy_blocked`. Exact
 > candidate-pair allowlist entries now carry governed executor input, and
 > boundary coverage verifies model-supplied `arguments` are replaced by the
-> governed candidate contract before execution. This is still not
-> the full provider-backed /
-> model-ranked manifest/capability path. Main Chat
+> governed candidate contract before execution. Multi-candidate MCP read plans
+> now also have a fail-soft provider/model-ranked preselection step: when cloud
+> use is policy-allowed, credentials are present, and the scheduler is not
+> scripted, Main Chat sends only the metadata-safe candidate contract and
+> privacy-masked bounded generation context to the provider without injecting the
+> full LifeModel system prompt, requires the previewed ranking route provider/model
+> to raw-exact match the actual request provider/model before crediting provider-ranked evidence,
+> accepts only known candidate ids
+> as a reorder signal only when they form a complete bounded candidate-id
+> permutation, ignores unknown/invalid/partial/contract-unsafe id lists, keeps governed executor
+> arguments authoritative, fails soft before provider invocation when the source
+> candidate set has contract-unsafe candidate/action/target/source/match labels
+> or duplicate candidate ids, and records model-ranked/source/digest/candidate-id
+> evidence in transcript and AgentLoop metadata only for accepted complete
+> rankings; ignored provider orders keep only the ignored flag and metadata-safe
+> response digest. This provider/model-ranked
+> path is covered by ordinary `send_message` with a local HTTP
+> OpenAI-compatible provider and is not external live-provider credit. Main Chat
 > workspace file read target resolution also moved from a small hardcoded
 > filename list to a workspace-root resolver that accepts explicit relative
 > paths, canonicalizes readable targets, blocks traversal/outside-workspace
@@ -167,9 +182,8 @@
 > payloads without calling Skill Runtime commands. The existing 24-case
 > send/stream command-surface gate remains green. This does not complete the
 > Goal: real final/live-provider acceptance, remaining external live-provider
-> harness evidence, broader provider-backed/model-ranked manifest/capability
-> selection, and further module cleanup of other Main Chat runtime/strategy code
-> remain blockers.
+> harness evidence, and further module cleanup of other Main Chat
+> runtime/strategy code remain blockers.
 
 ## 1. CLI Goal-Mode Short Instruction
 
@@ -278,9 +292,10 @@ The Goal starts from these known facts:
    misses / wrong action-target pairs / write-like or unsupported action types /
    unknown non-candidate calls now become explicit blockers instead of falling
    back; selected candidates also record metadata-safe ExecutionPolicy
-   validation and policy-denied selected candidates block explicitly. It still
-   lacks full provider-backed/model-ranked
-   manifest/capability selection evidence.
+   validation and policy-denied selected candidates block explicitly.
+   Multi-candidate MCP read selection now has a provider/model-ranked
+   preselection path with local HTTP OpenAI-compatible proof, but still lacks
+   external live-provider proof.
 8. Workspace file read target selection is too hardcoded.
 9. Knowledge formats (`SOUL.md`, `USER.md`, `MEMORY.md`, `SKILL.md`,
    `AGENTS.md`) now have a controlled bounded loader for workspace/configured
@@ -359,8 +374,8 @@ registered as a non-default Tauri command and uses the production
 the core runtime eval, attaches metadata-safe live-provider preflight from the
 current state/scheduler, executes all 24 local send/stream command-surface cases on isolated eval
 state, avoids external provider invocation and app-store writes, reports
-`migrationPermission=false`, and fails closed because full live-provider
-evidence is absent. Isolated eval state construction is
+`migrationPermission=false`, reports exact report-level live evidence blockers,
+and fails closed because full live-provider evidence is absent. Isolated eval state construction is
 production-safe through `main_chat_eval_state`, so this evidence does not mutate
 real app stores. This is auditable Stage 2 progress, not final acceptance
 readiness.
@@ -390,23 +405,85 @@ Rules:
   execution path, not a detached synthetic path.
 - The final acceptance runner's explicit opt-in path must run all four live
   scenarios on isolated eval state and must not mutate the source app stores.
-- Credited scenarios must have non-empty run id, task session id, response
-  preview, completed status, no blockers, no silent writes, and no legacy
-  fallback.
-- Credited ReAct live scenarios must also carry metadata-safe governed
+- Credited scenarios must have raw metadata-safe run id and task session id
+  with no wrapping whitespace/control characters,
+  raw bounded non-empty harness-normalized single-line response preview with no
+  wrapping whitespace, repeated whitespace runs, or control characters,
+  raw metadata-safe provider identity with no wrapping whitespace/control characters,
+  raw metadata-safe provider model identity with no wrapping whitespace/control characters, exact metadata-safe required-evidence manifest,
+  completed status, no blockers, no silent writes, and no legacy fallback.
+- The live-provider harness may normalize provider reply whitespace/control
+  characters only for the `response_preview` trace field; it must not mutate the
+  real reply, transcript, stored output, or tool evidence.
+- Reports that claim ready/completed live-provider execution but lack
+  `live_provider_invocation_allowed`, `main_chat_invoked`, or `model_invoked`
+  proof must derive exact blockers and remain uncredited.
+- The final runner's `liveProviderReadyCount` must count only reports that pass
+  the matching scenario credit rules; raw `ready=true` claims with missing
+  trace, missing governance evidence, fallback, silent write, or local/synthetic
+  provider identity must remain uncredited and must not inflate ready count.
+- Credited scenarios must have `provider_endpoint_kind=external_provider` and
+  a metadata-safe non-local provider identity; local HTTP, synthetic, local,
+  localhost, loopback/private-network alias, embedded or alphanumeric-embedded
+  loopback/private IPv4 alias, embedded local/mock/fixture/synthetic/scripted/ollama label,
+  mock, fixture-like, or
+  contract-unsafe provider reports must derive `live_provider_external_provider_missing`
+  and remain uncredited.
+- Credited DirectAnswer live scenarios must prove direct provider generation
+  with no AgentLoop, single-step fallback, MCP/proposal, or tool-selection
+  metadata.
+- Credited ReAct live scenarios must not use single-step fallback and must also
+  carry metadata-safe governed
   tool-selection evidence: bounded candidate count, model-selected allowed
-  tool, selected candidate rank/source/capability digest/match reason,
+  tool, selected candidate rank/raw metadata-safe source with no wrapping
+  whitespace/control characters/metadata-safe capability digest/bounded safe
+  capability labels with a discrete read label and write-like labels rejected/raw metadata-safe match reason with no wrapping whitespace/control characters,
   selected candidate id/target/action type, bounded candidate ids, target
-  allowlist, exact action-target allowlist, ExecutionPolicy
-  validation/allowance, and governed candidate arguments.
-- Credited web AgentLoop live scenarios must prove the selected candidate
-  target/action is scoped to a governed `web.*` tool.
-- Credited registered MCP live scenarios must prove at least two distinct
-  bounded model-selectable MCP candidates, targets, and action-target pairs
-  before model selection.
+  allowlist, exact action-target allowlist, exact provider-ranked candidate id
+  order preservation for registered MCP live credit, ExecutionPolicy
+  validation/allowance, and raw exact metadata-safe governed candidate
+  arguments digest with no extra whitespace.
+  The selected candidate rank must match the selected candidate id's 1-based
+  position in the bounded candidate id list.
+  Candidate ids, target allowlist, and action-target allowlist must share the
+  same distinct bounded target set and candidate cardinality, and every
+  allowed action must use the model-selected governed action type. Each
+  action-target allowlist entry must be an exact two-field `{actionType,target}`
+  metadata-safe object; entries with extra JSON fields or labels that only
+  become metadata-safe after trimming are not live-creditable.
+- Credited web AgentLoop live scenarios must prove selected candidate id/target
+  identity and action evidence are scoped to a governed `web.*` tool whose
+  selected governed action type is `mcp_tool`, with no overlapping registered
+  MCP read-success or ToolPermission proposal trace.
+- Credited registered MCP live scenarios must prove at least two complete,
+  duplicate-free bounded model-selectable MCP candidates, targets, and
+  action-target pairs before model selection, and must preserve provider-ranked
+  selection metadata plus selected-candidate identity
+  (`toolSelectionModelRanked=true`, `toolSelectionRankingSource=provider_model`,
+  `toolSelectionRankingRouteType=cloud`, provider-backed ranking route whose
+  raw metadata-safe provider identity with no wrapping whitespace/control characters
+  raw-exact matches the raw metadata-safe live report provider, raw metadata-safe ranking
+  model identity with no wrapping whitespace/control characters raw-exact matches the raw
+  metadata-safe live report model, provider ranking response shape as an exact
+  one-field JSON object containing only `ranked_candidate_ids`, with Markdown fenced
+  JSON, extra explanatory text, and extra response fields rejected fail-soft, ranked candidate
+  ids as a complete duplicate-free bounded raw exact candidate-id permutation, contract-unsafe
+  returned candidate ids, including ids that only match after trimming
+  whitespace, rejected fail-soft, extra provider response fields rejected
+  fail-soft, source candidate sets with contract-unsafe candidate/action/target/source/match
+  labels or duplicate candidate ids rejected before provider invocation,
+  contract-unsafe candidate/target/action labels rejected, candidate ids matching the exact
+  target/action-target allowlists, selected candidate id equal to selected MCP
+  target, selected rank matching the provider-ranked order, selected action type
+  `mcp_tool`, non-ignored status, raw exact metadata-safe response digest with
+  `bytes:<positive-n> hash:sha256:<64-hex>` shape, canonical decimal byte
+  count with no leading zeros, no extra whitespace, zero-byte placeholder and
+  free-form hash suffix rejection, and
+  no overlapping ToolPermission proposal outcome).
 - Credited MCP ToolPermission proposal live scenarios must prove the selected
-  candidate target/action matches the pending ToolPermission proposal target
-  and uses `mcp_tool`.
+  candidate id/target identity matches the pending ToolPermission proposal
+  target, use `mcp_tool`, and have no overlapping registered MCP read-success
+  outcome.
 - Local HTTP provider proof remains useful plumbing evidence, but not external
   live-provider completion credit.
 
@@ -461,7 +538,7 @@ candidate evidence in transcripts, supports a
 bounded generic MCP read manifest candidate set, ranks generic MCP candidates by
 deterministic query/manifest capability, name, and tag matches while ignoring
 raw manifest ids/descriptions, and
-exposes candidate rank/source/capability digest/sanitized match reason evidence without
+exposes candidate rank/source/capability digest/bounded safe capability labels/sanitized match reason evidence without
 raw manifest payloads, while redacting unsafe candidate contract label fields and deduplicating by model-selectable target before
 applying the bounded limit. It also excludes high-risk / critical /
 confirmation-required / write-like / contract-unsafe manifest names/source
@@ -475,9 +552,33 @@ digest/match reason metadata, selected candidate id/target/action type,
 bounded candidate ids, target allowlist, exact action-target allowlist, plus
 metadata-safe ExecutionPolicy validation, and
 policy-denied selected candidates block as
-`model_selected_tool_policy_blocked`. Remaining Stage 5 work is real
-provider-backed/model-ranked manifest and capability selection before execution
-policy application.
+`model_selected_tool_policy_blocked`. Multi-candidate MCP read selection now
+also performs provider/model-ranked preselection before AgentLoop execution
+when cloud/model use is allowed and credentials are available. The ranking
+prompt exposes only the metadata-safe candidate contract, including capability
+digest and bounded safe capability labels, plus privacy-masked bounded
+generation context without injecting the full LifeModel system prompt,
+requires the previewed ranking route provider/model to raw-exact match the actual request
+provider/model before crediting provider-ranked evidence, accepts only known
+candidate ids as a reorder signal,
+requires a complete bounded candidate-id permutation, ignores invalid/partial/
+contract-unsafe ids fail-soft, preserves exact allowlist/governed executor
+arguments, and records accepted ranking source/digest/candidate-id evidence
+only for complete provider permutations; ignored provider orders keep only the
+ignored flag and metadata-safe response digest. This is
+proved by ordinary `send_message` through a local HTTP OpenAI-compatible
+provider; real external live-provider proof is still required before final
+completion.
+Live ReAct digest credit requires the generated raw metadata-safe label shape
+`bytes:<positive-n> hash:sha256:<64-hex>` for governed arguments, selected
+candidate capabilities, and provider-ranking responses, with a canonical
+decimal byte count that has no leading zeros and no wrapping control
+characters; both the harness ready predicate and final gate fail closed for
+zero-byte placeholder, leading-zero byte count, weak, free-form, or
+control-character-wrapped digest labels.
+Live ReAct ranked-manifest credit also requires selected candidate rank to
+match the selected candidate id's 1-based position in the bounded candidate id
+list; mismatched rank/order evidence fails closed.
 
 ### Stage 6: Safe Workspace File Read
 

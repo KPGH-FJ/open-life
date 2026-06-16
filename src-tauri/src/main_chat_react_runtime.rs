@@ -12,7 +12,8 @@ use crate::main_chat_generation_support::{
 use crate::main_chat_hs_runtime::build_chat_runtime_hs_packet;
 use crate::main_chat_react_tool_selection::{
     build_main_chat_react_agent_loop_messages, main_chat_react_agent_loop_execution_plan,
-    MainChatReactActionPlan,
+    rank_main_chat_react_tool_candidates_with_model, MainChatReactActionPlan,
+    MainChatReactToolSelectionRanking,
 };
 use crate::main_chat_runtime_support::append_main_chat_agent_transcript;
 use crate::{AppState, ToolCallResult, ToolCallStatus};
@@ -44,6 +45,66 @@ pub(crate) struct MainChatReactAgentLoopAttempt {
     pub(crate) blocker_reason: Option<String>,
 }
 
+fn attach_tool_selection_ranking_metadata(
+    metadata: &mut serde_json::Value,
+    ranking: &MainChatReactToolSelectionRanking,
+) {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "toolSelectionModelRanked".into(),
+            serde_json::json!(ranking.model_ranked),
+        );
+        object.insert(
+            "toolSelectionRankingSource".into(),
+            serde_json::json!(ranking.ranking_source),
+        );
+        object.insert(
+            "toolSelectionRankingProvider".into(),
+            ranking
+                .ranking_provider
+                .as_ref()
+                .map(|provider| serde_json::Value::String(provider.clone()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "toolSelectionRankingModel".into(),
+            ranking
+                .ranking_model
+                .as_ref()
+                .map(|model| serde_json::Value::String(model.clone()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "toolSelectionRankingRouteType".into(),
+            ranking
+                .ranking_route_type
+                .as_ref()
+                .map(|route_type| serde_json::Value::String(route_type.clone()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+        object.insert(
+            "toolSelectionRankingProviderBacked".into(),
+            serde_json::json!(ranking.provider_backed),
+        );
+        object.insert(
+            "toolSelectionModelRankingIgnored".into(),
+            serde_json::json!(ranking.ignored),
+        );
+        object.insert(
+            "toolSelectionModelRankingCandidateIds".into(),
+            serde_json::json!(ranking.ranked_candidate_ids),
+        );
+        object.insert(
+            "toolSelectionModelRankingResponseDigest".into(),
+            ranking
+                .model_response_digest
+                .as_ref()
+                .map(|digest| serde_json::Value::String(digest.clone()))
+                .unwrap_or(serde_json::Value::Null),
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn try_run_main_chat_react_agent_loop(
     state: &Arc<AppState>,
@@ -66,10 +127,19 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
         main_chat_provider_endpoint_kind(&scheduler, scripted_provider_response);
     let live_provider_invoked =
         allow_cloud && !scripted_provider_response && provider_endpoint_kind == "external_provider";
-    let agent_loop_plan = {
+    let deterministic_agent_loop_plan = {
         let registry = state.mcp_registry.lock().await;
         main_chat_react_agent_loop_execution_plan(&registry, plan)
     };
+    let (agent_loop_plan, tool_selection_ranking) =
+        rank_main_chat_react_tool_candidates_with_model(
+            &scheduler,
+            life_model,
+            messages_for_generation,
+            deterministic_agent_loop_plan,
+            allow_cloud,
+        )
+        .await;
     let tool_selection_candidate_ids = agent_loop_plan.tool_candidate_ids();
     let tool_selection_allowlist = agent_loop_plan.allowed_tool_targets();
     let tool_selection_allowed_actions = agent_loop_plan.allowed_tool_action_metadata();
@@ -80,32 +150,34 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             "allowedActions": tool_selection_allowed_actions.clone(),
             "allowWrites": false,
         }));
+    let mut plan_metadata = serde_json::json!({
+        "agentLoopAttempted": true,
+        "singleStepFallbackAvailable": true,
+        "allowWrites": false,
+        "allowCloud": allow_cloud,
+        "localOnlyRequired": local_only_required,
+        "plannedActionType": plan.queue_action_type.clone(),
+        "plannedTarget": plan.target.clone(),
+        "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
+        "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
+        "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
+        "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
+        "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
+        "toolSelectionContractDigest": tool_selection_contract_digest,
+        "toolExecutionAllowed": true,
+        "writeExecutionAllowed": false,
+        "directWritesExecuted": false,
+        "providerEndpointKind": provider_endpoint_kind,
+        "scriptedProviderResponse": scripted_provider_response,
+        "externalLiveProviderEvalPreflighted": false,
+    });
+    attach_tool_selection_ranking_metadata(&mut plan_metadata, &tool_selection_ranking);
     let mut transcript_entries = append_main_chat_agent_transcript(
         state,
         Some(task_session_id),
         ExecutionTranscriptEntryKind::Plan,
         "Governed ReAct AgentLoop attempt started.",
-        serde_json::json!({
-            "agentLoopAttempted": true,
-            "singleStepFallbackAvailable": true,
-            "allowWrites": false,
-            "allowCloud": allow_cloud,
-            "localOnlyRequired": local_only_required,
-            "plannedActionType": plan.queue_action_type.clone(),
-            "plannedTarget": plan.target.clone(),
-            "argumentsDigest": openlife_core::agent::react_beta::metadata_safe_value_digest(&plan.arguments),
-            "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
-            "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
-            "toolSelectionAllowlist": agent_loop_plan.allowed_tool_targets(),
-            "toolSelectionAllowedActions": agent_loop_plan.allowed_tool_action_metadata(),
-            "toolSelectionContractDigest": tool_selection_contract_digest,
-            "toolExecutionAllowed": true,
-            "writeExecutionAllowed": false,
-            "directWritesExecuted": false,
-            "providerEndpointKind": provider_endpoint_kind,
-            "scriptedProviderResponse": scripted_provider_response,
-            "externalLiveProviderEvalPreflighted": false,
-        }),
+        plan_metadata,
     )
     .await;
 
@@ -372,7 +444,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
     match loop_result {
         Ok(result) => {
             if result.stop_reason == "tool_allowlist_blocked" {
-                let metadata = serde_json::json!({
+                let mut metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
                     "singleStepFallbackUsed": false,
@@ -393,6 +465,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     "liveProviderInvoked": live_provider_invoked,
                     "externalLiveProviderEvalPreflighted": false,
                 });
+                attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
                 transcript_entries.extend(
                     append_main_chat_agent_transcript(
                         state,
@@ -425,7 +498,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             });
             let planned_action_observed = observed_action.is_some();
             if !planned_action_observed {
-                let metadata = serde_json::json!({
+                let mut metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
                     "singleStepFallbackUsed": true,
@@ -440,6 +513,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     "stopReason": result.stop_reason.clone(),
                     "directWritesExecuted": false,
                 });
+                attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
                 transcript_entries.extend(
                     append_main_chat_agent_transcript(
                         state,
@@ -482,10 +556,11 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
             );
             let selected_capabilities_digest_label =
                 selected_tool_candidate.capabilities_digest_label();
+            let selected_capability_labels_label = selected_tool_candidate.capability_labels_label();
             let selected_manifest_source_label = selected_tool_candidate.manifest_source_label();
             let selected_match_reason_label = selected_tool_candidate.match_reason_label();
             if !selected_execution_policy.execution_allowed {
-                let metadata = serde_json::json!({
+                let mut metadata = serde_json::json!({
                     "agentLoopAttempted": true,
                     "agentLoopSucceeded": false,
                     "singleStepFallbackUsed": false,
@@ -506,6 +581,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     "toolSelectionCandidateRank": selected_tool_candidate.selection_rank,
                     "toolSelectionCandidateSource": selected_manifest_source_label,
                     "toolSelectionCandidateCapabilitiesDigest": selected_capabilities_digest_label,
+                    "toolSelectionCandidateCapabilityLabels": selected_capability_labels_label,
                     "toolSelectionCandidateMatchReason": selected_match_reason_label,
                     "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
                     "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
@@ -523,6 +599,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                     "liveProviderInvoked": live_provider_invoked,
                     "externalLiveProviderEvalPreflighted": false,
                 });
+                attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
                 transcript_entries.extend(
                     append_main_chat_agent_transcript(
                         state,
@@ -618,6 +695,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 "toolSelectionCandidateRank": selected_tool_candidate.selection_rank,
                 "toolSelectionCandidateSource": selected_manifest_source_label,
                 "toolSelectionCandidateCapabilitiesDigest": selected_capabilities_digest_label,
+                "toolSelectionCandidateCapabilityLabels": selected_capability_labels_label,
                 "toolSelectionCandidateMatchReason": selected_match_reason_label,
                 "toolSelectionCandidateCount": agent_loop_plan.tool_candidate_count(),
                 "toolSelectionCandidateIds": agent_loop_plan.tool_candidate_ids(),
@@ -638,6 +716,7 @@ pub(crate) async fn try_run_main_chat_react_agent_loop(
                 "liveProviderInvoked": live_provider_invoked,
                 "externalLiveProviderEvalPreflighted": false,
             });
+            attach_tool_selection_ranking_metadata(&mut metadata, &tool_selection_ranking);
             if plan.target == "mcp.call_tool" {
                 if let Some(object) = metadata.as_object_mut() {
                     object.insert(

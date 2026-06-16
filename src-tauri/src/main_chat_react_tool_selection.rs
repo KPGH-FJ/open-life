@@ -1,6 +1,29 @@
+use openlife_core::life_model::LifeModel;
 use openlife_core::llm::ChatMessage;
+use openlife_core::scheduler::InferenceScheduler;
 
 const MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN: usize = 96;
+const MAIN_CHAT_CANDIDATE_RANKING_TOOLS_PROMPT: &str =
+    "Main Chat metadata-safe candidate ranking; no tool execution.";
+const MAIN_CHAT_WRITE_LIKE_CONTAINS_TERMS: &[&str] = &[
+    "write",
+    "send",
+    "delete",
+    "remove",
+    "update",
+    "create",
+    "modify",
+    "mutate",
+    "externalwrite",
+    "externalsideeffect",
+    "realwrite",
+    "emailsend",
+    "calendarsend",
+    "calendarwrite",
+    "providerwrite",
+    "shellexec",
+    "execute",
+];
 
 #[derive(Clone)]
 pub(crate) struct MainChatReactToolCandidate {
@@ -25,6 +48,33 @@ impl MainChatReactToolCandidate {
         )
     }
 
+    pub(crate) fn capability_labels_label(&self) -> String {
+        let mut labels = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for capability in &self.capabilities {
+            if !main_chat_contract_safe_label(capability, false)
+                || main_chat_surface_contains_write_like_term(capability)
+                || !seen.insert(capability.as_str())
+            {
+                continue;
+            }
+            let next_label = if labels.is_empty() {
+                capability.clone()
+            } else {
+                format!("{}/{}", labels.join("/"), capability)
+            };
+            if next_label.len() > MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN {
+                break;
+            }
+            labels.push(capability.clone());
+        }
+        if labels.is_empty() {
+            "none".into()
+        } else {
+            labels.join("/")
+        }
+    }
+
     pub(crate) fn manifest_source_label(&self) -> String {
         main_chat_contract_label_or(&self.manifest_source, true, "contract_unsafe_source")
     }
@@ -45,6 +95,49 @@ pub(crate) struct MainChatReactActionPlan {
     pub(crate) uses_ephemeral_file_permission: bool,
     pub(crate) uses_ephemeral_mcp_wrapper_permission: bool,
     pub(crate) tool_candidates: Vec<MainChatReactToolCandidate>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MainChatReactToolSelectionRanking {
+    pub(crate) model_ranked: bool,
+    pub(crate) ranking_source: String,
+    pub(crate) ranking_provider: Option<String>,
+    pub(crate) ranking_model: Option<String>,
+    pub(crate) ranking_route_type: Option<String>,
+    pub(crate) provider_backed: bool,
+    pub(crate) model_response_digest: Option<String>,
+    pub(crate) ignored: bool,
+    pub(crate) ranked_candidate_ids: Vec<String>,
+}
+
+impl MainChatReactToolSelectionRanking {
+    pub(crate) fn deterministic() -> Self {
+        Self {
+            model_ranked: false,
+            ranking_source: "deterministic_local".into(),
+            ranking_provider: None,
+            ranking_model: None,
+            ranking_route_type: None,
+            provider_backed: false,
+            model_response_digest: None,
+            ignored: false,
+            ranked_candidate_ids: Vec::new(),
+        }
+    }
+
+    fn deterministic_with_route(route: openlife_core::agent::ModelRouteTrace) -> Self {
+        Self {
+            model_ranked: false,
+            ranking_source: "deterministic_local".into(),
+            ranking_provider: Some(route.provider),
+            ranking_model: Some(route.model),
+            ranking_route_type: Some(route.route_type),
+            provider_backed: false,
+            model_response_digest: None,
+            ignored: false,
+            ranked_candidate_ids: Vec::new(),
+        }
+    }
 }
 
 impl MainChatReactActionPlan {
@@ -153,6 +246,7 @@ impl MainChatReactActionPlan {
                 let arguments_digest_label =
                     format!("bytes:{} hash:{}", arguments_digest.0, arguments_digest.1);
                 let capabilities_digest_label = candidate.capabilities_digest_label();
+                let capability_labels = candidate.capability_labels_label();
                 let candidate_id = main_chat_contract_label_or(
                     &candidate.candidate_id,
                     false,
@@ -171,7 +265,8 @@ impl MainChatReactActionPlan {
                     concat!(
                         "{{candidateId={}; candidateActionType={}; ",
                         "candidateTarget={}; candidateRank={}; candidateSource={}; ",
-                        "argumentDigest={}; capabilitiesDigest={}; matchReason={}; ",
+                        "argumentDigest={}; capabilitiesDigest={}; capabilityLabels={}; ",
+                        "matchReason={}; ",
                         "risk=read_only; allowWrites=false}}"
                     ),
                     candidate_id,
@@ -181,6 +276,7 @@ impl MainChatReactActionPlan {
                     candidate_source,
                     arguments_digest_label,
                     capabilities_digest_label,
+                    capability_labels,
                     match_reason
                 )
             })
@@ -194,6 +290,275 @@ impl MainChatReactActionPlan {
             candidate_contract, candidate_count
         )
     }
+}
+
+pub(crate) async fn rank_main_chat_react_tool_candidates_with_model(
+    scheduler: &InferenceScheduler,
+    _life_model: &LifeModel,
+    messages_for_generation: &[ChatMessage],
+    plan: MainChatReactActionPlan,
+    allow_cloud: bool,
+) -> (MainChatReactActionPlan, MainChatReactToolSelectionRanking) {
+    if !allow_cloud
+        || plan.tool_candidate_count() < 2
+        || !main_chat_provider_rankable_candidate_contract(&plan)
+        || scheduler.scripted_generation_response.is_some()
+        || scheduler.effective_api_key().trim().is_empty()
+    {
+        return (plan, MainChatReactToolSelectionRanking::deterministic());
+    }
+
+    let ranking_route = scheduler
+        .preview_chat_route(Some(MAIN_CHAT_CANDIDATE_RANKING_TOOLS_PROMPT))
+        .await;
+    let ranking_provider_backed = ranking_route.route_type == "cloud"
+        && main_chat_contract_safe_label(&ranking_route.provider, false)
+        && main_chat_contract_safe_label(&ranking_route.model, false)
+        && main_chat_provider_ranked_route_provider_allowed(&ranking_route.provider);
+    if !ranking_provider_backed {
+        return (
+            plan,
+            MainChatReactToolSelectionRanking::deterministic_with_route(ranking_route),
+        );
+    }
+    if !main_chat_ranking_route_matches_scheduler(&ranking_route, scheduler) {
+        return (
+            plan,
+            MainChatReactToolSelectionRanking::deterministic_with_route(ranking_route),
+        );
+    }
+
+    let ranking_messages =
+        build_main_chat_candidate_ranking_messages(messages_for_generation, &plan);
+    let ranking_response = openlife_core::llm::chat_with_openrouter_raw(
+        ranking_messages,
+        None,
+        &scheduler.provider,
+        &scheduler.openai_base,
+        &scheduler.openai_key,
+        &scheduler.chat_model,
+    )
+    .await;
+    let Ok(response) = ranking_response else {
+        return (
+            plan,
+            MainChatReactToolSelectionRanking {
+                model_ranked: false,
+                ranking_source: "deterministic_local".into(),
+                ranking_provider: Some(ranking_route.provider),
+                ranking_model: Some(ranking_route.model),
+                ranking_route_type: Some(ranking_route.route_type),
+                provider_backed: ranking_provider_backed,
+                model_response_digest: None,
+                ignored: false,
+                ranked_candidate_ids: Vec::new(),
+            },
+        );
+    };
+
+    let response_digest =
+        openlife_core::agent::react_beta::metadata_safe_value_digest(&serde_json::json!({
+            "response": response,
+        }));
+    let response_digest_label = format!("bytes:{} hash:{}", response_digest.0, response_digest.1);
+    let Some(ranked_candidate_ids) = parse_main_chat_model_ranked_candidate_ids(&response) else {
+        return (
+            plan,
+            MainChatReactToolSelectionRanking {
+                model_ranked: false,
+                ranking_source: "deterministic_local".into(),
+                ranking_provider: Some(ranking_route.provider),
+                ranking_model: Some(ranking_route.model),
+                ranking_route_type: Some(ranking_route.route_type),
+                provider_backed: ranking_provider_backed,
+                model_response_digest: Some(response_digest_label),
+                ignored: true,
+                ranked_candidate_ids: Vec::new(),
+            },
+        );
+    };
+    let Some(ranked_plan) = apply_model_ranked_candidate_ids(&plan, &ranked_candidate_ids) else {
+        return (
+            plan,
+            MainChatReactToolSelectionRanking {
+                model_ranked: false,
+                ranking_source: "deterministic_local".into(),
+                ranking_provider: Some(ranking_route.provider),
+                ranking_model: Some(ranking_route.model),
+                ranking_route_type: Some(ranking_route.route_type),
+                provider_backed: ranking_provider_backed,
+                model_response_digest: Some(response_digest_label),
+                ignored: true,
+                ranked_candidate_ids: Vec::new(),
+            },
+        );
+    };
+
+    (
+        ranked_plan,
+        MainChatReactToolSelectionRanking {
+            model_ranked: true,
+            ranking_source: "provider_model".into(),
+            ranking_provider: Some(ranking_route.provider),
+            ranking_model: Some(ranking_route.model),
+            ranking_route_type: Some(ranking_route.route_type),
+            provider_backed: ranking_provider_backed,
+            model_response_digest: Some(response_digest_label),
+            ignored: false,
+            ranked_candidate_ids,
+        },
+    )
+}
+
+fn main_chat_ranking_route_matches_scheduler(
+    route: &openlife_core::agent::ModelRouteTrace,
+    scheduler: &InferenceScheduler,
+) -> bool {
+    route.provider == scheduler.provider && route.model == scheduler.chat_model
+}
+
+fn main_chat_provider_ranked_route_provider_allowed(provider: &str) -> bool {
+    if !main_chat_contract_safe_label(provider, false) {
+        return false;
+    }
+    let provider = provider.to_ascii_lowercase();
+    if matches!(
+        provider.as_str(),
+        "" | "none"
+            | "ollama"
+            | "local"
+            | "localhost"
+            | "127.0.0.1"
+            | "::1"
+            | "0.0.0.0"
+            | "local_test_http"
+            | "local-test-http"
+            | "local_http"
+            | "local-http"
+            | "mock"
+            | "fixture"
+            | "synthetic"
+            | "scripted"
+    ) {
+        return false;
+    }
+    if main_chat_provider_ranked_route_provider_is_local_network_alias(&provider) {
+        return false;
+    }
+    let has_synthetic_token = provider
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "local" | "localhost" | "mock" | "fixture" | "synthetic" | "scripted"
+            )
+        });
+    if has_synthetic_token {
+        return false;
+    }
+    [
+        "ollama",
+        "local",
+        "localhost",
+        "mock",
+        "fixture",
+        "synthetic",
+        "scripted",
+    ]
+    .iter()
+    .all(|alias| !provider.contains(alias))
+}
+
+fn main_chat_provider_ranked_route_provider_is_local_network_alias(provider: &str) -> bool {
+    let normalized = provider
+        .chars()
+        .map(|ch| {
+            if matches!(ch, '-' | '_' | '/') {
+                '.'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let parts = normalized.split('.').collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return false;
+    }
+    parts.windows(4).any(|octets| {
+        if octets
+            .iter()
+            .any(|octet| octet.is_empty() || !octet.chars().all(|ch| ch.is_ascii_digit()))
+        {
+            return false;
+        }
+        let Some(first) = octets.first().and_then(|octet| octet.parse::<u8>().ok()) else {
+            return false;
+        };
+        let Some(second) = octets.get(1).and_then(|octet| octet.parse::<u8>().ok()) else {
+            return false;
+        };
+
+        first == 0
+            || first == 10
+            || first == 127
+            || (first == 169 && second == 254)
+            || (first == 172 && (16..=31).contains(&second))
+            || (first == 192 && second == 168)
+    }) || main_chat_provider_ranked_route_provider_has_embedded_local_network_alias(provider)
+}
+
+fn main_chat_provider_ranked_route_provider_has_embedded_local_network_alias(
+    provider: &str,
+) -> bool {
+    let mut octets = Vec::new();
+    let mut current = String::new();
+    for ch in provider.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if let Ok(octet) = current.parse::<u16>() {
+                octets.push(octet);
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        if let Ok(octet) = current.parse::<u16>() {
+            octets.push(octet);
+        }
+    }
+
+    octets.windows(4).any(|window| {
+        if window.iter().any(|octet| *octet > 255) {
+            return false;
+        }
+        let first = window[0];
+        let second = window[1];
+
+        first == 0
+            || first == 10
+            || first == 127
+            || (first == 169 && second == 254)
+            || (first == 172 && (16..=31).contains(&second))
+            || (first == 192 && second == 168)
+    })
+}
+
+fn main_chat_provider_rankable_candidate_contract(plan: &MainChatReactActionPlan) -> bool {
+    let candidates = plan.tool_candidates();
+    let mut candidate_ids = std::collections::BTreeSet::new();
+    for candidate in &candidates {
+        if !main_chat_contract_safe_label(&candidate.candidate_id, false)
+            || !main_chat_contract_safe_label(&candidate.executor_action_type, false)
+            || !main_chat_contract_safe_label(&candidate.target, false)
+            || !main_chat_contract_safe_label(&candidate.manifest_source, true)
+            || !main_chat_contract_safe_label(&candidate.match_reason, false)
+            || !candidate_ids.insert(candidate.candidate_id.as_str())
+        {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) struct MainChatMcpReadResolution {
@@ -351,6 +716,152 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
     guided_messages
 }
 
+fn build_main_chat_candidate_ranking_messages(
+    messages_for_generation: &[ChatMessage],
+    plan: &MainChatReactActionPlan,
+) -> Vec<ChatMessage> {
+    let bounded_context = messages_for_generation
+        .iter()
+        .rev()
+        .take(4)
+        .map(|message| {
+            format!(
+                "{}: {}",
+                main_chat_contract_label_or(&message.role, false, "role"),
+                bounded_main_chat_ranking_text(&message.content, 1200)
+            )
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    vec![
+        ChatMessage {
+            role: "system".into(),
+            content: concat!(
+                "Rank OpenLife Main Chat governed read-only tool candidates for relevance. ",
+                "Use only the metadata-safe candidate contract. Do not invent candidate IDs, ",
+                "do not include tool arguments, and do not request writes. Return only JSON ",
+                "shaped as {\"ranked_candidate_ids\":[\"candidateId\",...]}.",
+            )
+            .into(),
+        },
+        ChatMessage {
+            role: "user".into(),
+            content: format!(
+                "Sanitized conversation context:\n{}\n\nMetadata-safe candidate contract:\n{}\n\nReturn ranked_candidate_ids now.",
+                bounded_context,
+                plan.tool_candidate_contract()
+            ),
+        },
+    ]
+}
+
+fn bounded_main_chat_ranking_text(value: &str, max_chars: usize) -> String {
+    let normalized = value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let (masked, _) = openlife_core::privacy::PrivacyEngine::new().desensitize(&normalized);
+    masked.chars().take(max_chars).collect()
+}
+
+fn parse_main_chat_model_ranked_candidate_ids(response: &str) -> Option<Vec<String>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(response) else {
+        return None;
+    };
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let ids = object
+        .get("ranked_candidate_ids")
+        .and_then(serde_json::Value::as_array)?;
+    let mut candidate_ids = Vec::new();
+    for id in ids {
+        let candidate_id = id.as_str()?;
+        if !main_chat_contract_safe_label(candidate_id, false) {
+            return None;
+        }
+        candidate_ids.push(candidate_id.to_string());
+    }
+    Some(candidate_ids)
+}
+
+fn apply_model_ranked_candidate_ids(
+    plan: &MainChatReactActionPlan,
+    ranked_candidate_ids: &[String],
+) -> Option<MainChatReactActionPlan> {
+    if ranked_candidate_ids.is_empty() {
+        return None;
+    }
+    let original_candidates = plan.tool_candidates();
+    let original_candidate_ids = original_candidates
+        .iter()
+        .map(|candidate| candidate.candidate_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ranked_candidate_id_set = ranked_candidate_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::BTreeSet<_>>();
+    if ranked_candidate_ids.len() != original_candidates.len()
+        || original_candidate_ids.len() != original_candidates.len()
+        || ranked_candidate_id_set.len() != ranked_candidate_ids.len()
+        || ranked_candidate_ids.iter().any(|candidate_id| {
+            !original_candidates
+                .iter()
+                .any(|candidate| &candidate.candidate_id == candidate_id)
+        })
+        || original_candidates.iter().any(|candidate| {
+            !ranked_candidate_ids
+                .iter()
+                .any(|candidate_id| candidate_id == &candidate.candidate_id)
+        })
+    {
+        return None;
+    }
+    let mut ranked_candidates = Vec::new();
+    for candidate_id in ranked_candidate_ids {
+        if let Some(candidate) = original_candidates
+            .iter()
+            .find(|candidate| &candidate.candidate_id == candidate_id)
+        {
+            if !ranked_candidates
+                .iter()
+                .any(|existing: &MainChatReactToolCandidate| {
+                    existing.candidate_id == candidate.candidate_id
+                })
+            {
+                let mut candidate = candidate.clone();
+                candidate.match_reason = "provider_model_ranked".into();
+                ranked_candidates.push(candidate);
+            }
+        }
+    }
+    if ranked_candidates.is_empty() {
+        return None;
+    }
+    for candidate in original_candidates {
+        if !ranked_candidates
+            .iter()
+            .any(|existing| existing.candidate_id == candidate.candidate_id)
+        {
+            ranked_candidates.push(candidate);
+        }
+    }
+    for (index, candidate) in ranked_candidates.iter_mut().enumerate() {
+        candidate.selection_rank = index + 1;
+    }
+    let mut ranked_plan = plan.clone();
+    if let Some(primary) = ranked_candidates.first() {
+        ranked_plan.target = primary.target.clone();
+        ranked_plan.arguments = primary.arguments.clone();
+    }
+    ranked_plan.tool_candidates = ranked_candidates;
+    Some(ranked_plan)
+}
+
 pub(crate) fn main_chat_react_agent_loop_execution_plan(
     registry: &openlife_core::mcp::McpRegistry,
     plan: &MainChatReactActionPlan,
@@ -492,13 +1003,14 @@ fn main_chat_governed_mcp_read_tool_candidates(
         .enumerate()
         .map(|(index, manifest)| {
             let selection_score = main_chat_manifest_selection_score(&manifest, &selection_terms);
+            let capabilities = main_chat_manifest_read_candidate_capabilities(&manifest);
             MainChatReactToolCandidate {
                 candidate_id: manifest.name.clone(),
                 executor_action_type: "mcp_tool".into(),
                 target: manifest.name,
                 arguments: serde_json::json!({}),
                 manifest_source: manifest.source.to_string(),
-                capabilities: manifest.capabilities,
+                capabilities,
                 selection_rank: index + 1,
                 match_reason: if selection_score > 0 {
                     "capability_or_name_match".into()
@@ -508,6 +1020,20 @@ fn main_chat_governed_mcp_read_tool_candidates(
             }
         })
         .collect()
+}
+
+fn main_chat_manifest_read_candidate_capabilities(
+    manifest: &openlife_core::tool_manifest::ToolManifest,
+) -> Vec<String> {
+    let mut capabilities = manifest.capabilities.clone();
+    if manifest.action_type.eq_ignore_ascii_case("read")
+        && !capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("read"))
+    {
+        capabilities.insert(0, "read".into());
+    }
+    capabilities
 }
 
 fn main_chat_manifest_selection_score(
@@ -679,59 +1205,42 @@ fn main_chat_contract_label_or(value: &str, allow_colon: bool, fallback: &str) -
 fn main_chat_manifest_has_write_like_surface(
     manifest: &openlife_core::tool_manifest::ToolManifest,
 ) -> bool {
-    const WRITE_LIKE_CONTAINS_TERMS: &[&str] = &[
-        "write",
-        "send",
-        "delete",
-        "remove",
-        "update",
-        "create",
-        "modify",
-        "mutate",
-        "externalwrite",
-        "externalsideeffect",
-        "realwrite",
-        "emailsend",
-        "calendarsend",
-        "calendarwrite",
-        "providerwrite",
-        "shellexec",
-        "execute",
-    ];
     std::iter::once(manifest.id.as_str())
         .chain(std::iter::once(manifest.name.as_str()))
         .chain(std::iter::once(manifest.action_type.as_str()))
         .chain(manifest.capabilities.iter().map(String::as_str))
         .chain(manifest.tags.iter().map(String::as_str))
-        .map(normalize_main_chat_selection_text)
-        .any(|surface| {
-            matches!(
-                surface.as_str(),
-                "write"
-                    | "send"
-                    | "delete"
-                    | "remove"
-                    | "update"
-                    | "create"
-                    | "modify"
-                    | "mutate"
-                    | "externalwrite"
-                    | "externalsideeffect"
-                    | "realwrite"
-                    | "emailsend"
-                    | "calendarsend"
-                    | "calendarwrite"
-                    | "providerwrite"
-                    | "shellexec"
-                    | "execute"
-                    | "exec"
-            ) || WRITE_LIKE_CONTAINS_TERMS
-                .iter()
-                .any(|term| surface.contains(term))
-                || surface.ends_with("write")
-                || surface.ends_with("send")
-                || surface.ends_with("delete")
-        })
+        .any(main_chat_surface_contains_write_like_term)
+}
+
+fn main_chat_surface_contains_write_like_term(value: &str) -> bool {
+    let surface = normalize_main_chat_selection_text(value);
+    matches!(
+        surface.as_str(),
+        "write"
+            | "send"
+            | "delete"
+            | "remove"
+            | "update"
+            | "create"
+            | "modify"
+            | "mutate"
+            | "externalwrite"
+            | "externalsideeffect"
+            | "realwrite"
+            | "emailsend"
+            | "calendarsend"
+            | "calendarwrite"
+            | "providerwrite"
+            | "shellexec"
+            | "execute"
+            | "exec"
+    ) || MAIN_CHAT_WRITE_LIKE_CONTAINS_TERMS
+        .iter()
+        .any(|term| surface.contains(term))
+        || surface.ends_with("write")
+        || surface.ends_with("send")
+        || surface.ends_with("delete")
 }
 
 pub(crate) fn main_chat_workspace_file_target(user_text: &str) -> Result<(String, String), String> {

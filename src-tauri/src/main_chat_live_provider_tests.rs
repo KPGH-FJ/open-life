@@ -238,7 +238,7 @@ async fn main_chat_live_provider_eval_harness_executes_local_http_provider_witho
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     configure_live_provider_eval_state_with_local_http_provider(
         &state,
-        "local provider harness direct answer",
+        "local provider harness\ndirect answer",
     )
     .await;
 
@@ -272,10 +272,107 @@ async fn main_chat_live_provider_eval_harness_executes_local_http_provider_witho
         .response_preview
         .as_ref()
         .is_some_and(|preview| preview.contains("local provider harness direct answer")));
+    assert!(report
+        .response_preview
+        .as_ref()
+        .is_some_and(|preview| preview.chars().all(|ch| !ch.is_control())));
 
     let evidence = main_chat_live_provider_acceptance_evidence(&[report]);
     assert!(!evidence.generation_eval_executed);
     assert!(evidence.no_silent_writes);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn main_chat_live_provider_eval_harness_preserves_raw_model_identity_for_final_audit() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state_with_local_http_provider(
+        &state,
+        "local provider harness model identity",
+    )
+    .await;
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        scheduler.chat_model = "gpt-local-provider-harness ".into();
+    }
+
+    let report = run_main_chat_live_provider_eval_harness(
+        state,
+        MainChatLiveProviderEvalHarnessInput {
+            scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
+            session_id: "local-http-provider-harness-raw-model".into(),
+            prompt: "Answer in one short sentence: what is this local provider eval proving?"
+                .into(),
+            explicit_live_eval_requested: true,
+            local_only_required: false,
+        },
+    )
+    .await
+    .expect("local provider harness report");
+
+    assert_eq!(
+        report.provider_model.as_deref(),
+        Some("gpt-local-provider-harness "),
+        "live harness must preserve the raw scheduler model identity so the final gate can reject labels that only become metadata-safe after trimming"
+    );
+    assert!(
+        !report.ready,
+        "live harness must not mark a report ready when the raw provider model identity is not metadata-safe"
+    );
+    assert_eq!(report.status, "failed");
+    assert!(report
+        .blockers
+        .contains(&"live_provider_model_identity_missing".to_string()));
+    let evidence = main_chat_live_provider_acceptance_evidence(&[report]);
+    assert!(
+        !evidence.generation_eval_executed,
+        "trim-normalized provider model identity must not receive live generation credit"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn main_chat_live_provider_eval_harness_preserves_raw_provider_identity_for_final_audit() {
+    let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    configure_live_provider_eval_state_with_local_http_provider(
+        &state,
+        "local provider harness provider identity",
+    )
+    .await;
+    {
+        let mut scheduler = state.scheduler.lock().await;
+        scheduler.provider = "openai ".into();
+    }
+
+    let report = run_main_chat_live_provider_eval_harness(
+        state,
+        MainChatLiveProviderEvalHarnessInput {
+            scenario: MainChatLiveProviderEvalHarnessScenario::DirectAnswer,
+            session_id: "local-http-provider-harness-raw-provider".into(),
+            prompt: "Answer in one short sentence: what is this local provider eval proving?"
+                .into(),
+            explicit_live_eval_requested: true,
+            local_only_required: false,
+        },
+    )
+    .await
+    .expect("local provider harness report");
+
+    assert_eq!(
+        report.provider, "openai ",
+        "live harness must preserve the raw scheduler provider identity so the final gate can reject labels that only become metadata-safe after trimming"
+    );
+    assert!(
+        !report.ready,
+        "live harness must not mark a report ready when the raw provider identity is not metadata-safe"
+    );
+    assert_eq!(report.status, "failed");
+    assert!(report
+        .blockers
+        .contains(&"live_provider_external_provider_missing".to_string()));
+    let evidence = main_chat_live_provider_acceptance_evidence(&[report]);
+    assert!(
+        !evidence.generation_eval_executed,
+        "trim-normalized provider identity must not receive live generation credit"
+    );
 }
 
 #[tokio::test]
@@ -393,6 +490,16 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
         );
         assert!(report.model_selected_execution_allowed, "{scenario:?}");
         assert!(report.model_selected_governed_arguments, "{scenario:?}");
+        assert!(
+            report
+                .model_selected_governed_arguments_digest
+                .as_ref()
+                .is_some_and(|digest| {
+                    let digest = digest.trim();
+                    digest.starts_with("bytes:") && digest.contains(" hash:")
+                }),
+            "{scenario:?} must preserve governed candidate arguments digest evidence"
+        );
         assert_eq!(
             report.model_selected_candidate_rank,
             Some(1),
@@ -409,8 +516,18 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
             report
                 .model_selected_candidate_capabilities_digest
                 .as_ref()
-                .is_some_and(|digest| digest.starts_with("bytes:")),
+                .is_some_and(|digest| {
+                    let digest = digest.trim();
+                    digest.starts_with("bytes:") && digest.contains(" hash:")
+                }),
             "{scenario:?} must preserve selected candidate capability digest evidence"
+        );
+        assert!(
+            report
+                .model_selected_candidate_capability_labels
+                .as_ref()
+                .is_some_and(|labels| labels == "read" || labels.starts_with("read/")),
+            "{scenario:?} must preserve bounded safe selected candidate capability labels"
         );
         assert!(
             report
@@ -467,6 +584,10 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
                     report.agent_loop_action_status.as_deref(),
                     Some("succeeded")
                 );
+                assert_eq!(
+                    selected_id, selected_target,
+                    "web AgentLoop live scenario must prove selected candidate id and target identify the same governed web tool"
+                );
             }
             MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
                 assert_eq!(
@@ -478,6 +599,162 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
                     report.tool_selection_candidate_count >= 2,
                     "registered MCP live scenario must prove bounded multi-candidate model selection"
                 );
+                let distinct_candidate_ids = report
+                    .tool_selection_candidate_ids
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|candidate_id| !candidate_id.trim().is_empty())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let distinct_allowed_targets = report
+                    .tool_selection_allowlist
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|target| !target.trim().is_empty())
+                    .collect::<std::collections::BTreeSet<_>>();
+                let distinct_allowed_action_pairs = report
+                    .tool_selection_allowed_actions
+                    .iter()
+                    .filter_map(|action| {
+                        let action_type = action.get("actionType")?.as_str()?.trim();
+                        let target = action.get("target")?.as_str()?.trim();
+                        if action_type.is_empty() || target.is_empty() {
+                            return None;
+                        }
+                        Some((action_type, target))
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    distinct_candidate_ids.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve duplicate-free bounded candidate ids"
+                );
+                assert_eq!(
+                    report.tool_selection_allowlist.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve complete bounded target allowlist"
+                );
+                assert_eq!(
+                    distinct_allowed_targets.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve duplicate-free bounded target allowlist"
+                );
+                assert_eq!(
+                    report.tool_selection_allowed_actions.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve complete exact action-target allowlist"
+                );
+                assert_eq!(
+                    distinct_allowed_action_pairs.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve duplicate-free exact action-target pairs"
+                );
+                let action_targets = report
+                    .tool_selection_allowed_actions
+                    .iter()
+                    .filter_map(|action| {
+                        let action_type = action.get("actionType")?.as_str()?.trim();
+                        let target = action.get("target")?.as_str()?.trim();
+                        if action_type == "mcp_tool" && !target.is_empty() {
+                            Some(target)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                let candidate_target_labels = report
+                    .tool_selection_candidate_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                let allowed_target_labels = report
+                    .tool_selection_allowlist
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<std::collections::BTreeSet<_>>();
+                assert_eq!(
+                    candidate_target_labels, allowed_target_labels,
+                    "registered MCP live scenario must preserve candidate ids as the exact target allowlist"
+                );
+                assert_eq!(
+                    candidate_target_labels, action_targets,
+                    "registered MCP live scenario must preserve candidate ids as exact MCP action targets"
+                );
+                assert_eq!(
+                    selected_id, selected_target,
+                    "registered MCP live scenario must prove selected candidate id and target identify the same MCP candidate"
+                );
+                assert_eq!(
+                    selected_action_type, "mcp_tool",
+                    "registered MCP live scenario must select the governed MCP action type"
+                );
+                assert!(
+                    report.tool_selection_model_ranked,
+                    "registered MCP live scenario must prove provider-ranked candidate ordering"
+                );
+                assert_eq!(
+                    report.tool_selection_ranking_source.as_deref(),
+                    Some("provider_model")
+                );
+                assert_eq!(
+                    report.tool_selection_ranking_route_type.as_deref(),
+                    Some("cloud")
+                );
+                assert_eq!(
+                    report.tool_selection_ranking_provider.as_deref(),
+                    Some(report.provider.as_str()),
+                    "registered MCP live scenario must prove the ranking provider matches the live report provider"
+                );
+                assert!(
+                    report
+                        .provider_model
+                        .as_ref()
+                        .is_some_and(|model| !model.trim().is_empty()),
+                    "registered MCP live scenario must preserve the live report model identity"
+                );
+                assert_eq!(
+                    report.tool_selection_ranking_model.as_deref(),
+                    report.provider_model.as_deref(),
+                    "registered MCP live scenario must prove the ranking model matches the live report model"
+                );
+                assert!(
+                    report.tool_selection_ranking_provider_backed,
+                    "registered MCP live scenario must prove provider-backed ranking route"
+                );
+                assert!(!report.tool_selection_model_ranking_ignored);
+                assert_eq!(
+                    report.tool_selection_model_ranking_candidate_ids.len(),
+                    report.tool_selection_candidate_count,
+                    "registered MCP live scenario must preserve a complete provider-ranked candidate permutation"
+                );
+                assert!(
+                    report.tool_selection_model_ranking_candidate_ids.len() >= 2,
+                    "registered MCP live scenario must preserve provider-ranked candidate ids"
+                );
+                let selected_provider_rank = report
+                    .tool_selection_model_ranking_candidate_ids
+                    .iter()
+                    .position(|candidate_id| candidate_id == selected_id)
+                    .map(|index| index + 1);
+                assert_eq!(
+                    report.model_selected_candidate_rank,
+                    selected_provider_rank,
+                    "registered MCP live scenario must preserve selected candidate rank from the provider-ranked order"
+                );
+                assert!(
+                    report
+                        .tool_selection_model_ranking_response_digest
+                        .as_ref()
+                        .is_some_and(|digest| {
+                            let digest = digest.trim();
+                            digest.starts_with("bytes:") && digest.contains(" hash:")
+                        }),
+                    "registered MCP live scenario must preserve provider-ranking response digest"
+                );
+                assert_eq!(
+                    report.model_selected_candidate_match_reason.as_deref(),
+                    Some("provider_model_ranked"),
+                    "registered MCP live scenario must select a provider-ranked candidate"
+                );
             }
             MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
                 assert_eq!(
@@ -485,6 +762,21 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
                     Some("needs_confirmation")
                 );
                 assert!(report.tool_permission_proposal_created);
+                assert_eq!(
+                    report.model_selected_candidate_id.as_deref(),
+                    report.tool_permission_proposal_target.as_deref(),
+                    "MCP ToolPermission proposal live scenario must select the governed proposal target candidate id"
+                );
+                assert_eq!(
+                    report.model_selected_candidate_target.as_deref(),
+                    report.tool_permission_proposal_target.as_deref(),
+                    "MCP ToolPermission proposal live scenario must bind the selected target to the pending proposal target"
+                );
+                assert_eq!(
+                    report.model_selected_candidate_action_type.as_deref(),
+                    Some("mcp_tool"),
+                    "MCP ToolPermission proposal live scenario must select an MCP tool action"
+                );
             }
             MainChatLiveProviderEvalHarnessScenario::DirectAnswer => unreachable!(),
         }

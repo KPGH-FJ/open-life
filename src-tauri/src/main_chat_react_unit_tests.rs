@@ -346,6 +346,45 @@ fn main_chat_react_agent_loop_mcp_candidate_set_deduplicates_model_selectable_ta
 }
 
 #[test]
+fn main_chat_react_agent_loop_mcp_candidate_contract_labels_read_action_manifests_as_read() {
+    let mut registry = openlife_core::mcp::McpRegistry::new();
+    registry.register_builtin(
+        openlife_core::tool_manifest::ToolManifest {
+            id: "aaa_action_read_only.read".into(),
+            name: "aaa_action_read_only.read".into(),
+            description: "Low-risk read action manifest with utility-only declared capability."
+                .into(),
+            parameters: serde_json::json!({ "type": "object" }),
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1.0.0".into(),
+            source: openlife_core::tool_manifest::ToolSource::BuiltIn,
+            capabilities: vec!["utility".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            tags: vec!["utility".into()],
+        },
+        Box::new(|_| Ok("metadata-safe action read placeholder".into())),
+    );
+    let plan = build_main_chat_react_action_plan(
+        "session-action-read-capability-label",
+        "Use an mcp read-only utility tool now.",
+    )
+    .expect("build generic MCP read plan");
+
+    let agent_loop_plan = main_chat_react_agent_loop_execution_plan(&registry, &plan);
+    let contract = agent_loop_plan.tool_candidate_contract();
+
+    assert!(
+        contract.contains("candidateId=aaa_action_read_only.read")
+            && contract.contains("capabilityLabels=read/utility"),
+        "read-action MCP manifests must expose a discrete read capability label for provider-ranked live evidence"
+    );
+}
+
+#[test]
 fn main_chat_react_agent_loop_ranks_mcp_candidates_by_manifest_capability_match() {
     let mut registry = openlife_core::mcp::McpRegistry::new();
     registry.register_builtin(
