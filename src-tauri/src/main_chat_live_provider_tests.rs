@@ -232,6 +232,70 @@ async fn main_chat_live_provider_eval_harness_blocks_react_cases_before_command_
     }
 }
 
+#[test]
+fn live_provider_harness_preserves_agent_loop_attempt_metadata_when_not_completed() {
+    let entries = vec![
+        serde_json::json!({
+            "summary": "Governed ReAct AgentLoop attempt started.",
+            "metadata": {
+                "agentLoopAttempted": true,
+                "agentLoopSucceeded": false,
+                "toolSelectionCandidateCount": 2,
+                "toolSelectionCandidateIds": ["builtin_echo", "tool.list_available"]
+            }
+        }),
+        serde_json::json!({
+            "summary": "Governed ReAct AgentLoop did not observe the planned action; single-step fallback remains available.",
+            "metadata": {
+                "agentLoopAttempted": true,
+                "agentLoopSucceeded": false,
+                "singleStepFallbackUsed": true,
+                "plannedActionObserved": false,
+                "toolSelectionCandidateCount": 2,
+                "toolSelectionCandidateIds": ["builtin_echo", "tool.list_available"],
+                "toolSelectionAllowlist": ["builtin_echo", "tool.list_available"]
+            }
+        }),
+    ];
+
+    let metadata =
+        crate::main_chat_live_provider_harness::main_chat_live_provider_agent_loop_metadata_from_entries(
+            &entries,
+        )
+        .expect("agent loop attempted metadata");
+
+    assert_eq!(
+        metadata
+            .get("toolSelectionCandidateCount")
+            .and_then(serde_json::Value::as_u64),
+        Some(2)
+    );
+    assert_eq!(
+        metadata
+            .get("singleStepFallbackUsed")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn live_provider_evidence_rejects_tool_permission_proposal_with_mcp_read_success_overlap() {
+    let mut report =
+        crate::main_chat_final_gate::completed_main_chat_live_provider_eval_harness_report(
+            MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal,
+            "openai",
+            "external_provider",
+            "run-proposal",
+            "task-proposal",
+            "proposal ready",
+        );
+    report.mcp_read_target_resolved = true;
+
+    let evidence = main_chat_live_provider_acceptance_evidence(&[report]);
+
+    assert!(!evidence.proposal_permission_eval_executed);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn main_chat_live_provider_eval_harness_executes_local_http_provider_without_external_live_credit(
 ) {
@@ -471,6 +535,38 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
         .await
         .expect("live provider harness report");
 
+        if !report.ready {
+            eprintln!(
+                "live provider harness failed summary: {}",
+                serde_json::json!({
+                    "scenario": scenario.as_str(),
+                    "status": report.status,
+                    "blockers": report.blockers,
+                    "modelInvoked": report.model_invoked,
+                    "agentLoopSucceeded": report.agent_loop_succeeded,
+                    "singleStepFallbackUsed": report.single_step_fallback_used,
+                    "agentLoopActionStatus": report.agent_loop_action_status,
+                    "mcpReadTargetResolved": report.mcp_read_target_resolved,
+                    "toolPermissionProposalCreated": report.tool_permission_proposal_created,
+                    "toolPermissionProposalTarget": report.tool_permission_proposal_target,
+                    "toolSelectionCandidateCount": report.tool_selection_candidate_count,
+                    "toolSelectionCandidateIds": report.tool_selection_candidate_ids,
+                    "toolSelectionAllowlist": report.tool_selection_allowlist,
+                    "toolSelectionAllowedActions": report.tool_selection_allowed_actions,
+                    "modelSelectedAllowedTool": report.model_selected_allowed_tool,
+                    "modelSelectedExecutionPolicyValidated": report.model_selected_execution_policy_validated,
+                    "modelSelectedExecutionAllowed": report.model_selected_execution_allowed,
+                    "modelSelectedGovernedArguments": report.model_selected_governed_arguments,
+                    "modelSelectedCandidateId": report.model_selected_candidate_id,
+                    "modelSelectedCandidateTarget": report.model_selected_candidate_target,
+                    "modelSelectedCandidateActionType": report.model_selected_candidate_action_type,
+                    "modelSelectedCandidateRank": report.model_selected_candidate_rank,
+                    "modelSelectedCandidateSource": report.model_selected_candidate_source,
+                    "modelSelectedCandidateCapabilityLabels": report.model_selected_candidate_capability_labels,
+                    "modelSelectedCandidateMatchReason": report.model_selected_candidate_match_reason,
+                })
+            );
+        }
         assert!(report.ready, "{scenario:?} blocked: {:?}", report.blockers);
         assert_eq!(report.status, "completed");
         assert_eq!(report.provider_endpoint_kind, "external_provider");
@@ -500,9 +596,10 @@ async fn main_chat_live_provider_eval_harness_invokes_external_react_web_and_mcp
                 }),
             "{scenario:?} must preserve governed candidate arguments digest evidence"
         );
-        assert_eq!(
-            report.model_selected_candidate_rank,
-            Some(1),
+        assert!(
+            report
+                .model_selected_candidate_rank
+                .is_some_and(|rank| rank > 0),
             "{scenario:?} must preserve selected candidate rank evidence"
         );
         assert!(

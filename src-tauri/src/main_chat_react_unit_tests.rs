@@ -155,6 +155,12 @@ fn main_chat_react_agent_loop_receives_plan_guidance_without_raw_arguments() {
         .content
         .contains("plannedActionType=session.search"));
     assert!(guidance.content.contains("plannedTarget=session.search"));
+    assert!(
+        guidance
+            .content
+            .contains("explicitly asks to use, call, read, search, or fetch"),
+        "AgentLoop guidance must not invite direct answers when the user explicitly requested a tool action"
+    );
     assert!(guidance.content.contains("argumentsDigest="));
     assert!(
         !guidance.content.contains("what did i ask yesterday"),
@@ -167,6 +173,56 @@ fn main_chat_react_agent_loop_receives_plan_guidance_without_raw_arguments() {
     assert!(
         !guidance.content.contains("\"query\""),
         "plan guidance must not include structured executor arguments"
+    );
+}
+
+#[test]
+fn main_chat_react_action_plan_prefers_explicit_web_target_over_internal_mcp_action_type_label() {
+    let plan = build_main_chat_react_action_plan(
+        "session-web-target",
+        "Call web.search once using the exact action_type mcp_tool.",
+    )
+    .expect("build web search plan");
+
+    assert_eq!(plan.queue_action_type, "web.search");
+    assert_eq!(plan.target, "web.search");
+    assert_eq!(plan.executor_action_type, "mcp_tool");
+    assert!(plan.requires_network);
+}
+
+#[test]
+fn main_chat_react_action_plan_resolves_specific_mcp_tool_after_mcp_keyword() {
+    let plan = build_main_chat_react_action_plan(
+        "session-mcp-target",
+        "Use mcp builtin_echo read-only now.",
+    )
+    .expect("build MCP read plan");
+
+    assert_eq!(plan.queue_action_type, "mcp.read_only");
+    assert_eq!(plan.target, "mcp.call_tool");
+    assert_eq!(
+        plan.arguments
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str),
+        Some("builtin_echo")
+    );
+}
+
+#[test]
+fn main_chat_react_action_plan_does_not_treat_action_type_schema_key_as_mcp_tool_name() {
+    let plan = build_main_chat_react_action_plan(
+        "session-mcp-generic",
+        "Use mcp read-only now. Return JSON with action_type from system guidance.",
+    )
+    .expect("build generic MCP read plan");
+
+    assert_eq!(plan.queue_action_type, "mcp.read_only");
+    assert_eq!(plan.target, "mcp.call_tool");
+    assert_eq!(
+        plan.arguments
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str),
+        Some("")
     );
 }
 

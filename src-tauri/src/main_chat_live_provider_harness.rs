@@ -259,19 +259,7 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
     let agent_loop_metadata = response
         .get("execution_transcript")
         .and_then(serde_json::Value::as_array)
-        .and_then(|entries| {
-            entries.iter().find_map(|entry| {
-                let summary_matches = entry
-                    .get("summary")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|summary| summary.contains("Governed ReAct AgentLoop completed"));
-                if summary_matches {
-                    entry.get("metadata").cloned()
-                } else {
-                    None
-                }
-            })
-        });
+        .and_then(|entries| main_chat_live_provider_agent_loop_metadata_from_entries(entries));
     let agent_loop_succeeded = agent_loop_metadata
         .as_ref()
         .and_then(|metadata| metadata.get("agentLoopSucceeded"))
@@ -287,7 +275,7 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         .and_then(|metadata| metadata.get("agentLoopActionStatus"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let mcp_read_target_resolved = agent_loop_metadata
+    let raw_mcp_read_target_resolved = agent_loop_metadata
         .as_ref()
         .and_then(|metadata| metadata.get("mcpReadTargetResolved"))
         .and_then(serde_json::Value::as_bool)
@@ -534,6 +522,14 @@ pub(crate) async fn run_main_chat_live_provider_eval_harness(
         task_session_id.as_deref(),
         response_preview.as_deref(),
     );
+    let mcp_read_target_resolved = raw_mcp_read_target_resolved
+        && input.scenario
+            == main_chat_final_gate::MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop
+        && agent_loop_succeeded
+        && !single_step_fallback_used
+        && agent_loop_action_status.as_deref() == Some("succeeded")
+        && !tool_permission_proposal_created
+        && tool_permission_proposal_target.is_none();
     let direct_answer_generation_trace_present = !agent_loop_succeeded
         && !single_step_fallback_used
         && agent_loop_action_status.is_none()
@@ -706,6 +702,33 @@ fn non_empty_string_metadata(metadata: &Option<serde_json::Value>, key: &str) ->
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
+}
+
+pub(crate) fn main_chat_live_provider_agent_loop_metadata_from_entries(
+    entries: &[serde_json::Value],
+) -> Option<serde_json::Value> {
+    let mut attempted_metadata = None;
+    for entry in entries {
+        let summary = entry
+            .get("summary")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let Some(metadata) = entry.get("metadata") else {
+            continue;
+        };
+        if summary.contains("Governed ReAct AgentLoop completed") {
+            return Some(metadata.clone());
+        }
+        if summary.contains("Governed ReAct AgentLoop")
+            && metadata
+                .get("agentLoopAttempted")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            attempted_metadata = Some(metadata.clone());
+        }
+    }
+    attempted_metadata
 }
 
 fn live_provider_response_preview(reply: &str, max_chars: usize) -> String {

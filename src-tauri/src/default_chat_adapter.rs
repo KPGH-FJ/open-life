@@ -2826,6 +2826,7 @@ pub(crate) fn evaluate_default_chat_adapter_ordinary_entry_preflight(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn ensure_default_chat_adapter_ordinary_entry_preflight(
     callsite: DefaultChatAdapterCallsite,
     route: &DefaultChatAdapterRoute,

@@ -816,6 +816,35 @@ async fn main_chat_final_acceptance_gate_runner_reports_live_preflight_blockers_
         .contains(&"live_provider_generation_not_executed".to_string()));
 }
 
+#[tokio::test]
+#[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, network, and a real external provider API key"]
+async fn main_chat_final_acceptance_gate_runner_accepts_external_live_provider_when_opted_in() {
+    let report = run_main_chat_agent_execution_v1_final_acceptance_gate_with_config_mode(
+        true,
+        MainChatLiveProviderEvalConfigMode::FromEnvironment,
+    )
+    .await;
+
+    assert_eq!(report.live_provider_report_count, 4);
+    assert_eq!(report.live_provider_ready_count, 4);
+    assert_eq!(report.live_provider_main_chat_invoked_count, 4);
+    assert_eq!(report.live_provider_model_invoked_count, 4);
+    assert!(!report.live_provider_direct_writes_executed);
+    assert!(
+        report.live_provider_blockers.is_empty(),
+        "live provider blockers: {:?}",
+        report.live_provider_blockers
+    );
+    assert!(
+        report.acceptance.ready,
+        "final acceptance blockers: {:?}",
+        report.acceptance.blockers
+    );
+    assert!(report.acceptance.live_provider_gate_ready);
+    assert!(report.acceptance.command_surface_gate_ready);
+    assert!(report.acceptance.runtime_gate_ready);
+}
+
 #[test]
 fn main_chat_live_provider_harness_reports_build_structured_acceptance_evidence() {
     let complete = main_chat_live_provider_acceptance_evidence(&[

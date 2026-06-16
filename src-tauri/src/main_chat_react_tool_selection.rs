@@ -573,7 +573,7 @@ pub(crate) fn build_main_chat_react_action_plan(
     user_text: &str,
 ) -> Result<MainChatReactActionPlan, String> {
     let lower = user_text.to_ascii_lowercase();
-    if lower.contains("mcp") {
+    if main_chat_explicit_mcp_read_request(&lower) {
         let tool_name = infer_main_chat_mcp_tool_name(user_text).unwrap_or_default();
         return Ok(MainChatReactActionPlan {
             queue_action_type: "mcp.read_only".into(),
@@ -681,6 +681,18 @@ pub(crate) fn build_main_chat_react_action_plan(
     })
 }
 
+fn main_chat_explicit_mcp_read_request(lower: &str) -> bool {
+    lower.contains("mcp ")
+        || lower.contains("mcp read")
+        || lower.contains("mcp-read")
+        || lower.contains("mcp.read")
+        || lower.contains("mcp.call_tool")
+        || lower.contains("mcp memory")
+        || lower.contains("mcp echo")
+        || lower.contains("mcp tool")
+        || lower.contains("governed mcp")
+}
+
 pub(crate) fn build_main_chat_react_agent_loop_messages(
     messages_for_generation: &[ChatMessage],
     plan: &MainChatReactActionPlan,
@@ -695,7 +707,8 @@ pub(crate) fn build_main_chat_react_agent_loop_messages(
         content: format!(
             concat!(
                 "Main Chat Agent v1 selected a governed read-only ReAct action for this turn.\n",
-                "Use at most one allowed tool candidate. If the action is unnecessary, answer directly.\n",
+                "Use at most one allowed tool candidate. If the user explicitly asks to use, call, read, search, or fetch, the action is necessary and you must not answer directly.\n",
+                "Only answer directly when no explicit tool action is requested.\n",
                 "When using the action, return only a JSON envelope shaped as ",
                 "{{\"final\":\"...\",\"actions\":[{{\"name\":\"<allowedTarget>\",",
                 "\"action_type\":\"<plannedExecutorActionType>\",\"arguments\":{{}}}}],",
@@ -742,8 +755,10 @@ fn build_main_chat_candidate_ranking_messages(
             content: concat!(
                 "Rank OpenLife Main Chat governed read-only tool candidates for relevance. ",
                 "Use only the metadata-safe candidate contract. Do not invent candidate IDs, ",
-                "do not include tool arguments, and do not request writes. Return only JSON ",
-                "shaped as {\"ranked_candidate_ids\":[\"candidateId\",...]}.",
+                "do not include tool arguments, and do not request writes. Return only a raw JSON ",
+                "object with exactly one field shaped as {\"ranked_candidate_ids\":[\"candidateId\",...]}. ",
+                "The array must be a complete permutation of every candidateId in the candidate contract, ",
+                "with no missing IDs, no extra IDs, no duplicates, no markdown, and no explanation.",
             )
             .into(),
         },
@@ -1280,7 +1295,21 @@ fn is_main_chat_specific_mcp_tool_token(token: &str) -> bool {
     let lower = token.to_ascii_lowercase();
     if matches!(
         lower.as_str(),
-        "read" | "read-only" | "readonly" | "tool" | "tools" | "utility" | "now" | "please"
+        "read"
+            | "read-only"
+            | "readonly"
+            | "tool"
+            | "tools"
+            | "utility"
+            | "now"
+            | "please"
+            | "json"
+            | "schema"
+            | "action"
+            | "actions"
+            | "action_type"
+            | "arguments"
+            | "guidance"
     ) {
         return false;
     }

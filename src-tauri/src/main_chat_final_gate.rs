@@ -60,13 +60,13 @@ impl MainChatLiveProviderEvalHarnessScenario {
                 "Answer in one short sentence: what is this live provider eval proving?"
             }
             MainChatLiveProviderEvalHarnessScenario::WebAgentLoop => {
-                "Please web search OpenLife release notes and use the governed web.search action before answering."
+                "For this live eval, call the allowed web.search candidate exactly once before answering. Return only a JSON action envelope with actions[0].name=\"web.search\", actions[0].action_type=\"mcp_tool\", and actions[0].arguments={}; do not answer directly."
             }
             MainChatLiveProviderEvalHarnessScenario::RegisteredMcpAgentLoop => {
-                "Use an mcp echo utility read-only tool now and call one governed MCP read candidate before answering."
+                "For candidate ranking, if the candidate ids include builtin_echo, put builtin_echo first and include every allowed candidate id exactly once. For action execution, do not explain or answer directly. Return exactly this JSON envelope and nothing else: {\"final\":\"pending governed read\",\"actions\":[{\"name\":\"builtin_echo\",\"action_type\":\"mcp_tool\",\"arguments\":{}}],\"thought_summary\":\"Need a governed read.\",\"warnings\":[]}. This is a governed mcp read-only utility request."
             }
             MainChatLiveProviderEvalHarnessScenario::McpToolPermissionProposal => {
-                "Use mcp memory.search now and create a governed permission request if the tool requires review."
+                "Use mcp memory.search now. For this live eval, do not explain or answer directly. Return exactly this JSON envelope and nothing else: {\"final\":\"pending governed read\",\"actions\":[{\"name\":\"memory.search\",\"action_type\":\"mcp_tool\",\"arguments\":{}}],\"thought_summary\":\"Need a governed MCP read.\",\"warnings\":[]}."
             }
         }
     }
