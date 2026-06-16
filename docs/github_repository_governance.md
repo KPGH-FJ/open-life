@@ -2,6 +2,10 @@
 
 This document defines the GitHub operating model for OpenLife.
 
+Document publication and local-only planning rules are governed by
+`docs/repository_document_governance.md`. Use that document before committing
+new Markdown/HTML plans, PRDs, Agent notes, or architecture drafts.
+
 Current Agent development order and document precedence are governed by
 `AGENTS.md`, `plans/README.md`, and
 `plans/openlife_lifemodel_governed_agent_runtime.md`. GitHub issues, PRs, and

@@ -1139,6 +1139,13 @@ metadata-safe safety, default Chat impact, and next dependency.
 | Document | Use for |
 | --- | --- |
 | `AGENTS.md` | Agent instructions, project context, Tool Taxonomy, and current hard constraints. |
+| `plans/main_chat_agent_productization_v1_goal_spec.md` | Next development goal spec for Main Chat Agent Control Plane, product eval, runtime-backed UI state, L0-L2 product completion, and narrow L3/L4/L5 continuity. |
+| `plans/openlife_agent_product_capability_matrix_v1.md` | Product capability matrix for the next Agent phase: capability levels, current/target state, UI/backend dependencies, acceptance gates, and Codex/Hermes/OpenClaw gaps. |
+| `plans/main_chat_agent_product_eval_scenarios_v1.md` | Product-level Main Chat Agent scenario set covering DirectAnswer, read tools, ReAct, PlanExecute, memory, permission, skill, recovery, and final delivery. |
+| `plans/main_chat_agent_control_plane_ui_contract_v1.md` | Runtime-backed Agent Control Plane UI objects, state machine, controls, streaming rules, and anti-fake UI constraints. |
+| `plans/main_chat_runtime_to_ui_evidence_mapping_v1.md` | Contract mapping runtime evidence to UI task, action, observation, blocker, proposal, and final delivery objects. |
+| `plans/main_chat_permission_proposal_memory_ux_contract_v1.md` | Permission, ToolPermission proposal, memory proposal, conflict, rollback, and Review Center UX contract. |
+| `plans/main_chat_final_delivery_contract_v1.md` | Final delivery object, completion statuses, section requirements, and negative assertions for task completion. |
 | `plans/main_chat_agent_v1_stabilization_goal_spec.md` | Current Goal-mode entry for stabilization / acceptance-blocker remediation. Use before restarting broader Main Chat capability expansion. |
 | `plans/main_chat_agent_migration_v1_goal_spec.md` | Main Chat Agent Execution v1 capability target and audit trail. Do not directly restart it as the next broad Goal unless explicitly requested. |
 | `plans/openlife_lifemodel_governed_agent_runtime.md` | Current LifeModel-Governed Runtime program and post-W149 implementation options. |

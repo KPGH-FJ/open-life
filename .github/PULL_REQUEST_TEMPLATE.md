@@ -26,6 +26,7 @@
 ## Risk Check
 
 - [ ] No secrets, private files, raw LifeModel, raw memory, sensitive chat, or complete private prompts are included.
+- [ ] Any new or changed Markdown/HTML document is intentionally public, authority/status-labeled when needed, and not AI scratch or private product planning material.
 - [ ] This PR does not broaden tool/runtime authority, model routing, privacy boundaries, proposal semantics, audit behavior, or LifeModel source-of-truth semantics.
 - [ ] If this PR changes tool status, runtime strategy, proposal semantics, or planning direction, AGENTS.md, plans/README.md, and the relevant roadmap/taxonomy docs were updated.
 

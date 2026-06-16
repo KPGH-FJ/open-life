@@ -126,3 +126,18 @@ Thumbs.db
 
 # 忽略本地数据目录
 openlife-data/
+
+# -----------------------------------------------------------------------------
+# 本地私有文档 / AI 草稿 / 未发布 PRD
+# -----------------------------------------------------------------------------
+docs/private/
+docs/local/
+plans/private/
+plans/local/
+plans/drafts/
+ai-notes/
+agent-notes/
+prd-drafts/
+*.private.md
+*.local.md
+*.scratch.md
