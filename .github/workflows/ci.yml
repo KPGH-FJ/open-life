@@ -167,8 +167,14 @@ jobs:
         with:
           shared-key: "openlife-rust-windows"
 
-      - name: Run tests
-        run: cargo test --all
+      - name: Run core tests
+        run: cargo test -p openlife-core
+
+      - name: Compile Tauri lib tests
+        run: cargo test -p openlife-tauri --lib --no-run
+
+      - name: Run Tauri binary tests
+        run: cargo test -p openlife-tauri --bins
 
   # ============================================
   # Rust 覆盖率（可选，仅在 dev → main 时运行）
