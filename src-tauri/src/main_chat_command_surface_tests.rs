@@ -1,7 +1,3 @@
-use super::{
-    __cmd__send_message, __cmd__start_stream_message, __tauri_command_name_send_message,
-    __tauri_command_name_start_stream_message, send_message, start_stream_message,
-};
 use crate::main_chat_final_acceptance_tests::run_main_chat_command_surface_eval_gate;
 
 #[test]
@@ -117,7 +113,7 @@ async fn send_message_command_surface_runs_governed_proposal_path() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -226,7 +222,7 @@ async fn start_stream_message_command_surface_runs_governed_proposal_path() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -331,7 +327,7 @@ async fn send_message_direct_answer_records_main_chat_run_and_completes_task() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -444,7 +440,7 @@ async fn send_message_l2_direct_answer_records_scheduler_provider_generation_tra
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -586,7 +582,7 @@ async fn start_stream_message_direct_answer_records_main_chat_run_and_completes_
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -707,7 +703,7 @@ async fn start_stream_message_l2_direct_answer_records_scheduler_provider_genera
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -873,7 +869,7 @@ async fn send_message_command_surface_preserves_web_policy_blocker() {
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -964,7 +960,7 @@ async fn start_stream_message_command_surface_preserves_web_policy_blocker() {
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1058,7 +1054,7 @@ async fn send_message_command_surface_preserves_missing_mcp_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1144,7 +1140,7 @@ async fn start_stream_message_command_surface_preserves_missing_mcp_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1250,7 +1246,7 @@ async fn send_message_command_surface_preserves_registered_mcp_read_success() {
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1354,7 +1350,7 @@ async fn start_stream_message_command_surface_preserves_registered_mcp_read_succ
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1491,7 +1487,7 @@ async fn send_message_registered_mcp_read_completes_through_agent_loop_not_fallb
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1659,7 +1655,7 @@ async fn start_stream_message_registered_mcp_read_completes_through_agent_loop_n
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -1832,7 +1828,7 @@ async fn send_message_registered_mcp_multi_candidate_agent_loop_selects_allowed_
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -2004,7 +2000,7 @@ async fn send_message_web_policy_blocker_completes_through_agent_loop_not_fallba
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![send_message])
+        .invoke_handler(tauri::generate_handler![crate::send_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -2179,7 +2175,7 @@ async fn start_stream_message_web_policy_blocker_completes_through_agent_loop_no
     }
     let app = tauri::test::mock_builder()
         .manage(state.clone())
-        .invoke_handler(tauri::generate_handler![start_stream_message])
+        .invoke_handler(tauri::generate_handler![crate::start_stream_message])
         .build(main_chat_command_surface_test_context())
         .expect("build mock tauri app");
     let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
