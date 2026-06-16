@@ -234,6 +234,40 @@ async fn main_chat_transcript(
         .expect("list main chat transcript")
 }
 
+fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut request_bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    let mut expected_request_len = None;
+    loop {
+        let bytes_read = std::io::Read::read(stream, &mut buffer).unwrap_or(0);
+        if bytes_read == 0 {
+            break;
+        }
+        request_bytes.extend_from_slice(&buffer[..bytes_read]);
+        let request_so_far = String::from_utf8_lossy(&request_bytes);
+        if expected_request_len.is_none() {
+            if let Some((headers, _)) = request_so_far.split_once("\r\n\r\n") {
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        if name.eq_ignore_ascii_case("content-length") {
+                            value.trim().parse::<usize>().ok()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(0);
+                expected_request_len = Some(headers.len() + "\r\n\r\n".len() + content_length);
+            }
+        }
+        if expected_request_len.is_some_and(|expected| request_bytes.len() >= expected) {
+            break;
+        }
+    }
+    request_bytes
+}
+
 async fn fake_ordered_chat_provider_endpoint(replies: Vec<String>) -> String {
     let listener =
         std::net::TcpListener::bind("127.0.0.1:0").expect("bind local ordered chat provider");
@@ -247,8 +281,7 @@ async fn fake_ordered_chat_provider_endpoint(replies: Vec<String>) -> String {
                 Ok((mut stream, _)) => {
                     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
                     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-                    let mut buffer = [0u8; 8192];
-                    let _ = std::io::Read::read(&mut stream, &mut buffer);
+                    let _request_bytes = read_http_request(&mut stream);
                     let reply = replies
                         .get(handled)
                         .or_else(|| replies.last())
@@ -298,37 +331,7 @@ async fn fake_capturing_chat_provider_endpoint(
         if let Ok((mut stream, _)) = listener.accept() {
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
             let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-            let mut request_bytes = Vec::new();
-            let mut buffer = [0u8; 4096];
-            let mut expected_request_len = None;
-            loop {
-                let bytes_read = std::io::Read::read(&mut stream, &mut buffer).unwrap_or(0);
-                if bytes_read == 0 {
-                    break;
-                }
-                request_bytes.extend_from_slice(&buffer[..bytes_read]);
-                let request_so_far = String::from_utf8_lossy(&request_bytes);
-                if expected_request_len.is_none() {
-                    if let Some((headers, _)) = request_so_far.split_once("\r\n\r\n") {
-                        let content_length = headers
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                if name.eq_ignore_ascii_case("content-length") {
-                                    value.trim().parse::<usize>().ok()
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or(0);
-                        expected_request_len =
-                            Some(headers.len() + "\r\n\r\n".len() + content_length);
-                    }
-                }
-                if expected_request_len.is_some_and(|expected| request_bytes.len() >= expected) {
-                    break;
-                }
-            }
+            let request_bytes = read_http_request(&mut stream);
             let request = String::from_utf8_lossy(&request_bytes).to_string();
             let _ = request_tx.send(request);
             let body = serde_json::json!({
@@ -393,6 +396,13 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
                 }
             }],
             "thought_summary": "Select the first provider-ranked governed read candidate.",
+            "warnings": []
+        })
+        .to_string(),
+        serde_json::json!({
+            "final": "The provider-ranked read candidate completed.",
+            "actions": [],
+            "thought_summary": "Finish after observing the governed read result.",
             "warnings": []
         })
         .to_string(),
@@ -493,6 +503,13 @@ async fn main_chat_react_registered_mcp_agent_loop_uses_provider_ranked_candidat
             .get("modelSelectedArgumentsSource")
             .and_then(serde_json::Value::as_str),
         Some("governed_candidate_contract")
+    );
+    assert_eq!(
+        completed_entry
+            .metadata
+            .get("stopReason")
+            .and_then(serde_json::Value::as_str),
+        Some("no_tools")
     );
 }
 
